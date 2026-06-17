@@ -131,7 +131,8 @@ impl ReaderView {
         let comic = &reader.comic;
         let state = &mut reader.state;
         let texture_page = &mut reader.texture_page;
-        thumbnail_bar(ui, comic, current_page, &mut |idx| {
+        let ctx = ui.ctx().clone();
+        thumbnail_bar(ui, &ctx, comic, current_page, &mut |idx| {
             state.go_to_page(idx, total_pages);
             // Force texture refresh on next frame
             *texture_page = None;
