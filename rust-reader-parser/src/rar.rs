@@ -1,6 +1,6 @@
 use crate::traits::{is_image_extension, ParseError, Parser};
 use rust_reader_core::models::{Comic, Page, PageSource, Volume};
-use std::io::{Error as IoError, ErrorKind};
+use std::io::Error as IoError;
 use std::path::Path;
 
 pub struct RarParser;
@@ -18,12 +18,12 @@ impl Parser for RarParser {
 
         let open_archive = unrar::Archive::new(path)
             .open_for_listing()
-            .map_err(|e| ParseError::Io(IoError::new(ErrorKind::Other, e)))?;
+            .map_err(|e| ParseError::Io(IoError::other(e)))?;
 
         let mut names: Vec<String> = Vec::new();
         for entry in open_archive {
-            let header = entry.map_err(|e| ParseError::Io(IoError::new(ErrorKind::Other, e)))?;
-            if header.is_file() && is_image_name(&header.filename) {
+            let header = entry.map_err(|e| ParseError::Io(IoError::other(e)))?;
+            if header.is_file() && is_image_name(&header.filename.to_string_lossy()) {
                 names.push(header.filename.to_string_lossy().to_string());
             }
         }
@@ -64,9 +64,9 @@ impl Parser for RarParser {
     }
 }
 
-fn is_image_name(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
+fn is_image_name(name: &str) -> bool {
+    name.rsplit('.')
+        .next()
         .map(is_image_extension)
         .unwrap_or(false)
 }

@@ -1,7 +1,7 @@
 use crossbeam_channel::{bounded, Receiver, Sender};
 use egui::ColorImage;
 use rust_reader_core::models::PageSource;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
@@ -95,8 +95,8 @@ fn load_page(source: &PageSource) -> Result<ColorImage, String> {
     decode_image(&bytes)
 }
 
-fn read_rar_entry(archive: &PathBuf, name: &str) -> Result<Vec<u8>, String> {
-    let mut archive = unrar::Archive::new(archive)
+fn read_rar_entry(archive_path: &Path, name: &str) -> Result<Vec<u8>, String> {
+    let mut archive = unrar::Archive::new(archive_path)
         .open_for_processing()
         .map_err(|e| e.to_string())?;
 
