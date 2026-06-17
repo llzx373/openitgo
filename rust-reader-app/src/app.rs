@@ -28,6 +28,33 @@ impl Default for ReaderApp {
 
 impl eframe::App for ReaderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if matches!(self.current_view, View::Reader) {
+            if let Some(reader) = self.reader_view.open.as_mut() {
+                let total = reader
+                    .comic
+                    .volumes
+                    .first()
+                    .map(|v| v.pages.len())
+                    .unwrap_or(0);
+                if total > 0 {
+                    if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                        match reader.state.mode {
+                            ReadingMode::Ltr => reader.state.next_page(total),
+                            ReadingMode::Rtl => reader.state.prev_page(),
+                            ReadingMode::Webtoon => reader.state.next_page(total),
+                        }
+                    }
+                    if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                        match reader.state.mode {
+                            ReadingMode::Ltr => reader.state.prev_page(),
+                            ReadingMode::Rtl => reader.state.next_page(total),
+                            ReadingMode::Webtoon => reader.state.prev_page(),
+                        }
+                    }
+                }
+            }
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| match self.current_view {
             View::Library => {
                 let mut open_idx = None;
