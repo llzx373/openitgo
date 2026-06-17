@@ -3061,6 +3061,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "rust-reader-core",
+ "tempfile",
  "thiserror 1.0.69",
  "zip",
 ]
@@ -3073,6 +3074,7 @@ dependencies = [
  "rust-reader-core",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
 ]
 

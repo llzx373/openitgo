@@ -1,3 +1,4 @@
+use crate::views::library::LibraryView;
 use rust_reader_core::models::ReadingMode;
 use rust_reader_storage::models::Settings;
 
@@ -12,6 +13,7 @@ pub enum View {
 pub struct ReaderApp {
     pub current_view: View,
     pub settings: Settings,
+    pub library_view: LibraryView,
 }
 
 impl Default for ReaderApp {
@@ -22,6 +24,7 @@ impl Default for ReaderApp {
                 default_mode: ReadingMode::Ltr,
                 ..Default::default()
             },
+            library_view: LibraryView::default(),
         }
     }
 }
@@ -35,8 +38,16 @@ impl ReaderApp {
 impl eframe::App for ReaderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("rustReader");
-            ui.label("App skeleton loaded");
+            match self.current_view {
+                View::Library => {
+                    self.library_view.ui(ui, &mut |_| {
+                        // Reader opening implemented in Task 12
+                    });
+                }
+                _ => {
+                    ui.label("View not implemented yet");
+                }
+            }
         });
     }
 }
