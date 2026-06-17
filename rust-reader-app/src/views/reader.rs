@@ -37,7 +37,7 @@ impl ReaderView {
         });
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, on_bookmark: &mut dyn FnMut(usize)) {
         let Some(reader) = &mut self.open else {
             ui.label("未打开漫画");
             return;
@@ -79,6 +79,10 @@ impl ReaderView {
             if ui.button("适应").clicked() {
                 reader.state.zoom = 1.0;
                 reader.state.pan = Vec2::ZERO;
+            }
+            let current_page = reader.state.current_page;
+            if ui.button("添加书签").clicked() {
+                on_bookmark(current_page);
             }
         });
 
