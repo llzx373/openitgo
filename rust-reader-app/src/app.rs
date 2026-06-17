@@ -8,6 +8,7 @@ pub struct ReaderApp {
     pub settings: Settings,
     pub library_view: LibraryView,
     pub reader_view: ReaderView,
+    pub error_message: Option<String>,
 }
 
 impl Default for ReaderApp {
@@ -20,6 +21,7 @@ impl Default for ReaderApp {
             },
             library_view: LibraryView::default(),
             reader_view: ReaderView::default(),
+            error_message: None,
         }
     }
 }
@@ -32,15 +34,24 @@ impl eframe::App for ReaderApp {
                 self.library_view.ui(ui, &mut |idx| open_idx = Some(idx));
                 if let Some(idx) = open_idx {
                     if let Some(entry) = self.library_view.entry_at(idx) {
-                        if let Ok(comic) = rust_reader_parser::parse(&entry.path) {
-                            let state = ReadingState::new(
-                                self.settings.default_mode,
-                                comic.volumes[0].pages.len(),
-                            );
-                            self.reader_view.open(comic, state);
-                            self.current_view = View::Reader;
+                        match rust_reader_parser::parse(&entry.path) {
+                            Ok(comic) => {
+                                let state = ReadingState::new(
+                                    self.settings.default_mode,
+                                    comic.volumes[0].pages.len(),
+                                );
+                                self.reader_view.open(comic, state);
+                                self.current_view = View::Reader;
+                                self.error_message = None;
+                            }
+                            Err(e) => {
+                                self.error_message = Some(format!("无法打开漫画: {}", e));
+                            }
                         }
                     }
+                }
+                if let Some(err) = &self.error_message {
+                    ui.colored_label(ui.visuals().error_fg_color, err);
                 }
             }
             View::Reader => {
