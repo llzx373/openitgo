@@ -57,14 +57,7 @@ impl eframe::App for ReaderApp {
             self.reader_view.open = None;
         }
 
-        let toggle = ctx.input(|i| {
-            i.key_pressed(egui::Key::F11)
-                .then(|| !i.viewport().fullscreen.unwrap_or(false))
-        });
-        if let Some(fullscreen) = toggle {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(fullscreen));
-        }
-        self.handle_reader_input(ctx);
+        self.handle_global_input(ctx);
 
         if ctx.input(|i| i.key_pressed(egui::Key::O) && i.modifiers.ctrl) {
             if let Some(path) = rfd::FileDialog::new().pick_folder() {
@@ -73,44 +66,14 @@ impl eframe::App for ReaderApp {
         }
         self.handle_dropped_files(ctx);
 
-        egui::CentralPanel::default().show(ctx, |ui| match self.current_view {
-            View::Library => {
-                if let Some(err) = &self.error_message {
-                    ui.colored_label(ui.visuals().error_fg_color, err);
-                }
-                let mut open_idx = None;
-                let mut add_requested = false;
-                self.library_view
-                    .ui(ui, &mut |idx| open_idx = Some(idx), &mut || {
-                        add_requested = true
-                    });
-                if add_requested {
-                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                        self.add_folder_to_library(path);
-                    }
-                }
-                if let Some(idx) = open_idx {
-                    if let Some(entry) = self.library_view.entry_at(idx).cloned() {
-                        self.open_comic(entry.path);
-                    }
-                }
-            }
-            View::Reader => {
-                let mut bookmark_page = None;
-                self.reader_view
-                    .ui(ui, &mut |page| bookmark_page = Some(page));
-                if let Some(page) = bookmark_page {
-                    self.add_bookmark(page);
-                }
-            }
-            View::Settings => {
-                self.settings_view.ui(ui, &mut self.settings);
-            }
-        });
+        match self.current_view {
+            View::Library => self.render_library(ctx),
+            View::Reader => self.render_reader(ctx),
+            View::Settings => self.render_settings(ctx),
+        }
     }
 }
 
-#[allow(dead_code)]
 pub enum View {
     Library,
     Reader,
@@ -120,6 +83,330 @@ pub enum View {
 impl ReaderApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Self::default()
+    }
+
+    fn render_library(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if let Some(err) = &self.error_message {
+                ui.colored_label(ui.visuals().error_fg_color, err);
+            }
+            let mut open_idx = None;
+            let mut add_requested = false;
+            self.library_view
+                .ui(ui, &mut |idx| open_idx = Some(idx), &mut || {
+                    add_requested = true
+                });
+            if add_requested {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    self.add_folder_to_library(path);
+                }
+            }
+            if let Some(idx) = open_idx {
+                if let Some(entry) = self.library_view.entry_at(idx).cloned() {
+                    self.open_comic(entry.path);
+                }
+            }
+        });
+    }
+
+    fn render_reader(&mut self, ctx: &egui::Context) {
+        let Some(reader) = self.reader_view.open.as_ref() else {
+            self.current_view = View::Library;
+            return;
+        };
+        let total_pages = reader.total_pages();
+        let current_page = reader.state.current_page;
+        let mode = reader.state.mode;
+        let zoom = reader.state.zoom;
+
+        self.render_reader_toolbar(ctx, total_pages, current_page, mode, zoom);
+        self.render_reader_statusbar(ctx, total_pages, current_page, mode, zoom);
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let response = self.reader_view.ui(ui);
+
+            // Right-click context menu on the page area.
+            if let Some(response) = response {
+                response.context_menu(|ui| {
+                    self.context_menu_items(ui);
+                });
+            }
+
+            // Scroll wheel navigation.
+            let scroll = ui.input(|i| i.raw_scroll_delta.y);
+            if scroll > 2.0 {
+                self.reader_page_down();
+            } else if scroll < -2.0 {
+                self.reader_page_up();
+            }
+
+            // Double-click toggles fullscreen.
+            if ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) {
+                self.toggle_fullscreen(ctx);
+            }
+        });
+    }
+
+    fn render_reader_toolbar(
+        &mut self,
+        ctx: &egui::Context,
+        total_pages: usize,
+        current_page: usize,
+        mode: ReadingMode,
+        zoom: f32,
+    ) {
+        egui::TopBottomPanel::top("reader_toolbar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("← 书架").clicked() {
+                    self.current_view = View::Library;
+                }
+                ui.separator();
+
+                let modes = [
+                    (ReadingMode::Ltr, "国漫"),
+                    (ReadingMode::Rtl, "日漫"),
+                    (ReadingMode::Webtoon, "韩漫"),
+                ];
+                for (m, label) in modes {
+                    if ui.selectable_label(mode == m, label).clicked() {
+                        if let Some(reader) = self.reader_view.open.as_mut() {
+                            reader.state.set_mode(m, total_pages);
+                        }
+                    }
+                }
+                ui.separator();
+
+                if ui.button("-").clicked() {
+                    if let Some(reader) = self.reader_view.open.as_mut() {
+                        reader.zoom_out();
+                    }
+                }
+                ui.label(format!("{:.0}%", zoom * 100.0));
+                if ui.button("+").clicked() {
+                    if let Some(reader) = self.reader_view.open.as_mut() {
+                        reader.zoom_in();
+                    }
+                }
+                if ui.button("适应").clicked() {
+                    if let Some(reader) = self.reader_view.open.as_mut() {
+                        reader.reset_zoom();
+                    }
+                }
+                ui.separator();
+
+                if ui.button("上一页").clicked() {
+                    self.reader_prev_page();
+                }
+                let mut displayed_page = current_page + 1;
+                ui.add(
+                    egui::DragValue::new(&mut displayed_page)
+                        .speed(1.0)
+                        .range(1..=total_pages.max(1)),
+                );
+                ui.label(format!("/ {}", total_pages));
+                if ui.button("下一页").clicked() {
+                    self.reader_next_page();
+                }
+                ui.separator();
+
+                if ui.button("添加书签").clicked() {
+                    self.add_bookmark(current_page);
+                }
+                if ui.button("全屏").clicked() {
+                    self.toggle_fullscreen(ctx);
+                }
+                if ui.button("设置").clicked() {
+                    self.current_view = View::Settings;
+                }
+            });
+        });
+    }
+
+    fn render_reader_statusbar(
+        &mut self,
+        ctx: &egui::Context,
+        total_pages: usize,
+        current_page: usize,
+        mode: ReadingMode,
+        zoom: f32,
+    ) {
+        egui::TopBottomPanel::bottom("reader_statusbar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("页面: {}/{}", current_page + 1, total_pages));
+                ui.separator();
+                ui.label(format!(
+                    "模式: {}",
+                    match mode {
+                        ReadingMode::Ltr => "国漫（左→右）",
+                        ReadingMode::Rtl => "日漫（右→左）",
+                        ReadingMode::Webtoon => "韩漫（上→下）",
+                    }
+                ));
+                ui.separator();
+                ui.label(format!("缩放: {:.0}%", zoom * 100.0));
+                ui.separator();
+                ui.label("快捷键: ← → 翻页 | +/- 缩放 | F11 全屏 | Esc 返回书架");
+            });
+            ui.add_space(4.0);
+            self.reader_view.render_page_navigator(ui);
+        });
+    }
+
+    fn render_settings(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("← 返回").clicked() {
+                    self.current_view = if self.reader_view.open.is_some() {
+                        View::Reader
+                    } else {
+                        View::Library
+                    };
+                }
+            });
+            ui.separator();
+            self.settings_view.ui(ui, &mut self.settings);
+        });
+    }
+
+    fn context_menu_items(&mut self, ui: &mut egui::Ui) {
+        if ui.button("下一页").clicked() {
+            self.reader_next_page();
+            ui.close_menu();
+        }
+        if ui.button("上一页").clicked() {
+            self.reader_prev_page();
+            ui.close_menu();
+        }
+        ui.separator();
+        if ui.button("首页").clicked() {
+            if let Some(reader) = self.reader_view.open.as_mut() {
+                reader.first_page();
+            }
+            ui.close_menu();
+        }
+        if ui.button("末页").clicked() {
+            if let Some(reader) = self.reader_view.open.as_mut() {
+                reader.last_page();
+            }
+            ui.close_menu();
+        }
+        ui.separator();
+        if ui.button("添加书签").clicked() {
+            if let Some(reader) = self.reader_view.open.as_ref() {
+                self.add_bookmark(reader.state.current_page);
+            }
+            ui.close_menu();
+        }
+        if ui.button("全屏").clicked() {
+            self.toggle_fullscreen(ui.ctx());
+            ui.close_menu();
+        }
+        ui.separator();
+        if ui.button("返回书架").clicked() {
+            self.current_view = View::Library;
+            ui.close_menu();
+        }
+    }
+
+    fn handle_global_input(&mut self, ctx: &egui::Context) {
+        let is_reader = matches!(self.current_view, View::Reader);
+
+        if ctx.input(|i| i.key_pressed(egui::Key::F11)
+            || (i.key_pressed(egui::Key::F) && is_reader))
+        {
+            self.toggle_fullscreen(ctx);
+        }
+
+        if !is_reader {
+            return;
+        }
+
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
+                self.toggle_fullscreen(ctx);
+            } else {
+                self.current_view = View::Library;
+            }
+        }
+
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+            self.reader_next_page();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+            self.reader_prev_page();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::PageDown)
+            || i.key_pressed(egui::Key::Space))
+        {
+            self.reader_page_down();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::PageUp)) {
+            self.reader_page_up();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Home)) {
+            if let Some(reader) = self.reader_view.open.as_mut() {
+                reader.first_page();
+            }
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::End)) {
+            if let Some(reader) = self.reader_view.open.as_mut() {
+                reader.last_page();
+            }
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals)) {
+            if let Some(reader) = self.reader_view.open.as_mut() {
+                reader.zoom_in();
+            }
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Minus)) {
+            if let Some(reader) = self.reader_view.open.as_mut() {
+                reader.zoom_out();
+            }
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Num0)) {
+            if let Some(reader) = self.reader_view.open.as_mut() {
+                reader.reset_zoom();
+            }
+        }
+    }
+
+    fn reader_next_page(&mut self) {
+        if let Some(reader) = self.reader_view.open.as_mut() {
+            let total = reader.total_pages();
+            if total == 0 {
+                return;
+            }
+            match reader.state.mode {
+                ReadingMode::Ltr | ReadingMode::Webtoon => reader.state.next_page(total),
+                ReadingMode::Rtl => reader.state.prev_page(),
+            }
+        }
+    }
+
+    fn reader_prev_page(&mut self) {
+        if let Some(reader) = self.reader_view.open.as_mut() {
+            let total = reader.total_pages();
+            if total == 0 {
+                return;
+            }
+            match reader.state.mode {
+                ReadingMode::Ltr | ReadingMode::Webtoon => reader.state.prev_page(),
+                ReadingMode::Rtl => reader.state.next_page(total),
+            }
+        }
+    }
+
+    fn reader_page_down(&mut self) {
+        self.reader_next_page();
+    }
+
+    fn reader_page_up(&mut self) {
+        self.reader_prev_page();
+    }
+
+    fn toggle_fullscreen(&self, ctx: &egui::Context) {
+        let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
     }
 
     fn record_reader_history(&mut self) {
@@ -244,31 +531,6 @@ impl ReaderApp {
             if let Some(path) = &file.path {
                 self.ensure_in_library(path);
                 self.open_comic(path.clone());
-            }
-        }
-    }
-
-    fn handle_reader_input(&mut self, ctx: &egui::Context) {
-        if !matches!(self.current_view, View::Reader) {
-            return;
-        }
-        let Some(reader) = self.reader_view.open.as_mut() else {
-            return;
-        };
-        let total = reader.total_pages();
-        if total == 0 {
-            return;
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-            match reader.state.mode {
-                ReadingMode::Ltr | ReadingMode::Webtoon => reader.state.next_page(total),
-                ReadingMode::Rtl => reader.state.prev_page(),
-            }
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-            match reader.state.mode {
-                ReadingMode::Ltr | ReadingMode::Webtoon => reader.state.prev_page(),
-                ReadingMode::Rtl => reader.state.next_page(total),
             }
         }
     }

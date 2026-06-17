@@ -1,5 +1,5 @@
 use crate::widgets::page_navigator::page_navigator;
-use rust_reader_core::models::{Comic, PageSource, ReadingMode};
+use rust_reader_core::models::{Comic, PageSource};
 use rust_reader_core::state::{ReadingState, Vec2};
 
 const MIN_ZOOM: f32 = 0.1;
@@ -25,6 +25,35 @@ impl OpenReader {
             .map(|v| v.pages.len())
             .unwrap_or(0)
     }
+
+    pub fn zoom_in(&mut self) {
+        self.state.zoom *= 1.1;
+        self.state.zoom = self.state.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+    }
+
+    pub fn zoom_out(&mut self) {
+        self.state.zoom *= 0.9;
+        self.state.zoom = self.state.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+    }
+
+    pub fn reset_zoom(&mut self) {
+        self.state.zoom = 1.0;
+        self.state.pan = Vec2::ZERO;
+    }
+
+    pub fn first_page(&mut self) {
+        let total = self.total_pages();
+        if total > 0 {
+            self.state.go_to_page(0, total);
+        }
+    }
+
+    pub fn last_page(&mut self) {
+        let total = self.total_pages();
+        if total > 0 {
+            self.state.go_to_page(total - 1, total);
+        }
+    }
 }
 
 impl ReaderView {
@@ -37,54 +66,18 @@ impl ReaderView {
         });
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, on_bookmark: &mut dyn FnMut(usize)) {
+    /// Renders the current page and returns the response of the image widget.
+    pub fn ui(&mut self, ui: &mut egui::Ui) -> Option<egui::Response> {
         let Some(reader) = &mut self.open else {
             ui.label("未打开漫画");
-            return;
+            return None;
         };
 
         let total_pages = reader.total_pages();
-
         if total_pages == 0 {
             ui.label("此漫画没有页面");
-            return;
+            return None;
         }
-
-        let modes = [
-            (ReadingMode::Ltr, "国漫"),
-            (ReadingMode::Rtl, "日漫"),
-            (ReadingMode::Webtoon, "韩漫"),
-        ];
-        ui.horizontal(|ui| {
-            for (mode, label) in modes {
-                if ui
-                    .selectable_label(reader.state.mode == mode, label)
-                    .clicked()
-                {
-                    reader.state.set_mode(mode, total_pages);
-                }
-            }
-        });
-
-        ui.horizontal(|ui| {
-            if ui.button("-").clicked() {
-                reader.state.zoom *= 0.9;
-                reader.state.zoom = reader.state.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
-            }
-            ui.label(format!("{:.0}%", reader.state.zoom * 100.0));
-            if ui.button("+").clicked() {
-                reader.state.zoom *= 1.1;
-                reader.state.zoom = reader.state.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
-            }
-            if ui.button("适应").clicked() {
-                reader.state.zoom = 1.0;
-                reader.state.pan = Vec2::ZERO;
-            }
-            let current_page = reader.state.current_page;
-            if ui.button("添加书签").clicked() {
-                on_bookmark(current_page);
-            }
-        });
 
         if reader.texture_page != Some(reader.state.current_page) {
             match load_page_texture(ui.ctx(), &reader.comic, reader.state.current_page) {
@@ -96,7 +89,7 @@ impl ReaderView {
                     reader.texture = None;
                     reader.texture_page = None;
                     ui.label(err);
-                    return;
+                    return None;
                 }
             }
         }
@@ -126,28 +119,28 @@ impl ReaderView {
                 let delta = response.drag_delta();
                 reader.state.pan += Vec2::new(delta.x, delta.y);
             }
+            Some(response)
         } else {
             ui.label("无法加载页面");
+            None
         }
+    }
 
-        let current_page = reader.state.current_page;
+    pub fn render_page_navigator(&mut self, ui: &mut egui::Ui) {
+        let Some(reader) = &mut self.open else {
+            return;
+        };
         let total_pages = reader.total_pages();
+        if total_pages == 0 {
+            return;
+        }
+        let current_page = reader.state.current_page;
         let comic = &reader.comic;
         let state = &mut reader.state;
         let texture_page = &mut reader.texture_page;
         page_navigator(ui, comic, current_page, &mut |idx| {
             state.go_to_page(idx, total_pages);
             *texture_page = None;
-        });
-
-        ui.horizontal(|ui| {
-            if ui.button("上一页").clicked() {
-                reader.state.prev_page();
-            }
-            ui.label(format!("{}/{}", reader.state.current_page + 1, total_pages));
-            if ui.button("下一页").clicked() {
-                reader.state.next_page(total_pages);
-            }
         });
     }
 }
