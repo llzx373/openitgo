@@ -2,6 +2,8 @@
 name = "rust-reader-storage"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "Persistence layer for rustReader"
 
 [dependencies]
 rust-reader-core = { path = "../rust-reader-core" }

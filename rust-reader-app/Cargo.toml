@@ -2,9 +2,11 @@
 name = "rust-reader-app"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "Desktop egui application for rustReader"
 
 [dependencies]
-eframe = { version = "0.29", features = ["default"] }
+eframe = "0.29"
 egui = "0.29"
 rust-reader-core = { path = "../rust-reader-core" }
 rust-reader-parser = { path = "../rust-reader-parser" }

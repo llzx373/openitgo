@@ -1,2 +1,2 @@
-pub mod models;
 pub mod json_store;
+pub mod models;
