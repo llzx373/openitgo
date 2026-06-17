@@ -31,15 +31,17 @@ pub enum PageSource {
     },
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ReadingMode {
+    #[default]
     Ltr,
     Rtl,
     Webtoon,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FitMode {
+    #[default]
     Height,
     Width,
     Page,
