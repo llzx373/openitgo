@@ -78,36 +78,28 @@ impl PageLoader {
 }
 
 fn load_page(source: &PageSource) -> Result<ColorImage, String> {
-    match source {
+    let bytes = match source {
         PageSource::PdfPage {
             document,
             page_number,
-        } => {
-            let bytes = render_pdf_page(document, *page_number)?;
-            decode_image(&bytes)
+        } => return render_pdf_page(document, *page_number),
+        PageSource::File(path) => std::fs::read(path).map_err(|e| e.to_string())?,
+        PageSource::ZipEntry { archive, name } => {
+            let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
+            let mut archive =
+                zip::ZipArchive::new(file).map_err(|e| format!("invalid zip archive: {e}"))?;
+            let mut entry = archive
+                .by_name(name)
+                .map_err(|e| format!("zip entry not found: {e}"))?;
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut bytes)
+                .map_err(|e| format!("failed to read zip entry: {e}"))?;
+            bytes
         }
-        _ => {
-            let bytes = match source {
-                PageSource::File(path) => std::fs::read(path).map_err(|e| e.to_string())?,
-                PageSource::ZipEntry { archive, name } => {
-                    let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
-                    let mut archive = zip::ZipArchive::new(file)
-                        .map_err(|e| format!("invalid zip archive: {e}"))?;
-                    let mut entry = archive
-                        .by_name(name)
-                        .map_err(|e| format!("zip entry not found: {e}"))?;
-                    let mut bytes = Vec::new();
-                    std::io::Read::read_to_end(&mut entry, &mut bytes)
-                        .map_err(|e| format!("failed to read zip entry: {e}"))?;
-                    bytes
-                }
-                PageSource::RarEntry { archive, name } => read_rar_entry(archive, name)?,
-                PageSource::PdfPage { .. } => unreachable!(),
-            };
+        PageSource::RarEntry { archive, name } => read_rar_entry(archive, name)?,
+    };
 
-            decode_image(&bytes)
-        }
-    }
+    decode_image(&bytes)
 }
 
 fn read_rar_entry(archive_path: &Path, name: &str) -> Result<Vec<u8>, String> {
@@ -134,8 +126,12 @@ fn decode_image(bytes: &[u8]) -> Result<ColorImage, String> {
     Ok(ColorImage::from_rgba_unmultiplied(size, pixels.as_slice()))
 }
 
-/// Render a PDF page to PNG-encoded RGBA bytes.
-pub fn render_pdf_page(document: &Path, page_number: usize) -> Result<Vec<u8>, String> {
+const PDF_RENDER_DPI: f32 = 150.0;
+const PDF_BASE_DPI: f32 = 72.0;
+const PDF_MAX_RENDER_WIDTH: f32 = 2048.0;
+
+/// Render a PDF page directly to an egui [`ColorImage`].
+pub fn render_pdf_page(document: &Path, page_number: usize) -> Result<ColorImage, String> {
     let data = std::fs::read(document).map_err(|e| format!("failed to read PDF file: {e}"))?;
     let pdf = Pdf::new(data).map_err(|e| format!("failed to parse PDF: {e:?}"))?;
 
@@ -145,10 +141,9 @@ pub fn render_pdf_page(document: &Path, page_number: usize) -> Result<Vec<u8>, S
         .ok_or_else(|| format!("page index {page_number} out of bounds"))?;
 
     let (page_width, _page_height) = page.render_dimensions();
-    let max_width = 2048.0_f32;
-    let dpi_scale = 150.0_f32 / 72.0_f32;
+    let dpi_scale = PDF_RENDER_DPI / PDF_BASE_DPI;
     let scale = if page_width > 0.0 {
-        (max_width / page_width).min(dpi_scale)
+        (PDF_MAX_RENDER_WIDTH / page_width).min(dpi_scale)
     } else {
         1.0
     };
@@ -164,9 +159,11 @@ pub fn render_pdf_page(document: &Path, page_number: usize) -> Result<Vec<u8>, S
         },
     );
 
-    pixmap
-        .into_png()
-        .map_err(|e| format!("failed to encode PDF page as PNG: {e}"))
+    let size = [pixmap.width() as usize, pixmap.height() as usize];
+    Ok(ColorImage::from_rgba_premultiplied(
+        size,
+        pixmap.data_as_u8_slice(),
+    ))
 }
 
 #[cfg(test)]
@@ -217,11 +214,8 @@ mod tests {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../rust-reader-parser/tests/sample.pdf");
         let path = path.canonicalize().expect("sample.pdf should exist");
-        let bytes = render_pdf_page(&path, 0).unwrap();
-        assert!(!bytes.is_empty());
-
-        let image = image::load_from_memory(&bytes).expect("PNG should decode");
-        assert!(image.width() > 0);
-        assert!(image.height() > 0);
+        let image = render_pdf_page(&path, 0).unwrap();
+        assert!(image.size[0] > 0);
+        assert!(image.size[1] > 0);
     }
 }

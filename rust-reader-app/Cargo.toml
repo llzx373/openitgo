@@ -10,7 +10,6 @@ crossbeam-channel = "0.5"
 eframe = "0.29"
 egui = "0.29"
 image = { workspace = true }
-pdf = "0.9"
 pdf-render = "1.0.0-beta.9"
 rfd = "0.15"
 rust-reader-core = { path = "../rust-reader-core" }

@@ -3761,7 +3761,6 @@ dependencies = [
  "eframe",
  "egui",
  "image",
- "pdf",
  "pdf-render",
  "rfd",
  "rust-reader-core",
