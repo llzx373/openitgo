@@ -4,6 +4,7 @@ pub mod rar;
 pub mod traits;
 pub mod zip;
 
+use rar::RarParser;
 use rust_reader_core::models::Comic;
 use std::path::Path;
 use traits::{ParseError, Parser};
@@ -13,8 +14,8 @@ pub fn parse(path: &Path) -> Result<Comic, ParseError> {
         folder::FolderParser::parse(path)
     } else if zip::ZipParser::supports(path) {
         zip::ZipParser::parse(path)
-    } else if rar::RarParser::supports(path) {
-        rar::RarParser::parse(path)
+    } else if RarParser::supports(path) {
+        RarParser::parse(path)
     } else if pdf::PdfParser::supports(path) {
         pdf::PdfParser::parse(path)
     } else {

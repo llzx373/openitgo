@@ -1,6 +1,7 @@
 use crossbeam_channel::{bounded, Receiver, Sender};
 use egui::ColorImage;
 use rust_reader_core::models::PageSource;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
@@ -87,11 +88,27 @@ fn load_page(source: &PageSource) -> Result<ColorImage, String> {
                 .map_err(|e| format!("failed to read zip entry: {e}"))?;
             bytes
         }
-        PageSource::RarEntry { .. } => return Err("RAR not yet implemented".to_string()),
+        PageSource::RarEntry { archive, name } => read_rar_entry(archive, name)?,
         PageSource::PdfPage { .. } => return Err("PDF not yet implemented".to_string()),
     };
 
     decode_image(&bytes)
+}
+
+fn read_rar_entry(archive: &PathBuf, name: &str) -> Result<Vec<u8>, String> {
+    let mut archive = unrar::Archive::new(archive)
+        .open_for_processing()
+        .map_err(|e| e.to_string())?;
+
+    while let Some(entry) = archive.read_header().map_err(|e| e.to_string())? {
+        if entry.entry().filename.to_string_lossy() == name {
+            let (bytes, _archive) = entry.read().map_err(|e| e.to_string())?;
+            return Ok(bytes);
+        }
+        archive = entry.skip().map_err(|e| e.to_string())?;
+    }
+
+    Err(format!("rar entry not found: {name}"))
 }
 
 fn decode_image(bytes: &[u8]) -> Result<ColorImage, String> {

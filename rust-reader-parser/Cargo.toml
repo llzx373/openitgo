@@ -9,6 +9,7 @@ description = "Comic archive parsers for rustReader"
 rust-reader-core = { path = "../rust-reader-core" }
 image = { workspace = true }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
+unrar = "0.5"
 thiserror = { workspace = true }
 
 [dev-dependencies]
