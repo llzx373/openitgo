@@ -1,5 +1,9 @@
 use crossbeam_channel::{bounded, Receiver, Sender};
 use egui::ColorImage;
+use pdf_render::pdf_interpret::pdf_syntax::Pdf;
+use pdf_render::pdf_interpret::InterpreterSettings;
+use pdf_render::vello_cpu::color::palette::css::WHITE;
+use pdf_render::{render, RenderSettings};
 use rust_reader_core::models::PageSource;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -74,25 +78,36 @@ impl PageLoader {
 }
 
 fn load_page(source: &PageSource) -> Result<ColorImage, String> {
-    let bytes = match source {
-        PageSource::File(path) => std::fs::read(path).map_err(|e| e.to_string())?,
-        PageSource::ZipEntry { archive, name } => {
-            let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
-            let mut archive =
-                zip::ZipArchive::new(file).map_err(|e| format!("invalid zip archive: {e}"))?;
-            let mut entry = archive
-                .by_name(name)
-                .map_err(|e| format!("zip entry not found: {e}"))?;
-            let mut bytes = Vec::new();
-            std::io::Read::read_to_end(&mut entry, &mut bytes)
-                .map_err(|e| format!("failed to read zip entry: {e}"))?;
-            bytes
+    match source {
+        PageSource::PdfPage {
+            document,
+            page_number,
+        } => {
+            let bytes = render_pdf_page(document, *page_number)?;
+            decode_image(&bytes)
         }
-        PageSource::RarEntry { archive, name } => read_rar_entry(archive, name)?,
-        PageSource::PdfPage { .. } => return Err("PDF not yet implemented".to_string()),
-    };
+        _ => {
+            let bytes = match source {
+                PageSource::File(path) => std::fs::read(path).map_err(|e| e.to_string())?,
+                PageSource::ZipEntry { archive, name } => {
+                    let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
+                    let mut archive = zip::ZipArchive::new(file)
+                        .map_err(|e| format!("invalid zip archive: {e}"))?;
+                    let mut entry = archive
+                        .by_name(name)
+                        .map_err(|e| format!("zip entry not found: {e}"))?;
+                    let mut bytes = Vec::new();
+                    std::io::Read::read_to_end(&mut entry, &mut bytes)
+                        .map_err(|e| format!("failed to read zip entry: {e}"))?;
+                    bytes
+                }
+                PageSource::RarEntry { archive, name } => read_rar_entry(archive, name)?,
+                PageSource::PdfPage { .. } => unreachable!(),
+            };
 
-    decode_image(&bytes)
+            decode_image(&bytes)
+        }
+    }
 }
 
 fn read_rar_entry(archive_path: &Path, name: &str) -> Result<Vec<u8>, String> {
@@ -117,6 +132,41 @@ fn decode_image(bytes: &[u8]) -> Result<ColorImage, String> {
     let rgba = image.to_rgba8();
     let pixels = rgba.as_flat_samples();
     Ok(ColorImage::from_rgba_unmultiplied(size, pixels.as_slice()))
+}
+
+/// Render a PDF page to PNG-encoded RGBA bytes.
+pub fn render_pdf_page(document: &Path, page_number: usize) -> Result<Vec<u8>, String> {
+    let data = std::fs::read(document).map_err(|e| format!("failed to read PDF file: {e}"))?;
+    let pdf = Pdf::new(data).map_err(|e| format!("failed to parse PDF: {e:?}"))?;
+
+    let page = pdf
+        .pages()
+        .get(page_number)
+        .ok_or_else(|| format!("page index {page_number} out of bounds"))?;
+
+    let (page_width, _page_height) = page.render_dimensions();
+    let max_width = 2048.0_f32;
+    let dpi_scale = 150.0_f32 / 72.0_f32;
+    let scale = if page_width > 0.0 {
+        (max_width / page_width).min(dpi_scale)
+    } else {
+        1.0
+    };
+
+    let pixmap = render(
+        page,
+        &InterpreterSettings::default(),
+        &RenderSettings {
+            x_scale: scale,
+            y_scale: scale,
+            bg_color: WHITE,
+            ..Default::default()
+        },
+    );
+
+    pixmap
+        .into_png()
+        .map_err(|e| format!("failed to encode PDF page as PNG: {e}"))
 }
 
 #[cfg(test)]
@@ -160,5 +210,18 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn test_render_pdf_page_produces_non_empty_image() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../rust-reader-parser/tests/sample.pdf");
+        let path = path.canonicalize().expect("sample.pdf should exist");
+        let bytes = render_pdf_page(&path, 0).unwrap();
+        assert!(!bytes.is_empty());
+
+        let image = image::load_from_memory(&bytes).expect("PNG should decode");
+        assert!(image.width() > 0);
+        assert!(image.height() > 0);
     }
 }

@@ -10,6 +10,7 @@ rust-reader-core = { path = "../rust-reader-core" }
 image = { workspace = true }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 unrar = "0.5"
+pdf = "0.9"
 thiserror = { workspace = true }
 
 [dev-dependencies]
