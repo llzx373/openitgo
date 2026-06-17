@@ -62,6 +62,20 @@ impl ReaderView {
             }
         });
 
+        ui.horizontal(|ui| {
+            if ui.button("-").clicked() {
+                reader.state.zoom *= 0.9;
+            }
+            ui.label(format!("{:.0}%", reader.state.zoom * 100.0));
+            if ui.button("+").clicked() {
+                reader.state.zoom *= 1.1;
+            }
+            if ui.button("适应").clicked() {
+                reader.state.zoom = 1.0;
+                reader.state.pan = rust_reader_core::state::Vec2::ZERO;
+            }
+        });
+
         if reader.texture_page != Some(reader.state.current_page) {
             match load_page_texture(ui.ctx(), &reader.comic, reader.state.current_page) {
                 Ok(texture) => {
@@ -75,6 +89,16 @@ impl ReaderView {
                     return;
                 }
             }
+        }
+
+        let response = ui.interact(
+            ui.max_rect(),
+            ui.id().with("reader_drag"),
+            egui::Sense::drag(),
+        );
+        if response.dragged() {
+            reader.state.pan.x += response.drag_delta().x;
+            reader.state.pan.y += response.drag_delta().y;
         }
 
         if let Some(texture) = &reader.texture {
