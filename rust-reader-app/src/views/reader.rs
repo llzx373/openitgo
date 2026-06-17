@@ -1,6 +1,9 @@
 use rust_reader_core::models::{Comic, PageSource, ReadingMode};
 use rust_reader_core::state::ReadingState;
 
+const MIN_ZOOM: f32 = 0.1;
+const MAX_ZOOM: f32 = 5.0;
+
 #[derive(Default)]
 pub struct ReaderView {
     pub open: Option<OpenReader>,
@@ -65,10 +68,12 @@ impl ReaderView {
         ui.horizontal(|ui| {
             if ui.button("-").clicked() {
                 reader.state.zoom *= 0.9;
+                reader.state.zoom = reader.state.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
             }
             ui.label(format!("{:.0}%", reader.state.zoom * 100.0));
             if ui.button("+").clicked() {
                 reader.state.zoom *= 1.1;
+                reader.state.zoom = reader.state.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
             }
             if ui.button("适应").clicked() {
                 reader.state.zoom = 1.0;
@@ -91,18 +96,26 @@ impl ReaderView {
             }
         }
 
-        let response = ui.interact(
-            ui.max_rect(),
-            ui.id().with("reader_drag"),
-            egui::Sense::drag(),
-        );
-        if response.dragged() {
-            reader.state.pan.x += response.drag_delta().x;
-            reader.state.pan.y += response.drag_delta().y;
-        }
-
         if let Some(texture) = &reader.texture {
-            ui.image(texture);
+            let texture_size = texture.size_vec2();
+            let scaled_size = texture_size * reader.state.zoom;
+            let available = ui.available_rect_before_wrap();
+            let center = available.center();
+            let top_left = egui::pos2(
+                center.x - scaled_size.x / 2.0 + reader.state.pan.x,
+                center.y - scaled_size.y / 2.0 + reader.state.pan.y,
+            );
+            let image_rect = egui::Rect::from_min_size(top_left, scaled_size);
+            let response = ui.put(
+                image_rect,
+                egui::Image::new(texture)
+                    .fit_to_exact_size(scaled_size)
+                    .sense(egui::Sense::drag()),
+            );
+            if response.dragged() {
+                let delta = response.drag_delta();
+                reader.state.pan += rust_reader_core::state::Vec2::new(delta.x, delta.y);
+            }
         } else {
             ui.label("无法加载页面");
         }

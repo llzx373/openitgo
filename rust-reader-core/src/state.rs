@@ -21,6 +21,20 @@ impl std::ops::Mul<f32> for Vec2 {
     }
 }
 
+impl std::ops::Add for Vec2 {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self::Output {
+        Vec2::new(self.x + rhs.x, self.y + rhs.y)
+    }
+}
+
+impl std::ops::AddAssign for Vec2 {
+    fn add_assign(&mut self, rhs: Self) {
+        self.x += rhs.x;
+        self.y += rhs.y;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReadingState {
     pub mode: ReadingMode,

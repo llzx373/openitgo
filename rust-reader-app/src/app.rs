@@ -28,9 +28,12 @@ impl Default for ReaderApp {
 
 impl eframe::App for ReaderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input(|i| i.key_pressed(egui::Key::F11)) {
-            let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
+        let toggle = ctx.input(|i| {
+            i.key_pressed(egui::Key::F11)
+                .then(|| !i.viewport().fullscreen.unwrap_or(false))
+        });
+        if let Some(fullscreen) = toggle {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(fullscreen));
         }
         self.handle_reader_input(ctx);
 
