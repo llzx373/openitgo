@@ -38,6 +38,7 @@ impl PageLoader {
         thread::spawn(move || {
             while let Ok(request) = request_rx.recv() {
                 let image = load_page(&request.source);
+                // Receiver dropped means PageLoader is shutting down; ignore.
                 let _ = result_tx.send(LoadResult {
                     epoch: request.epoch,
                     page_index: request.page_index,
@@ -58,6 +59,7 @@ impl PageLoader {
     }
 
     pub fn request(&self, epoch: Epoch, page_index: usize, source: PageSource) {
+        // Receiver dropped means PageLoader is shutting down; ignore.
         let _ = self.request_tx.send(LoadRequest {
             epoch,
             page_index,

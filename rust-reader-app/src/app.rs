@@ -540,10 +540,7 @@ impl ReaderApp {
                 if let Some(h) = self.history.entries.iter().find(|h| h.comic_id == comic.id) {
                     state.go_to_page(h.page_index, total);
                 }
-                self.reader_view.open(comic, state);
-                if let Some(reader) = self.reader_view.open.as_mut() {
-                    reader.bump_epoch(&self.page_loader);
-                }
+                self.reader_view.open(comic, state, &self.page_loader);
                 self.current_view = View::Reader;
                 self.error_message = None;
             }

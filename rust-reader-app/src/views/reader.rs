@@ -156,8 +156,8 @@ impl OpenReader {
 }
 
 impl ReaderView {
-    pub fn open(&mut self, comic: Comic, state: ReadingState) {
-        self.open = Some(OpenReader {
+    pub fn open(&mut self, comic: Comic, state: ReadingState, loader: &PageLoader) {
+        let mut reader = OpenReader {
             comic,
             state,
             left_texture: None,
@@ -167,7 +167,9 @@ impl ReaderView {
             pending_fit: Some(QuickFit::Page),
             current_epoch: 0,
             pending_pages: HashSet::new(),
-        });
+        };
+        reader.bump_epoch(loader);
+        self.open = Some(reader);
     }
 
     pub fn update(&mut self, ctx: &egui::Context, loader: &PageLoader) {
