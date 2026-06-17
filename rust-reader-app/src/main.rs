@@ -1,5 +1,6 @@
 mod app;
 mod views;
+mod widgets;
 
 use app::ReaderApp;
 

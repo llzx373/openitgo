@@ -8,6 +8,7 @@ description = "Desktop egui application for rustReader"
 [dependencies]
 eframe = "0.29"
 egui = "0.29"
+image = { workspace = true }
 rust-reader-core = { path = "../rust-reader-core" }
 rust-reader-parser = { path = "../rust-reader-parser" }
 rust-reader-storage = { path = "../rust-reader-storage" }

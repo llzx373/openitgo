@@ -3042,6 +3042,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
+ "image",
  "rust-reader-core",
  "rust-reader-parser",
  "rust-reader-storage",
