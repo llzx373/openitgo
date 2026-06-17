@@ -1,0 +1,74 @@
+[
+  {
+    "label": "Run app",
+    "command": "cargo",
+    "args": ["run", "-p", "rust-reader-app"],
+    "env": {},
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "Test workspace",
+    "command": "cargo",
+    "args": ["test"],
+    "env": {},
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "Check workspace",
+    "command": "cargo",
+    "args": ["check"],
+    "env": {},
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "Clippy",
+    "command": "cargo",
+    "args": ["clippy", "--workspace", "--", "-D", "warnings"],
+    "env": {},
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "Format check",
+    "command": "cargo",
+    "args": ["fmt", "--check"],
+    "env": {},
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "Format code",
+    "command": "cargo",
+    "args": ["fmt"],
+    "env": {},
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "Build release",
+    "command": "cargo",
+    "args": ["build", "--release", "-p", "rust-reader-app"],
+    "env": {},
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "Clean build artifacts",
+    "command": "cargo",
+    "args": ["clean"],
+    "env": {},
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  }
+]
