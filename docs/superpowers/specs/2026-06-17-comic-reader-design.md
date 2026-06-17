@@ -25,7 +25,7 @@
 | 目标平台 | Windows / macOS / Linux |
 | 功能范围 | 标准体验（书架、历史、书签、缩略图导航等） |
 | 图片格式 | `image` crate 支持的所有格式（JPG/PNG/WebP/GIF/AVIF 等），开启全 features |
-| 实现方案 | 方案 3：Workspace 多 crate + 异步后台加载线程池 |
+| 实现方案 | 方案 3：Workspace 多 crate + 异步后台加载（单工作线程 + channel） |
 
 ### 2.2 首版功能清单
 
@@ -135,9 +135,9 @@ pub struct ReadingState {
 1. `Viewport` 维护当前可见区域（逻辑坐标）。
 2. `LayoutEngine` 根据 `ReadingMode` 计算每页在逻辑画布上的位置与尺寸。
 3. `Renderer` 将逻辑坐标映射到屏幕坐标，仅绘制可见区域内的页面。
-4. 解码任务提交到异步后台线程池，避免阻塞 UI 主线程。
-5. `Preloader` 在当前页前后 N 页触发提前解码，结果存入 `TextureCache`。
-6. 解码后的图片以 egui `TextureHandle` 形式缓存在 `TextureCache` 中，按 LRU 策略淘汰。
+4. 解码任务通过 channel 提交到异步后台工作线程，避免阻塞 UI 主线程。
+5. `ReaderView::request_preloads` 在当前页前后 N 页触发提前解码，结果存入 `PageCache`。
+6. 解码后的图片以 egui `TextureHandle` 形式缓存在 `PageCache`（`HashMap<usize, TextureHandle>`）中；超出当前页固定窗口范围的页面会被裁剪淘汰。
 
 ### 5.3 缩放策略
 
@@ -160,7 +160,7 @@ pub trait Parser: Send + Sync {
 |---|---|---|
 | `FolderParser` | `std::fs`, `image` | 按文件名排序读取图片。 |
 | `ZipParser` | `zip` crate | 支持 `.cbz`/`.zip`。 |
-| `RarParser` | `unrar` crate 或外部 `unrar` | 支持 `.cbr`/`.rar`。 |
+| `RarParser` | `unrar` crate | 支持 `.cbr`/`.rar`。 |
 | `PdfParser` | `pdf-rs` 或 `mupdf` 绑定 | 提取页面为位图，首版已完整支持。 |
 
 解析结果仅保留页面引用，不一次性解码所有图片。
@@ -230,7 +230,7 @@ pub trait Parser: Send + Sync {
 
 ### 10.1 已实现
 
-- [x] **异步后台加载**：文件解压、图片解码、PDF 渲染放入独立线程池，避免 UI 阻塞。
+- [x] **异步后台加载**：文件解压、图片解码、PDF 渲染通过 channel 提交到单后台工作线程，避免 UI 阻塞。
 - [x] **预加载优化**：当前页前后 N 页提前解码缓存。
 - [x] **CBR/RAR 与 PDF 完整解析**：首版已完整支持 `.cbr`/`.rar` 和 `.pdf`。
 
@@ -244,7 +244,7 @@ pub trait Parser: Send + Sync {
 | 决策 | 选项 | 理由 |
 |---|---|---|
 | 架构 | Workspace 多 crate | 职责清晰，便于测试与扩展 |
-| I/O 模型 | 异步后台加载线程池 | 避免 UI 阻塞，支持文件解压、图片解码、PDF 渲染并行处理 |
+| I/O 模型 | 异步后台加载（单工作线程 + channel） | 避免 UI 阻塞，后台顺序处理文件解压、图片解码与 PDF 渲染 |
 | UI 框架 | egui | 用户指定，跨平台、即时模式 |
 | 持久化格式 | JSON 文件 | 简单、易调试、无需引入数据库 |
 | 图片解码 | `image` crate | Rust 生态标准，支持格式广 |
