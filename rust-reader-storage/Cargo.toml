@@ -1,0 +1,11 @@
+[package]
+name = "rust-reader-storage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rust-reader-core = { path = "../rust-reader-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+thiserror = { workspace = true }
