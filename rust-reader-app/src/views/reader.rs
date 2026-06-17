@@ -10,11 +10,22 @@ pub struct ReaderView {
     pub open: Option<OpenReader>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickFit {
+    /// Fit the image width to the available viewport width.
+    Width,
+    /// Fit the image height to the available viewport height.
+    Height,
+    /// Fit the whole image inside the available viewport (letterbox).
+    Page,
+}
+
 pub struct OpenReader {
     pub comic: Comic,
     pub state: ReadingState,
     pub texture: Option<egui::TextureHandle>,
     pub texture_page: Option<usize>,
+    pub pending_fit: Option<QuickFit>,
 }
 
 impl OpenReader {
@@ -36,8 +47,28 @@ impl OpenReader {
         self.state.zoom = self.state.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
     }
 
-    pub fn reset_zoom(&mut self) {
-        self.state.zoom = 1.0;
+    pub fn request_fit(&mut self, fit: QuickFit) {
+        self.pending_fit = Some(fit);
+    }
+
+    fn apply_pending_fit(&mut self, available: egui::Vec2) {
+        let Some(fit) = self.pending_fit.take() else {
+            return;
+        };
+        let Some(texture) = &self.texture else {
+            return;
+        };
+        let image_size = texture.size_vec2();
+        if image_size.x <= 0.0 || image_size.y <= 0.0 {
+            return;
+        }
+
+        let scale = match fit {
+            QuickFit::Width => available.x / image_size.x,
+            QuickFit::Height => available.y / image_size.y,
+            QuickFit::Page => (available.x / image_size.x).min(available.y / image_size.y),
+        };
+        self.state.zoom = scale.clamp(MIN_ZOOM, MAX_ZOOM);
         self.state.pan = Vec2::ZERO;
     }
 
@@ -63,6 +94,7 @@ impl ReaderView {
             state,
             texture: None,
             texture_page: None,
+            pending_fit: Some(QuickFit::Page),
         });
     }
 
@@ -84,6 +116,10 @@ impl ReaderView {
                 Ok(texture) => {
                     reader.texture = Some(texture);
                     reader.texture_page = Some(reader.state.current_page);
+                    // New page loaded: remember to auto-fit on first render.
+                    if reader.pending_fit.is_none() {
+                        reader.pending_fit = Some(QuickFit::Page);
+                    }
                 }
                 Err(err) => {
                     reader.texture = None;
@@ -94,10 +130,13 @@ impl ReaderView {
             }
         }
 
-        if let Some(texture) = &reader.texture {
+        let texture = reader.texture.clone();
+        if let Some(texture) = texture {
+            let available = ui.available_rect_before_wrap();
+            reader.apply_pending_fit(available.size());
+
             let texture_size = texture.size_vec2();
             let scaled_size = texture_size * reader.state.zoom;
-            let available = ui.available_rect_before_wrap();
             let half_size = scaled_size / 2.0;
             let max_pan_x = (available.width() / 2.0 + half_size.x).max(0.0);
             let max_pan_y = (available.height() / 2.0 + half_size.y).max(0.0);
@@ -111,7 +150,7 @@ impl ReaderView {
             let image_rect = egui::Rect::from_min_size(top_left, scaled_size);
             let response = ui.put(
                 image_rect,
-                egui::Image::new(texture)
+                egui::Image::new(&texture)
                     .fit_to_exact_size(scaled_size)
                     .sense(egui::Sense::drag()),
             );

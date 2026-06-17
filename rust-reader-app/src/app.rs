@@ -1,4 +1,8 @@
-use crate::views::{library::LibraryView, reader::ReaderView, settings::SettingsView};
+use crate::views::{
+    library::LibraryView,
+    reader::{QuickFit, ReaderView},
+    settings::SettingsView,
+};
 use rust_reader_core::models::ReadingMode;
 use rust_reader_core::state::ReadingState;
 use rust_reader_storage::{
@@ -141,7 +145,10 @@ impl ReaderApp {
             }
 
             // Double-click toggles fullscreen.
-            if ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) {
+            if ui.input(|i| {
+                i.pointer
+                    .button_double_clicked(egui::PointerButton::Primary)
+            }) {
                 self.toggle_fullscreen(ctx);
             }
         });
@@ -187,9 +194,19 @@ impl ReaderApp {
                         reader.zoom_in();
                     }
                 }
-                if ui.button("适应").clicked() {
+                if ui.button("适应宽度").clicked() {
                     if let Some(reader) = self.reader_view.open.as_mut() {
-                        reader.reset_zoom();
+                        reader.request_fit(QuickFit::Width);
+                    }
+                }
+                if ui.button("适应高度").clicked() {
+                    if let Some(reader) = self.reader_view.open.as_mut() {
+                        reader.request_fit(QuickFit::Height);
+                    }
+                }
+                if ui.button("自动适应").clicked() {
+                    if let Some(reader) = self.reader_view.open.as_mut() {
+                        reader.request_fit(QuickFit::Page);
                     }
                 }
                 ui.separator();
@@ -311,8 +328,8 @@ impl ReaderApp {
     fn handle_global_input(&mut self, ctx: &egui::Context) {
         let is_reader = matches!(self.current_view, View::Reader);
 
-        if ctx.input(|i| i.key_pressed(egui::Key::F11)
-            || (i.key_pressed(egui::Key::F) && is_reader))
+        if ctx
+            .input(|i| i.key_pressed(egui::Key::F11) || (i.key_pressed(egui::Key::F) && is_reader))
         {
             self.toggle_fullscreen(ctx);
         }
@@ -335,9 +352,7 @@ impl ReaderApp {
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
             self.reader_prev_page();
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::PageDown)
-            || i.key_pressed(egui::Key::Space))
-        {
+        if ctx.input(|i| i.key_pressed(egui::Key::PageDown) || i.key_pressed(egui::Key::Space)) {
             self.reader_page_down();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::PageUp)) {
@@ -365,7 +380,7 @@ impl ReaderApp {
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Num0)) {
             if let Some(reader) = self.reader_view.open.as_mut() {
-                reader.reset_zoom();
+                reader.request_fit(QuickFit::Page);
             }
         }
     }
