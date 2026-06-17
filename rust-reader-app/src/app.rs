@@ -73,7 +73,10 @@ impl eframe::App for ReaderApp {
         }
         self.handle_dropped_files(ctx);
 
-        self.reader_view.update(ctx, &self.page_loader);
+        self.reader_view
+            .update(ctx, &self.page_loader, self.settings.preload_pages);
+        self.reader_view
+            .request_preloads(&self.page_loader, self.settings.preload_pages);
 
         match self.current_view {
             View::Library => self.render_library(ctx),

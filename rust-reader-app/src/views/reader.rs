@@ -1,3 +1,4 @@
+use crate::cache::PageCache;
 use crate::loader::{Epoch, PageLoader};
 use crate::widgets::page_navigator::page_navigator;
 use crate::widgets::page_view::upload_color_image;
@@ -33,6 +34,7 @@ pub struct OpenReader {
     pub pending_fit: Option<QuickFit>,
     pub current_epoch: Epoch,
     pub pending_pages: HashSet<usize>,
+    pub cache: PageCache,
 }
 
 impl OpenReader {
@@ -142,11 +144,12 @@ impl OpenReader {
                 Ok(image) => {
                     let texture =
                         upload_color_image(ctx, image, format!("page_{}", result.page_index));
+                    self.cache.insert(result.page_index, texture);
                     if self.left_page == Some(result.page_index) {
-                        self.left_texture = Some(texture.clone());
+                        self.left_texture = self.cache.get(result.page_index);
                     }
                     if self.right_page == Some(result.page_index) {
-                        self.right_texture = Some(texture);
+                        self.right_texture = self.cache.get(result.page_index);
                     }
                 }
                 Err(err) => eprintln!("failed to load page {}: {}", result.page_index, err),
@@ -167,15 +170,60 @@ impl ReaderView {
             pending_fit: Some(QuickFit::Page),
             current_epoch: 0,
             pending_pages: HashSet::new(),
+            cache: PageCache::new(),
         };
         reader.bump_epoch(loader);
         self.open = Some(reader);
     }
 
-    pub fn update(&mut self, ctx: &egui::Context, loader: &PageLoader) {
+    pub fn update(&mut self, ctx: &egui::Context, loader: &PageLoader, preload_pages: u8) {
         if let Some(reader) = &mut self.open {
             reader.update(ctx, loader);
         }
+        self.prune_cache(preload_pages);
+    }
+
+    pub fn request_preloads(&mut self, loader: &PageLoader, preload_pages: u8) {
+        let Some(reader) = self.open.as_mut() else {
+            return;
+        };
+        let current = reader.state.current_page;
+        let total = reader.total_pages();
+        if total == 0 {
+            return;
+        }
+        let n = preload_pages as usize;
+        let start = current.saturating_sub(n);
+        let end = (current + n + 1).min(total);
+        for idx in start..end {
+            if idx == current {
+                continue;
+            }
+            if reader.cache.contains(idx) {
+                continue;
+            }
+            if reader.pending_pages.contains(&idx) {
+                continue;
+            }
+            let Some(source) = reader.comic.page_source(idx).cloned() else {
+                continue;
+            };
+            reader.pending_pages.insert(idx);
+            loader.request(reader.current_epoch, idx, source);
+        }
+    }
+
+    pub fn prune_cache(&mut self, preload_pages: u8) {
+        let Some(reader) = self.open.as_mut() else {
+            return;
+        };
+        let current = reader.state.current_page;
+        let n = preload_pages as usize;
+        let keep_start = current.saturating_sub(n + 2);
+        let keep_end = current.saturating_add(n + 2);
+        reader
+            .cache
+            .retain(|page_index| page_index >= keep_start && page_index <= keep_end);
     }
 
     /// Renders the current page or spread and returns the response covering the page area.
@@ -194,15 +242,19 @@ impl ReaderView {
         let (left_idx, right_idx) = reader.spread_pages();
         if reader.left_page != Some(left_idx) {
             reader.left_page = Some(left_idx);
-            reader.left_texture = None;
-            request_page(loader, reader, left_idx);
+            reader.left_texture = reader.cache.get(left_idx);
+            if reader.left_texture.is_none() {
+                request_page(loader, reader, left_idx);
+            }
             reader.pending_fit = reader.pending_fit.or(Some(QuickFit::Page));
         }
         if reader.right_page != right_idx {
             reader.right_page = right_idx;
-            reader.right_texture = None;
+            reader.right_texture = right_idx.and_then(|idx| reader.cache.get(idx));
             if let Some(idx) = right_idx {
-                request_page(loader, reader, idx);
+                if reader.right_texture.is_none() {
+                    request_page(loader, reader, idx);
+                }
             }
             reader.pending_fit = reader.pending_fit.or(Some(QuickFit::Page));
         }

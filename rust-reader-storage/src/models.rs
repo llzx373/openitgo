@@ -2,13 +2,27 @@ use rust_reader_core::models::{FitMode, ReadingMode};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
     pub theme: Theme,
     pub default_mode: ReadingMode,
     pub default_fit: FitMode,
     pub double_page: bool,
+    pub preload_pages: u8,
     pub window_size: (f32, f32),
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            theme: Theme::default(),
+            default_mode: ReadingMode::default(),
+            default_fit: FitMode::default(),
+            double_page: false,
+            preload_pages: 2,
+            window_size: (1280.0, 720.0),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

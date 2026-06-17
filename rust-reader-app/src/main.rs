@@ -1,4 +1,5 @@
 mod app;
+mod cache;
 mod fonts;
 mod loader;
 mod views;
