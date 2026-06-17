@@ -14,6 +14,13 @@ impl Vec2 {
     }
 }
 
+impl std::ops::Mul<f32> for Vec2 {
+    type Output = Self;
+    fn mul(self, rhs: f32) -> Self::Output {
+        Vec2::new(self.x * rhs, self.y * rhs)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReadingState {
     pub mode: ReadingMode,
@@ -140,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_clamps_current_page_to_total_pages() {
+    fn test_new_starts_at_first_page() {
         // ReadingState::new always starts at page 0, so this primarily
         // ensures the constructor respects total_pages when it is non-zero.
         let state = ReadingState::new(ReadingMode::Ltr, 3);
