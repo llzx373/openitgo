@@ -7,3 +7,6 @@ description = "Core domain models and reading logic for rustReader"
 
 [dependencies]
 serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
