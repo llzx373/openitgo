@@ -1,4 +1,4 @@
-use rust_reader_storage::models::Library;
+use rust_reader_storage::models::{Library, LibraryEntry};
 
 #[derive(Default)]
 pub struct LibraryView {
@@ -6,6 +6,10 @@ pub struct LibraryView {
 }
 
 impl LibraryView {
+    pub fn entry_at(&self, idx: usize) -> Option<&LibraryEntry> {
+        self.library.entries.get(idx)
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, on_open: &mut dyn FnMut(usize)) {
         ui.heading("书架");
         if self.library.entries.is_empty() {

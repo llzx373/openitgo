@@ -31,7 +31,7 @@ impl eframe::App for ReaderApp {
                 let mut open_idx = None;
                 self.library_view.ui(ui, &mut |idx| open_idx = Some(idx));
                 if let Some(idx) = open_idx {
-                    if let Some(entry) = self.library_view.library.entries.get(idx) {
+                    if let Some(entry) = self.library_view.entry_at(idx) {
                         if let Ok(comic) = rust_reader_parser::parse(&entry.path) {
                             let state = ReadingState::new(
                                 self.settings.default_mode,
@@ -44,7 +44,7 @@ impl eframe::App for ReaderApp {
                 }
             }
             View::Reader => {
-                self.reader_view.ui(ui, ctx);
+                self.reader_view.ui(ui);
             }
             View::Settings => {
                 ui.label("设置视图待实现");
