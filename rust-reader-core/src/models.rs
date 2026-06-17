@@ -38,7 +38,7 @@ pub enum ReadingMode {
     Webtoon,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FitMode {
     Height,
     Width,
