@@ -174,8 +174,22 @@ mod tests {
 
     #[test]
     fn test_loader_loads_folder_image() {
+        assert_loader_loads_image_with_extension("png");
+    }
+
+    #[test]
+    fn test_loader_loads_bmp_image() {
+        assert_loader_loads_image_with_extension("bmp");
+    }
+
+    #[test]
+    fn test_loader_loads_tiff_image() {
+        assert_loader_loads_image_with_extension("tiff");
+    }
+
+    fn assert_loader_loads_image_with_extension(ext: &str) {
         let tmp = tempfile::tempdir().unwrap();
-        let sample_path = tmp.path().join("sample.png");
+        let sample_path = tmp.path().join(format!("sample.{ext}"));
 
         let image = image::RgbaImage::from_pixel(64, 64, image::Rgba([255, 0, 0, 255]));
         image.save(&sample_path).unwrap();
