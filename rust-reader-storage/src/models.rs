@@ -7,6 +7,7 @@ pub struct Settings {
     pub theme: Theme,
     pub default_mode: ReadingMode,
     pub default_fit: FitMode,
+    pub double_page: bool,
     pub window_size: (f32, f32),
 }
 

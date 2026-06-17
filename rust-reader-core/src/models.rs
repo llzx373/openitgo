@@ -39,6 +39,12 @@ pub enum ReadingMode {
     Webtoon,
 }
 
+impl ReadingMode {
+    pub fn is_webtoon(&self) -> bool {
+        matches!(self, ReadingMode::Webtoon)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FitMode {
     #[default]

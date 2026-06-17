@@ -183,6 +183,28 @@ impl ReaderApp {
                 }
                 ui.separator();
 
+                if mode != ReadingMode::Webtoon {
+                    let double_page = self
+                        .reader_view
+                        .open
+                        .as_ref()
+                        .map(|r| r.state.double_page)
+                        .unwrap_or(self.settings.double_page);
+                    if ui
+                        .selectable_label(double_page, "双页")
+                        .on_hover_text("切换到双页模式")
+                        .clicked()
+                    {
+                        let new_double = !double_page;
+                        self.settings.double_page = new_double;
+                        if let Some(reader) = self.reader_view.open.as_mut() {
+                            reader.state.set_double_page(new_double, total_pages);
+                            reader.pending_fit = Some(QuickFit::Page);
+                        }
+                    }
+                    ui.separator();
+                }
+
                 if ui.button("-").clicked() {
                     if let Some(reader) = self.reader_view.open.as_mut() {
                         reader.zoom_out();
@@ -261,6 +283,14 @@ impl ReaderApp {
                 ));
                 ui.separator();
                 ui.label(format!("缩放: {:.0}%", zoom * 100.0));
+                ui.separator();
+                let double_page = self
+                    .reader_view
+                    .open
+                    .as_ref()
+                    .map(|r| r.state.double_page)
+                    .unwrap_or(false);
+                ui.label(if double_page { "双页" } else { "单页" });
                 ui.separator();
                 ui.label("快捷键: ← → 翻页 | +/- 缩放 | F11 全屏 | Esc 返回书架");
             });
@@ -346,11 +376,25 @@ impl ReaderApp {
             }
         }
 
+        let rtl = self
+            .reader_view
+            .open
+            .as_ref()
+            .map(|r| r.state.mode == ReadingMode::Rtl)
+            .unwrap_or(false);
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-            self.reader_next_page();
+            if rtl {
+                self.reader_prev_page();
+            } else {
+                self.reader_next_page();
+            }
         }
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-            self.reader_prev_page();
+            if rtl {
+                self.reader_next_page();
+            } else {
+                self.reader_prev_page();
+            }
         }
         if ctx.input(|i| i.key_pressed(egui::Key::PageDown) || i.key_pressed(egui::Key::Space)) {
             self.reader_page_down();
@@ -388,26 +432,13 @@ impl ReaderApp {
     fn reader_next_page(&mut self) {
         if let Some(reader) = self.reader_view.open.as_mut() {
             let total = reader.total_pages();
-            if total == 0 {
-                return;
-            }
-            match reader.state.mode {
-                ReadingMode::Ltr | ReadingMode::Webtoon => reader.state.next_page(total),
-                ReadingMode::Rtl => reader.state.prev_page(),
-            }
+            reader.state.next_page(total);
         }
     }
 
     fn reader_prev_page(&mut self) {
         if let Some(reader) = self.reader_view.open.as_mut() {
-            let total = reader.total_pages();
-            if total == 0 {
-                return;
-            }
-            match reader.state.mode {
-                ReadingMode::Ltr | ReadingMode::Webtoon => reader.state.prev_page(),
-                ReadingMode::Rtl => reader.state.next_page(total),
-            }
+            reader.state.prev_page();
         }
     }
 
@@ -500,6 +531,7 @@ impl ReaderApp {
             Ok(comic) => {
                 let total = comic.volumes.first().map(|v| v.pages.len()).unwrap_or(0);
                 let mut state = ReadingState::new(self.settings.default_mode, total);
+                state.set_double_page(self.settings.double_page, total);
                 if let Some(h) = self.history.entries.iter().find(|h| h.comic_id == comic.id) {
                     state.go_to_page(h.page_index, total);
                 }

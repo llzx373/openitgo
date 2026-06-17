@@ -42,6 +42,7 @@ pub struct ReadingState {
     pub zoom: f32,
     pub pan: Vec2,
     pub fit_mode: FitMode,
+    pub double_page: bool,
 }
 
 impl ReadingState {
@@ -52,23 +53,34 @@ impl ReadingState {
             zoom: 1.0,
             pan: Vec2::ZERO,
             fit_mode: default_fit_mode(mode),
+            double_page: false,
         };
         state.clamp_page(total_pages);
         state
     }
 
     pub fn next_page(&mut self, total_pages: usize) {
-        if self.current_page + 1 < total_pages {
-            self.current_page += 1;
+        if total_pages == 0 {
+            return;
+        }
+        let step = self.page_step();
+        if self.current_page + step < total_pages {
+            self.current_page += step;
+            self.pan = Vec2::ZERO;
+        } else {
+            self.current_page = total_pages - 1;
             self.pan = Vec2::ZERO;
         }
     }
 
     pub fn prev_page(&mut self) {
-        if self.current_page > 0 {
-            self.current_page -= 1;
-            self.pan = Vec2::ZERO;
+        let step = self.page_step();
+        if self.current_page >= step {
+            self.current_page -= step;
+        } else {
+            self.current_page = 0;
         }
+        self.pan = Vec2::ZERO;
     }
 
     pub fn go_to_page(&mut self, page: usize, total_pages: usize) {
@@ -85,11 +97,35 @@ impl ReadingState {
         self.clamp_page(total_pages);
     }
 
+    pub fn set_double_page(&mut self, double_page: bool, total_pages: usize) {
+        self.double_page = double_page && !self.mode.is_webtoon();
+        self.pan = Vec2::ZERO;
+        self.clamp_page(total_pages);
+    }
+
+    pub fn toggle_double_page(&mut self, total_pages: usize) {
+        self.set_double_page(!self.double_page, total_pages);
+    }
+
+    fn page_step(&self) -> usize {
+        if self.double_page && !self.mode.is_webtoon() {
+            2
+        } else {
+            1
+        }
+    }
+
     fn clamp_page(&mut self, total_pages: usize) {
         if total_pages == 0 {
             self.current_page = 0;
-        } else if self.current_page >= total_pages {
+            return;
+        }
+        if self.current_page >= total_pages {
             self.current_page = total_pages - 1;
+        }
+        if self.double_page && !self.mode.is_webtoon() {
+            // Align to the start of a spread.
+            self.current_page = (self.current_page / 2) * 2;
         }
     }
 }
@@ -145,6 +181,58 @@ mod tests {
         assert_eq!(state.zoom, 1.0);
         assert_eq!(state.pan, Vec2::ZERO);
         assert_eq!(state.current_page, 2);
+    }
+
+    #[test]
+    fn test_double_page_navigation_steps_by_two() {
+        let mut state = ReadingState::new(ReadingMode::Ltr, 7);
+        state.set_double_page(true, 7);
+        assert_eq!(state.current_page, 0);
+
+        state.next_page(7);
+        assert_eq!(state.current_page, 2);
+
+        state.next_page(7);
+        assert_eq!(state.current_page, 4);
+
+        state.next_page(7);
+        assert_eq!(state.current_page, 6);
+
+        // At the end, cannot advance further.
+        state.next_page(7);
+        assert_eq!(state.current_page, 6);
+
+        state.prev_page();
+        assert_eq!(state.current_page, 4);
+    }
+
+    #[test]
+    fn test_double_page_rtl_steps_by_two() {
+        let mut state = ReadingState::new(ReadingMode::Rtl, 7);
+        state.set_double_page(true, 7);
+        state.next_page(7);
+        assert_eq!(state.current_page, 2);
+        state.prev_page();
+        assert_eq!(state.current_page, 0);
+    }
+
+    #[test]
+    fn test_go_to_page_aligns_to_spread_start() {
+        let mut state = ReadingState::new(ReadingMode::Ltr, 10);
+        state.set_double_page(true, 10);
+        state.go_to_page(3, 10);
+        assert_eq!(state.current_page, 2);
+        state.go_to_page(5, 10);
+        assert_eq!(state.current_page, 4);
+    }
+
+    #[test]
+    fn test_webtoon_ignores_double_page() {
+        let mut state = ReadingState::new(ReadingMode::Webtoon, 10);
+        state.set_double_page(true, 10);
+        assert!(!state.double_page);
+        state.next_page(10);
+        assert_eq!(state.current_page, 1);
     }
 
     #[test]
