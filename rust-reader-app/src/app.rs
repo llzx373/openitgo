@@ -66,13 +66,28 @@ impl eframe::App for ReaderApp {
         }
         self.handle_reader_input(ctx);
 
+        if ctx.input(|i| i.key_pressed(egui::Key::O) && i.modifiers.ctrl) {
+            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                self.add_folder_to_library(path);
+            }
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| match self.current_view {
             View::Library => {
                 if let Some(err) = &self.error_message {
                     ui.colored_label(ui.visuals().error_fg_color, err);
                 }
                 let mut open_idx = None;
-                self.library_view.ui(ui, &mut |idx| open_idx = Some(idx));
+                let mut add_requested = false;
+                self.library_view
+                    .ui(ui, &mut |idx| open_idx = Some(idx), &mut || {
+                        add_requested = true
+                    });
+                if add_requested {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        self.add_folder_to_library(path);
+                    }
+                }
                 if let Some(idx) = open_idx {
                     if let Some(entry) = self.library_view.entry_at(idx).cloned() {
                         match rust_reader_parser::parse(&entry.path) {
@@ -150,6 +165,31 @@ impl ReaderApp {
                     page_index,
                     last_read_at: now,
                 });
+            }
+        }
+    }
+
+    fn add_folder_to_library(&mut self, path: std::path::PathBuf) {
+        match rust_reader_parser::parse(&path) {
+            Ok(comic) => {
+                let entry = rust_reader_storage::models::LibraryEntry {
+                    comic_id: comic.id.clone(),
+                    title: comic.title.clone(),
+                    path: path.clone(),
+                    cover_path: None,
+                };
+                if !self
+                    .library_view
+                    .library
+                    .entries
+                    .iter()
+                    .any(|e| e.path == path)
+                {
+                    self.library_view.library.entries.push(entry);
+                }
+            }
+            Err(e) => {
+                self.error_message = Some(format!("无法添加漫画: {}", e));
             }
         }
     }

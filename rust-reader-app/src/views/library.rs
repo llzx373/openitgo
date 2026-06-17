@@ -10,10 +10,20 @@ impl LibraryView {
         self.library.entries.get(idx)
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, on_open: &mut dyn FnMut(usize)) {
-        ui.heading("书架");
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        on_open: &mut dyn FnMut(usize),
+        on_add: &mut dyn FnMut(),
+    ) {
+        ui.horizontal(|ui| {
+            ui.heading("书架");
+            if ui.button("打开文件夹").clicked() {
+                on_add();
+            }
+        });
         if self.library.entries.is_empty() {
-            ui.label("暂无漫画，请点击“打开”按钮添加。");
+            ui.label("暂无漫画，请点击“打开文件夹”按钮添加。");
             return;
         }
         egui::Grid::new("library_grid").show(ui, |ui| {
