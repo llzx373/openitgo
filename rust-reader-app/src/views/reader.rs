@@ -1,5 +1,5 @@
 use rust_reader_core::models::{Comic, PageSource, ReadingMode};
-use rust_reader_core::state::ReadingState;
+use rust_reader_core::state::{ReadingState, Vec2};
 
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 5.0;
@@ -77,7 +77,7 @@ impl ReaderView {
             }
             if ui.button("适应").clicked() {
                 reader.state.zoom = 1.0;
-                reader.state.pan = rust_reader_core::state::Vec2::ZERO;
+                reader.state.pan = Vec2::ZERO;
             }
         });
 
@@ -100,6 +100,11 @@ impl ReaderView {
             let texture_size = texture.size_vec2();
             let scaled_size = texture_size * reader.state.zoom;
             let available = ui.available_rect_before_wrap();
+            let half_size = scaled_size / 2.0;
+            let max_pan_x = (available.width() / 2.0 + half_size.x).max(0.0);
+            let max_pan_y = (available.height() / 2.0 + half_size.y).max(0.0);
+            reader.state.pan.x = reader.state.pan.x.clamp(-max_pan_x, max_pan_x);
+            reader.state.pan.y = reader.state.pan.y.clamp(-max_pan_y, max_pan_y);
             let center = available.center();
             let top_left = egui::pos2(
                 center.x - scaled_size.x / 2.0 + reader.state.pan.x,
@@ -114,7 +119,7 @@ impl ReaderView {
             );
             if response.dragged() {
                 let delta = response.drag_delta();
-                reader.state.pan += rust_reader_core::state::Vec2::new(delta.x, delta.y);
+                reader.state.pan += Vec2::new(delta.x, delta.y);
             }
         } else {
             ui.label("无法加载页面");
