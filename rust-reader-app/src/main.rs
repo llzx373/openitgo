@@ -1,4 +1,5 @@
 mod app;
+mod fonts;
 mod views;
 mod widgets;
 
@@ -12,6 +13,9 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "rustReader",
         options,
-        Box::new(|cc| Ok(Box::new(ReaderApp::new(cc)))),
+        Box::new(|cc| {
+            fonts::load_cjk_font(&cc.egui_ctx);
+            Ok(Box::new(ReaderApp::new(cc)))
+        }),
     )
 }

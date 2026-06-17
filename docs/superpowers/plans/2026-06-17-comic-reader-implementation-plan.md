@@ -1771,29 +1771,31 @@ git commit -m "feat(app): add zoom, pan, and fullscreen controls"
 
 ---
 
-## Task 15: Thumbnail Navigation Bar
+## Task 15: Page Navigator Bar
 
 **Files:**
-- Create: `rust-reader-app/src/widgets/thumbnail_bar.rs`
+- Create: `rust-reader-app/src/widgets/page_navigator.rs`
 - Modify: `rust-reader-app/src/views/reader.rs`
 
-- [ ] **Step 1: Implement thumbnail bar widget**
+- [ ] **Step 1: Implement page navigator widget**
 
-`rust-reader-app/src/widgets/thumbnail_bar.rs`:
+`rust-reader-app/src/widgets/page_navigator.rs`:
 ```rust
-use rust_reader_core::models::{Comic, PageSource};
+use rust_reader_core::models::Comic;
 
-pub fn thumbnail_bar(
+pub fn page_navigator(
     ui: &mut egui::Ui,
-    ctx: &egui::Context,
     comic: &Comic,
     current_page: usize,
     on_select: &mut dyn FnMut(usize),
 ) {
+    if comic.volumes.is_empty() {
+        return;
+    }
     ui.horizontal(|ui| {
-        for (idx, page) in comic.volumes[0].pages.iter().enumerate() {
-            let label = format!("{}", idx + 1);
+        for (idx, _page) in comic.volumes[0].pages.iter().enumerate() {
             let selected = idx == current_page;
+            let label = (idx + 1).to_string();
             if ui.selectable_label(selected, label).clicked() {
                 on_select(idx);
             }
@@ -1806,12 +1808,17 @@ pub fn thumbnail_bar(
 
 `rust-reader-app/src/views/reader.rs`:
 ```rust
-use crate::widgets::thumbnail_bar::thumbnail_bar;
+use crate::widgets::page_navigator::page_navigator;
 
 // In ReaderView::ui, after page display:
-let current_page = state.current_page;
-thumbnail_bar(ui, ctx, comic, current_page, &mut |idx| {
+let current_page = reader.state.current_page;
+let total_pages = reader.total_pages();
+let comic = &reader.comic;
+let state = &mut reader.state;
+let texture_page = &mut reader.texture_page;
+page_navigator(ui, comic, current_page, &mut |idx| {
     state.go_to_page(idx, total_pages);
+    *texture_page = None;
 });
 ```
 
@@ -1827,8 +1834,8 @@ Expected: Successful compilation.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add rust-reader-app/src/widgets/thumbnail_bar.rs rust-reader-app/src/views/reader.rs
-git commit -m "feat(app): add thumbnail navigation bar"
+git add rust-reader-app/src/widgets/page_navigator.rs rust-reader-app/src/views/reader.rs
+git commit -m "feat(app): add page navigator bar"
 ```
 
 ---
