@@ -71,6 +71,7 @@ impl eframe::App for ReaderApp {
                 self.add_folder_to_library(path);
             }
         }
+        self.handle_dropped_files(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| match self.current_view {
             View::Library => {
@@ -90,28 +91,7 @@ impl eframe::App for ReaderApp {
                 }
                 if let Some(idx) = open_idx {
                     if let Some(entry) = self.library_view.entry_at(idx).cloned() {
-                        match rust_reader_parser::parse(&entry.path) {
-                            Ok(comic) => {
-                                let total =
-                                    comic.volumes.first().map(|v| v.pages.len()).unwrap_or(0);
-                                let mut state =
-                                    ReadingState::new(self.settings.default_mode, total);
-                                if let Some(h) = self
-                                    .history
-                                    .entries
-                                    .iter()
-                                    .find(|h| h.comic_id == entry.comic_id)
-                                {
-                                    state.go_to_page(h.page_index, total);
-                                }
-                                self.reader_view.open(comic, state);
-                                self.current_view = View::Reader;
-                                self.error_message = None;
-                            }
-                            Err(e) => {
-                                self.error_message = Some(format!("无法打开漫画: {}", e));
-                            }
-                        }
+                        self.open_comic(entry.path);
                     }
                 }
             }
@@ -209,6 +189,61 @@ impl ReaderApp {
                         page_index,
                         note: None,
                     });
+            }
+        }
+    }
+
+    fn open_comic(&mut self, path: std::path::PathBuf) {
+        match rust_reader_parser::parse(&path) {
+            Ok(comic) => {
+                let total = comic.volumes.first().map(|v| v.pages.len()).unwrap_or(0);
+                let mut state = ReadingState::new(self.settings.default_mode, total);
+                if let Some(h) = self.history.entries.iter().find(|h| h.comic_id == comic.id) {
+                    state.go_to_page(h.page_index, total);
+                }
+                self.reader_view.open(comic, state);
+                self.current_view = View::Reader;
+                self.error_message = None;
+            }
+            Err(e) => {
+                self.error_message = Some(format!("无法打开漫画: {}", e));
+            }
+        }
+    }
+
+    fn ensure_in_library(&mut self, path: &std::path::Path) {
+        if self
+            .library_view
+            .library
+            .entries
+            .iter()
+            .any(|e| e.path == path)
+        {
+            return;
+        }
+        let title = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Untitled")
+            .to_string();
+        let comic_id = title.clone();
+        self.library_view
+            .library
+            .entries
+            .push(rust_reader_storage::models::LibraryEntry {
+                comic_id,
+                title,
+                path: path.to_path_buf(),
+                cover_path: None,
+            });
+    }
+
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped_files: Vec<_> = ctx.input(|i| i.raw.dropped_files.clone());
+        if let Some(file) = dropped_files.first() {
+            if let Some(path) = &file.path {
+                self.ensure_in_library(path);
+                self.open_comic(path.clone());
             }
         }
     }
