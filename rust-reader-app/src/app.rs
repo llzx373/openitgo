@@ -1,3 +1,4 @@
+use crate::loader::PageLoader;
 use crate::views::{
     library::LibraryView,
     reader::{QuickFit, ReaderView},
@@ -22,6 +23,7 @@ pub struct ReaderApp {
     pub history: History,
     pub bookmarks: Bookmarks,
     pub error_message: Option<String>,
+    pub page_loader: PageLoader,
 }
 
 impl Default for ReaderApp {
@@ -42,6 +44,7 @@ impl Default for ReaderApp {
             history,
             bookmarks,
             error_message: None,
+            page_loader: PageLoader::default(),
         }
     }
 }
@@ -69,6 +72,8 @@ impl eframe::App for ReaderApp {
             }
         }
         self.handle_dropped_files(ctx);
+
+        self.reader_view.update(ctx, &self.page_loader);
 
         match self.current_view {
             View::Library => self.render_library(ctx),
@@ -127,7 +132,7 @@ impl ReaderApp {
         self.render_reader_statusbar(ctx, total_pages, current_page, mode, zoom);
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let response = self.reader_view.ui(ui);
+            let response = self.reader_view.ui(ui, &self.page_loader);
 
             // Right-click context menu on the page area.
             if let Some(response) = response {
@@ -536,6 +541,9 @@ impl ReaderApp {
                     state.go_to_page(h.page_index, total);
                 }
                 self.reader_view.open(comic, state);
+                if let Some(reader) = self.reader_view.open.as_mut() {
+                    reader.bump_epoch(&self.page_loader);
+                }
                 self.current_view = View::Reader;
                 self.error_message = None;
             }

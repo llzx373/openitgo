@@ -1,5 +1,6 @@
 mod app;
 mod fonts;
+mod loader;
 mod views;
 mod widgets;
 

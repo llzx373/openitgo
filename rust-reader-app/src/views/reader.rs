@@ -1,6 +1,9 @@
+use crate::loader::{Epoch, PageLoader};
 use crate::widgets::page_navigator::page_navigator;
-use rust_reader_core::models::{Comic, PageSource, ReadingMode};
+use crate::widgets::page_view::upload_color_image;
+use rust_reader_core::models::{Comic, ReadingMode};
 use rust_reader_core::state::{ReadingState, Vec2};
+use std::collections::HashSet;
 
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 5.0;
@@ -28,15 +31,13 @@ pub struct OpenReader {
     pub right_texture: Option<egui::TextureHandle>,
     pub right_page: Option<usize>,
     pub pending_fit: Option<QuickFit>,
+    pub current_epoch: Epoch,
+    pub pending_pages: HashSet<usize>,
 }
 
 impl OpenReader {
     pub fn total_pages(&self) -> usize {
-        self.comic
-            .volumes
-            .first()
-            .map(|v| v.pages.len())
-            .unwrap_or(0)
+        self.comic.total_pages()
     }
 
     pub fn zoom_in(&mut self) {
@@ -121,6 +122,37 @@ impl OpenReader {
         self.state.zoom = scale.clamp(MIN_ZOOM, MAX_ZOOM);
         self.state.pan = Vec2::ZERO;
     }
+
+    pub fn bump_epoch(&mut self, loader: &PageLoader) {
+        self.current_epoch = loader.next_epoch();
+        self.pending_pages.clear();
+        self.left_texture = None;
+        self.right_texture = None;
+        self.left_page = None;
+        self.right_page = None;
+    }
+
+    pub fn update(&mut self, ctx: &egui::Context, loader: &PageLoader) {
+        while let Some(result) = loader.try_recv() {
+            if result.epoch != self.current_epoch {
+                continue;
+            }
+            self.pending_pages.remove(&result.page_index);
+            match result.image {
+                Ok(image) => {
+                    let texture =
+                        upload_color_image(ctx, image, format!("page_{}", result.page_index));
+                    if self.left_page == Some(result.page_index) {
+                        self.left_texture = Some(texture.clone());
+                    }
+                    if self.right_page == Some(result.page_index) {
+                        self.right_texture = Some(texture);
+                    }
+                }
+                Err(err) => eprintln!("failed to load page {}: {}", result.page_index, err),
+            }
+        }
+    }
 }
 
 impl ReaderView {
@@ -133,11 +165,19 @@ impl ReaderView {
             right_texture: None,
             right_page: None,
             pending_fit: Some(QuickFit::Page),
+            current_epoch: 0,
+            pending_pages: HashSet::new(),
         });
     }
 
+    pub fn update(&mut self, ctx: &egui::Context, loader: &PageLoader) {
+        if let Some(reader) = &mut self.open {
+            reader.update(ctx, loader);
+        }
+    }
+
     /// Renders the current page or spread and returns the response covering the page area.
-    pub fn ui(&mut self, ui: &mut egui::Ui) -> Option<egui::Response> {
+    pub fn ui(&mut self, ui: &mut egui::Ui, loader: &PageLoader) -> Option<egui::Response> {
         let Some(reader) = &mut self.open else {
             ui.label("未打开漫画");
             return None;
@@ -151,14 +191,17 @@ impl ReaderView {
 
         let (left_idx, right_idx) = reader.spread_pages();
         if reader.left_page != Some(left_idx) {
-            reader.left_texture = load_page_texture(ui.ctx(), &reader.comic, left_idx).ok();
             reader.left_page = Some(left_idx);
+            reader.left_texture = None;
+            request_page(loader, reader, left_idx);
             reader.pending_fit = reader.pending_fit.or(Some(QuickFit::Page));
         }
         if reader.right_page != right_idx {
-            reader.right_texture =
-                right_idx.and_then(|idx| load_page_texture(ui.ctx(), &reader.comic, idx).ok());
             reader.right_page = right_idx;
+            reader.right_texture = None;
+            if let Some(idx) = right_idx {
+                request_page(loader, reader, idx);
+            }
             reader.pending_fit = reader.pending_fit.or(Some(QuickFit::Page));
         }
 
@@ -242,28 +285,17 @@ impl ReaderView {
     }
 }
 
-fn load_page_texture(
-    ctx: &egui::Context,
-    comic: &Comic,
-    page_index: usize,
-) -> Result<egui::TextureHandle, String> {
-    let volume = comic
-        .volumes
-        .first()
-        .ok_or_else(|| "漫画没有卷".to_string())?;
-    let page = volume
-        .pages
-        .get(page_index)
-        .ok_or_else(|| "页面索引越界".to_string())?;
-
-    let label = format!("page_{}", page_index);
-    match &page.source {
-        PageSource::File(path) => {
-            crate::widgets::page_view::load_texture_from_path(ctx, path, &label)
-        }
-        PageSource::Bytes(bytes) => {
-            crate::widgets::page_view::load_texture_from_bytes(ctx, bytes.as_ref(), &label)
-        }
-        PageSource::PdfRef { .. } => Err("PDF 页面暂不支持".to_string()),
+fn request_page(loader: &PageLoader, reader: &mut OpenReader, page_index: usize) {
+    let total = reader.total_pages();
+    if page_index >= total {
+        return;
     }
+    if reader.pending_pages.contains(&page_index) {
+        return;
+    }
+    let Some(source) = reader.comic.page_source(page_index).cloned() else {
+        return;
+    };
+    reader.pending_pages.insert(page_index);
+    loader.request(reader.current_epoch, page_index, source);
 }

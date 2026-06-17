@@ -9,6 +9,20 @@ pub struct Comic {
     pub volumes: Vec<Volume>,
 }
 
+impl Comic {
+    pub fn total_pages(&self) -> usize {
+        self.volumes.first().map(|v| v.pages.len()).unwrap_or(0)
+    }
+
+    pub fn page_source(&self, page_index: usize) -> Option<&PageSource> {
+        self.volumes
+            .first()?
+            .pages
+            .get(page_index)
+            .map(|p| &p.source)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Volume {
     pub title: String,
