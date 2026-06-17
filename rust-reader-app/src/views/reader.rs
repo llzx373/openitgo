@@ -1,3 +1,4 @@
+use crate::widgets::thumbnail_bar::thumbnail_bar;
 use rust_reader_core::models::{Comic, PageSource, ReadingMode};
 use rust_reader_core::state::{ReadingState, Vec2};
 
@@ -124,6 +125,17 @@ impl ReaderView {
         } else {
             ui.label("无法加载页面");
         }
+
+        let current_page = reader.state.current_page;
+        let total_pages = reader.total_pages();
+        let comic = &reader.comic;
+        let state = &mut reader.state;
+        let texture_page = &mut reader.texture_page;
+        thumbnail_bar(ui, comic, current_page, &mut |idx| {
+            state.go_to_page(idx, total_pages);
+            // Force texture refresh on next frame
+            *texture_page = None;
+        });
 
         ui.horizontal(|ui| {
             if ui.button("上一页").clicked() {
