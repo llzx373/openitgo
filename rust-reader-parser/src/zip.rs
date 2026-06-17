@@ -1,6 +1,5 @@
 use crate::traits::{ParseError, Parser};
 use rust_reader_core::models::{Comic, Page, PageSource, Volume};
-use std::io::Read;
 use std::path::Path;
 
 pub struct ZipParser;
@@ -18,30 +17,32 @@ impl Parser for ZipParser {
         let mut archive =
             zip::ZipArchive::new(file).map_err(|e| ParseError::InvalidArchive(e.to_string()))?;
 
-        let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+        let archive_path = path.to_path_buf();
+        let mut names: Vec<String> = Vec::new();
         for i in 0..archive.len() {
-            let mut file = archive
+            let entry = archive
                 .by_index(i)
                 .map_err(|e| ParseError::InvalidArchive(e.to_string()))?;
-            if file.is_file() && is_image_name(file.name()) {
-                let mut bytes = Vec::new();
-                file.read_to_end(&mut bytes)?;
-                entries.push((file.name().to_string(), bytes));
+            if entry.is_file() && is_image_name(entry.name()) {
+                names.push(entry.name().to_string());
             }
         }
 
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        names.sort();
 
-        if entries.is_empty() {
+        if names.is_empty() {
             return Err(ParseError::NoPages);
         }
 
-        let pages: Vec<Page> = entries
+        let pages: Vec<Page> = names
             .into_iter()
             .enumerate()
-            .map(|(idx, (_, bytes))| Page {
+            .map(|(idx, name)| Page {
                 index: idx,
-                source: PageSource::Bytes(bytes),
+                source: PageSource::ZipEntry {
+                    archive: archive_path.clone(),
+                    name,
+                },
             })
             .collect();
 
@@ -67,7 +68,7 @@ fn is_image_name(name: &str) -> bool {
     let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     matches!(
         ext.as_str(),
-        "png" | "jpg" | "jpeg" | "webp" | "gif" | "avif"
+        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tiff" | "avif"
     )
 }
 
@@ -94,5 +95,12 @@ mod tests {
         }
         let comic = ZipParser::parse(&path).unwrap();
         assert_eq!(comic.volumes[0].pages.len(), 2);
+        assert_eq!(
+            comic.volumes[0].pages[0].source,
+            PageSource::ZipEntry {
+                archive: path,
+                name: "01.png".to_string(),
+            }
+        );
     }
 }

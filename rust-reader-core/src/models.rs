@@ -21,12 +21,20 @@ pub struct Page {
     pub source: PageSource,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
 pub enum PageSource {
     File(PathBuf),
-    Bytes(Vec<u8>),
-    PdfRef {
-        document_path: PathBuf,
+    ZipEntry {
+        archive: PathBuf,
+        name: String,
+    },
+    RarEntry {
+        archive: PathBuf,
+        name: String,
+    },
+    PdfPage {
+        document: PathBuf,
         page_number: usize,
     },
 }
