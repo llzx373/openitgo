@@ -260,15 +260,27 @@ impl ReaderView {
         }
 
         let available = ui.available_rect_before_wrap();
-        reader.apply_pending_fit(available.size());
 
-        let left_texture = reader.left_texture.clone()?;
+        let left_texture = reader.left_texture.clone();
         let right_texture = reader.right_texture.clone();
-        let left_size = left_texture.size_vec2();
-        let right_size = right_texture
+        let right_idx = reader.right_page;
+        const FALLBACK_PAGE_SIZE: egui::Vec2 = egui::Vec2::new(600.0, 800.0);
+        let left_size = left_texture
             .as_ref()
             .map(|t| t.size_vec2())
-            .unwrap_or(egui::Vec2::ZERO);
+            .unwrap_or(FALLBACK_PAGE_SIZE);
+        let right_size = match (right_idx, right_texture.as_ref()) {
+            (None, _) => egui::Vec2::ZERO,
+            (Some(_), None) => FALLBACK_PAGE_SIZE,
+            (Some(_), Some(t)) => t.size_vec2(),
+        };
+
+        let any_loading =
+            left_texture.is_none() || (right_idx.is_some() && right_texture.is_none());
+        if !any_loading {
+            reader.apply_pending_fit(available.size());
+        }
+
         let spread_size = egui::vec2(left_size.x + right_size.x, left_size.y.max(right_size.y));
         let scaled_spread = spread_size * reader.state.zoom;
 
@@ -286,32 +298,41 @@ impl ReaderView {
 
         // Render left page.
         let left_rect = egui::Rect::from_min_size(spread_top_left, left_size * reader.state.zoom);
-        let left_response = ui.put(
-            left_rect,
-            egui::Image::new(&left_texture)
-                .fit_to_exact_size(left_size * reader.state.zoom)
-                .sense(egui::Sense::drag()),
-        );
-        if left_response.dragged() {
-            let delta = left_response.drag_delta();
-            reader.state.pan += Vec2::new(delta.x, delta.y);
-        }
+        let left_response = if let Some(ref texture) = left_texture {
+            let response = ui.put(
+                left_rect,
+                egui::Image::new(texture)
+                    .fit_to_exact_size(left_size * reader.state.zoom)
+                    .sense(egui::Sense::drag()),
+            );
+            if response.dragged() {
+                let delta = response.drag_delta();
+                reader.state.pan += Vec2::new(delta.x, delta.y);
+            }
+            response
+        } else {
+            render_loading_placeholder(ui, left_rect)
+        };
 
         // Render right page if present.
-        if let Some(right_texture) = right_texture {
+        if right_idx.is_some() {
             let right_rect = egui::Rect::from_min_size(
                 egui::pos2(spread_top_left.x + left_rect.width(), spread_top_left.y),
                 right_size * reader.state.zoom,
             );
-            let right_response = ui.put(
-                right_rect,
-                egui::Image::new(&right_texture)
-                    .fit_to_exact_size(right_size * reader.state.zoom)
-                    .sense(egui::Sense::drag()),
-            );
-            if right_response.dragged() {
-                let delta = right_response.drag_delta();
-                reader.state.pan += Vec2::new(delta.x, delta.y);
+            if let Some(ref texture) = right_texture {
+                let right_response = ui.put(
+                    right_rect,
+                    egui::Image::new(texture)
+                        .fit_to_exact_size(right_size * reader.state.zoom)
+                        .sense(egui::Sense::drag()),
+                );
+                if right_response.dragged() {
+                    let delta = right_response.drag_delta();
+                    reader.state.pan += Vec2::new(delta.x, delta.y);
+                }
+            } else {
+                let _ = render_loading_placeholder(ui, right_rect);
             }
         }
 
@@ -352,4 +373,18 @@ fn request_page(loader: &PageLoader, reader: &mut OpenReader, page_index: usize)
     };
     reader.pending_pages.insert(page_index);
     loader.request(reader.current_epoch, page_index, source);
+}
+
+fn render_loading_placeholder(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Response {
+    let response = ui.allocate_rect(rect, egui::Sense::drag());
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+        ui.with_layout(
+            egui::Layout::centered_and_justified(egui::Direction::TopDown),
+            |ui| {
+                ui.spinner();
+                ui.label("加载中...");
+            },
+        );
+    });
+    response
 }
