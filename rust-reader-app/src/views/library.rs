@@ -1,16 +1,8 @@
 use rust_reader_storage::models::Library;
 
+#[derive(Default)]
 pub struct LibraryView {
     pub library: Library,
-}
-
-#[allow(clippy::derivable_impls)]
-impl Default for LibraryView {
-    fn default() -> Self {
-        Self {
-            library: Library::default(),
-        }
-    }
 }
 
 impl LibraryView {
