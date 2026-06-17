@@ -54,7 +54,7 @@ pub struct Bookmark {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Bookmarks {
-    pub items: Vec<Bookmark>,
+    pub entries: Vec<Bookmark>,
 }
 
 #[cfg(test)]
