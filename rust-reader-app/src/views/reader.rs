@@ -13,6 +13,16 @@ pub struct OpenReader {
     pub texture_page: Option<usize>,
 }
 
+impl OpenReader {
+    pub fn total_pages(&self) -> usize {
+        self.comic
+            .volumes
+            .first()
+            .map(|v| v.pages.len())
+            .unwrap_or(0)
+    }
+}
+
 impl ReaderView {
     pub fn open(&mut self, comic: Comic, state: ReadingState) {
         self.open = Some(OpenReader {
@@ -29,26 +39,26 @@ impl ReaderView {
             return;
         };
 
-        let total_pages = reader.comic.volumes[0].pages.len();
+        let total_pages = reader.total_pages();
 
+        if total_pages == 0 {
+            ui.label("此漫画没有页面");
+            return;
+        }
+
+        let modes = [
+            (ReadingMode::Ltr, "国漫"),
+            (ReadingMode::Rtl, "日漫"),
+            (ReadingMode::Webtoon, "韩漫"),
+        ];
         ui.horizontal(|ui| {
-            if ui
-                .selectable_label(matches!(reader.state.mode, ReadingMode::Ltr), "国漫")
-                .clicked()
-            {
-                reader.state.set_mode(ReadingMode::Ltr, total_pages);
-            }
-            if ui
-                .selectable_label(matches!(reader.state.mode, ReadingMode::Rtl), "日漫")
-                .clicked()
-            {
-                reader.state.set_mode(ReadingMode::Rtl, total_pages);
-            }
-            if ui
-                .selectable_label(matches!(reader.state.mode, ReadingMode::Webtoon), "韩漫")
-                .clicked()
-            {
-                reader.state.set_mode(ReadingMode::Webtoon, total_pages);
+            for (mode, label) in modes {
+                if ui
+                    .selectable_label(reader.state.mode == mode, label)
+                    .clicked()
+                {
+                    reader.state.set_mode(mode, total_pages);
+                }
             }
         });
 
