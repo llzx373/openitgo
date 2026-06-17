@@ -899,6 +899,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-channel"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82b8f8f868b36967f9606790d1903570de9ceaf870a7bf9fbbd3016d636a2cb2"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-deque"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3124,6 +3133,7 @@ checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
 name = "rust-reader-app"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "eframe",
  "egui",
  "image",
@@ -3131,6 +3141,8 @@ dependencies = [
  "rust-reader-core",
  "rust-reader-parser",
  "rust-reader-storage",
+ "tempfile",
+ "zip",
 ]
 
 [[package]]

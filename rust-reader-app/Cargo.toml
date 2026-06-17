@@ -6,6 +6,7 @@ license = "MIT"
 description = "Desktop egui application for rustReader"
 
 [dependencies]
+crossbeam-channel = "0.5"
 eframe = "0.29"
 egui = "0.29"
 image = { workspace = true }
@@ -13,3 +14,7 @@ rfd = "0.15"
 rust-reader-core = { path = "../rust-reader-core" }
 rust-reader-parser = { path = "../rust-reader-parser" }
 rust-reader-storage = { path = "../rust-reader-storage" }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3.14"
