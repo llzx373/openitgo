@@ -1,4 +1,4 @@
-use crate::traits::{ParseError, Parser};
+use crate::traits::{is_image_extension, ParseError, Parser};
 use rust_reader_core::models::{Comic, Page, PageSource, Volume};
 use std::path::Path;
 
@@ -65,11 +65,10 @@ impl Parser for ZipParser {
 }
 
 fn is_image_name(name: &str) -> bool {
-    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-    matches!(
-        ext.as_str(),
-        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tiff" | "avif"
-    )
+    name.rsplit('.')
+        .next()
+        .map(is_image_extension)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -102,5 +101,29 @@ mod tests {
                 name: "01.png".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn test_parse_cbz_accepts_all_image_extensions() {
+        use crate::traits::IMAGE_EXTENSIONS;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.cbz");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            for (i, ext) in IMAGE_EXTENSIONS.iter().enumerate() {
+                zip.start_file(format!("{:02}.{}", i, ext.to_uppercase()), options)
+                    .unwrap();
+                zip.write_all(b"fake").unwrap();
+            }
+            zip.start_file("skip.txt", options).unwrap();
+            zip.write_all(b"not an image").unwrap();
+            zip.finish().unwrap();
+        }
+        let comic = ZipParser::parse(&path).unwrap();
+        assert_eq!(comic.volumes[0].pages.len(), IMAGE_EXTENSIONS.len());
     }
 }

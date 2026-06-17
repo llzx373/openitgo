@@ -1,10 +1,8 @@
-use crate::traits::{ParseError, Parser};
+use crate::traits::{is_image_extension, ParseError, Parser};
 use rust_reader_core::models::{Comic, Page, PageSource, Volume};
 use std::path::{Path, PathBuf};
 
 pub struct FolderParser;
-
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "avif"];
 
 impl Parser for FolderParser {
     fn supports(path: &Path) -> bool {
@@ -52,7 +50,7 @@ impl Parser for FolderParser {
 fn is_image(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| IMAGE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        .map(is_image_extension)
         .unwrap_or(false)
 }
 
@@ -75,5 +73,22 @@ mod tests {
         fs::write(tmp.path().join("02.jpg"), b"fake").unwrap();
         let comic = FolderParser::parse(tmp.path()).unwrap();
         assert_eq!(comic.volumes[0].pages.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_folder_accepts_all_image_extensions() {
+        use crate::traits::IMAGE_EXTENSIONS;
+
+        let tmp = tempfile::tempdir().unwrap();
+        for (i, ext) in IMAGE_EXTENSIONS.iter().enumerate() {
+            fs::write(
+                tmp.path().join(format!("{:02}.{}", i, ext.to_uppercase())),
+                b"fake",
+            )
+            .unwrap();
+        }
+        fs::write(tmp.path().join("skip.txt"), b"not an image").unwrap();
+        let comic = FolderParser::parse(tmp.path()).unwrap();
+        assert_eq!(comic.volumes[0].pages.len(), IMAGE_EXTENSIONS.len());
     }
 }
