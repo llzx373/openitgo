@@ -29,6 +29,11 @@ impl SettingsView {
                 );
             });
 
+        ui.horizontal(|ui| {
+            ui.label("预加载页数:");
+            ui.add(egui::Slider::new(&mut settings.preload_pages, 0..=10));
+        });
+
         ui.label("主题");
         egui::ComboBox::from_id_salt("theme")
             .selected_text(theme_label(settings.theme.clone()))
