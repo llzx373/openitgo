@@ -1,4 +1,4 @@
-use crate::widgets::thumbnail_bar::thumbnail_bar;
+use crate::widgets::page_navigator::page_navigator;
 use rust_reader_core::models::{Comic, PageSource, ReadingMode};
 use rust_reader_core::state::{ReadingState, Vec2};
 
@@ -131,10 +131,8 @@ impl ReaderView {
         let comic = &reader.comic;
         let state = &mut reader.state;
         let texture_page = &mut reader.texture_page;
-        let ctx = ui.ctx().clone();
-        thumbnail_bar(ui, &ctx, comic, current_page, &mut |idx| {
+        page_navigator(ui, comic, current_page, &mut |idx| {
             state.go_to_page(idx, total_pages);
-            // Force texture refresh on next frame
             *texture_page = None;
         });
 
