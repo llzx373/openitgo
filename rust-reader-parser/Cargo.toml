@@ -10,3 +10,6 @@ rust-reader-core = { path = "../rust-reader-core" }
 image = { workspace = true }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.14"
