@@ -131,11 +131,18 @@ impl ReaderApp {
         let mode = reader.state.mode;
         let zoom = reader.state.zoom;
 
-        self.render_reader_toolbar(ctx, total_pages, current_page, mode, zoom);
-        self.render_reader_statusbar(ctx, total_pages, current_page, mode, zoom);
+        if self.settings.show_toolbar {
+            self.render_reader_toolbar(ctx, total_pages, current_page, mode, zoom);
+        }
+        if self.settings.show_statusbar {
+            self.render_reader_statusbar(ctx, total_pages, current_page, mode, zoom);
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let response = self.reader_view.ui(ui, &self.page_loader);
+
+            // Floating thumbnail progress bar overlay.
+            self.reader_view.render_thumbnail_progress_bar(ui);
 
             // Right-click context menu on the page area.
             if let Some(response) = response {
@@ -265,6 +272,12 @@ impl ReaderApp {
                 if ui.button("设置").clicked() {
                     self.current_view = View::Settings;
                 }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("✕").on_hover_text("隐藏工具栏").clicked() {
+                        self.settings.show_toolbar = false;
+                    }
+                });
             });
         });
     }
@@ -301,6 +314,12 @@ impl ReaderApp {
                 ui.label(if double_page { "双页" } else { "单页" });
                 ui.separator();
                 ui.label("快捷键: ← → 翻页 | +/- 缩放 | F11 全屏 | Esc 返回书架");
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("✕").on_hover_text("隐藏状态栏").clicked() {
+                        self.settings.show_statusbar = false;
+                    }
+                });
             });
             ui.add_space(4.0);
             self.reader_view.render_page_navigator(ui);
@@ -354,6 +373,25 @@ impl ReaderApp {
         }
         if ui.button("全屏").clicked() {
             self.toggle_fullscreen(ui.ctx());
+            ui.close_menu();
+        }
+        ui.separator();
+        let toolbar_label = if self.settings.show_toolbar {
+            "隐藏工具栏"
+        } else {
+            "显示工具栏"
+        };
+        if ui.button(toolbar_label).clicked() {
+            self.settings.show_toolbar = !self.settings.show_toolbar;
+            ui.close_menu();
+        }
+        let statusbar_label = if self.settings.show_statusbar {
+            "隐藏状态栏"
+        } else {
+            "显示状态栏"
+        };
+        if ui.button(statusbar_label).clicked() {
+            self.settings.show_statusbar = !self.settings.show_statusbar;
             ui.close_menu();
         }
         ui.separator();

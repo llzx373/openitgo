@@ -11,6 +11,8 @@ pub struct Settings {
     pub double_page: bool,
     pub cache_size_mb: u32,
     pub window_size: (f32, f32),
+    pub show_toolbar: bool,
+    pub show_statusbar: bool,
 }
 
 impl Default for Settings {
@@ -22,6 +24,8 @@ impl Default for Settings {
             double_page: false,
             cache_size_mb: 1024,
             window_size: (1280.0, 720.0),
+            show_toolbar: true,
+            show_statusbar: true,
         }
     }
 }
@@ -82,6 +86,8 @@ mod tests {
         let s = Settings::default();
         assert!(matches!(s.theme, Theme::System));
         assert_eq!(s.cache_size_mb, 1024);
+        assert!(s.show_toolbar);
+        assert!(s.show_statusbar);
     }
 
     #[test]

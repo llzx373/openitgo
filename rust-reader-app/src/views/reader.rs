@@ -2,6 +2,7 @@ use crate::cache::PageCache;
 use crate::loader::{Epoch, PageLoader};
 use crate::widgets::page_navigator::page_navigator;
 use crate::widgets::page_view::upload_color_image;
+use crate::widgets::thumbnail_progress_bar::thumbnail_progress_bar;
 use rust_reader_core::models::{Comic, ReadingMode};
 use rust_reader_core::state::{ReadingState, Vec2};
 use std::collections::HashSet;
@@ -12,6 +13,7 @@ const MAX_ZOOM: f32 = 5.0;
 #[derive(Default)]
 pub struct ReaderView {
     pub open: Option<OpenReader>,
+    pub show_thumbnails: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,6 +366,46 @@ impl ReaderView {
             *left_page = None;
             *right_page = None;
         });
+    }
+
+    /// Renders a floating thumbnail progress bar overlay at the bottom of the reader area.
+    /// The bar appears when the mouse is near the bottom edge or when `show_thumbnails` is pinned.
+    pub fn render_thumbnail_progress_bar(&mut self, ui: &mut egui::Ui) -> Option<egui::Response> {
+        let reader = self.open.as_mut()?;
+        let rect = ui.max_rect();
+        let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+
+        let mouse_near_bottom =
+            pointer_pos.is_some_and(|p| rect.contains(p) && p.y >= rect.max.y - 24.0);
+
+        if !mouse_near_bottom && !self.show_thumbnails {
+            return None;
+        }
+
+        const BAR_HEIGHT: f32 = 80.0;
+        let bar_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.min.x, rect.max.y - BAR_HEIGHT),
+            egui::vec2(rect.width(), BAR_HEIGHT),
+        );
+
+        let current_page = reader.state.current_page;
+        let total_pages = reader.total_pages();
+        let comic = &reader.comic;
+        let cache = &mut reader.cache;
+        let state = &mut reader.state;
+        let left_page = &mut reader.left_page;
+        let right_page = &mut reader.right_page;
+
+        Some(
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(bar_rect), |ui| {
+                thumbnail_progress_bar(ui, cache, comic, current_page, &mut |idx| {
+                    state.go_to_page(idx, total_pages);
+                    *left_page = None;
+                    *right_page = None;
+                })
+            })
+            .inner,
+        )
     }
 }
 
