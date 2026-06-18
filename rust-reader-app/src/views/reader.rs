@@ -5,7 +5,7 @@ use crate::widgets::progress_bar::{comic_progress_bar, ProgressBarResponse};
 use crate::widgets::thumbnail_progress_bar::page_thumbnail_tooltip;
 use rust_reader_core::models::{Comic, ReadingMode};
 use rust_reader_core::state::{ReadingState, Vec2};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 5.0;
@@ -35,6 +35,7 @@ pub struct OpenReader {
     pub pending_fit: Option<QuickFit>,
     pub current_epoch: Epoch,
     pub pending_pages: HashSet<usize>,
+    pub page_errors: HashMap<usize, String>,
     pub cache: PageCache,
 }
 
@@ -129,6 +130,7 @@ impl OpenReader {
     pub fn bump_epoch(&mut self, loader: &PageLoader) {
         self.current_epoch = loader.next_epoch();
         self.pending_pages.clear();
+        self.page_errors.clear();
         self.left_texture = None;
         self.right_texture = None;
         self.left_page = None;
@@ -154,7 +156,10 @@ impl OpenReader {
                         self.right_texture = self.cache.get(result.page_index);
                     }
                 }
-                Err(err) => eprintln!("failed to load page {}: {}", result.page_index, err),
+                Err(err) => {
+                    eprintln!("failed to load page {}: {}", result.page_index, err);
+                    self.page_errors.insert(result.page_index, err);
+                }
             }
         }
     }
@@ -172,6 +177,7 @@ impl ReaderView {
             pending_fit: Some(QuickFit::Page),
             current_epoch: 0,
             pending_pages: HashSet::new(),
+            page_errors: HashMap::new(),
             cache: PageCache::new(),
         };
         reader.bump_epoch(loader);
@@ -306,44 +312,30 @@ impl ReaderView {
 
         // Render left page.
         let left_rect = egui::Rect::from_min_size(spread_top_left, left_size * reader.state.zoom);
-        let left_response = if let Some(ref texture) = left_texture {
-            let response = ui.put(
-                left_rect,
-                egui::Image::new(texture)
-                    .fit_to_exact_size(left_size * reader.state.zoom)
-                    .sense(egui::Sense::drag()),
-            );
-            if response.dragged() {
-                let delta = response.drag_delta();
-                reader.state.pan += Vec2::new(delta.x, delta.y);
-            }
-            response
-        } else {
-            render_loading_placeholder(ui, left_rect)
-        };
+        let left_response = render_page_or_placeholder(
+            ui,
+            reader,
+            loader,
+            left_rect,
+            left_idx,
+            left_texture.as_ref(),
+        );
 
         // Render right page if present.
         let mut right_response: Option<egui::Response> = None;
-        if right_idx.is_some() {
+        if let Some(idx) = right_idx {
             let right_rect = egui::Rect::from_min_size(
                 egui::pos2(spread_top_left.x + left_rect.width(), spread_top_left.y),
                 right_size * reader.state.zoom,
             );
-            let response = if let Some(ref texture) = right_texture {
-                let response = ui.put(
-                    right_rect,
-                    egui::Image::new(texture)
-                        .fit_to_exact_size(right_size * reader.state.zoom)
-                        .sense(egui::Sense::drag()),
-                );
-                if response.dragged() {
-                    let delta = response.drag_delta();
-                    reader.state.pan += Vec2::new(delta.x, delta.y);
-                }
-                response
-            } else {
-                render_loading_placeholder(ui, right_rect)
-            };
+            let response = render_page_or_placeholder(
+                ui,
+                reader,
+                loader,
+                right_rect,
+                idx,
+                right_texture.as_ref(),
+            );
             right_response = Some(response);
         }
 
@@ -424,7 +416,65 @@ fn request_page(loader: &PageLoader, reader: &mut OpenReader, page_index: usize)
         return;
     };
     reader.pending_pages.insert(page_index);
+    reader.page_errors.remove(&page_index);
     loader.request_high(reader.current_epoch, page_index, source);
+}
+
+fn render_page_or_placeholder(
+    ui: &mut egui::Ui,
+    reader: &mut OpenReader,
+    loader: &PageLoader,
+    rect: egui::Rect,
+    page_index: usize,
+    texture: Option<&egui::TextureHandle>,
+) -> egui::Response {
+    if let Some(texture) = texture {
+        let response = ui.put(
+            rect,
+            egui::Image::new(texture)
+                .fit_to_exact_size(rect.size())
+                .sense(egui::Sense::drag()),
+        );
+        if response.dragged() {
+            let delta = response.drag_delta();
+            reader.state.pan += Vec2::new(delta.x, delta.y);
+        }
+        response
+    } else if let Some(err) = reader.page_errors.get(&page_index).cloned() {
+        render_error_placeholder(ui, rect, &err, || {
+            request_page(loader, reader, page_index);
+        })
+    } else {
+        render_loading_placeholder(ui, rect)
+    }
+}
+
+fn render_error_placeholder(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    error: &str,
+    mut retry: impl FnMut(),
+) -> egui::Response {
+    let response = ui.allocate_rect(rect, egui::Sense::click());
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+        ui.with_layout(
+            egui::Layout::centered_and_justified(egui::Direction::TopDown),
+            |ui| {
+                ui.colored_label(ui.visuals().error_fg_color, "加载失败");
+                let short = if error.len() > 80 {
+                    format!("{}...", &error[..80])
+                } else {
+                    error.to_string()
+                };
+                ui.label(egui::RichText::new(short).size(12.0));
+                ui.label(egui::RichText::new("点击重试").size(12.0));
+            },
+        );
+    });
+    if response.clicked() {
+        retry();
+    }
+    response
 }
 
 fn render_loading_placeholder(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Response {
