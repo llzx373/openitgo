@@ -132,14 +132,22 @@ fn process_request(req: LoadRequest, result_sender: &Sender<LoadResult>) {
     });
 }
 
-fn load_page(source: &PageSource) -> Result<ColorImage, String> {
-    let bytes = match source {
-        PageSource::PdfPage {
-            document,
-            page_number,
-        } => return render_pdf_page(document, *page_number),
-        PageSource::File(path) => std::fs::read(path).map_err(|e| e.to_string())?,
+fn read_page_bytes(source: &PageSource) -> Result<(Vec<u8>, Option<String>), String> {
+    match source {
+        PageSource::PdfPage { .. } => Err("PDF should be rendered on IO thread".to_string()),
+        PageSource::File(path) => {
+            let hint = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_lowercase());
+            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            Ok((bytes, hint))
+        }
         PageSource::ZipEntry { archive, name } => {
+            let hint = std::path::Path::new(name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_lowercase());
             let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
             let mut archive =
                 zip::ZipArchive::new(file).map_err(|e| format!("invalid zip archive: {e}"))?;
@@ -149,12 +157,29 @@ fn load_page(source: &PageSource) -> Result<ColorImage, String> {
             let mut bytes = Vec::new();
             std::io::Read::read_to_end(&mut entry, &mut bytes)
                 .map_err(|e| format!("failed to read zip entry: {e}"))?;
-            bytes
+            Ok((bytes, hint))
         }
-        PageSource::RarEntry { archive, name } => read_rar_entry(archive, name)?,
-    };
+        PageSource::RarEntry { archive, name } => {
+            let hint = std::path::Path::new(name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.to_lowercase());
+            let bytes = read_rar_entry(archive, name)?;
+            Ok((bytes, hint))
+        }
+    }
+}
 
-    decode_image(&bytes)
+fn load_page(source: &PageSource) -> Result<ColorImage, String> {
+    match source {
+        PageSource::PdfPage {
+            document,
+            page_number,
+        } => return render_pdf_page(document, *page_number),
+        _ => {}
+    };
+    let (bytes, hint) = read_page_bytes(source)?;
+    decode_image_bytes(&bytes, hint.as_deref())
 }
 
 fn read_rar_entry(archive_path: &Path, name: &str) -> Result<Vec<u8>, String> {
@@ -175,8 +200,13 @@ fn read_rar_entry(archive_path: &Path, name: &str) -> Result<Vec<u8>, String> {
 
 const MAX_IMAGE_DIMENSION: u32 = 4096;
 
-fn decode_image(bytes: &[u8]) -> Result<ColorImage, String> {
-    let image = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
+fn decode_image_bytes(bytes: &[u8], format_hint: Option<&str>) -> Result<ColorImage, String> {
+    let format = format_hint.and_then(image::ImageFormat::from_extension);
+    let image = if let Some(format) = format {
+        image::load_from_memory_with_format(bytes, format).map_err(|e| e.to_string())?
+    } else {
+        image::load_from_memory(bytes).map_err(|e| e.to_string())?
+    };
     let image = downsample_if_needed(image);
     let size = [image.width() as _, image.height() as _];
     let rgba = image.to_rgba8();
