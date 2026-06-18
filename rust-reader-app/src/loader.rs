@@ -49,16 +49,31 @@ pub enum LoadPriority {
     Low,
 }
 
-pub struct LoadRequest {
-    pub epoch: Epoch,
-    pub page_index: usize,
-    pub source: PageSource,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressedFormat {
+    Dxt5Srgb,
+}
+
+pub enum LoadedImage {
+    Compressed {
+        data: Vec<u8>,
+        original_size: [u32; 2],
+        gpu_size: [u32; 2],
+        format: CompressedFormat,
+    },
+    Color(ColorImage),
 }
 
 pub struct LoadResult {
     pub epoch: Epoch,
     pub page_index: usize,
-    pub image: Result<ColorImage, String>,
+    pub image: Result<LoadedImage, String>,
+}
+
+pub struct LoadRequest {
+    pub epoch: Epoch,
+    pub page_index: usize,
+    pub source: PageSource,
 }
 
 struct DecodeJob {
@@ -308,7 +323,63 @@ fn read_rar_entry(archive_path: &Path, name: &str) -> Result<Vec<u8>, String> {
 
 const MAX_IMAGE_DIMENSION: u32 = 4096;
 
-fn decode_image_bytes(bytes: &[u8], format_hint: Option<&str>) -> Result<ColorImage, String> {
+fn compress_dxt5(image: image::DynamicImage) -> Result<LoadedImage, String> {
+    let original_w = image.width();
+    let original_h = image.height();
+    let rgba = image.to_rgba8();
+    let (gpu_w, gpu_h) = padded_size(original_w, original_h);
+
+    let pixels = if original_w == gpu_w && original_h == gpu_h {
+        rgba.into_raw()
+    } else {
+        pad_rgba(&rgba, original_w, original_h, gpu_w, gpu_h)
+    };
+
+    let mut output = vec![0u8; texpresso::Format::Bc3.compressed_size(gpu_w as usize, gpu_h as usize)];
+    texpresso::Format::Bc3.compress(
+        &pixels,
+        gpu_w as usize,
+        gpu_h as usize,
+        texpresso::Params {
+            algorithm: texpresso::Algorithm::ClusterFit,
+            weights: texpresso::COLOUR_WEIGHTS_PERCEPTUAL,
+            weigh_colour_by_alpha: false,
+        },
+        &mut output,
+    );
+
+    Ok(LoadedImage::Compressed {
+        data: output,
+        original_size: [original_w, original_h],
+        gpu_size: [gpu_w, gpu_h],
+        format: CompressedFormat::Dxt5Srgb,
+    })
+}
+
+fn padded_size(width: u32, height: u32) -> (u32, u32) {
+    let pad = |n: u32| ((n + 3) / 4) * 4;
+    (pad(width), pad(height))
+}
+
+fn pad_rgba(
+    src: &image::RgbaImage,
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+) -> Vec<u8> {
+    let mut dst = vec![0u8; (dst_w * dst_h * 4) as usize];
+    for y in 0..src_h {
+        for x in 0..src_w {
+            let src_pixel = src.get_pixel(x, y).0;
+            let dst_idx = ((y * dst_w + x) * 4) as usize;
+            dst[dst_idx..dst_idx + 4].copy_from_slice(&src_pixel);
+        }
+    }
+    dst
+}
+
+fn decode_image_bytes(bytes: &[u8], format_hint: Option<&str>) -> Result<LoadedImage, String> {
     let format = format_hint.and_then(image::ImageFormat::from_extension);
     let image = if let Some(format) = format {
         image::load_from_memory_with_format(bytes, format).map_err(|e| e.to_string())?
@@ -316,10 +387,7 @@ fn decode_image_bytes(bytes: &[u8], format_hint: Option<&str>) -> Result<ColorIm
         image::load_from_memory(bytes).map_err(|e| e.to_string())?
     };
     let image = downsample_if_needed(image);
-    let size = [image.width() as _, image.height() as _];
-    let rgba = image.to_rgba8();
-    let pixels = rgba.as_flat_samples();
-    Ok(ColorImage::from_rgba_unmultiplied(size, pixels.as_slice()))
+    compress_dxt5(image)
 }
 
 fn downsample_if_needed(image: image::DynamicImage) -> image::DynamicImage {
@@ -343,7 +411,7 @@ const PDF_BASE_DPI: f32 = 72.0;
 const PDF_MAX_RENDER_WIDTH: f32 = 2048.0;
 
 /// Render a PDF page directly to an egui [`ColorImage`].
-pub fn render_pdf_page(document: &Path, page_number: usize) -> Result<ColorImage, String> {
+pub fn render_pdf_page(document: &Path, page_number: usize) -> Result<LoadedImage, String> {
     let data = std::fs::read(document).map_err(|e| format!("failed to read PDF file: {e}"))?;
     let pdf = Pdf::new(data).map_err(|e| format!("failed to parse PDF: {e:?}"))?;
 
@@ -372,10 +440,22 @@ pub fn render_pdf_page(document: &Path, page_number: usize) -> Result<ColorImage
     );
 
     let size = [pixmap.width() as usize, pixmap.height() as usize];
-    Ok(ColorImage::from_rgba_premultiplied(
+    Ok(LoadedImage::Color(ColorImage::from_rgba_premultiplied(
         size,
         pixmap.data_as_u8_slice(),
-    ))
+    )))
+}
+
+#[cfg(test)]
+fn assert_loaded_image_size(image: LoadedImage, expected: [usize; 2]) {
+    match image {
+        LoadedImage::Compressed { original_size, .. } => {
+            assert_eq!([original_size[0] as usize, original_size[1] as usize], expected);
+        }
+        LoadedImage::Color(color) => {
+            assert_eq!(color.size, expected);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -412,8 +492,8 @@ mod tests {
         loader.request_high(epoch, 0, PageSource::File(PathBuf::from(&sample_path)));
 
         let result = wait_for_result(&loader, epoch, 0, Duration::from_secs(5));
-        let color_image = result.image.expect("expected image to load successfully");
-        assert_eq!(color_image.size, [64, 64]);
+        let loaded_image = result.image.expect("expected image to load successfully");
+        assert_loaded_image_size(loaded_image, [64, 64]);
     }
 
     fn wait_for_result(
@@ -442,8 +522,13 @@ mod tests {
             .join("../rust-reader-parser/tests/sample.pdf");
         let path = path.canonicalize().expect("sample.pdf should exist");
         let image = render_pdf_page(&path, 0).unwrap();
-        assert!(image.size[0] > 0);
-        assert!(image.size[1] > 0);
+        match image {
+            LoadedImage::Color(color) => {
+                assert!(color.size[0] > 0);
+                assert!(color.size[1] > 0);
+            }
+            _ => panic!("PDF should produce a Color image"),
+        }
     }
 
     #[test]
@@ -497,7 +582,7 @@ mod tests {
                     .expect("unknown epoch");
                 epochs.remove(pos);
                 let image = result.image.expect("image should decode");
-                assert_eq!(image.size, [64, 64]);
+                assert_loaded_image_size(image, [64, 64]);
                 received += 1;
             } else {
                 std::thread::sleep(Duration::from_millis(10));
@@ -546,7 +631,7 @@ mod tests {
             if let Some(result) = loader.try_recv() {
                 assert_eq!(result.epoch, epoch);
                 let image = result.image.expect("image should decode");
-                assert_eq!(image.size, [32, 32]);
+                assert_loaded_image_size(image, [32, 32]);
                 received += 1;
             } else {
                 std::thread::sleep(Duration::from_millis(10));
