@@ -1,7 +1,7 @@
 use crate::loader::PageLoader;
 use crate::opener::{ComicOpener, OpenStatus};
 use crate::views::{
-    library::LibraryView,
+    library::{LibraryCallbacks, LibraryView},
     reader::{QuickFit, ReaderView},
     settings::SettingsView,
 };
@@ -35,7 +35,10 @@ impl Default for ReaderApp {
         let library = store.load_library().unwrap_or_default();
         let history = store.load_history().unwrap_or_default();
         let bookmarks = store.load_bookmarks().unwrap_or_default();
-        let library_view = LibraryView { library };
+        let library_view = LibraryView {
+            library,
+            mode: Default::default(),
+        };
         Self {
             current_view: View::Library,
             settings,
@@ -147,11 +150,20 @@ impl ReaderApp {
                 ui.colored_label(ui.visuals().error_fg_color, err);
             }
             let mut open_idx = None;
+            let mut open_path: Option<PathBuf> = None;
             let mut add_requested = false;
-            self.library_view
-                .ui(ui, &mut |idx| open_idx = Some(idx), &mut || {
-                    add_requested = true
-                });
+            let mut delete_bookmark_idx: Option<usize> = None;
+            self.library_view.ui(
+                ui,
+                &self.history,
+                &self.bookmarks,
+                LibraryCallbacks {
+                    on_open_library: &mut |idx| open_idx = Some(idx),
+                    on_open_path: &mut |path| open_path = Some(path),
+                    on_add: &mut || add_requested = true,
+                    on_delete_bookmark: &mut |idx| delete_bookmark_idx = Some(idx),
+                },
+            );
             if add_requested {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     self.add_folder_to_library(path);
@@ -161,6 +173,12 @@ impl ReaderApp {
                 if let Some(entry) = self.library_view.entry_at(idx).cloned() {
                     self.open_comic(entry.path);
                 }
+            }
+            if let Some(path) = open_path {
+                self.open_comic(path);
+            }
+            if let Some(idx) = delete_bookmark_idx {
+                self.bookmarks.entries.remove(idx);
             }
         });
     }
@@ -755,7 +773,10 @@ mod tests {
             let library = store.load_library().unwrap_or_default();
             let history = store.load_history().unwrap_or_default();
             let bookmarks = store.load_bookmarks().unwrap_or_default();
-            let library_view = LibraryView { library };
+            let library_view = LibraryView {
+                library,
+                mode: Default::default(),
+            };
             Self {
                 current_view: View::Library,
                 settings,

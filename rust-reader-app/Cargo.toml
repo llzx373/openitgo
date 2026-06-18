@@ -15,6 +15,7 @@ rfd = "0.15"
 rust-reader-core = { path = "../rust-reader-core" }
 rust-reader-parser = { path = "../rust-reader-parser" }
 rust-reader-storage = { path = "../rust-reader-storage" }
+time = "0.3"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 unrar = "0.5"
 
