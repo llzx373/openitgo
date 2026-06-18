@@ -673,11 +673,16 @@ impl ReaderApp {
     fn add_folder_to_library(&mut self, path: std::path::PathBuf) {
         match rust_reader_parser::parse(&path) {
             Ok(comic) => {
+                let added_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
                 let entry = rust_reader_storage::models::LibraryEntry {
                     comic_id: comic.id.clone(),
                     title: comic.title.clone(),
                     path: path.clone(),
                     cover_path: None,
+                    added_at,
                 };
                 if !self
                     .library_view
@@ -738,6 +743,10 @@ impl ReaderApp {
             .unwrap_or("Untitled")
             .to_string();
         let comic_id = title.clone();
+        let added_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         self.library_view
             .library
             .entries
@@ -746,6 +755,7 @@ impl ReaderApp {
                 title,
                 path: path.to_path_buf(),
                 cover_path: None,
+                added_at,
             });
     }
 
