@@ -5,10 +5,41 @@ use pdf_render::pdf_interpret::InterpreterSettings;
 use pdf_render::vello_cpu::color::palette::css::WHITE;
 use pdf_render::{render, RenderSettings};
 use rust_reader_core::models::PageSource;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
+
+struct ZipCache {
+    archives: HashMap<std::path::PathBuf, zip::ZipArchive<std::fs::File>>,
+}
+
+impl ZipCache {
+    fn new() -> Self {
+        Self {
+            archives: HashMap::new(),
+        }
+    }
+
+    fn get_or_open(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<&mut zip::ZipArchive<std::fs::File>, String> {
+        if !self.archives.contains_key(path) {
+            let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+            let archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+            self.archives.insert(path.to_path_buf(), archive);
+        }
+        self.archives
+            .get_mut(path)
+            .ok_or_else(|| "zip archive missing from cache".to_string())
+    }
+
+    fn remove(&mut self, path: &std::path::Path) {
+        self.archives.remove(path);
+    }
+}
 
 pub type Epoch = u64;
 
@@ -62,20 +93,23 @@ impl PageLoader {
             bounded(64);
 
         let result_sender_for_io = result_sender.clone();
-        let io_worker = thread::spawn(move || loop {
-            if let Ok(req) = high_receiver.try_recv() {
-                process_io_request(req, &result_sender_for_io, &decode_sender);
-                continue;
-            }
-            select! {
-                recv(high_receiver) -> req => {
-                    if let Ok(req) = req {
-                        process_io_request(req, &result_sender_for_io, &decode_sender);
-                    }
+        let io_worker = thread::spawn(move || {
+            let mut zip_cache = ZipCache::new();
+            loop {
+                if let Ok(req) = high_receiver.try_recv() {
+                    process_io_request(req, &result_sender_for_io, &decode_sender, &mut zip_cache);
+                    continue;
                 }
-                recv(low_receiver) -> req => {
-                    if let Ok(req) = req {
-                        process_io_request(req, &result_sender_for_io, &decode_sender);
+                select! {
+                    recv(high_receiver) -> req => {
+                        if let Ok(req) = req {
+                            process_io_request(req, &result_sender_for_io, &decode_sender, &mut zip_cache);
+                        }
+                    }
+                    recv(low_receiver) -> req => {
+                        if let Ok(req) = req {
+                            process_io_request(req, &result_sender_for_io, &decode_sender, &mut zip_cache);
+                        }
                     }
                 }
             }
@@ -156,6 +190,7 @@ fn process_io_request(
     req: LoadRequest,
     result_sender: &Sender<LoadResult>,
     decode_sender: &Sender<DecodeJob>,
+    zip_cache: &mut ZipCache,
 ) {
     match req.source {
         PageSource::PdfPage {
@@ -169,7 +204,7 @@ fn process_io_request(
                 image,
             });
         }
-        _ => match read_page_bytes(&req.source) {
+        _ => match read_page_bytes(&req.source, zip_cache) {
             Ok((bytes, format_hint)) => {
                 let _ = decode_sender.send(DecodeJob {
                     epoch: req.epoch,
@@ -189,7 +224,39 @@ fn process_io_request(
     }
 }
 
-fn read_page_bytes(source: &PageSource) -> Result<(Vec<u8>, Option<String>), String> {
+fn read_zip_entry(
+    zip_cache: &mut ZipCache,
+    archive_path: &std::path::Path,
+    index: usize,
+) -> Result<Vec<u8>, String> {
+    let first_attempt = (|| -> Result<Vec<u8>, String> {
+        let archive = zip_cache.get_or_open(archive_path)?;
+        let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes)
+            .map_err(|e| format!("failed to read zip entry: {e}"))?;
+        Ok(bytes)
+    })();
+
+    match first_attempt {
+        Ok(bytes) => Ok(bytes),
+        Err(_) => {
+            // File may have been modified/deleted externally. Drop cache and retry once.
+            zip_cache.remove(archive_path);
+            let archive = zip_cache.get_or_open(archive_path)?;
+            let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut bytes)
+                .map_err(|e| format!("failed to read zip entry: {e}"))?;
+            Ok(bytes)
+        }
+    }
+}
+
+fn read_page_bytes(
+    source: &PageSource,
+    zip_cache: &mut ZipCache,
+) -> Result<(Vec<u8>, Option<String>), String> {
     match source {
         PageSource::PdfPage { .. } => Err("PDF should be rendered on IO thread".to_string()),
         PageSource::File(path) => {
@@ -200,20 +267,16 @@ fn read_page_bytes(source: &PageSource) -> Result<(Vec<u8>, Option<String>), Str
             let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
             Ok((bytes, hint))
         }
-        PageSource::ZipEntry { archive, name } => {
+        PageSource::ZipEntry {
+            archive,
+            name,
+            index,
+        } => {
             let hint = std::path::Path::new(name)
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(|s| s.to_lowercase());
-            let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
-            let mut archive =
-                zip::ZipArchive::new(file).map_err(|e| format!("invalid zip archive: {e}"))?;
-            let mut entry = archive
-                .by_name(name)
-                .map_err(|e| format!("zip entry not found: {e}"))?;
-            let mut bytes = Vec::new();
-            std::io::Read::read_to_end(&mut entry, &mut bytes)
-                .map_err(|e| format!("failed to read zip entry: {e}"))?;
+            let bytes = read_zip_entry(zip_cache, archive, *index)?;
             Ok((bytes, hint))
         }
         PageSource::RarEntry { archive, name } => {
