@@ -231,7 +231,11 @@ impl ReaderApp {
             (None, None)
         };
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        let bg = self.settings.background_color;
+        let frame = egui::Frame::central_panel(&ctx.style()).fill(egui::Color32::from_rgb(
+            bg[0], bg[1], bg[2],
+        ));
+        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             let response = self.reader_view.ui(ui, &self.page_loader);
 
             // Floating thumbnail tooltip above the cursor when hovering the progress bar.

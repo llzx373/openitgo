@@ -1,4 +1,4 @@
-use rust_reader_core::models::ReadingMode;
+use rust_reader_core::models::{FitMode, ReadingMode};
 use rust_reader_storage::models::{Settings, Theme};
 
 #[derive(Default)]
@@ -39,6 +39,21 @@ impl SettingsView {
             "反转滚轮方向（适用于 macOS 自然滚动）",
         );
 
+        ui.label("默认缩放/适应");
+        egui::ComboBox::from_id_salt("fit")
+            .selected_text(fit_label(settings.default_fit))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut settings.default_fit, FitMode::Height, "适应高度");
+                ui.selectable_value(&mut settings.default_fit, FitMode::Width, "适应宽度");
+                ui.selectable_value(&mut settings.default_fit, FitMode::Page, "适应页面");
+                ui.selectable_value(&mut settings.default_fit, FitMode::Original, "原始大小");
+            });
+
+        ui.horizontal(|ui| {
+            ui.label("阅读背景色:");
+            ui.color_edit_button_srgb(&mut settings.background_color);
+        });
+
         ui.label("主题");
         egui::ComboBox::from_id_salt("theme")
             .selected_text(theme_label(settings.theme.clone()))
@@ -47,6 +62,15 @@ impl SettingsView {
                 ui.selectable_value(&mut settings.theme, Theme::Light, "浅色");
                 ui.selectable_value(&mut settings.theme, Theme::Dark, "深色");
             });
+    }
+}
+
+fn fit_label(fit: FitMode) -> &'static str {
+    match fit {
+        FitMode::Height => "适应高度",
+        FitMode::Width => "适应宽度",
+        FitMode::Page => "适应页面",
+        FitMode::Original => "原始大小",
     }
 }
 

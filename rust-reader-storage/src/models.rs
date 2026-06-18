@@ -14,6 +14,7 @@ pub struct Settings {
     pub show_toolbar: bool,
     pub show_statusbar: bool,
     pub invert_scroll: bool,
+    pub background_color: [u8; 3],
 }
 
 impl Default for Settings {
@@ -28,6 +29,7 @@ impl Default for Settings {
             show_toolbar: true,
             show_statusbar: true,
             invert_scroll: false,
+            background_color: [30, 30, 30],
         }
     }
 }
@@ -91,6 +93,16 @@ mod tests {
         assert!(s.show_toolbar);
         assert!(s.show_statusbar);
         assert!(!s.invert_scroll);
+        assert_eq!(s.background_color, [30, 30, 30]);
+    }
+
+    #[test]
+    fn test_settings_roundtrip_with_background_color() {
+        let mut s = Settings::default();
+        s.background_color = [12, 34, 56];
+        let json = serde_json::to_string(&s).unwrap();
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, loaded);
     }
 
     #[test]
