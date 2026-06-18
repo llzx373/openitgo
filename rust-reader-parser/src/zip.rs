@@ -18,30 +18,31 @@ impl Parser for ZipParser {
             zip::ZipArchive::new(file).map_err(|e| ParseError::InvalidArchive(e.to_string()))?;
 
         let archive_path = path.to_path_buf();
-        let mut names: Vec<String> = Vec::new();
+        let mut entries: Vec<(usize, String)> = Vec::new();
         for i in 0..archive.len() {
             let entry = archive
                 .by_index(i)
                 .map_err(|e| ParseError::InvalidArchive(e.to_string()))?;
             if entry.is_file() && is_image_name(entry.name()) {
-                names.push(entry.name().to_string());
+                entries.push((i, entry.name().to_string()));
             }
         }
 
-        names.sort();
+        entries.sort_by(|a, b| a.1.cmp(&b.1));
 
-        if names.is_empty() {
+        if entries.is_empty() {
             return Err(ParseError::NoPages);
         }
 
-        let pages: Vec<Page> = names
+        let pages: Vec<Page> = entries
             .into_iter()
             .enumerate()
-            .map(|(idx, name)| Page {
+            .map(|(idx, (zip_index, name))| Page {
                 index: idx,
                 source: PageSource::ZipEntry {
                     archive: archive_path.clone(),
                     name,
+                    index: zip_index,
                 },
             })
             .collect();
@@ -99,6 +100,7 @@ mod tests {
             PageSource::ZipEntry {
                 archive: path,
                 name: "01.png".to_string(),
+                index: 0,
             }
         );
     }
