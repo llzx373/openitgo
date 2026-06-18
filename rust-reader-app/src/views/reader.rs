@@ -1,8 +1,8 @@
 use crate::cache::PageCache;
 use crate::loader::{Epoch, PageLoader};
-use crate::widgets::page_navigator::page_navigator;
 use crate::widgets::page_view::upload_color_image;
-use crate::widgets::thumbnail_progress_bar::thumbnail_progress_bar;
+use crate::widgets::progress_bar::{comic_progress_bar, ProgressBarResponse};
+use crate::widgets::thumbnail_progress_bar::page_thumbnail_tooltip;
 use rust_reader_core::models::{Comic, ReadingMode};
 use rust_reader_core::state::{ReadingState, Vec2};
 use std::collections::HashSet;
@@ -347,71 +347,62 @@ impl ReaderView {
         Some(left_response)
     }
 
-    pub fn render_page_navigator(&mut self, ui: &mut egui::Ui) {
+    pub fn render_progress_bar(&mut self, ui: &mut egui::Ui) -> ProgressBarResponse {
         let Some(reader) = &mut self.open else {
-            return;
+            return ProgressBarResponse {
+                response: ui.allocate_response(egui::Vec2::ZERO, egui::Sense::hover()),
+                hovered_page: None,
+            };
         };
         let total_pages = reader.total_pages();
-        if total_pages == 0 {
-            return;
-        }
         let current_page = reader.state.current_page;
-        let comic = &reader.comic;
-        let state = &mut reader.state;
-        let left_page = &mut reader.left_page;
-        let right_page = &mut reader.right_page;
-        page_navigator(ui, comic, current_page, &mut |idx| {
-            state.go_to_page(idx, total_pages);
-            *left_page = None;
-            *right_page = None;
-        });
+
+        let ProgressBarResponse {
+            response,
+            hovered_page,
+        } = comic_progress_bar(ui, current_page, total_pages);
+
+        if response.clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let target = page_at_x(pos.x, response.rect, total_pages);
+                if target != current_page {
+                    reader.state.go_to_page(target, total_pages);
+                    reader.left_page = None;
+                    reader.right_page = None;
+                }
+            }
+        }
+
+        ProgressBarResponse {
+            response,
+            hovered_page,
+        }
     }
 
-    /// Renders a floating thumbnail progress bar overlay above the given progress bar rect.
-    /// The thumbnail bar appears when the mouse is hovering over the progress bar.
-    pub fn render_thumbnail_progress_bar(
+    pub fn render_progress_thumbnail(
         &mut self,
         ui: &mut egui::Ui,
-        progress_bar_rect: egui::Rect,
+        hovered_page: Option<usize>,
     ) -> Option<egui::Response> {
         let reader = self.open.as_mut()?;
-        let pointer_pos = ui.input(|i| i.pointer.hover_pos());
-
-        let hovering_progress = pointer_pos
-            .is_some_and(|p| progress_bar_rect.contains(p) || progress_bar_rect.contains(p));
-
-        if !hovering_progress {
-            return None;
-        }
-
-        const BAR_HEIGHT: f32 = 80.0;
-        let bar_rect = egui::Rect::from_min_size(
-            egui::pos2(
-                progress_bar_rect.min.x,
-                progress_bar_rect.min.y - BAR_HEIGHT,
-            ),
-            egui::vec2(progress_bar_rect.width(), BAR_HEIGHT),
-        );
-
-        let current_page = reader.state.current_page;
-        let total_pages = reader.total_pages();
-        let comic = &reader.comic;
-        let cache = &mut reader.cache;
-        let state = &mut reader.state;
-        let left_page = &mut reader.left_page;
-        let right_page = &mut reader.right_page;
-
-        Some(
-            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(bar_rect), |ui| {
-                thumbnail_progress_bar(ui, cache, comic, current_page, &mut |idx| {
-                    state.go_to_page(idx, total_pages);
-                    *left_page = None;
-                    *right_page = None;
-                })
-            })
-            .inner,
-        )
+        let page_index = hovered_page?;
+        let pointer_pos = ui.input(|i| i.pointer.hover_pos())?;
+        Some(page_thumbnail_tooltip(
+            ui,
+            &mut reader.cache,
+            page_index,
+            pointer_pos,
+        ))
     }
+}
+
+fn page_at_x(x: f32, rect: egui::Rect, total_pages: usize) -> usize {
+    if rect.width() <= 0.0 || total_pages == 0 {
+        return 0;
+    }
+    let ratio = ((x - rect.min.x) / rect.width()).clamp(0.0, 1.0);
+    let page = (ratio * total_pages as f32).floor() as usize;
+    page.min(total_pages - 1)
 }
 
 fn request_page(loader: &PageLoader, reader: &mut OpenReader, page_index: usize) {

@@ -134,18 +134,18 @@ impl ReaderApp {
         if self.settings.show_toolbar {
             self.render_reader_toolbar(ctx, total_pages, current_page, mode, zoom);
         }
-        let progress_bar_rect = if self.settings.show_statusbar {
+        let (progress_bar_rect, hovered_page) = if self.settings.show_statusbar {
             self.render_reader_statusbar(ctx)
         } else {
-            None
+            (None, None)
         };
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let response = self.reader_view.ui(ui, &self.page_loader);
 
-            // Floating thumbnail progress bar overlay, shown when hovering the progress bar.
-            if let Some(rect) = progress_bar_rect {
-                self.reader_view.render_thumbnail_progress_bar(ui, rect);
+            // Floating thumbnail tooltip above the cursor when hovering the progress bar.
+            if progress_bar_rect.is_some() {
+                self.reader_view.render_progress_thumbnail(ui, hovered_page);
             }
 
             // Right-click context menu on the page area.
@@ -286,11 +286,16 @@ impl ReaderApp {
         });
     }
 
-    fn render_reader_statusbar(&mut self, ctx: &egui::Context) -> Option<egui::Rect> {
+    fn render_reader_statusbar(
+        &mut self,
+        ctx: &egui::Context,
+    ) -> (Option<egui::Rect>, Option<usize>) {
         let mut progress_rect = None;
+        let mut hovered_page = None;
         egui::TopBottomPanel::bottom("reader_statusbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                self.reader_view.render_page_navigator(ui);
+                let bar_response = self.reader_view.render_progress_bar(ui);
+                hovered_page = bar_response.hovered_page;
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("✕").on_hover_text("隐藏状态栏").clicked() {
@@ -300,7 +305,7 @@ impl ReaderApp {
             });
             progress_rect = Some(ui.min_rect());
         });
-        progress_rect
+        (progress_rect, hovered_page)
     }
 
     fn render_settings(&mut self, ctx: &egui::Context) {
