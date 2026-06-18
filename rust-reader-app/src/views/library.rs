@@ -1,4 +1,4 @@
-use rust_reader_storage::models::{Bookmarks, History, Library, LibraryEntry};
+use rust_reader_storage::models::{Bookmarks, History, Library, LibraryEntry, LibrarySort};
 use std::path::PathBuf;
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -9,12 +9,24 @@ pub enum LibraryMode {
     Bookmarks,
 }
 
-#[derive(Default)]
 pub struct LibraryView {
     pub library: Library,
     pub mode: LibraryMode,
+    pub search_query: String,
     edit_buffer: Option<(usize, String)>,
     pending_delete: Option<usize>,
+}
+
+impl Default for LibraryView {
+    fn default() -> Self {
+        Self {
+            library: Library::default(),
+            mode: LibraryMode::Library,
+            search_query: String::new(),
+            edit_buffer: None,
+            pending_delete: None,
+        }
+    }
 }
 
 pub struct LibraryCallbacks<'a> {
@@ -40,6 +52,7 @@ impl LibraryView {
         ui: &mut egui::Ui,
         history: &History,
         bookmarks: &Bookmarks,
+        library_sort: &mut LibrarySort,
         callbacks: LibraryCallbacks<'_>,
     ) {
         ui.horizontal(|ui| {
@@ -63,6 +76,17 @@ impl LibraryView {
             {
                 self.mode = LibraryMode::Bookmarks;
             }
+            if self.mode == LibraryMode::Library {
+                ui.separator();
+                ui.add(egui::TextEdit::singleline(&mut self.search_query).hint_text("搜索漫画"));
+                egui::ComboBox::from_id_salt("library_sort")
+                    .selected_text(sort_label(*library_sort))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(library_sort, LibrarySort::LastRead, "最近阅读");
+                        ui.selectable_value(library_sort, LibrarySort::Title, "标题");
+                        ui.selectable_value(library_sort, LibrarySort::Added, "添加时间");
+                    });
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("打开文件夹").clicked() {
                     (callbacks.on_add)();
@@ -71,21 +95,28 @@ impl LibraryView {
         });
 
         match self.mode {
-            LibraryMode::Library => self.render_library(ui, callbacks),
+            LibraryMode::Library => self.render_library(ui, history, *library_sort, callbacks),
             LibraryMode::History => self.render_history(ui, history, callbacks),
             LibraryMode::Bookmarks => self.render_bookmarks(ui, bookmarks, callbacks),
         }
     }
 
-    fn render_library(&mut self, ui: &mut egui::Ui, callbacks: LibraryCallbacks<'_>) {
-        if self.library.entries.is_empty() {
-            ui.label("暂无漫画，请点击“打开文件夹”按钮添加。");
+    fn render_library(
+        &mut self,
+        ui: &mut egui::Ui,
+        history: &History,
+        sort: LibrarySort,
+        callbacks: LibraryCallbacks<'_>,
+    ) {
+        let entries = self.filtered_entries(history, sort);
+        if entries.is_empty() {
+            ui.label("没有匹配的漫画。");
             return;
         }
         egui::Grid::new("library_grid").show(ui, |ui| {
-            for (idx, entry) in self.library.entries.iter().enumerate() {
+            for (original_idx, entry) in entries {
                 ui.vertical(|ui| {
-                    if self.edit_buffer.as_ref().map(|b| b.0) == Some(idx) {
+                    if self.edit_buffer.as_ref().map(|b| b.0) == Some(original_idx) {
                         let title = &mut self.edit_buffer.as_mut().unwrap().1;
                         ui.text_edit_singleline(title);
                         let mut save = false;
@@ -101,7 +132,7 @@ impl LibraryView {
                         if save {
                             let new_title = title.trim().to_string();
                             if !new_title.is_empty() {
-                                (callbacks.on_update_title)(idx, new_title);
+                                (callbacks.on_update_title)(original_idx, new_title);
                             }
                             self.edit_buffer = None;
                         } else if cancel {
@@ -112,16 +143,16 @@ impl LibraryView {
                     }
                     ui.horizontal(|ui| {
                         if ui.button("打开").clicked() {
-                            (callbacks.on_open_library)(idx);
+                            (callbacks.on_open_library)(original_idx);
                         }
                         if ui.button("编辑").clicked() {
-                            self.edit_buffer = Some((idx, entry.title.clone()));
+                            self.edit_buffer = Some((original_idx, entry.title.clone()));
                             self.pending_delete = None;
                         }
-                        if self.pending_delete == Some(idx) {
+                        if self.pending_delete == Some(original_idx) {
                             ui.label("确定删除？");
                             if ui.button("是").clicked() {
-                                (callbacks.on_delete_library)(idx);
+                                (callbacks.on_delete_library)(original_idx);
                                 self.pending_delete = None;
                                 self.edit_buffer = None;
                             }
@@ -129,7 +160,7 @@ impl LibraryView {
                                 self.pending_delete = None;
                             }
                         } else if ui.button("删除").clicked() {
-                            self.pending_delete = Some(idx);
+                            self.pending_delete = Some(original_idx);
                             self.edit_buffer = None;
                         }
                     });
@@ -137,6 +168,34 @@ impl LibraryView {
                 ui.end_row();
             }
         });
+    }
+
+    fn filtered_entries(
+        &self,
+        history: &History,
+        sort: LibrarySort,
+    ) -> Vec<(usize, LibraryEntry)> {
+        let query = self.search_query.trim().to_lowercase();
+        let mut entries: Vec<(usize, LibraryEntry)> = self
+            .library
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| query.is_empty() || e.title.to_lowercase().contains(&query))
+            .map(|(i, e)| (i, e.clone()))
+            .collect();
+
+        entries.sort_by(|(_, a), (_, b)| match sort {
+            LibrarySort::Title => a.title.cmp(&b.title),
+            LibrarySort::Added => b.added_at.cmp(&a.added_at),
+            LibrarySort::LastRead => {
+                let last_a = last_read_at(history, &a.comic_id);
+                let last_b = last_read_at(history, &b.comic_id);
+                last_b.cmp(&last_a)
+            }
+        });
+
+        entries
     }
 
     fn render_history(
@@ -206,6 +265,24 @@ impl LibraryView {
                 ui.end_row();
             }
         });
+    }
+}
+
+fn last_read_at(history: &History, comic_id: &str) -> u64 {
+    history
+        .entries
+        .iter()
+        .filter(|h| h.comic_id == comic_id)
+        .map(|h| h.last_read_at)
+        .max()
+        .unwrap_or(0)
+}
+
+fn sort_label(sort: LibrarySort) -> &'static str {
+    match sort {
+        LibrarySort::LastRead => "最近阅读",
+        LibrarySort::Title => "标题",
+        LibrarySort::Added => "添加时间",
     }
 }
 

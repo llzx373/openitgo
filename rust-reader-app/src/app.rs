@@ -158,6 +158,7 @@ impl ReaderApp {
                 ui,
                 &self.history,
                 &self.bookmarks,
+                &mut self.settings.library_sort,
                 LibraryCallbacks {
                     on_open_library: &mut |idx| open_idx = Some(idx),
                     on_open_path: &mut |path| open_path = Some(path),
