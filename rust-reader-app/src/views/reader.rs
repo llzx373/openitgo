@@ -1,6 +1,6 @@
 use crate::cache::PageCache;
 use crate::loader::{Epoch, PageLoader};
-use crate::widgets::page_view::upload_color_image;
+use crate::widgets::page_view::{upload_image, TextureSlot};
 use crate::widgets::progress_bar::{comic_progress_bar, ProgressBarResponse};
 use crate::widgets::thumbnail_progress_bar::page_thumbnail_tooltip;
 use rust_reader_core::models::{Comic, ReadingMode};
@@ -57,9 +57,9 @@ impl PageAnimation {
 pub struct OpenReader {
     pub comic: Comic,
     pub state: ReadingState,
-    pub left_texture: Option<egui::TextureHandle>,
+    pub left_texture: Option<TextureSlot>,
     pub left_page: Option<usize>,
-    pub right_texture: Option<egui::TextureHandle>,
+    pub right_texture: Option<TextureSlot>,
     pub right_page: Option<usize>,
     pub pending_fit: Option<QuickFit>,
     pub current_epoch: Epoch,
@@ -174,15 +174,15 @@ impl OpenReader {
     }
 
     fn spread_size(&self) -> Option<egui::Vec2> {
-        let left_size = self.left_texture.as_ref()?.size_vec2();
+        let left_size = self.left_texture.as_ref()?.size();
         let right_size = self
             .right_texture
             .as_ref()
-            .map(|t| t.size_vec2())
-            .unwrap_or(egui::Vec2::ZERO);
+            .map(|t| t.size())
+            .unwrap_or([0, 0]);
         Some(egui::vec2(
-            left_size.x + right_size.x,
-            left_size.y.max(right_size.y),
+            (left_size[0] + right_size[0]) as f32,
+            left_size[1].max(right_size[1]) as f32,
         ))
     }
 
@@ -216,7 +216,14 @@ impl OpenReader {
         self.right_page = None;
     }
 
-    pub fn update(&mut self, ctx: &egui::Context, loader: &PageLoader, cache_size_bytes: usize) {
+    pub fn update(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &mut eframe::Frame,
+        loader: &PageLoader,
+        cache_size_bytes: usize,
+        supports_dxt5: bool,
+    ) {
         while let Some(result) = loader.try_recv() {
             if result.epoch != self.current_epoch {
                 continue;
@@ -224,10 +231,16 @@ impl OpenReader {
             self.pending_pages.remove(&result.page_index);
             match result.image {
                 Ok(image) => {
-                    let texture =
-                        upload_color_image(ctx, image, format!("page_{}", result.page_index));
+                    let slot = upload_image(
+                        ctx,
+                        frame,
+                        &format!("page_{}", result.page_index),
+                        image,
+                        supports_dxt5,
+                    );
+                    let gl = frame.gl().map(|g| &**g);
                     self.cache
-                        .insert(result.page_index, texture, cache_size_bytes);
+                        .insert(result.page_index, slot, cache_size_bytes, gl);
                     if self.left_page == Some(result.page_index) {
                         self.left_texture = self.cache.get(result.page_index);
                     }
@@ -264,20 +277,32 @@ impl ReaderView {
         self.open = Some(reader);
     }
 
-    pub fn update(&mut self, ctx: &egui::Context, loader: &PageLoader, cache_size_mb: u32) {
-        let budget = cache_size_mb as usize * 1024 * 1024;
+    pub fn update(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &mut eframe::Frame,
+        loader: &PageLoader,
+        cache_size_mb: usize,
+        supports_dxt5: bool,
+    ) {
+        let budget = cache_size_mb * 1024 * 1024;
         if let Some(reader) = &mut self.open {
-            reader.update(ctx, loader, budget);
+            reader.update(ctx, frame, loader, budget, supports_dxt5);
         }
-        self.enforce_cache_budget(cache_size_mb);
+        self.enforce_cache_budget(frame, cache_size_mb);
     }
 
-    pub fn request_preloads(&mut self, loader: &PageLoader, cache_size_mb: u32) {
+    pub fn request_preloads(
+        &mut self,
+        frame: &mut eframe::Frame,
+        loader: &PageLoader,
+        cache_size_mb: usize,
+    ) {
         let Some(reader) = self.open.as_mut() else {
             return;
         };
-        let budget = cache_size_mb as usize * 1024 * 1024;
-        reader.cache.enforce_budget(budget);
+        let budget = cache_size_mb * 1024 * 1024;
+        reader.cache.enforce_budget(budget, frame.gl().map(|g| &**g));
         if reader.cache.total_size_bytes() >= budget {
             return;
         }
@@ -312,12 +337,12 @@ impl ReaderView {
         }
     }
 
-    pub fn enforce_cache_budget(&mut self, cache_size_mb: u32) {
+    pub fn enforce_cache_budget(&mut self, frame: &mut eframe::Frame, cache_size_mb: usize) {
         let Some(reader) = self.open.as_mut() else {
             return;
         };
-        let budget = cache_size_mb as usize * 1024 * 1024;
-        reader.cache.enforce_budget(budget);
+        let budget = cache_size_mb * 1024 * 1024;
+        reader.cache.enforce_budget(budget, frame.gl().map(|g| &**g));
     }
 
     /// Renders the current page or spread and returns the response covering the page area.
@@ -368,12 +393,18 @@ impl ReaderView {
         const FALLBACK_PAGE_SIZE: egui::Vec2 = egui::Vec2::new(600.0, 800.0);
         let left_size = left_texture
             .as_ref()
-            .map(|t| t.size_vec2())
+            .map(|t| {
+                let size = t.size();
+                egui::vec2(size[0] as f32, size[1] as f32)
+            })
             .unwrap_or(FALLBACK_PAGE_SIZE);
         let right_size = match (right_idx, right_texture.as_ref()) {
             (None, _) => egui::Vec2::ZERO,
             (Some(_), None) => FALLBACK_PAGE_SIZE,
-            (Some(_), Some(t)) => t.size_vec2(),
+            (Some(_), Some(t)) => {
+                let size = t.size();
+                egui::vec2(size[0] as f32, size[1] as f32)
+            }
         };
 
         let any_loading = (left_idx.is_some() && left_texture.is_none())
@@ -472,11 +503,17 @@ impl ReaderView {
         // Use placeholder sizes if textures are not ready yet.
         let from_size = from_texture
             .as_ref()
-            .map(|t| t.size_vec2())
+            .map(|t| {
+                let size = t.size();
+                egui::vec2(size[0] as f32, size[1] as f32)
+            })
             .unwrap_or(egui::vec2(600.0, 800.0));
         let to_size = to_texture
             .as_ref()
-            .map(|t| t.size_vec2())
+            .map(|t| {
+                let size = t.size();
+                egui::vec2(size[0] as f32, size[1] as f32)
+            })
             .unwrap_or(egui::vec2(600.0, 800.0));
 
         let available = ui.available_rect_before_wrap();
@@ -602,12 +639,26 @@ fn render_page_or_placeholder(
     loader: &PageLoader,
     rect: egui::Rect,
     page_index: usize,
-    texture: Option<&egui::TextureHandle>,
+    texture: Option<&TextureSlot>,
 ) -> egui::Response {
     if let Some(texture) = texture {
+        let image = match texture {
+            TextureSlot::Managed(handle) => egui::Image::new(handle),
+            TextureSlot::Native(id, original_size) => {
+                let gpu_w = ((original_size[0] + 3) / 4) * 4;
+                let gpu_h = ((original_size[1] + 3) / 4) * 4;
+                let uv_max = egui::pos2(
+                    original_size[0] as f32 / gpu_w as f32,
+                    original_size[1] as f32 / gpu_h as f32,
+                );
+                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), uv_max);
+                let desired_size = egui::Vec2::new(original_size[0] as f32, original_size[1] as f32);
+                egui::Image::new((*id, desired_size)).uv(uv)
+            }
+        };
         let response = ui.put(
             rect,
-            egui::Image::new(texture)
+            image
                 .fit_to_exact_size(rect.size())
                 .sense(egui::Sense::click_and_drag()),
         );

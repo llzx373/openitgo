@@ -1,5 +1,6 @@
 use crate::loader::{CompressedFormat, LoadedImage};
 use egui::{Color32, ColorImage, TextureHandle, TextureId, TextureOptions};
+use glow::HasContext;
 
 #[derive(Clone)]
 pub enum TextureSlot {
@@ -8,10 +9,10 @@ pub enum TextureSlot {
 }
 
 impl TextureSlot {
-    pub fn size(&self) -> [u32; 2] {
+    pub fn size(&self) -> [usize; 2] {
         match self {
             TextureSlot::Managed(h) => h.size(),
-            TextureSlot::Native(_, s) => *s,
+            TextureSlot::Native(_, s) => [s[0] as usize, s[1] as usize],
         }
     }
 
@@ -44,7 +45,7 @@ pub fn upload_image(
         LoadedImage::Compressed { original_size, .. } => {
             let color = ColorImage::new(
                 [original_size[0] as usize, original_size[1] as usize],
-                Color32::MAGENTA,
+                Color32::from_rgb(255, 0, 255),
             );
             TextureSlot::Managed(ctx.load_texture(label, color, TextureOptions::LINEAR))
         }
@@ -72,7 +73,7 @@ fn upload_compressed_native(
         gl.compressed_tex_image_2d(
             glow::TEXTURE_2D,
             0,
-            glow::COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT,
+            glow::COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT as i32,
             gpu_size[0] as i32,
             gpu_size[1] as i32,
             0,
@@ -81,6 +82,6 @@ fn upload_compressed_native(
         );
         gl.bind_texture(glow::TEXTURE_2D, None);
     }
-    let id = frame.register_native_texture(texture);
+    let id = frame.register_native_glow_texture(texture);
     TextureSlot::Native(id, display_size)
 }

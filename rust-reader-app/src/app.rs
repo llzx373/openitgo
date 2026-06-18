@@ -1,6 +1,7 @@
 use crate::loader::PageLoader;
 use crate::opener::{ComicOpener, OpenStatus};
 use crate::shortcuts::is_shortcut_pressed;
+use glow::HasContext;
 use crate::views::{
     library::{LibraryCallbacks, LibraryView},
     reader::{QuickFit, ReaderView},
@@ -63,7 +64,7 @@ impl eframe::App for ReaderApp {
         let _ = self.store.save_bookmarks(&self.bookmarks);
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if !matches!(self.current_view, View::Reader) {
             self.record_reader_history();
             self.reader_view.open = None;
@@ -79,10 +80,21 @@ impl eframe::App for ReaderApp {
         self.handle_dropped_files(ctx);
         self.poll_opener();
 
+        let supports_dxt5 = frame
+            .gl()
+            .map(|gl| gl.supported_extensions().contains("GL_EXT_texture_compression_s3tc"))
+            .unwrap_or(false);
+
+        let cache_size_mb = self.settings.cache_size_mb as usize;
+        self.reader_view.update(
+            ctx,
+            frame,
+            &self.page_loader,
+            cache_size_mb,
+            supports_dxt5,
+        );
         self.reader_view
-            .update(ctx, &self.page_loader, self.settings.cache_size_mb);
-        self.reader_view
-            .request_preloads(&self.page_loader, self.settings.cache_size_mb);
+            .request_preloads(frame, &self.page_loader, cache_size_mb);
 
         match self.current_view.clone() {
             View::Library => self.render_library(ctx),
