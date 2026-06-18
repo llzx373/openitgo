@@ -42,6 +42,7 @@ pub enum PageSource {
     ZipEntry {
         archive: PathBuf,
         name: String,
+        index: usize,
     },
     RarEntry {
         archive: PathBuf,
