@@ -99,6 +99,11 @@ pub enum View {
     Loading(PathBuf),
 }
 
+enum BarEdge {
+    Top,
+    Bottom,
+}
+
 impl ReaderApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Self::default()
@@ -170,10 +175,29 @@ impl ReaderApp {
         let mode = reader.state.mode;
         let zoom = reader.state.zoom;
 
-        if self.settings.show_toolbar {
+        let (fullscreen, mouse_pos, screen_size) = ctx.input(|i| {
+            (
+                i.viewport().fullscreen.unwrap_or(false),
+                i.pointer.latest_pos(),
+                i.screen_rect().size(),
+            )
+        });
+        if Self::should_show_bar(
+            self.settings.show_toolbar,
+            fullscreen,
+            mouse_pos,
+            screen_size,
+            BarEdge::Top,
+        ) {
             self.render_reader_toolbar(ctx, total_pages, current_page, mode, zoom);
         }
-        let (progress_bar_rect, hovered_page) = if self.settings.show_statusbar {
+        let (progress_bar_rect, hovered_page) = if Self::should_show_bar(
+            self.settings.show_statusbar,
+            fullscreen,
+            mouse_pos,
+            screen_size,
+            BarEdge::Bottom,
+        ) {
             self.render_reader_statusbar(ctx)
         } else {
             (None, None)
@@ -550,6 +574,28 @@ impl ReaderApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fullscreen));
     }
 
+    fn should_show_bar(
+        show_setting: bool,
+        fullscreen: bool,
+        mouse_pos: Option<egui::Pos2>,
+        screen_size: egui::Vec2,
+        edge: BarEdge,
+    ) -> bool {
+        if !show_setting {
+            return false;
+        }
+        if !fullscreen {
+            return true;
+        }
+        const THRESHOLD: f32 = 20.0;
+        match edge {
+            BarEdge::Top => mouse_pos.map(|p| p.y <= THRESHOLD).unwrap_or(false),
+            BarEdge::Bottom => mouse_pos
+                .map(|p| p.y >= screen_size.y - THRESHOLD)
+                .unwrap_or(false),
+        }
+    }
+
     fn record_reader_history(&mut self) {
         if let Some(reader) = self.reader_view.open.as_ref() {
             let comic_id = reader.comic.id.clone();
@@ -817,5 +863,67 @@ mod tests {
         let reader = app2.reader_view.open.as_ref().expect("reader should be open");
         assert_eq!(reader.comic.id, "test-comic");
         assert_eq!(reader.state.current_page, 6);
+    }
+
+    fn should_show_bar(
+        show_setting: bool,
+        fullscreen: bool,
+        mouse_pos: Option<egui::Pos2>,
+        screen_size: egui::Vec2,
+        edge: BarEdge,
+    ) -> bool {
+        ReaderApp::should_show_bar(show_setting, fullscreen, mouse_pos, screen_size, edge)
+    }
+
+    #[test]
+    fn test_bar_hidden_when_setting_off() {
+        let screen = egui::vec2(1920.0, 1080.0);
+        assert!(!should_show_bar(
+            false,
+            false,
+            Some(egui::pos2(0.0, 0.0)),
+            screen,
+            BarEdge::Top
+        ));
+        assert!(!should_show_bar(
+            false,
+            true,
+            Some(egui::pos2(0.0, 0.0)),
+            screen,
+            BarEdge::Top
+        ));
+    }
+
+    #[test]
+    fn test_bar_shown_when_not_fullscreen_and_setting_on() {
+        let screen = egui::vec2(1920.0, 1080.0);
+        assert!(should_show_bar(true, false, None, screen, BarEdge::Top));
+        assert!(should_show_bar(true, false, Some(egui::pos2(500.0, 500.0)), screen, BarEdge::Bottom));
+    }
+
+    #[test]
+    fn test_top_bar_shown_in_fullscreen_near_top_edge() {
+        let screen = egui::vec2(1920.0, 1080.0);
+        assert!(should_show_bar(true, true, Some(egui::pos2(100.0, 10.0)), screen, BarEdge::Top));
+        assert!(!should_show_bar(true, true, Some(egui::pos2(100.0, 100.0)), screen, BarEdge::Top));
+    }
+
+    #[test]
+    fn test_bottom_bar_shown_in_fullscreen_near_bottom_edge() {
+        let screen = egui::vec2(1920.0, 1080.0);
+        assert!(should_show_bar(
+            true,
+            true,
+            Some(egui::pos2(100.0, 1070.0)),
+            screen,
+            BarEdge::Bottom
+        ));
+        assert!(!should_show_bar(
+            true,
+            true,
+            Some(egui::pos2(100.0, 500.0)),
+            screen,
+            BarEdge::Bottom
+        ));
     }
 }
