@@ -513,8 +513,8 @@ mod tests {
         {
             let file = std::fs::File::create(&path).unwrap();
             let mut zip = zip::ZipWriter::new(file);
-            let options =
-                zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
             for i in 0..4 {
                 zip.start_file(format!("{:02}.png", i), options).unwrap();
                 let img = image::RgbaImage::from_pixel(32, 32, image::Rgba([i as u8, 0, 0, 255]));
