@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 5.0;
+const FALLBACK_PAGE_SIZE: egui::Vec2 = egui::Vec2::new(600.0, 800.0);
 
 #[derive(Default)]
 pub struct ReaderView {
@@ -214,10 +215,11 @@ impl OpenReader {
 
     fn protected_page_indices(&self) -> Vec<usize> {
         let mut v = Vec::with_capacity(4);
-        if let Some(i) = self.left_page {
+        let (left, right) = self.spread_pages();
+        if let Some(i) = left {
             v.push(i);
         }
-        if let Some(i) = self.right_page {
+        if let Some(i) = right {
             v.push(i);
         }
         if let Some(a) = self.page_animation {
@@ -299,18 +301,12 @@ impl ReaderView {
         let budget = cache_size_mb * 1024 * 1024;
         if let Some(reader) = &mut self.open {
             reader.update(ctx, frame, loader, budget, supports_dxt5);
-            let protected = reader.protected_page_indices();
-            reader.cache.enforce_budget_with_protected(
-                budget,
-                frame.gl().map(|g| &**g),
-                &protected,
-            );
         }
     }
 
     pub fn request_preloads(
         &mut self,
-        frame: &mut eframe::Frame,
+        _frame: &mut eframe::Frame,
         loader: &PageLoader,
         cache_size_mb: usize,
     ) {
@@ -318,10 +314,6 @@ impl ReaderView {
             return;
         };
         let budget = cache_size_mb * 1024 * 1024;
-        let protected = reader.protected_page_indices();
-        reader
-            .cache
-            .enforce_budget_with_protected(budget, frame.gl().map(|g| &**g), &protected);
         if reader.cache.total_size_bytes() >= budget {
             return;
         }
@@ -354,18 +346,6 @@ impl ReaderView {
                 loader.request_low(reader.current_epoch, idx, source);
             }
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn enforce_cache_budget(&mut self, frame: &mut eframe::Frame, cache_size_mb: usize) {
-        let Some(reader) = self.open.as_mut() else {
-            return;
-        };
-        let budget = cache_size_mb * 1024 * 1024;
-        let protected = reader.protected_page_indices();
-        reader
-            .cache
-            .enforce_budget_with_protected(budget, frame.gl().map(|g| &**g), &protected);
     }
 
     /// Renders the current page or spread and returns the response covering the page area.
@@ -405,7 +385,6 @@ impl ReaderView {
         }
 
         let available = ui.available_rect_before_wrap();
-        const FALLBACK_PAGE_SIZE: egui::Vec2 = egui::Vec2::new(600.0, 800.0);
         let left_size = left_texture
             .as_ref()
             .map(|t| {
@@ -522,14 +501,14 @@ impl ReaderView {
                 let size = t.size();
                 egui::vec2(size[0] as f32, size[1] as f32)
             })
-            .unwrap_or(egui::vec2(600.0, 800.0));
+            .unwrap_or(FALLBACK_PAGE_SIZE);
         let to_size = to_texture
             .as_ref()
             .map(|t| {
                 let size = t.size();
                 egui::vec2(size[0] as f32, size[1] as f32)
             })
-            .unwrap_or(egui::vec2(600.0, 800.0));
+            .unwrap_or(FALLBACK_PAGE_SIZE);
 
         let available = ui.available_rect_before_wrap();
         let scale = (available.width() / to_size.x)
@@ -657,24 +636,11 @@ fn render_page_or_placeholder(
     texture: Option<&TextureSlot>,
 ) -> egui::Response {
     if let Some(texture) = texture {
-        let image = match texture {
-            TextureSlot::Managed(handle) => egui::Image::new(handle),
-            TextureSlot::Native(id, _) => {
-                let desired_size =
-                    egui::Vec2::new(texture.size()[0] as f32, texture.size()[1] as f32);
-                let mut image = egui::Image::new((*id, desired_size));
-                if let Some(uv) = texture.uv_rect() {
-                    image = image.uv(uv);
-                }
-                image
-            }
-        };
-        let response = ui.put(
-            rect,
-            image
-                .fit_to_exact_size(rect.size())
-                .sense(egui::Sense::click_and_drag()),
-        );
+        let mut image = egui::Image::new(texture.image_source()).fit_to_exact_size(rect.size());
+        if let Some(uv) = texture.uv_rect() {
+            image = image.uv(uv);
+        }
+        let response = ui.put(rect, image.sense(egui::Sense::click_and_drag()));
         if response.dragged() {
             let delta = response.drag_delta();
             reader.state.pan += Vec2::new(delta.x, delta.y);

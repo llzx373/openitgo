@@ -56,9 +56,9 @@ impl Default for ReaderApp {
 }
 
 impl eframe::App for ReaderApp {
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
         self.record_reader_history();
-        self.reader_view.cleanup(_gl);
+        self.reader_view.cleanup(gl);
         let _ = self.store.save_settings(&self.settings);
         let _ = self.store.save_library(&self.library_view.library);
         let _ = self.store.save_history(&self.history);

@@ -1,5 +1,4 @@
 use crate::cache::PageCache;
-use crate::widgets::page_view::TextureSlot;
 
 const THUMB_SIZE: egui::Vec2 = egui::Vec2::new(80.0, 120.0);
 
@@ -18,23 +17,11 @@ pub fn page_thumbnail_tooltip(
         .rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
 
     if let Some(texture) = cache.get(page_index) {
-        match texture {
-            TextureSlot::Managed(handle) => {
-                ui.put(
-                    rect,
-                    egui::Image::new(&handle).fit_to_exact_size(rect.size()),
-                );
-            }
-            TextureSlot::Native(id, _) => {
-                let desired_size =
-                    egui::Vec2::new(texture.size()[0] as f32, texture.size()[1] as f32);
-                let mut image = egui::Image::new((id, desired_size));
-                if let Some(uv) = texture.uv_rect() {
-                    image = image.uv(uv);
-                }
-                ui.put(rect, image.fit_to_exact_size(rect.size()));
-            }
+        let mut image = egui::Image::new(texture.image_source()).fit_to_exact_size(rect.size());
+        if let Some(uv) = texture.uv_rect() {
+            image = image.uv(uv);
         }
+        ui.put(rect, image);
     } else {
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
             ui.with_layout(

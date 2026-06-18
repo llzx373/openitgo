@@ -1,5 +1,5 @@
 use crate::loader::{dxt5_padded_size, CompressedFormat, LoadedImage};
-use egui::{TextureHandle, TextureId, TextureOptions};
+use egui::{load::SizedTexture, TextureHandle, TextureId, TextureOptions};
 use glow::HasContext;
 
 #[derive(Clone)]
@@ -41,6 +41,21 @@ impl TextureSlot {
             original_size[1] as f32 / gpu_size[1] as f32,
         );
         Some(egui::Rect::from_min_max(egui::pos2(0.0, 0.0), uv_max))
+    }
+
+    /// Build an `egui::ImageSource` suitable for `egui::Image::new`.
+    /// For native DXT5 textures the caller should apply [`Self::uv_rect()`]
+    /// to hide the 4×4 padding.
+    pub fn image_source(&self) -> egui::ImageSource<'static> {
+        match self {
+            TextureSlot::Managed(handle) => egui::ImageSource::Texture(handle.into()),
+            TextureSlot::Native(id, original_size) => {
+                egui::ImageSource::Texture(SizedTexture::new(
+                    *id,
+                    egui::vec2(original_size[0] as f32, original_size[1] as f32),
+                ))
+            }
+        }
     }
 }
 
