@@ -54,10 +54,12 @@ impl Default for PageLoader {
 
 impl PageLoader {
     pub fn new() -> Self {
-        let (high_sender, high_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) = bounded(64);
+        let (high_sender, high_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) =
+            bounded(64);
         let (low_sender, low_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) = bounded(64);
         let (result_sender, receiver): (Sender<LoadResult>, Receiver<LoadResult>) = bounded(64);
-        let (decode_sender, decode_receiver): (Sender<DecodeJob>, Receiver<DecodeJob>) = bounded(64);
+        let (decode_sender, decode_receiver): (Sender<DecodeJob>, Receiver<DecodeJob>) =
+            bounded(64);
 
         let result_sender_for_io = result_sender.clone();
         let io_worker = thread::spawn(move || loop {
