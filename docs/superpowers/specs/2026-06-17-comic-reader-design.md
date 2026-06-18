@@ -94,8 +94,9 @@ pub struct Page {
 
 pub enum PageSource {
     File(PathBuf),
-    Bytes(Vec<u8>),
-    PdfRef(PdfPageRef),
+    ZipEntry { archive: PathBuf, name: String },
+    RarEntry { archive: PathBuf, name: String },
+    PdfPage { document: PathBuf, page_number: usize },
 }
 
 pub enum ReadingMode {
@@ -117,6 +118,7 @@ pub struct ReadingState {
     pub zoom: f32,
     pub pan: Vec2,
     pub fit_mode: FitMode,
+    pub double_page: bool, // 仅对 LTR/RTL 有效
 }
 ```
 
@@ -132,17 +134,20 @@ pub struct ReadingState {
 
 ### 5.2 渲染流程
 
-1. `Viewport` 维护当前可见区域（逻辑坐标）。
-2. `LayoutEngine` 根据 `ReadingMode` 计算每页在逻辑画布上的位置与尺寸。
-3. `Renderer` 将逻辑坐标映射到屏幕坐标，仅绘制可见区域内的页面。
-4. 解码任务通过 channel 提交到异步后台工作线程，避免阻塞 UI 主线程。
-5. `ReaderView::request_preloads` 以当前页为中心向外预加载页面，结果存入 `PageCache`，直到缓存预算耗尽或所有页面都已缓存/待加载。
-6. 解码后的图片以 egui `TextureHandle` 形式缓存在 `PageCache` 中；`PageCache` 按内存预算（100 MB - 4 GB，默认 1 GB）维护，使用 LRU 策略淘汰最少访问的页面。
+1. `ReaderView` 维护当前可见的左/右页面纹理句柄。
+2. 当显示页索引发生变化时，`ReaderView::ui` 向 `PageLoader` 提交**高优先级**解码请求；当前页会尽快被后台线程处理并回传。
+3. `ReaderView::request_preloads` 以当前页为中心向外提交**低优先级**解码请求，结果存入 `PageCache`。
+4. `PageLoader` 使用两条 channel：高优先级队列给当前页，低优先级队列给预加载页。工作线程始终先 drain 高优先级请求，再处理低优先级请求。
+5. 解码后的图片以 egui `TextureHandle` 形式缓存在 `PageCache` 中；`PageCache` 按内存预算（100 MB - 4 GB，默认 1 GB）维护，使用 LRU 策略淘汰最少访问的页面。
+6. 页面未加载完成时，渲染区显示 spinner + "加载中..." 占位符。
 
 ### 5.3 缩放策略
 
-- 默认：LTR/RTL 使用 `FitMode::Height`，Webtoon 使用 `FitMode::Width`。
-- 用户可通过 `Ctrl + 滚轮` 在适配基础上进一步缩放。
+- **适应宽度**：图片宽度撑满窗口。
+- **适应高度**：图片高度撑满窗口。
+- **自动适应**：整张图片完整显示在窗口内（默认）。
+- **原始尺寸**：按图片原始像素尺寸 1:1 显示。
+- **+ / - 按钮**：在适配基础上进一步缩放。
 - 放大后支持拖拽平移。
 
 ## 6. 文件解析层
@@ -185,29 +190,31 @@ pub trait Parser: Send + Sync {
 1. **书架视图（Library）**
    - 网格展示漫画封面缩略图。
    - 点击打开并恢复阅读进度。
-   - 右键菜单：删除记录、在文件夹中显示、刷新缩略图。
+   - 支持 Ctrl+O 或「打开文件夹」按钮添加漫画。
 
 2. **阅读器视图（Reader）**
-   - 中央：漫画渲染区。
-   - 顶部工具栏（可自动隐藏）：模式切换、缩放、页码跳转、全屏。
-   - 底部缩略图栏：当前卷所有页面缩略图，点击跳转。
-   - 侧边栏（可收起）：目录、书签列表。
+   - 中央：漫画渲染区（单页或双页跨页）。
+   - 顶部工具栏：返回书架、模式切换、单/双页切换、缩放、页码跳转、添加书签、全屏、设置。
+   - 底部状态栏：页码、阅读模式、缩放比例、单/双页状态、快捷键提示。
+   - 底部页面导航条：当前卷所有页面缩略图，点击跳转。
+   - 右键菜单：下一页、上一页、首页、末页、添加书签、全屏、返回书架。
 
 3. **设置视图（Settings）**
-   - 通用：主题、语言、默认阅读模式、存储位置。
-   - 阅读：背景色、翻页动画开关、缓存大小（100 MB - 4 GB，默认 1 GB）。
-   - 快捷键：首版使用默认快捷键，界面预留自定义入口，实际自定义功能列入未来规划。
+   - 通用：主题、默认阅读模式、窗口状态。
+   - 阅读：缓存大小（100 MB - 4 GB，默认 1 GB）。
+   - 快捷键：首版使用默认快捷键，界面预留自定义入口。
 
 ### 8.2 交互方式
 
 | 操作 | 行为 |
 |---|---|
+| 拖拽文件/文件夹到窗口 | 打开漫画 |
 | 按 ← | LTR 上一页；RTL 下一页 |
 | 按 → | LTR 下一页；RTL 上一页 |
 | 滚轮 | LTR/RTL 横向翻页；Webtoon 垂直滚动 |
 | 空格 / PgDn | 下一页 / 向下滚动 |
 | Esc | 退出全屏或返回书架 |
-| F11 | 切换全屏 |
+| F11 / F | 切换全屏 |
 | Ctrl + O | 打开文件夹并加入书架 |
 | +/- / 0 | 缩放 / 自动适应 |
 | 拖拽 | 放大时平移 |
@@ -233,8 +240,10 @@ pub trait Parser: Send + Sync {
 ### 10.1 已实现
 
 - [x] **异步后台加载**：文件解压、图片解码、PDF 渲染通过 channel 提交到单后台工作线程，避免 UI 阻塞。
-- [x] **基于大小的 LRU 缓存/预加载**：按内存预算（默认 1 GB）缓存解码后的页面，并自动淘汰最少使用的页面。
+- [x] **当前页优先加载**：当前显示页使用高优先级 channel，预加载页使用低优先级 channel，确保翻页时当前页尽快显示。
+- [x] **基于大小的 LRU 缓存/预加载**：按内存预算（默认 1 GB，可调 100 MB - 4 GB）缓存解码后的页面，并自动淘汰最少使用的页面。
 - [x] **CBR/RAR 与 PDF 完整解析**：首版已完整支持 `.cbr`/`.rar` 和 `.pdf`。
+- [x] **双页模式**：国漫/日漫支持两页并排显示。
 
 ### 10.2 未来规划
 
@@ -246,7 +255,7 @@ pub trait Parser: Send + Sync {
 | 决策 | 选项 | 理由 |
 |---|---|---|
 | 架构 | Workspace 多 crate | 职责清晰，便于测试与扩展 |
-| I/O 模型 | 异步后台加载（单工作线程 + channel） | 避免 UI 阻塞，后台顺序处理文件解压、图片解码与 PDF 渲染 |
+| I/O 模型 | 异步后台加载（单工作线程 + 双 channel） | 避免 UI 阻塞；高优先级 channel 保证当前页优先解码，低优先级 channel 用于背景预加载 |
 | UI 框架 | egui | 用户指定，跨平台、即时模式 |
 | 持久化格式 | JSON 文件 | 简单、易调试、无需引入数据库 |
 | 图片解码 | `image` crate | Rust 生态标准，支持格式广 |
