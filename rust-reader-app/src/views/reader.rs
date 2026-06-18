@@ -13,7 +13,6 @@ const MAX_ZOOM: f32 = 5.0;
 #[derive(Default)]
 pub struct ReaderView {
     pub open: Option<OpenReader>,
-    pub show_thumbnails: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -368,24 +367,30 @@ impl ReaderView {
         });
     }
 
-    /// Renders a floating thumbnail progress bar overlay at the bottom of the reader area.
-    /// The bar appears when the mouse is near the bottom edge or when `show_thumbnails` is pinned.
-    pub fn render_thumbnail_progress_bar(&mut self, ui: &mut egui::Ui) -> Option<egui::Response> {
+    /// Renders a floating thumbnail progress bar overlay above the given progress bar rect.
+    /// The thumbnail bar appears when the mouse is hovering over the progress bar.
+    pub fn render_thumbnail_progress_bar(
+        &mut self,
+        ui: &mut egui::Ui,
+        progress_bar_rect: egui::Rect,
+    ) -> Option<egui::Response> {
         let reader = self.open.as_mut()?;
-        let rect = ui.max_rect();
         let pointer_pos = ui.input(|i| i.pointer.hover_pos());
 
-        let mouse_near_bottom =
-            pointer_pos.is_some_and(|p| rect.contains(p) && p.y >= rect.max.y - 24.0);
+        let hovering_progress = pointer_pos
+            .is_some_and(|p| progress_bar_rect.contains(p) || progress_bar_rect.contains(p));
 
-        if !mouse_near_bottom && !self.show_thumbnails {
+        if !hovering_progress {
             return None;
         }
 
         const BAR_HEIGHT: f32 = 80.0;
         let bar_rect = egui::Rect::from_min_size(
-            egui::pos2(rect.min.x, rect.max.y - BAR_HEIGHT),
-            egui::vec2(rect.width(), BAR_HEIGHT),
+            egui::pos2(
+                progress_bar_rect.min.x,
+                progress_bar_rect.min.y - BAR_HEIGHT,
+            ),
+            egui::vec2(progress_bar_rect.width(), BAR_HEIGHT),
         );
 
         let current_page = reader.state.current_page;

@@ -134,15 +134,19 @@ impl ReaderApp {
         if self.settings.show_toolbar {
             self.render_reader_toolbar(ctx, total_pages, current_page, mode, zoom);
         }
-        if self.settings.show_statusbar {
-            self.render_reader_statusbar(ctx, total_pages, current_page, mode, zoom);
-        }
+        let progress_bar_rect = if self.settings.show_statusbar {
+            self.render_reader_statusbar(ctx)
+        } else {
+            None
+        };
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let response = self.reader_view.ui(ui, &self.page_loader);
 
-            // Floating thumbnail progress bar overlay.
-            self.reader_view.render_thumbnail_progress_bar(ui);
+            // Floating thumbnail progress bar overlay, shown when hovering the progress bar.
+            if let Some(rect) = progress_bar_rect {
+                self.reader_view.render_thumbnail_progress_bar(ui, rect);
+            }
 
             // Right-click context menu on the page area.
             if let Some(response) = response {
@@ -282,38 +286,11 @@ impl ReaderApp {
         });
     }
 
-    fn render_reader_statusbar(
-        &mut self,
-        ctx: &egui::Context,
-        total_pages: usize,
-        current_page: usize,
-        mode: ReadingMode,
-        zoom: f32,
-    ) {
+    fn render_reader_statusbar(&mut self, ctx: &egui::Context) -> Option<egui::Rect> {
+        let mut progress_rect = None;
         egui::TopBottomPanel::bottom("reader_statusbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(format!("页面: {}/{}", current_page + 1, total_pages));
-                ui.separator();
-                ui.label(format!(
-                    "模式: {}",
-                    match mode {
-                        ReadingMode::Ltr => "国漫（左→右）",
-                        ReadingMode::Rtl => "日漫（右→左）",
-                        ReadingMode::Webtoon => "韩漫（上→下）",
-                    }
-                ));
-                ui.separator();
-                ui.label(format!("缩放: {:.0}%", zoom * 100.0));
-                ui.separator();
-                let double_page = self
-                    .reader_view
-                    .open
-                    .as_ref()
-                    .map(|r| r.state.double_page)
-                    .unwrap_or(false);
-                ui.label(if double_page { "双页" } else { "单页" });
-                ui.separator();
-                ui.label("快捷键: ← → 翻页 | +/- 缩放 | F11 全屏 | Esc 返回书架");
+                self.reader_view.render_page_navigator(ui);
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("✕").on_hover_text("隐藏状态栏").clicked() {
@@ -321,9 +298,9 @@ impl ReaderApp {
                     }
                 });
             });
-            ui.add_space(4.0);
-            self.reader_view.render_page_navigator(ui);
+            progress_rect = Some(ui.min_rect());
         });
+        progress_rect
     }
 
     fn render_settings(&mut self, ctx: &egui::Context) {
