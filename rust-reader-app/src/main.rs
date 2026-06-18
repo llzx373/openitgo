@@ -2,6 +2,7 @@ mod app;
 mod cache;
 mod fonts;
 mod loader;
+mod opener;
 mod views;
 mod widgets;
 

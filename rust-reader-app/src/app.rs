@@ -1,4 +1,5 @@
 use crate::loader::PageLoader;
+use crate::opener::{ComicOpener, OpenStatus};
 use crate::views::{
     library::LibraryView,
     reader::{QuickFit, ReaderView},
@@ -24,6 +25,7 @@ pub struct ReaderApp {
     pub bookmarks: Bookmarks,
     pub error_message: Option<String>,
     pub page_loader: PageLoader,
+    pub opener: Option<ComicOpener>,
 }
 
 impl Default for ReaderApp {
@@ -45,6 +47,7 @@ impl Default for ReaderApp {
             bookmarks,
             error_message: None,
             page_loader: PageLoader::default(),
+            opener: None,
         }
     }
 }
@@ -72,29 +75,65 @@ impl eframe::App for ReaderApp {
             }
         }
         self.handle_dropped_files(ctx);
+        self.poll_opener();
 
         self.reader_view
             .update(ctx, &self.page_loader, self.settings.cache_size_mb);
         self.reader_view
             .request_preloads(&self.page_loader, self.settings.cache_size_mb);
 
-        match self.current_view {
+        match self.current_view.clone() {
             View::Library => self.render_library(ctx),
             View::Reader => self.render_reader(ctx),
             View::Settings => self.render_settings(ctx),
+            View::Loading(path) => self.render_loading(ctx, path),
         }
     }
 }
 
+#[derive(Clone)]
 pub enum View {
     Library,
     Reader,
     Settings,
+    Loading(PathBuf),
 }
 
 impl ReaderApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Self::default()
+    }
+
+    fn poll_opener(&mut self) {
+        let Some(mut opener) = self.opener.take() else {
+            return;
+        };
+        match opener.poll() {
+            OpenStatus::Loading => {
+                self.opener = Some(opener);
+            }
+            OpenStatus::Ready(result) => {
+                match result {
+                    Ok(comic) => {
+                        let total = comic.volumes.first().map(|v| v.pages.len()).unwrap_or(0);
+                        let mut state = ReadingState::new(self.settings.default_mode, total);
+                        state.set_double_page(self.settings.double_page, total);
+                        if let Some(h) =
+                            self.history.entries.iter().find(|h| h.comic_id == comic.id)
+                        {
+                            state.go_to_page(h.page_index, total);
+                        }
+                        self.reader_view.open(comic, state, &self.page_loader);
+                        self.current_view = View::Reader;
+                        self.error_message = None;
+                    }
+                    Err(e) => {
+                        self.error_message = Some(format!("无法打开漫画: {}", e));
+                        self.current_view = View::Library;
+                    }
+                }
+            }
+        }
     }
 
     fn render_library(&mut self, ctx: &egui::Context) {
@@ -324,6 +363,31 @@ impl ReaderApp {
             });
             ui.separator();
             self.settings_view.ui(ui, &mut self.settings);
+        });
+    }
+
+    fn render_loading(&mut self, ctx: &egui::Context, path: PathBuf) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.with_layout(
+                egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.spinner();
+                        ui.label("正在打开漫画...");
+                        if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                            ui.label(egui::RichText::new(name).size(14.0).strong());
+                        }
+                        ui.add_space(16.0);
+                        if ui.button("取消").clicked() {
+                            self.opener = None;
+                            self.current_view = View::Library;
+                        }
+                        if let Some(err) = &self.error_message {
+                            ui.colored_label(ui.visuals().error_fg_color, err);
+                        }
+                    });
+                },
+            );
         });
     }
 
@@ -558,22 +622,11 @@ impl ReaderApp {
     }
 
     fn open_comic(&mut self, path: std::path::PathBuf) {
-        match rust_reader_parser::parse(&path) {
-            Ok(comic) => {
-                let total = comic.volumes.first().map(|v| v.pages.len()).unwrap_or(0);
-                let mut state = ReadingState::new(self.settings.default_mode, total);
-                state.set_double_page(self.settings.double_page, total);
-                if let Some(h) = self.history.entries.iter().find(|h| h.comic_id == comic.id) {
-                    state.go_to_page(h.page_index, total);
-                }
-                self.reader_view.open(comic, state, &self.page_loader);
-                self.current_view = View::Reader;
-                self.error_message = None;
-            }
-            Err(e) => {
-                self.error_message = Some(format!("无法打开漫画: {}", e));
-            }
-        }
+        self.opener = Some(ComicOpener::open(path.clone(), |p| {
+            rust_reader_parser::parse(p).map_err(|e| e.to_string())
+        }));
+        self.current_view = View::Loading(path);
+        self.error_message = None;
     }
 
     fn ensure_in_library(&mut self, path: &std::path::Path) {
