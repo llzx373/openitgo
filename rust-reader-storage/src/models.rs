@@ -13,6 +13,7 @@ pub struct Settings {
     pub window_size: (f32, f32),
     pub show_toolbar: bool,
     pub show_statusbar: bool,
+    pub invert_scroll: bool,
 }
 
 impl Default for Settings {
@@ -26,6 +27,7 @@ impl Default for Settings {
             window_size: (1280.0, 720.0),
             show_toolbar: true,
             show_statusbar: true,
+            invert_scroll: false,
         }
     }
 }
@@ -88,6 +90,7 @@ mod tests {
         assert_eq!(s.cache_size_mb, 1024);
         assert!(s.show_toolbar);
         assert!(s.show_statusbar);
+        assert!(!s.invert_scroll);
     }
 
     #[test]

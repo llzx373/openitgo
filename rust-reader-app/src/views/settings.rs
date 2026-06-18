@@ -34,6 +34,11 @@ impl SettingsView {
             ui.add(egui::Slider::new(&mut settings.cache_size_mb, 100..=4096));
         });
 
+        ui.checkbox(
+            &mut settings.invert_scroll,
+            "反转滚轮方向（适用于 macOS 自然滚动）",
+        );
+
         ui.label("主题");
         egui::ComboBox::from_id_salt("theme")
             .selected_text(theme_label(settings.theme.clone()))

@@ -156,7 +156,10 @@ impl ReaderApp {
             }
 
             // Scroll wheel navigation.
-            let scroll = ui.input(|i| i.raw_scroll_delta.y);
+            let mut scroll = ui.input(|i| i.raw_scroll_delta.y);
+            if self.settings.invert_scroll {
+                scroll = -scroll;
+            }
             if scroll > 2.0 {
                 self.reader_page_down();
             } else if scroll < -2.0 {
