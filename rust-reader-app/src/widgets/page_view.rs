@@ -2,6 +2,9 @@ use crate::loader::{dxt5_padded_size, CompressedFormat, LoadedImage};
 use egui::{load::SizedTexture, TextureHandle, TextureId, TextureOptions};
 use glow::HasContext;
 
+/// A handle to a GPU texture. Managed variants are freed by egui when the
+/// last clone is dropped; native variants are owned by `PageCache` and must
+/// not be kept alive after the cache entry is evicted.
 #[derive(Clone)]
 pub enum TextureSlot {
     Managed(TextureHandle),

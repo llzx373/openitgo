@@ -18,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct ReaderApp {
     pub current_view: View,
+    pub last_view: View,
     pub settings: Settings,
     pub library_view: LibraryView,
     pub reader_view: ReaderView,
@@ -41,6 +42,7 @@ impl Default for ReaderApp {
         library_view.library = library;
         Self {
             current_view: View::Library,
+            last_view: View::Library,
             settings,
             library_view,
             reader_view: ReaderView::default(),
@@ -58,7 +60,7 @@ impl Default for ReaderApp {
 impl eframe::App for ReaderApp {
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
         self.record_reader_history();
-        self.reader_view.cleanup(gl);
+        self.reader_view.close(gl);
         let _ = self.store.save_settings(&self.settings);
         let _ = self.store.save_library(&self.library_view.library);
         let _ = self.store.save_history(&self.history);
@@ -66,10 +68,13 @@ impl eframe::App for ReaderApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        if !matches!(self.current_view, View::Reader) {
+        let gl = frame.gl().map(|g| &**g);
+
+        if matches!(self.last_view, View::Reader) && !matches!(self.current_view, View::Reader) {
             self.record_reader_history();
-            self.reader_view.cleanup(frame.gl().map(|g| &**g));
+            self.reader_view.clear_cache(gl);
         }
+        self.last_view = self.current_view.clone();
 
         self.handle_global_input(ctx);
 
@@ -79,7 +84,7 @@ impl eframe::App for ReaderApp {
             }
         }
         self.handle_dropped_files(ctx);
-        self.poll_opener();
+        self.poll_opener(gl);
 
         let supports_dxt5 = frame
             .gl()
@@ -122,7 +127,7 @@ impl ReaderApp {
         Self::default()
     }
 
-    fn poll_opener(&mut self) {
+    fn poll_opener(&mut self, gl: Option<&glow::Context>) {
         let Some(mut opener) = self.opener.take() else {
             return;
         };
@@ -138,7 +143,7 @@ impl ReaderApp {
                     if let Some(h) = self.history.entries.iter().find(|h| h.comic_id == comic.id) {
                         state.go_to_page(h.page_index, total);
                     }
-                    self.reader_view.open(comic, state, &self.page_loader);
+                    self.reader_view.open(gl, comic, state, &self.page_loader);
                     self.current_view = View::Reader;
                     self.error_message = None;
                 }
@@ -823,6 +828,7 @@ mod tests {
             library_view.library = library;
             Self {
                 current_view: View::Library,
+                last_view: View::Library,
                 settings,
                 library_view,
                 reader_view: ReaderView::default(),
@@ -842,6 +848,7 @@ mod tests {
         let (mut app, _tmp) = app_with_temp_store();
         let comic = dummy_comic();
         app.reader_view.open(
+            None,
             comic.clone(),
             ReadingState::new(ReadingMode::Ltr, 10),
             &PageLoader::default(),
@@ -879,7 +886,7 @@ mod tests {
 
         app.open_comic(tmp_dir.path().to_path_buf());
         for _ in 0..100 {
-            app.poll_opener();
+            app.poll_opener(None);
             if app.current_view == View::Reader {
                 break;
             }
@@ -908,7 +915,7 @@ mod tests {
 
         app1.open_comic(comic_dir.clone());
         for _ in 0..100 {
-            app1.poll_opener();
+            app1.poll_opener(None);
             if app1.current_view == View::Reader {
                 break;
             }
@@ -922,7 +929,7 @@ mod tests {
         let mut app2 = ReaderApp::with_store_dir(store_tmp.path());
         app2.open_comic(comic_dir);
         for _ in 0..100 {
-            app2.poll_opener();
+            app2.poll_opener(None);
             if app2.current_view == View::Reader {
                 break;
             }

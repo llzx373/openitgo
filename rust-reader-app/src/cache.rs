@@ -27,6 +27,8 @@ impl PageCache {
         self.total_size_bytes
     }
 
+    /// Returns a clone of the cached slot. For native textures the returned
+    /// `TextureId` must not be used after the page is evicted from the cache.
     pub fn get(&mut self, page_index: usize) -> Option<TextureSlot> {
         let entry = self.textures.get_mut(&page_index)?;
         entry.last_accessed = Instant::now();
@@ -49,7 +51,12 @@ impl PageCache {
         }
 
         if new_size > max_size_bytes {
-            self.clear(gl);
+            // Evict everything we are allowed to, then allow this single item to overshoot.
+            while self.total_size_bytes > 0 {
+                if !self.evict_lru_excluding(gl, protected) {
+                    break;
+                }
+            }
         } else {
             while self.total_size_bytes + new_size > max_size_bytes {
                 if !self.evict_lru_excluding(gl, protected) {

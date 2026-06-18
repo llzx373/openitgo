@@ -266,7 +266,15 @@ impl OpenReader {
 }
 
 impl ReaderView {
-    pub fn open(&mut self, comic: Comic, state: ReadingState, loader: &PageLoader) {
+    /// Open a new comic, clearing any previous reader's cache first.
+    pub fn open(
+        &mut self,
+        gl: Option<&glow::Context>,
+        comic: Comic,
+        state: ReadingState,
+        loader: &PageLoader,
+    ) {
+        self.clear_cache(gl);
         let mut reader = OpenReader {
             comic,
             state,
@@ -283,10 +291,17 @@ impl ReaderView {
         self.open = Some(reader);
     }
 
-    pub fn cleanup(&mut self, gl: Option<&glow::Context>) {
+    /// Clear all cached textures (managed and native) to free GPU memory,
+    /// but keep the current reader open so the user can resume reading.
+    pub fn clear_cache(&mut self, gl: Option<&glow::Context>) {
         if let Some(reader) = self.open.as_mut() {
             reader.cache.clear(gl);
         }
+    }
+
+    /// Fully close the reader: clear cache and drop the open comic.
+    pub fn close(&mut self, gl: Option<&glow::Context>) {
+        self.clear_cache(gl);
         self.open = None;
     }
 
