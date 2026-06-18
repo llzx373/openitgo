@@ -1,5 +1,5 @@
 use crate::loader::{CompressedFormat, LoadedImage};
-use egui::{Color32, ColorImage, TextureHandle, TextureId, TextureOptions};
+use egui::{TextureHandle, TextureId, TextureOptions};
 use glow::HasContext;
 
 #[derive(Clone)]
@@ -13,13 +13,6 @@ impl TextureSlot {
         match self {
             TextureSlot::Managed(h) => h.size(),
             TextureSlot::Native(_, s) => [s[0] as usize, s[1] as usize],
-        }
-    }
-
-    pub fn id(&self) -> TextureId {
-        match self {
-            TextureSlot::Managed(h) => h.id(),
-            TextureSlot::Native(id, _) => *id,
         }
     }
 }
@@ -37,17 +30,14 @@ pub fn upload_image(
             original_size,
             gpu_size,
             format,
+            ..
         } if supports_dxt5 => match format {
             CompressedFormat::Dxt5Srgb => {
                 upload_compressed_native(frame, label, data, gpu_size, original_size)
             }
         },
-        LoadedImage::Compressed { original_size, .. } => {
-            let color = ColorImage::new(
-                [original_size[0] as usize, original_size[1] as usize],
-                Color32::from_rgb(255, 0, 255),
-            );
-            TextureSlot::Managed(ctx.load_texture(label, color, TextureOptions::LINEAR))
+        LoadedImage::Compressed { rgba, .. } => {
+            TextureSlot::Managed(ctx.load_texture(label, rgba, TextureOptions::LINEAR))
         }
         LoadedImage::Color(image) => TextureSlot::Managed(
             ctx.load_texture(label, image, TextureOptions::LINEAR),

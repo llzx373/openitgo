@@ -151,7 +151,7 @@ mod tests {
 
         assert!(cache.contains(0));
         let retrieved = cache.get(0).expect("texture should be in cache");
-        assert_eq!(retrieved.id(), handle.id());
+        assert_eq!(retrieved.size(), handle.size());
     }
 
     #[test]

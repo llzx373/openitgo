@@ -57,6 +57,7 @@ pub enum CompressedFormat {
 pub enum LoadedImage {
     Compressed {
         data: Vec<u8>,
+        rgba: ColorImage,
         original_size: [u32; 2],
         gpu_size: [u32; 2],
         format: CompressedFormat,
@@ -329,6 +330,11 @@ fn compress_dxt5(image: image::DynamicImage) -> Result<LoadedImage, String> {
     let rgba = image.to_rgba8();
     let (gpu_w, gpu_h) = padded_size(original_w, original_h);
 
+    let color_image = ColorImage::from_rgba_unmultiplied(
+        [original_w as usize, original_h as usize],
+        rgba.as_raw(),
+    );
+
     let pixels = if original_w == gpu_w && original_h == gpu_h {
         rgba.into_raw()
     } else {
@@ -350,6 +356,7 @@ fn compress_dxt5(image: image::DynamicImage) -> Result<LoadedImage, String> {
 
     Ok(LoadedImage::Compressed {
         data: output,
+        rgba: color_image,
         original_size: [original_w, original_h],
         gpu_size: [gpu_w, gpu_h],
         format: CompressedFormat::Dxt5Srgb,
