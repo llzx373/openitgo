@@ -15,6 +15,7 @@ pub struct Settings {
     pub show_statusbar: bool,
     pub invert_scroll: bool,
     pub background_color: [u8; 3],
+    pub shortcuts: Shortcuts,
 }
 
 impl Default for Settings {
@@ -30,6 +31,41 @@ impl Default for Settings {
             show_statusbar: true,
             invert_scroll: false,
             background_color: [30, 30, 30],
+            shortcuts: Shortcuts::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Shortcuts {
+    pub next_page: Vec<String>,
+    pub prev_page: Vec<String>,
+    pub page_down: Vec<String>,
+    pub page_up: Vec<String>,
+    pub fullscreen: Vec<String>,
+    pub fit_page: Vec<String>,
+    pub fit_width: Vec<String>,
+    pub fit_height: Vec<String>,
+    pub zoom_in: Vec<String>,
+    pub zoom_out: Vec<String>,
+    pub back_to_library: Vec<String>,
+}
+
+impl Default for Shortcuts {
+    fn default() -> Self {
+        Self {
+            next_page: vec!["ArrowRight".to_string()],
+            prev_page: vec!["ArrowLeft".to_string()],
+            page_down: vec!["PageDown".to_string(), "Space".to_string()],
+            page_up: vec!["PageUp".to_string()],
+            fullscreen: vec!["F11".to_string()],
+            fit_page: vec!["Num0".to_string()],
+            fit_width: vec!["W".to_string()],
+            fit_height: vec!["H".to_string()],
+            zoom_in: vec!["Plus".to_string(), "Equals".to_string()],
+            zoom_out: vec!["Minus".to_string()],
+            back_to_library: vec!["Escape".to_string()],
         }
     }
 }

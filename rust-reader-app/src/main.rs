@@ -3,6 +3,7 @@ mod cache;
 mod fonts;
 mod loader;
 mod opener;
+mod shortcuts;
 mod views;
 mod widgets;
 

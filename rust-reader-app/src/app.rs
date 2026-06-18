@@ -1,5 +1,6 @@
 use crate::loader::PageLoader;
 use crate::opener::{ComicOpener, OpenStatus};
+use crate::shortcuts::is_shortcut_pressed;
 use crate::views::{
     library::{LibraryCallbacks, LibraryView},
     reader::{QuickFit, ReaderView},
@@ -42,7 +43,7 @@ impl Default for ReaderApp {
             settings,
             library_view,
             reader_view: ReaderView::default(),
-            settings_view: SettingsView,
+            settings_view: SettingsView::default(),
             store,
             history,
             bookmarks,
@@ -526,10 +527,7 @@ impl ReaderApp {
 
     fn handle_global_input(&mut self, ctx: &egui::Context) {
         let is_reader = matches!(self.current_view, View::Reader);
-
-        if ctx
-            .input(|i| i.key_pressed(egui::Key::F11) || (i.key_pressed(egui::Key::F) && is_reader))
-        {
+        if is_shortcut_pressed(ctx, &self.settings.shortcuts.fullscreen) {
             self.toggle_fullscreen(ctx);
         }
 
@@ -537,7 +535,7 @@ impl ReaderApp {
             return;
         }
 
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if is_shortcut_pressed(ctx, &self.settings.shortcuts.back_to_library) {
             if ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
                 self.toggle_fullscreen(ctx);
             } else {
@@ -551,49 +549,49 @@ impl ReaderApp {
             .as_ref()
             .map(|r| r.state.mode == ReadingMode::Rtl)
             .unwrap_or(false);
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+        if is_shortcut_pressed(ctx, &self.settings.shortcuts.next_page) {
             if rtl {
                 self.reader_prev_page();
             } else {
                 self.reader_next_page();
             }
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+        if is_shortcut_pressed(ctx, &self.settings.shortcuts.prev_page) {
             if rtl {
                 self.reader_next_page();
             } else {
                 self.reader_prev_page();
             }
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::PageDown) || i.key_pressed(egui::Key::Space)) {
+        if is_shortcut_pressed(ctx, &self.settings.shortcuts.page_down) {
             self.reader_page_down();
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::PageUp)) {
+        if is_shortcut_pressed(ctx, &self.settings.shortcuts.page_up) {
             self.reader_page_up();
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Home)) {
-            if let Some(reader) = self.reader_view.open.as_mut() {
-                reader.first_page();
-            }
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::End)) {
-            if let Some(reader) = self.reader_view.open.as_mut() {
-                reader.last_page();
-            }
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals)) {
+        if is_shortcut_pressed(ctx, &self.settings.shortcuts.zoom_in) {
             if let Some(reader) = self.reader_view.open.as_mut() {
                 reader.zoom_in();
             }
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Minus)) {
+        if is_shortcut_pressed(ctx, &self.settings.shortcuts.zoom_out) {
             if let Some(reader) = self.reader_view.open.as_mut() {
                 reader.zoom_out();
             }
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Num0)) {
+        if is_shortcut_pressed(ctx, &self.settings.shortcuts.fit_page) {
             if let Some(reader) = self.reader_view.open.as_mut() {
                 reader.request_fit(QuickFit::Page);
+            }
+        }
+        if is_shortcut_pressed(ctx, &self.settings.shortcuts.fit_width) {
+            if let Some(reader) = self.reader_view.open.as_mut() {
+                reader.request_fit(QuickFit::Width);
+            }
+        }
+        if is_shortcut_pressed(ctx, &self.settings.shortcuts.fit_height) {
+            if let Some(reader) = self.reader_view.open.as_mut() {
+                reader.request_fit(QuickFit::Height);
             }
         }
     }
@@ -811,7 +809,7 @@ mod tests {
                 settings,
                 library_view,
                 reader_view: ReaderView::default(),
-                settings_view: SettingsView,
+                settings_view: SettingsView::default(),
                 store,
                 history,
                 bookmarks,
