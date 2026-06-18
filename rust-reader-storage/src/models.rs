@@ -79,11 +79,25 @@ pub enum Theme {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct LibraryEntry {
     pub comic_id: String,
     pub title: String,
     pub path: PathBuf,
     pub cover_path: Option<PathBuf>,
+    pub added_at: u64,
+}
+
+impl Default for LibraryEntry {
+    fn default() -> Self {
+        Self {
+            comic_id: String::new(),
+            title: String::new(),
+            path: PathBuf::new(),
+            cover_path: None,
+            added_at: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -149,6 +163,7 @@ mod tests {
                 title: "Test".to_string(),
                 path: PathBuf::from("/tmp"),
                 cover_path: None,
+                added_at: 0,
             }],
         };
         let json = serde_json::to_string(&lib).unwrap();
