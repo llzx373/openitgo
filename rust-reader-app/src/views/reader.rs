@@ -376,9 +376,8 @@ impl ReaderView {
             (Some(_), Some(t)) => t.size_vec2(),
         };
 
-        let any_loading =
-            (left_idx.is_some() && left_texture.is_none())
-                || (right_idx.is_some() && right_texture.is_none());
+        let any_loading = (left_idx.is_some() && left_texture.is_none())
+            || (right_idx.is_some() && right_texture.is_none());
         if !any_loading {
             reader.apply_pending_fit(available.size());
         }
@@ -416,14 +415,15 @@ impl ReaderView {
         // Render right page if present.
         if let Some(idx) = right_idx {
             let right_top_left = if left_idx.is_some() {
-                egui::pos2(spread_top_left.x + left_size.x * reader.state.zoom, spread_top_left.y)
+                egui::pos2(
+                    spread_top_left.x + left_size.x * reader.state.zoom,
+                    spread_top_left.y,
+                )
             } else {
                 spread_top_left
             };
-            let right_rect = egui::Rect::from_min_size(
-                right_top_left,
-                right_size * reader.state.zoom,
-            );
+            let right_rect =
+                egui::Rect::from_min_size(right_top_left, right_size * reader.state.zoom);
             responses.push(render_page_or_placeholder(
                 ui,
                 reader,
@@ -516,14 +516,8 @@ impl ReaderView {
             ),
             to_scaled,
         );
-        let to_response = render_page_or_placeholder(
-            ui,
-            reader,
-            loader,
-            to_rect,
-            to_idx,
-            to_texture.as_ref(),
-        );
+        let to_response =
+            render_page_or_placeholder(ui, reader, loader, to_rect, to_idx, to_texture.as_ref());
 
         Some(from_response.union(to_response))
     }
@@ -720,7 +714,10 @@ mod tests {
             direction: TurnDirection::Next,
             start_time: std::time::Instant::now(),
         };
-        assert!(animation.progress() < 0.1, "progress should start near zero");
+        assert!(
+            animation.progress() < 0.1,
+            "progress should start near zero"
+        );
 
         let animation = PageAnimation {
             start_time: std::time::Instant::now() - PageAnimation::DURATION,

@@ -193,7 +193,11 @@ fn downsample_if_needed(image: image::DynamicImage) -> image::DynamicImage {
     let ratio = MAX_IMAGE_DIMENSION as f32 / max as f32;
     let new_w = (w as f32 * ratio).round() as u32;
     let new_h = (h as f32 * ratio).round() as u32;
-    image.resize(new_w.max(1), new_h.max(1), image::imageops::FilterType::Lanczos3)
+    image.resize(
+        new_w.max(1),
+        new_h.max(1),
+        image::imageops::FilterType::Lanczos3,
+    )
 }
 
 const PDF_RENDER_DPI: f32 = 150.0;

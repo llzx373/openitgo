@@ -78,7 +78,10 @@ mod tests {
     fn poll_returns_comic_when_parser_succeeds() {
         let expected = dummy_comic();
         let mut opener =
-            ComicOpener::open(PathBuf::from("/tmp/test"), move |_path| Ok(expected.clone()));
+            ComicOpener::open(
+                PathBuf::from("/tmp/test"),
+                move |_path| Ok(expected.clone()),
+            );
         thread::sleep(Duration::from_millis(50));
         let status = opener.poll();
         assert!(
@@ -95,10 +98,7 @@ mod tests {
         });
         thread::sleep(Duration::from_millis(50));
         let status = opener.poll();
-        assert_eq!(
-            status,
-            OpenStatus::Ready(Err("parse failed".to_string()))
-        );
+        assert_eq!(status, OpenStatus::Ready(Err("parse failed".to_string())));
     }
 
     #[test]

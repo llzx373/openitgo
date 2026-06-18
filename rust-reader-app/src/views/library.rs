@@ -1,4 +1,4 @@
-use rust_reader_storage::models::{Bookmarks, History, HistoryEntry, Library, LibraryEntry, LibrarySort};
+use rust_reader_storage::models::{Bookmarks, History, Library, LibraryEntry, LibrarySort};
 use std::path::PathBuf;
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -170,11 +170,7 @@ impl LibraryView {
         });
     }
 
-    fn filtered_entries(
-        &self,
-        history: &History,
-        sort: LibrarySort,
-    ) -> Vec<(usize, LibraryEntry)> {
+    fn filtered_entries(&self, history: &History, sort: LibrarySort) -> Vec<(usize, LibraryEntry)> {
         let query = self.search_query.trim().to_lowercase();
         let mut entries: Vec<(usize, LibraryEntry)> = self
             .library
@@ -306,6 +302,7 @@ fn format_timestamp(ts: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_reader_storage::models::HistoryEntry;
 
     use std::path::PathBuf;
 

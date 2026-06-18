@@ -119,27 +119,23 @@ impl ReaderApp {
             OpenStatus::Loading => {
                 self.opener = Some(opener);
             }
-            OpenStatus::Ready(result) => {
-                match result {
-                    Ok(comic) => {
-                        let total = comic.volumes.first().map(|v| v.pages.len()).unwrap_or(0);
-                        let mut state = ReadingState::new(self.settings.default_mode, total);
-                        state.set_double_page(self.settings.double_page, total);
-                        if let Some(h) =
-                            self.history.entries.iter().find(|h| h.comic_id == comic.id)
-                        {
-                            state.go_to_page(h.page_index, total);
-                        }
-                        self.reader_view.open(comic, state, &self.page_loader);
-                        self.current_view = View::Reader;
-                        self.error_message = None;
+            OpenStatus::Ready(result) => match result {
+                Ok(comic) => {
+                    let total = comic.volumes.first().map(|v| v.pages.len()).unwrap_or(0);
+                    let mut state = ReadingState::new(self.settings.default_mode, total);
+                    state.set_double_page(self.settings.double_page, total);
+                    if let Some(h) = self.history.entries.iter().find(|h| h.comic_id == comic.id) {
+                        state.go_to_page(h.page_index, total);
                     }
-                    Err(e) => {
-                        self.error_message = Some(format!("无法打开漫画: {}", e));
-                        self.current_view = View::Library;
-                    }
+                    self.reader_view.open(comic, state, &self.page_loader);
+                    self.current_view = View::Reader;
+                    self.error_message = None;
                 }
-            }
+                Err(e) => {
+                    self.error_message = Some(format!("无法打开漫画: {}", e));
+                    self.current_view = View::Library;
+                }
+            },
         }
     }
 
@@ -234,9 +230,8 @@ impl ReaderApp {
         };
 
         let bg = self.settings.background_color;
-        let frame = egui::Frame::central_panel(&ctx.style()).fill(egui::Color32::from_rgb(
-            bg[0], bg[1], bg[2],
-        ));
+        let frame = egui::Frame::central_panel(&ctx.style())
+            .fill(egui::Color32::from_rgb(bg[0], bg[1], bg[2]));
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             let response = self.reader_view.ui(ui, &self.page_loader);
 
@@ -881,7 +876,11 @@ mod tests {
         }
 
         assert_eq!(app.current_view, View::Reader);
-        let reader = app.reader_view.open.as_ref().expect("reader should be open");
+        let reader = app
+            .reader_view
+            .open
+            .as_ref()
+            .expect("reader should be open");
         assert_eq!(reader.comic.id, comic_id);
         assert_eq!(reader.state.current_page, 1);
     }
@@ -919,7 +918,11 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
-        let reader = app2.reader_view.open.as_ref().expect("reader should be open");
+        let reader = app2
+            .reader_view
+            .open
+            .as_ref()
+            .expect("reader should be open");
         assert_eq!(reader.comic.id, "test-comic");
         assert_eq!(reader.state.current_page, 6);
     }
@@ -957,14 +960,32 @@ mod tests {
     fn test_bar_shown_when_not_fullscreen_and_setting_on() {
         let screen = egui::vec2(1920.0, 1080.0);
         assert!(should_show_bar(true, false, None, screen, BarEdge::Top));
-        assert!(should_show_bar(true, false, Some(egui::pos2(500.0, 500.0)), screen, BarEdge::Bottom));
+        assert!(should_show_bar(
+            true,
+            false,
+            Some(egui::pos2(500.0, 500.0)),
+            screen,
+            BarEdge::Bottom
+        ));
     }
 
     #[test]
     fn test_top_bar_shown_in_fullscreen_near_top_edge() {
         let screen = egui::vec2(1920.0, 1080.0);
-        assert!(should_show_bar(true, true, Some(egui::pos2(100.0, 10.0)), screen, BarEdge::Top));
-        assert!(!should_show_bar(true, true, Some(egui::pos2(100.0, 100.0)), screen, BarEdge::Top));
+        assert!(should_show_bar(
+            true,
+            true,
+            Some(egui::pos2(100.0, 10.0)),
+            screen,
+            BarEdge::Top
+        ));
+        assert!(!should_show_bar(
+            true,
+            true,
+            Some(egui::pos2(100.0, 100.0)),
+            screen,
+            BarEdge::Top
+        ));
     }
 
     #[test]

@@ -77,20 +77,19 @@ impl SettingsView {
         shortcuts: &mut rust_reader_storage::models::Shortcuts,
     ) {
         type ShortcutGetter = fn(&mut rust_reader_storage::models::Shortcuts) -> &mut Vec<String>;
-        let actions: &[(&str, ShortcutGetter)] =
-            &[
-                ("下一页", |s| &mut s.next_page),
-                ("上一页", |s| &mut s.prev_page),
-                ("向下翻页", |s| &mut s.page_down),
-                ("向上翻页", |s| &mut s.page_up),
-                ("全屏", |s| &mut s.fullscreen),
-                ("适应页面", |s| &mut s.fit_page),
-                ("适应宽度", |s| &mut s.fit_width),
-                ("适应高度", |s| &mut s.fit_height),
-                ("放大", |s| &mut s.zoom_in),
-                ("缩小", |s| &mut s.zoom_out),
-                ("返回书架", |s| &mut s.back_to_library),
-            ];
+        let actions: &[(&str, ShortcutGetter)] = &[
+            ("下一页", |s| &mut s.next_page),
+            ("上一页", |s| &mut s.prev_page),
+            ("向下翻页", |s| &mut s.page_down),
+            ("向上翻页", |s| &mut s.page_up),
+            ("全屏", |s| &mut s.fullscreen),
+            ("适应页面", |s| &mut s.fit_page),
+            ("适应宽度", |s| &mut s.fit_width),
+            ("适应高度", |s| &mut s.fit_height),
+            ("放大", |s| &mut s.zoom_in),
+            ("缩小", |s| &mut s.zoom_out),
+            ("返回书架", |s| &mut s.back_to_library),
+        ];
         for &(label, getter) in actions {
             let bindings = getter(shortcuts);
             ui.horizontal(|ui| {
