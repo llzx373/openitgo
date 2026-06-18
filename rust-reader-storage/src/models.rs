@@ -16,6 +16,7 @@ pub struct Settings {
     pub invert_scroll: bool,
     pub background_color: [u8; 3],
     pub shortcuts: Shortcuts,
+    pub library_sort: LibrarySort,
 }
 
 impl Default for Settings {
@@ -32,6 +33,7 @@ impl Default for Settings {
             invert_scroll: false,
             background_color: [30, 30, 30],
             shortcuts: Shortcuts::default(),
+            library_sort: LibrarySort::default(),
         }
     }
 }
@@ -76,6 +78,15 @@ pub enum Theme {
     System,
     Light,
     Dark,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LibrarySort {
+    #[default]
+    LastRead,
+    Title,
+    Added,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -150,6 +161,7 @@ mod tests {
     fn test_settings_roundtrip_with_background_color() {
         let mut s = Settings::default();
         s.background_color = [12, 34, 56];
+        s.library_sort = LibrarySort::Title;
         let json = serde_json::to_string(&s).unwrap();
         let loaded: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(s, loaded);
