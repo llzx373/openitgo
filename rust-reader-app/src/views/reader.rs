@@ -1,5 +1,5 @@
 use crate::cache::PageCache;
-use crate::loader::{dxt5_padded_size, Epoch, PageLoader};
+use crate::loader::{Epoch, PageLoader};
 use crate::widgets::page_view::{upload_image, TextureSlot};
 use crate::widgets::progress_bar::{comic_progress_bar, ProgressBarResponse};
 use crate::widgets::thumbnail_progress_bar::page_thumbnail_tooltip;
@@ -659,16 +659,14 @@ fn render_page_or_placeholder(
     if let Some(texture) = texture {
         let image = match texture {
             TextureSlot::Managed(handle) => egui::Image::new(handle),
-            TextureSlot::Native(id, original_size) => {
-                let (gpu_w, gpu_h) = dxt5_padded_size(original_size[0], original_size[1]);
-                let uv_max = egui::pos2(
-                    original_size[0] as f32 / gpu_w as f32,
-                    original_size[1] as f32 / gpu_h as f32,
-                );
-                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), uv_max);
+            TextureSlot::Native(id, _) => {
                 let desired_size =
-                    egui::Vec2::new(original_size[0] as f32, original_size[1] as f32);
-                egui::Image::new((*id, desired_size)).uv(uv)
+                    egui::Vec2::new(texture.size()[0] as f32, texture.size()[1] as f32);
+                let mut image = egui::Image::new((*id, desired_size));
+                if let Some(uv) = texture.uv_rect() {
+                    image = image.uv(uv);
+                }
+                image
             }
         };
         let response = ui.put(

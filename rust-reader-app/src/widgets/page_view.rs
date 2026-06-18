@@ -1,19 +1,46 @@
-use crate::loader::{CompressedFormat, LoadedImage};
+use crate::loader::{dxt5_padded_size, CompressedFormat, LoadedImage};
 use egui::{TextureHandle, TextureId, TextureOptions};
 use glow::HasContext;
 
 #[derive(Clone)]
 pub enum TextureSlot {
     Managed(TextureHandle),
-    Native(TextureId, [u32; 2]), // display size
+    /// Native GL texture. The associated GL texture is owned by `PageCache` and
+    /// deleted on eviction; do not let clones outlive the cache entry.
+    Native(TextureId, #[allow(missing_docs)] [u32; 2]),
 }
 
 impl TextureSlot {
+    /// Returns the original display size (width, height) in pixels.
     pub fn size(&self) -> [usize; 2] {
         match self {
             TextureSlot::Managed(h) => h.size(),
-            TextureSlot::Native(_, s) => [s[0] as usize, s[1] as usize],
+            TextureSlot::Native(_, original_size) => {
+                [original_size[0] as usize, original_size[1] as usize]
+            }
         }
+    }
+
+    /// Returns the GPU size (padded to 4×4 blocks) for native DXT5 textures.
+    pub fn gpu_size(&self) -> Option<[u32; 2]> {
+        match self {
+            TextureSlot::Managed(_) => None,
+            TextureSlot::Native(_, original_size) => {
+                let (w, h) = dxt5_padded_size(original_size[0], original_size[1]);
+                Some([w, h])
+            }
+        }
+    }
+
+    /// Returns the UV rect that hides DXT5 4×4 padding. `None` for managed textures.
+    pub fn uv_rect(&self) -> Option<egui::Rect> {
+        let gpu_size = self.gpu_size()?;
+        let original_size = self.size();
+        let uv_max = egui::pos2(
+            original_size[0] as f32 / gpu_size[0] as f32,
+            original_size[1] as f32 / gpu_size[1] as f32,
+        );
+        Some(egui::Rect::from_min_max(egui::pos2(0.0, 0.0), uv_max))
     }
 }
 
@@ -57,7 +84,7 @@ fn upload_compressed_native(
     _label: &str,
     data: Vec<u8>,
     gpu_size: [u32; 2],
-    display_size: [u32; 2],
+    original_size: [u32; 2],
 ) -> Result<TextureSlot, String> {
     let gl = frame.gl().ok_or("glow context required")?;
     let texture =
@@ -97,10 +124,11 @@ fn upload_compressed_native(
         let err = gl.get_error();
         if err != glow::NO_ERROR {
             gl.delete_texture(texture);
+            gl.bind_texture(glow::TEXTURE_2D, None);
             return Err(format!("compressed_tex_image_2d failed: {err}"));
         }
         gl.bind_texture(glow::TEXTURE_2D, None);
     }
     let id = frame.register_native_glow_texture(texture);
-    Ok(TextureSlot::Native(id, display_size))
+    Ok(TextureSlot::Native(id, original_size))
 }

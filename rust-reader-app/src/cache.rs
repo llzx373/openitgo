@@ -52,7 +52,11 @@ impl PageCache {
             self.clear(gl);
         } else {
             while self.total_size_bytes + new_size > max_size_bytes {
-                self.evict_lru_excluding(gl, protected);
+                if !self.evict_lru_excluding(gl, protected) {
+                    // All remaining entries are protected; allow going over budget
+                    // rather than hanging.
+                    break;
+                }
             }
         }
 
@@ -71,6 +75,7 @@ impl PageCache {
         self.textures.contains_key(&page_index)
     }
 
+    /// Kept for tests; prefer [`Self::enforce_budget_with_protected`] in production.
     #[allow(dead_code)]
     pub fn enforce_budget(&mut self, max_size_bytes: usize, gl: Option<&glow::Context>) {
         self.enforce_budget_with_protected(max_size_bytes, gl, &[]);
@@ -83,7 +88,9 @@ impl PageCache {
         protected: &[usize],
     ) {
         while self.total_size_bytes > max_size_bytes {
-            self.evict_lru_excluding(gl, protected);
+            if !self.evict_lru_excluding(gl, protected) {
+                break;
+            }
         }
     }
 
@@ -94,7 +101,7 @@ impl PageCache {
         }
     }
 
-    fn evict_lru_excluding(&mut self, gl: Option<&glow::Context>, protected: &[usize]) {
+    fn evict_lru_excluding(&mut self, gl: Option<&glow::Context>, protected: &[usize]) -> bool {
         let lru_key = self
             .textures
             .iter()
@@ -107,6 +114,9 @@ impl PageCache {
                 delete_native_texture(gl, entry.slot);
                 self.total_size_bytes -= entry.size_bytes;
             }
+            true
+        } else {
+            false
         }
     }
 }
@@ -135,9 +145,9 @@ fn slot_size_bytes(slot: &TextureSlot) -> usize {
             let size = handle.size();
             size[0] * size[1] * 4
         }
-        TextureSlot::Native(_, display_size) => {
-            let gpu_w = display_size[0].div_ceil(4) * 4;
-            let gpu_h = display_size[1].div_ceil(4) * 4;
+        TextureSlot::Native(_, original_size) => {
+            let gpu_w = original_size[0].div_ceil(4) * 4;
+            let gpu_h = original_size[1].div_ceil(4) * 4;
             (gpu_w * gpu_h) as usize
         }
     }
@@ -254,6 +264,26 @@ mod tests {
         cache.enforce_budget_with_protected(budget, None, &[0, 2]);
         assert!(cache.contains(0));
         assert!(cache.contains(2));
+    }
+
+    #[test]
+    fn test_cache_insert_allows_over_budget_when_all_protected() {
+        let ctx = egui::Context::default();
+        let mut cache = PageCache::new();
+        // 2x2 RGBA8 = 16 bytes each; budget can only hold one.
+        let budget = 16;
+
+        let h0 = make_texture(&ctx, "page_0", 2, 2);
+        let h1 = make_texture(&ctx, "page_1", 2, 2);
+
+        cache.insert(0, h0, budget, None, &[]);
+        // Insert page 1 while page 0 is protected. Since page 0 cannot be
+        // evicted, the budget must be exceeded rather than looping forever.
+        cache.insert(1, h1, budget, None, &[0]);
+
+        assert!(cache.contains(0));
+        assert!(cache.contains(1));
+        assert!(cache.total_size_bytes() > budget);
     }
 
     #[test]
