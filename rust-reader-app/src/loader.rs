@@ -381,6 +381,7 @@ pub fn render_pdf_page(document: &Path, page_number: usize) -> Result<ColorImage
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
@@ -503,5 +504,54 @@ mod tests {
             }
         }
         assert_eq!(received, count, "all concurrent images should decode");
+    }
+
+    #[test]
+    fn test_loader_reads_multiple_zip_entries_with_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.cbz");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options =
+                zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            for i in 0..4 {
+                zip.start_file(format!("{:02}.png", i), options).unwrap();
+                let img = image::RgbaImage::from_pixel(32, 32, image::Rgba([i as u8, 0, 0, 255]));
+                let mut buf = Vec::new();
+                img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+                    .unwrap();
+                zip.write_all(&buf).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+
+        let loader = PageLoader::new();
+        let epoch = loader.next_epoch();
+        let sources: Vec<_> = (0..4)
+            .map(|i| PageSource::ZipEntry {
+                archive: path.clone(),
+                name: format!("{:02}.png", i),
+                index: i,
+            })
+            .collect();
+
+        for (i, source) in sources.iter().enumerate() {
+            loader.request_high(epoch, i, source.clone());
+        }
+
+        let mut received = 0;
+        let start = Instant::now();
+        while received < 4 && start.elapsed() < Duration::from_secs(10) {
+            if let Some(result) = loader.try_recv() {
+                assert_eq!(result.epoch, epoch);
+                let image = result.image.expect("image should decode");
+                assert_eq!(image.size, [32, 32]);
+                received += 1;
+            } else {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        assert_eq!(received, 4);
     }
 }
