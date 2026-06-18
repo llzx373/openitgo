@@ -220,7 +220,7 @@ impl ReaderView {
                     continue;
                 };
                 reader.pending_pages.insert(idx);
-                loader.request(reader.current_epoch, idx, source);
+                loader.request_low(reader.current_epoch, idx, source);
             }
         }
     }
@@ -379,7 +379,7 @@ fn request_page(loader: &PageLoader, reader: &mut OpenReader, page_index: usize)
         return;
     };
     reader.pending_pages.insert(page_index);
-    loader.request(reader.current_epoch, page_index, source);
+    loader.request_high(reader.current_epoch, page_index, source);
 }
 
 fn render_loading_placeholder(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Response {

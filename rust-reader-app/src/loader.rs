@@ -1,4 +1,4 @@
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, select, Receiver, Sender};
 use egui::ColorImage;
 use pdf_render::pdf_interpret::pdf_syntax::Pdf;
 use pdf_render::pdf_interpret::InterpreterSettings;
@@ -7,9 +7,16 @@ use pdf_render::{render, RenderSettings};
 use rust_reader_core::models::PageSource;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread;
 
 pub type Epoch = u64;
+
+#[allow(dead_code)]
+pub enum LoadPriority {
+    High,
+    Low,
+}
 
 pub struct LoadRequest {
     pub epoch: Epoch,
@@ -24,9 +31,11 @@ pub struct LoadResult {
 }
 
 pub struct PageLoader {
-    request_tx: Sender<LoadRequest>,
-    result_rx: Receiver<LoadResult>,
-    epoch: AtomicU64,
+    high_sender: Sender<LoadRequest>,
+    low_sender: Sender<LoadRequest>,
+    receiver: Receiver<LoadResult>,
+    epoch: Arc<AtomicU64>,
+    _worker: thread::JoinHandle<()>,
 }
 
 impl Default for PageLoader {
@@ -37,25 +46,39 @@ impl Default for PageLoader {
 
 impl PageLoader {
     pub fn new() -> Self {
-        let (request_tx, request_rx): (Sender<LoadRequest>, Receiver<LoadRequest>) = bounded(64);
-        let (result_tx, result_rx): (Sender<LoadResult>, Receiver<LoadResult>) = bounded(64);
+        let (high_sender, high_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) =
+            bounded(64);
+        let (low_sender, low_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) = bounded(64);
+        let (result_sender, receiver): (Sender<LoadResult>, Receiver<LoadResult>) = bounded(64);
 
-        thread::spawn(move || {
-            while let Ok(request) = request_rx.recv() {
-                let image = load_page(&request.source);
-                // Receiver dropped means PageLoader is shutting down; ignore.
-                let _ = result_tx.send(LoadResult {
-                    epoch: request.epoch,
-                    page_index: request.page_index,
-                    image,
-                });
+        let worker = thread::spawn(move || loop {
+            // 1. Drain all pending high-priority requests first.
+            if let Ok(req) = high_receiver.try_recv() {
+                process_request(req, &result_sender);
+                continue;
+            }
+
+            // 2. Block until either channel has a request, but prefer high if both are ready.
+            select! {
+                recv(high_receiver) -> req => {
+                    if let Ok(req) = req {
+                        process_request(req, &result_sender);
+                    }
+                }
+                recv(low_receiver) -> req => {
+                    if let Ok(req) = req {
+                        process_request(req, &result_sender);
+                    }
+                }
             }
         });
 
         Self {
-            request_tx,
-            result_rx,
-            epoch: AtomicU64::new(1),
+            high_sender,
+            low_sender,
+            receiver,
+            epoch: Arc::new(AtomicU64::new(1)),
+            _worker: worker,
         }
     }
 
@@ -63,18 +86,50 @@ impl PageLoader {
         self.epoch.fetch_add(1, Ordering::SeqCst)
     }
 
-    pub fn request(&self, epoch: Epoch, page_index: usize, source: PageSource) {
+    pub fn request_high(&self, epoch: Epoch, page_index: usize, source: PageSource) {
         // Receiver dropped means PageLoader is shutting down; ignore.
-        let _ = self.request_tx.send(LoadRequest {
+        let _ = self.high_sender.send(LoadRequest {
             epoch,
             page_index,
             source,
         });
     }
 
-    pub fn try_recv(&self) -> Option<LoadResult> {
-        self.result_rx.try_recv().ok()
+    pub fn request_low(&self, epoch: Epoch, page_index: usize, source: PageSource) {
+        // Receiver dropped means PageLoader is shutting down; ignore.
+        let _ = self.low_sender.send(LoadRequest {
+            epoch,
+            page_index,
+            source,
+        });
     }
+
+    #[allow(dead_code)]
+    pub fn request(
+        &self,
+        priority: LoadPriority,
+        epoch: Epoch,
+        page_index: usize,
+        source: PageSource,
+    ) {
+        match priority {
+            LoadPriority::High => self.request_high(epoch, page_index, source),
+            LoadPriority::Low => self.request_low(epoch, page_index, source),
+        }
+    }
+
+    pub fn try_recv(&self) -> Option<LoadResult> {
+        self.receiver.try_recv().ok()
+    }
+}
+
+fn process_request(req: LoadRequest, result_sender: &Sender<LoadResult>) {
+    let image = load_page(&req.source);
+    let _ = result_sender.send(LoadResult {
+        epoch: req.epoch,
+        page_index: req.page_index,
+        image,
+    });
 }
 
 fn load_page(source: &PageSource) -> Result<ColorImage, String> {
@@ -196,7 +251,7 @@ mod tests {
 
         let loader = PageLoader::new();
         let epoch = loader.next_epoch();
-        loader.request(epoch, 0, PageSource::File(PathBuf::from(&sample_path)));
+        loader.request_high(epoch, 0, PageSource::File(PathBuf::from(&sample_path)));
 
         let result = wait_for_result(&loader, epoch, 0, Duration::from_secs(5));
         let color_image = result.image.expect("expected image to load successfully");
