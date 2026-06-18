@@ -404,4 +404,39 @@ mod tests {
             "aspect ratio should be preserved"
         );
     }
+
+    #[test]
+    fn test_loader_decodes_multiple_images_concurrently() {
+        let tmp = tempfile::tempdir().unwrap();
+        let count = 8;
+        let mut epochs = Vec::new();
+        let loader = PageLoader::new();
+
+        for i in 0..count {
+            let path = tmp.path().join(format!("sample_{i}.png"));
+            let image = image::RgbaImage::from_pixel(64, 64, image::Rgba([i as u8, 0, 0, 255]));
+            image.save(&path).unwrap();
+            let epoch = loader.next_epoch();
+            epochs.push(epoch);
+            loader.request_high(epoch, i, PageSource::File(path));
+        }
+
+        let mut received = 0;
+        let start = Instant::now();
+        while received < count && start.elapsed() < Duration::from_secs(10) {
+            if let Some(result) = loader.try_recv() {
+                let pos = epochs
+                    .iter()
+                    .position(|&e| e == result.epoch)
+                    .expect("unknown epoch");
+                epochs.remove(pos);
+                let image = result.image.expect("image should decode");
+                assert_eq!(image.size, [64, 64]);
+                received += 1;
+            } else {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        assert_eq!(received, count, "all concurrent images should decode");
+    }
 }
