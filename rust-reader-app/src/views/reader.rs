@@ -323,28 +323,35 @@ impl ReaderView {
         };
 
         // Render right page if present.
+        let mut right_response: Option<egui::Response> = None;
         if right_idx.is_some() {
             let right_rect = egui::Rect::from_min_size(
                 egui::pos2(spread_top_left.x + left_rect.width(), spread_top_left.y),
                 right_size * reader.state.zoom,
             );
-            if let Some(ref texture) = right_texture {
-                let right_response = ui.put(
+            let response = if let Some(ref texture) = right_texture {
+                let response = ui.put(
                     right_rect,
                     egui::Image::new(texture)
                         .fit_to_exact_size(right_size * reader.state.zoom)
                         .sense(egui::Sense::drag()),
                 );
-                if right_response.dragged() {
-                    let delta = right_response.drag_delta();
+                if response.dragged() {
+                    let delta = response.drag_delta();
                     reader.state.pan += Vec2::new(delta.x, delta.y);
                 }
+                response
             } else {
-                let _ = render_loading_placeholder(ui, right_rect);
-            }
+                render_loading_placeholder(ui, right_rect)
+            };
+            right_response = Some(response);
         }
 
-        Some(left_response)
+        // Return a response that covers both pages so context menu and drag work everywhere.
+        match right_response {
+            Some(right) => Some(left_response.union(right)),
+            None => Some(left_response),
+        }
     }
 
     pub fn render_progress_bar(&mut self, ui: &mut egui::Ui) -> ProgressBarResponse {
