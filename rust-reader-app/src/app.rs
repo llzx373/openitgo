@@ -91,7 +91,7 @@ impl eframe::App for ReaderApp {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum View {
     Library,
     Reader,
@@ -664,5 +664,158 @@ impl ReaderApp {
                 self.open_comic(path.clone());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_reader_core::models::{Comic, Page, PageSource, Volume};
+    use rust_reader_core::state::ReadingState;
+    use std::path::Path;
+
+    fn dummy_comic() -> Comic {
+        Comic {
+            id: "test-comic".to_string(),
+            title: "Test Comic".to_string(),
+            path: PathBuf::from("/tmp/test-comic"),
+            volumes: vec![Volume {
+                title: "Vol 1".to_string(),
+                pages: (0..10)
+                    .map(|i| Page {
+                        index: i,
+                        source: PageSource::File(PathBuf::from(format!("page{}.png", i))),
+                    })
+                    .collect(),
+            }],
+        }
+    }
+
+    fn app_with_temp_store() -> (ReaderApp, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = ReaderApp::with_store_dir(tmp.path());
+        (app, tmp)
+    }
+
+    fn write_dummy_image(dir: &Path, name: &str) {
+        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255]));
+        img.save(dir.join(name)).unwrap();
+    }
+
+    impl ReaderApp {
+        fn with_store_dir(dir: &Path) -> Self {
+            let store = JsonStore::new(dir);
+            let settings = store.load_settings().unwrap_or_default();
+            let library = store.load_library().unwrap_or_default();
+            let history = store.load_history().unwrap_or_default();
+            let bookmarks = store.load_bookmarks().unwrap_or_default();
+            let library_view = LibraryView { library };
+            Self {
+                current_view: View::Library,
+                settings,
+                library_view,
+                reader_view: ReaderView::default(),
+                settings_view: SettingsView,
+                store,
+                history,
+                bookmarks,
+                error_message: None,
+                page_loader: PageLoader::default(),
+                opener: None,
+            }
+        }
+    }
+
+    #[test]
+    fn test_record_reader_history_creates_entry() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let comic = dummy_comic();
+        app.reader_view.open(
+            comic.clone(),
+            ReadingState::new(ReadingMode::Ltr, 10),
+            &PageLoader::default(),
+        );
+        app.reader_view.open.as_mut().unwrap().state.current_page = 5;
+        app.record_reader_history();
+        let entry = app
+            .history
+            .entries
+            .iter()
+            .find(|h| h.comic_id == comic.id)
+            .expect("history entry should exist");
+        assert_eq!(entry.page_index, 5);
+    }
+
+    #[test]
+    fn test_poll_opener_restores_page_from_history() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        write_dummy_image(tmp_dir.path(), "page0.png");
+        write_dummy_image(tmp_dir.path(), "page1.png");
+
+        let comic_id = tmp_dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        app.history.entries.push(HistoryEntry {
+            comic_id: comic_id.clone(),
+            volume_index: 0,
+            page_index: 1,
+            last_read_at: 0,
+        });
+
+        app.open_comic(tmp_dir.path().to_path_buf());
+        for _ in 0..100 {
+            app.poll_opener();
+            if app.current_view == View::Reader {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(app.current_view, View::Reader);
+        let reader = app.reader_view.open.as_ref().expect("reader should be open");
+        assert_eq!(reader.comic.id, comic_id);
+        assert_eq!(reader.state.current_page, 1);
+    }
+
+    #[test]
+    fn test_history_roundtrip_via_storage() {
+        let (mut app1, store_tmp) = app_with_temp_store();
+        // Use a stable folder name so the parsed comic id matches the saved history.
+        let comic_dir = store_tmp.path().join("test-comic");
+        std::fs::create_dir(&comic_dir).unwrap();
+        for i in 0..10 {
+            write_dummy_image(&comic_dir, &format!("page{}.png", i));
+        }
+
+        app1.open_comic(comic_dir.clone());
+        for _ in 0..100 {
+            app1.poll_opener();
+            if app1.current_view == View::Reader {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(app1.current_view, View::Reader);
+        app1.reader_view.open.as_mut().unwrap().state.current_page = 6;
+        app1.record_reader_history();
+        app1.store.save_history(&app1.history).unwrap();
+
+        let mut app2 = ReaderApp::with_store_dir(store_tmp.path());
+        app2.open_comic(comic_dir);
+        for _ in 0..100 {
+            app2.poll_opener();
+            if app2.current_view == View::Reader {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let reader = app2.reader_view.open.as_ref().expect("reader should be open");
+        assert_eq!(reader.comic.id, "test-comic");
+        assert_eq!(reader.state.current_page, 6);
     }
 }
