@@ -1,5 +1,5 @@
 use crate::cache::PageCache;
-use crate::loader::{Epoch, PageLoader};
+use crate::loader::{dxt5_padded_size, Epoch, PageLoader};
 use crate::widgets::page_view::{upload_image, TextureSlot};
 use crate::widgets::progress_bar::{comic_progress_bar, ProgressBarResponse};
 use crate::widgets::thumbnail_progress_bar::page_thumbnail_tooltip;
@@ -57,9 +57,7 @@ impl PageAnimation {
 pub struct OpenReader {
     pub comic: Comic,
     pub state: ReadingState,
-    pub left_texture: Option<TextureSlot>,
     pub left_page: Option<usize>,
-    pub right_texture: Option<TextureSlot>,
     pub right_page: Option<usize>,
     pub pending_fit: Option<QuickFit>,
     pub current_epoch: Epoch,
@@ -173,11 +171,11 @@ impl OpenReader {
         }
     }
 
-    fn spread_size(&self) -> Option<egui::Vec2> {
-        let left_size = self.left_texture.as_ref()?.size();
+    fn spread_size(&mut self) -> Option<egui::Vec2> {
+        let left_size = self.cache.get(self.left_page?).map(|t| t.size())?;
         let right_size = self
-            .right_texture
-            .as_ref()
+            .cache
+            .get(self.right_page?)
             .map(|t| t.size())
             .unwrap_or([0, 0]);
         Some(egui::vec2(
@@ -210,10 +208,23 @@ impl OpenReader {
         self.current_epoch = loader.next_epoch();
         self.pending_pages.clear();
         self.page_errors.clear();
-        self.left_texture = None;
-        self.right_texture = None;
         self.left_page = None;
         self.right_page = None;
+    }
+
+    fn protected_page_indices(&self) -> Vec<usize> {
+        let mut v = Vec::with_capacity(4);
+        if let Some(i) = self.left_page {
+            v.push(i);
+        }
+        if let Some(i) = self.right_page {
+            v.push(i);
+        }
+        if let Some(a) = self.page_animation {
+            v.push(a.from_page);
+            v.push(a.to_page);
+        }
+        v
     }
 
     pub fn update(
@@ -239,14 +250,9 @@ impl OpenReader {
                         supports_dxt5,
                     );
                     let gl = frame.gl().map(|g| &**g);
+                    let protected = self.protected_page_indices();
                     self.cache
-                        .insert(result.page_index, slot, cache_size_bytes, gl);
-                    if self.left_page == Some(result.page_index) {
-                        self.left_texture = self.cache.get(result.page_index);
-                    }
-                    if self.right_page == Some(result.page_index) {
-                        self.right_texture = self.cache.get(result.page_index);
-                    }
+                        .insert(result.page_index, slot, cache_size_bytes, gl, &protected);
                 }
                 Err(err) => {
                     eprintln!("failed to load page {}: {}", result.page_index, err);
@@ -262,9 +268,7 @@ impl ReaderView {
         let mut reader = OpenReader {
             comic,
             state,
-            left_texture: None,
             left_page: None,
-            right_texture: None,
             right_page: None,
             pending_fit: Some(QuickFit::Page),
             current_epoch: 0,
@@ -275,6 +279,13 @@ impl ReaderView {
         };
         reader.bump_epoch(loader);
         self.open = Some(reader);
+    }
+
+    pub fn cleanup(&mut self, gl: Option<&glow::Context>) {
+        if let Some(reader) = self.open.as_mut() {
+            reader.cache.clear(gl);
+        }
+        self.open = None;
     }
 
     pub fn update(
@@ -288,8 +299,13 @@ impl ReaderView {
         let budget = cache_size_mb * 1024 * 1024;
         if let Some(reader) = &mut self.open {
             reader.update(ctx, frame, loader, budget, supports_dxt5);
+            let protected = reader.protected_page_indices();
+            reader.cache.enforce_budget_with_protected(
+                budget,
+                frame.gl().map(|g| &**g),
+                &protected,
+            );
         }
-        self.enforce_cache_budget(frame, cache_size_mb);
     }
 
     pub fn request_preloads(
@@ -302,7 +318,10 @@ impl ReaderView {
             return;
         };
         let budget = cache_size_mb * 1024 * 1024;
-        reader.cache.enforce_budget(budget, frame.gl().map(|g| &**g));
+        let protected = reader.protected_page_indices();
+        reader
+            .cache
+            .enforce_budget_with_protected(budget, frame.gl().map(|g| &**g), &protected);
         if reader.cache.total_size_bytes() >= budget {
             return;
         }
@@ -337,12 +356,16 @@ impl ReaderView {
         }
     }
 
+    #[allow(dead_code)]
     pub fn enforce_cache_budget(&mut self, frame: &mut eframe::Frame, cache_size_mb: usize) {
         let Some(reader) = self.open.as_mut() else {
             return;
         };
         let budget = cache_size_mb * 1024 * 1024;
-        reader.cache.enforce_budget(budget, frame.gl().map(|g| &**g));
+        let protected = reader.protected_page_indices();
+        reader
+            .cache
+            .enforce_budget_with_protected(budget, frame.gl().map(|g| &**g), &protected);
     }
 
     /// Renders the current page or spread and returns the response covering the page area.
@@ -363,21 +386,18 @@ impl ReaderView {
         }
 
         let (left_idx, right_idx) = reader.spread_pages();
-        if reader.left_page != left_idx {
+        let left_texture = left_idx.and_then(|idx| reader.cache.get(idx));
+        let right_texture = right_idx.and_then(|idx| reader.cache.get(idx));
+        if reader.left_page != left_idx || reader.right_page != right_idx {
             reader.left_page = left_idx;
-            reader.left_texture = left_idx.and_then(|idx| reader.cache.get(idx));
+            reader.right_page = right_idx;
             if let Some(idx) = left_idx {
-                if reader.left_texture.is_none() {
+                if left_texture.is_none() {
                     request_page(loader, reader, idx);
                 }
             }
-            reader.pending_fit = reader.pending_fit.or(Some(QuickFit::Page));
-        }
-        if reader.right_page != right_idx {
-            reader.right_page = right_idx;
-            reader.right_texture = right_idx.and_then(|idx| reader.cache.get(idx));
             if let Some(idx) = right_idx {
-                if reader.right_texture.is_none() {
+                if right_texture.is_none() {
                     request_page(loader, reader, idx);
                 }
             }
@@ -385,11 +405,6 @@ impl ReaderView {
         }
 
         let available = ui.available_rect_before_wrap();
-
-        let left_texture = reader.left_texture.clone();
-        let right_texture = reader.right_texture.clone();
-        let left_idx = reader.left_page;
-        let right_idx = reader.right_page;
         const FALLBACK_PAGE_SIZE: egui::Vec2 = egui::Vec2::new(600.0, 800.0);
         let left_size = left_texture
             .as_ref()
@@ -645,14 +660,14 @@ fn render_page_or_placeholder(
         let image = match texture {
             TextureSlot::Managed(handle) => egui::Image::new(handle),
             TextureSlot::Native(id, original_size) => {
-                let gpu_w = ((original_size[0] + 3) / 4) * 4;
-                let gpu_h = ((original_size[1] + 3) / 4) * 4;
+                let (gpu_w, gpu_h) = dxt5_padded_size(original_size[0], original_size[1]);
                 let uv_max = egui::pos2(
                     original_size[0] as f32 / gpu_w as f32,
                     original_size[1] as f32 / gpu_h as f32,
                 );
                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), uv_max);
-                let desired_size = egui::Vec2::new(original_size[0] as f32, original_size[1] as f32);
+                let desired_size =
+                    egui::Vec2::new(original_size[0] as f32, original_size[1] as f32);
                 egui::Image::new((*id, desired_size)).uv(uv)
             }
         };
@@ -744,9 +759,7 @@ mod tests {
                 }],
             },
             state: ReadingState::new(ReadingMode::Ltr, 10),
-            left_texture: None,
             left_page: None,
-            right_texture: None,
             right_page: None,
             pending_fit: None,
             current_epoch: 0,

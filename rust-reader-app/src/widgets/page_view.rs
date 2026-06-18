@@ -27,21 +27,28 @@ pub fn upload_image(
     match image {
         LoadedImage::Compressed {
             data,
+            rgba,
             original_size,
             gpu_size,
             format,
             ..
         } if supports_dxt5 => match format {
             CompressedFormat::Dxt5Srgb => {
-                upload_compressed_native(frame, label, data, gpu_size, original_size)
+                match upload_compressed_native(frame, label, data, gpu_size, original_size) {
+                    Ok(slot) => slot,
+                    Err(err) => {
+                        eprintln!("native DXT5 upload failed, falling back: {err}");
+                        TextureSlot::Managed(ctx.load_texture(label, rgba, TextureOptions::LINEAR))
+                    }
+                }
             }
         },
         LoadedImage::Compressed { rgba, .. } => {
             TextureSlot::Managed(ctx.load_texture(label, rgba, TextureOptions::LINEAR))
         }
-        LoadedImage::Color(image) => TextureSlot::Managed(
-            ctx.load_texture(label, image, TextureOptions::LINEAR),
-        ),
+        LoadedImage::Color(image) => {
+            TextureSlot::Managed(ctx.load_texture(label, image, TextureOptions::LINEAR))
+        }
     }
 }
 
@@ -51,15 +58,32 @@ fn upload_compressed_native(
     data: Vec<u8>,
     gpu_size: [u32; 2],
     display_size: [u32; 2],
-) -> TextureSlot {
-    let gl = frame.gl().expect("glow context required");
-    let texture = unsafe { gl.create_texture() }.expect("failed to create texture");
+) -> Result<TextureSlot, String> {
+    let gl = frame.gl().ok_or("glow context required")?;
+    let texture =
+        unsafe { gl.create_texture() }.map_err(|e| format!("failed to create texture: {e}"))?;
     unsafe {
         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
         gl.compressed_tex_image_2d(
             glow::TEXTURE_2D,
             0,
@@ -70,8 +94,13 @@ fn upload_compressed_native(
             data.len() as i32,
             &data,
         );
+        let err = gl.get_error();
+        if err != glow::NO_ERROR {
+            gl.delete_texture(texture);
+            return Err(format!("compressed_tex_image_2d failed: {err}"));
+        }
         gl.bind_texture(glow::TEXTURE_2D, None);
     }
     let id = frame.register_native_glow_texture(texture);
-    TextureSlot::Native(id, display_size)
+    Ok(TextureSlot::Native(id, display_size))
 }

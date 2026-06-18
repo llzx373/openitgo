@@ -1,4 +1,5 @@
 use crate::cache::PageCache;
+use crate::loader::dxt5_padded_size;
 use crate::widgets::page_view::TextureSlot;
 
 const THUMB_SIZE: egui::Vec2 = egui::Vec2::new(80.0, 120.0);
@@ -26,9 +27,14 @@ pub fn page_thumbnail_tooltip(
                 );
             }
             TextureSlot::Native(id, size) => {
+                let (gpu_w, gpu_h) = dxt5_padded_size(size[0], size[1]);
+                let uv_max =
+                    egui::pos2(size[0] as f32 / gpu_w as f32, size[1] as f32 / gpu_h as f32);
+                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), uv_max);
                 ui.put(
                     rect,
                     egui::Image::new((id, egui::Vec2::new(size[0] as f32, size[1] as f32)))
+                        .uv(uv)
                         .fit_to_exact_size(rect.size()),
                 );
             }

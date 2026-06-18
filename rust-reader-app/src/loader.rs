@@ -328,7 +328,7 @@ fn compress_dxt5(image: image::DynamicImage) -> Result<LoadedImage, String> {
     let original_w = image.width();
     let original_h = image.height();
     let rgba = image.to_rgba8();
-    let (gpu_w, gpu_h) = padded_size(original_w, original_h);
+    let (gpu_w, gpu_h) = dxt5_padded_size(original_w, original_h);
 
     let color_image = ColorImage::from_rgba_unmultiplied(
         [original_w as usize, original_h as usize],
@@ -341,7 +341,8 @@ fn compress_dxt5(image: image::DynamicImage) -> Result<LoadedImage, String> {
         pad_rgba(&rgba, original_w, original_h, gpu_w, gpu_h)
     };
 
-    let mut output = vec![0u8; texpresso::Format::Bc3.compressed_size(gpu_w as usize, gpu_h as usize)];
+    let mut output =
+        vec![0u8; texpresso::Format::Bc3.compressed_size(gpu_w as usize, gpu_h as usize)];
     texpresso::Format::Bc3.compress(
         &pixels,
         gpu_w as usize,
@@ -363,18 +364,11 @@ fn compress_dxt5(image: image::DynamicImage) -> Result<LoadedImage, String> {
     })
 }
 
-fn padded_size(width: u32, height: u32) -> (u32, u32) {
-    let pad = |n: u32| ((n + 3) / 4) * 4;
-    (pad(width), pad(height))
+pub fn dxt5_padded_size(width: u32, height: u32) -> (u32, u32) {
+    (width.div_ceil(4) * 4, height.div_ceil(4) * 4)
 }
 
-fn pad_rgba(
-    src: &image::RgbaImage,
-    src_w: u32,
-    src_h: u32,
-    dst_w: u32,
-    dst_h: u32,
-) -> Vec<u8> {
+fn pad_rgba(src: &image::RgbaImage, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<u8> {
     let mut dst = vec![0u8; (dst_w * dst_h * 4) as usize];
     for y in 0..src_h {
         for x in 0..src_w {
@@ -457,7 +451,10 @@ pub fn render_pdf_page(document: &Path, page_number: usize) -> Result<LoadedImag
 fn assert_loaded_image_size(image: LoadedImage, expected: [usize; 2]) {
     match image {
         LoadedImage::Compressed { original_size, .. } => {
-            assert_eq!([original_size[0] as usize, original_size[1] as usize], expected);
+            assert_eq!(
+                [original_size[0] as usize, original_size[1] as usize],
+                expected
+            );
         }
         LoadedImage::Color(color) => {
             assert_eq!(color.size, expected);
@@ -645,5 +642,39 @@ mod tests {
             }
         }
         assert_eq!(received, 4);
+    }
+
+    #[test]
+    fn test_dxt5_padded_size() {
+        assert_eq!(dxt5_padded_size(4, 4), (4, 4));
+        assert_eq!(dxt5_padded_size(1, 1), (4, 4));
+        assert_eq!(dxt5_padded_size(5, 7), (8, 8));
+        assert_eq!(dxt5_padded_size(8, 9), (8, 12));
+    }
+
+    #[test]
+    fn test_compress_dxt5_output_size() {
+        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            5,
+            7,
+            image::Rgba([255, 0, 0, 255]),
+        ));
+        let loaded = compress_dxt5(img).expect("compression should succeed");
+        match loaded {
+            LoadedImage::Compressed {
+                data,
+                original_size,
+                gpu_size,
+                ..
+            } => {
+                assert_eq!(original_size, [5, 7]);
+                let (expected_w, expected_h) = dxt5_padded_size(5, 7);
+                assert_eq!(gpu_size, [expected_w, expected_h]);
+                let expected = texpresso::Format::Bc3
+                    .compressed_size(gpu_size[0] as usize, gpu_size[1] as usize);
+                assert_eq!(data.len(), expected);
+            }
+            LoadedImage::Color(_) => panic!("expected compressed image"),
+        }
     }
 }

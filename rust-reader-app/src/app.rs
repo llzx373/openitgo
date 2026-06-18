@@ -1,12 +1,12 @@
 use crate::loader::PageLoader;
 use crate::opener::{ComicOpener, OpenStatus};
 use crate::shortcuts::is_shortcut_pressed;
-use glow::HasContext;
 use crate::views::{
     library::{LibraryCallbacks, LibraryView},
     reader::{QuickFit, ReaderView},
     settings::SettingsView,
 };
+use glow::HasContext;
 use rust_reader_core::models::ReadingMode;
 use rust_reader_core::state::ReadingState;
 use rust_reader_storage::{
@@ -58,6 +58,7 @@ impl Default for ReaderApp {
 impl eframe::App for ReaderApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.record_reader_history();
+        self.reader_view.cleanup(_gl);
         let _ = self.store.save_settings(&self.settings);
         let _ = self.store.save_library(&self.library_view.library);
         let _ = self.store.save_history(&self.history);
@@ -67,7 +68,7 @@ impl eframe::App for ReaderApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if !matches!(self.current_view, View::Reader) {
             self.record_reader_history();
-            self.reader_view.open = None;
+            self.reader_view.cleanup(frame.gl().map(|g| &**g));
         }
 
         self.handle_global_input(ctx);
@@ -82,17 +83,15 @@ impl eframe::App for ReaderApp {
 
         let supports_dxt5 = frame
             .gl()
-            .map(|gl| gl.supported_extensions().contains("GL_EXT_texture_compression_s3tc"))
+            .map(|gl| {
+                gl.supported_extensions()
+                    .contains("GL_EXT_texture_compression_s3tc")
+            })
             .unwrap_or(false);
 
         let cache_size_mb = self.settings.cache_size_mb as usize;
-        self.reader_view.update(
-            ctx,
-            frame,
-            &self.page_loader,
-            cache_size_mb,
-            supports_dxt5,
-        );
+        self.reader_view
+            .update(ctx, frame, &self.page_loader, cache_size_mb, supports_dxt5);
         self.reader_view
             .request_preloads(frame, &self.page_loader, cache_size_mb);
 
