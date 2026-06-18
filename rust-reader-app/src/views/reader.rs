@@ -25,6 +25,35 @@ pub enum QuickFit {
     Page,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnDirection {
+    Next,
+    Prev,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PageAnimation {
+    pub from_page: usize,
+    pub to_page: usize,
+    pub direction: TurnDirection,
+    pub start_time: std::time::Instant,
+}
+
+impl PageAnimation {
+    pub const DURATION: std::time::Duration = std::time::Duration::from_millis(250);
+
+    pub fn progress(&self) -> f32 {
+        let elapsed = self.start_time.elapsed().as_secs_f32();
+        let t = (elapsed / Self::DURATION.as_secs_f32()).clamp(0.0, 1.0);
+        // Ease-out cubic.
+        1.0 - (1.0 - t).powi(3)
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.start_time.elapsed() >= Self::DURATION
+    }
+}
+
 pub struct OpenReader {
     pub comic: Comic,
     pub state: ReadingState,
@@ -37,6 +66,7 @@ pub struct OpenReader {
     pub pending_pages: HashSet<usize>,
     pub page_errors: HashMap<usize, String>,
     pub cache: PageCache,
+    pub page_animation: Option<PageAnimation>,
 }
 
 impl OpenReader {
@@ -74,6 +104,43 @@ impl OpenReader {
 
     fn is_double_page(&self) -> bool {
         self.state.double_page && !self.state.mode.is_webtoon()
+    }
+
+    fn can_animate_turn(&self) -> bool {
+        !self.state.mode.is_webtoon() && !self.is_double_page()
+    }
+
+    pub fn next_page_with_animation(&mut self) {
+        let from = self.state.current_page;
+        let total = self.total_pages();
+        self.state.next_page(total);
+        let to = self.state.current_page;
+        self.start_turn_animation(from, to);
+    }
+
+    pub fn prev_page_with_animation(&mut self) {
+        let from = self.state.current_page;
+        self.state.prev_page();
+        let to = self.state.current_page;
+        self.start_turn_animation(from, to);
+    }
+
+    fn start_turn_animation(&mut self, from: usize, to: usize) {
+        if from == to || !self.can_animate_turn() {
+            self.page_animation = None;
+            return;
+        }
+        let direction = if to > from {
+            TurnDirection::Next
+        } else {
+            TurnDirection::Prev
+        };
+        self.page_animation = Some(PageAnimation {
+            from_page: from,
+            to_page: to,
+            direction,
+            start_time: std::time::Instant::now(),
+        });
     }
 
     /// Returns the page indices to display in left and right slots.
@@ -179,6 +246,7 @@ impl ReaderView {
             pending_pages: HashSet::new(),
             page_errors: HashMap::new(),
             cache: PageCache::new(),
+            page_animation: None,
         };
         reader.bump_epoch(loader);
         self.open = Some(reader);
@@ -251,6 +319,10 @@ impl ReaderView {
         if total_pages == 0 {
             ui.label("此漫画没有页面");
             return None;
+        }
+
+        if reader.page_animation.is_some() && reader.can_animate_turn() {
+            return self.render_page_turn_animation(ui, loader);
         }
 
         let (left_idx, right_idx) = reader.spread_pages();
@@ -344,6 +416,88 @@ impl ReaderView {
             Some(right) => Some(left_response.union(right)),
             None => Some(left_response),
         }
+    }
+
+    fn render_page_turn_animation(
+        &mut self,
+        ui: &mut egui::Ui,
+        loader: &PageLoader,
+    ) -> Option<egui::Response> {
+        let reader = self.open.as_mut()?;
+        let animation = reader.page_animation?;
+        if animation.is_finished() {
+            reader.page_animation = None;
+            return None;
+        }
+        let progress = animation.progress();
+        let from_idx = animation.from_page;
+        let to_idx = animation.to_page;
+
+        let from_texture = reader.cache.get(from_idx);
+        let to_texture = reader.cache.get(to_idx);
+        if from_texture.is_none() {
+            request_page(loader, reader, from_idx);
+        }
+        if to_texture.is_none() {
+            request_page(loader, reader, to_idx);
+        }
+        // Use placeholder sizes if textures are not ready yet.
+        let from_size = from_texture
+            .as_ref()
+            .map(|t| t.size_vec2())
+            .unwrap_or(egui::vec2(600.0, 800.0));
+        let to_size = to_texture
+            .as_ref()
+            .map(|t| t.size_vec2())
+            .unwrap_or(egui::vec2(600.0, 800.0));
+
+        let available = ui.available_rect_before_wrap();
+        let scale = (available.width() / to_size.x)
+            .min(available.height() / to_size.y)
+            .min(1.0);
+        let to_scaled = to_size * scale;
+        let from_scaled = from_size * scale;
+
+        let center = available.center();
+        let direction_sign = match animation.direction {
+            TurnDirection::Next => -1.0,
+            TurnDirection::Prev => 1.0,
+        };
+        let offset = direction_sign * progress * available.width();
+
+        let from_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                center.x - from_scaled.x / 2.0 + offset,
+                center.y - from_scaled.y / 2.0,
+            ),
+            from_scaled,
+        );
+        let from_response = render_page_or_placeholder(
+            ui,
+            reader,
+            loader,
+            from_rect,
+            from_idx,
+            from_texture.as_ref(),
+        );
+
+        let to_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                center.x - to_scaled.x / 2.0 + offset - direction_sign * available.width(),
+                center.y - to_scaled.y / 2.0,
+            ),
+            to_scaled,
+        );
+        let to_response = render_page_or_placeholder(
+            ui,
+            reader,
+            loader,
+            to_rect,
+            to_idx,
+            to_texture.as_ref(),
+        );
+
+        Some(from_response.union(to_response))
     }
 
     pub fn render_progress_bar(&mut self, ui: &mut egui::Ui) -> ProgressBarResponse {
@@ -489,4 +643,92 @@ fn render_loading_placeholder(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Resp
         );
     });
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_reader_core::models::{Comic, Page, PageSource, Volume};
+    use rust_reader_core::state::ReadingState;
+    use std::path::PathBuf;
+    use std::thread;
+    use std::time::Duration;
+
+    fn dummy_reader() -> OpenReader {
+        OpenReader {
+            comic: Comic {
+                id: "test".to_string(),
+                title: "Test".to_string(),
+                path: PathBuf::from("/tmp/test"),
+                volumes: vec![Volume {
+                    title: "Vol 1".to_string(),
+                    pages: (0..10)
+                        .map(|i| Page {
+                            index: i,
+                            source: PageSource::File(PathBuf::from(format!("page{}.png", i))),
+                        })
+                        .collect(),
+                }],
+            },
+            state: ReadingState::new(ReadingMode::Ltr, 10),
+            left_texture: None,
+            left_page: None,
+            right_texture: None,
+            right_page: None,
+            pending_fit: None,
+            current_epoch: 0,
+            pending_pages: HashSet::new(),
+            page_errors: HashMap::new(),
+            cache: PageCache::new(),
+            page_animation: None,
+        }
+    }
+
+    #[test]
+    fn test_page_animation_progress_clamps_and_eases() {
+        let animation = PageAnimation {
+            from_page: 0,
+            to_page: 1,
+            direction: TurnDirection::Next,
+            start_time: std::time::Instant::now(),
+        };
+        assert!(animation.progress() < 0.1, "progress should start near zero");
+
+        let animation = PageAnimation {
+            start_time: std::time::Instant::now() - PageAnimation::DURATION,
+            ..animation
+        };
+        assert!((animation.progress() - 1.0).abs() < 0.001);
+        assert!(animation.is_finished());
+    }
+
+    #[test]
+    fn test_next_page_starts_animation_in_single_page_mode() {
+        let mut reader = dummy_reader();
+        reader.state.set_double_page(false, 10);
+        reader.next_page_with_animation();
+        assert_eq!(reader.state.current_page, 1);
+        assert!(reader.page_animation.is_some());
+        let anim = reader.page_animation.unwrap();
+        assert_eq!(anim.from_page, 0);
+        assert_eq!(anim.to_page, 1);
+        assert_eq!(anim.direction, TurnDirection::Next);
+    }
+
+    #[test]
+    fn test_next_page_does_not_animate_in_double_page_mode() {
+        let mut reader = dummy_reader();
+        reader.state.set_double_page(true, 10);
+        reader.next_page_with_animation();
+        assert_eq!(reader.state.current_page, 2);
+        assert!(reader.page_animation.is_none());
+    }
+
+    #[test]
+    fn test_animation_clears_after_duration() {
+        let mut reader = dummy_reader();
+        reader.next_page_with_animation();
+        thread::sleep(PageAnimation::DURATION + Duration::from_millis(10));
+        assert!(reader.page_animation.as_ref().unwrap().is_finished());
+    }
 }

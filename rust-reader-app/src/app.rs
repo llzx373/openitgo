@@ -596,14 +596,13 @@ impl ReaderApp {
 
     fn reader_next_page(&mut self) {
         if let Some(reader) = self.reader_view.open.as_mut() {
-            let total = reader.total_pages();
-            reader.state.next_page(total);
+            reader.next_page_with_animation();
         }
     }
 
     fn reader_prev_page(&mut self) {
         if let Some(reader) = self.reader_view.open.as_mut() {
-            reader.state.prev_page();
+            reader.prev_page_with_animation();
         }
     }
 
