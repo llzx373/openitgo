@@ -103,7 +103,7 @@ impl OpenReader {
     }
 
     fn is_double_page(&self) -> bool {
-        self.state.double_page && !self.state.mode.is_webtoon()
+        self.state.is_double_page()
     }
 
     fn can_animate_turn(&self) -> bool {
@@ -144,20 +144,32 @@ impl OpenReader {
     }
 
     /// Returns the page indices to display in left and right slots.
-    fn spread_pages(&self) -> (usize, Option<usize>) {
+    ///
+    /// In double-page mode, the first page (cover) is shown alone on the
+    /// reading side; subsequent spreads use two pages.
+    fn spread_pages(&self) -> (Option<usize>, Option<usize>) {
         let current = self.state.current_page;
         let total = self.total_pages();
         if total == 0 {
-            return (0, None);
+            return (None, None);
         }
-        let next = (current + 1).min(total - 1);
-        if !self.is_double_page() || next == current {
-            return (current, None);
+        if !self.is_double_page() {
+            return (Some(current), None);
         }
-        match self.state.mode {
-            ReadingMode::Ltr => (current, Some(next)),
-            ReadingMode::Rtl => (next, Some(current)),
-            ReadingMode::Webtoon => (current, None),
+        if current == 0 {
+            // Cover page shown alone on the reading side.
+            match self.state.mode {
+                ReadingMode::Ltr => (None, Some(0)),
+                ReadingMode::Rtl => (Some(0), None),
+                ReadingMode::Webtoon => (Some(current), None),
+            }
+        } else {
+            let next = (current + 1).min(total - 1);
+            match self.state.mode {
+                ReadingMode::Ltr => (Some(current), Some(next)),
+                ReadingMode::Rtl => (Some(next), Some(current)),
+                ReadingMode::Webtoon => (Some(current), None),
+            }
         }
     }
 
@@ -326,11 +338,13 @@ impl ReaderView {
         }
 
         let (left_idx, right_idx) = reader.spread_pages();
-        if reader.left_page != Some(left_idx) {
-            reader.left_page = Some(left_idx);
-            reader.left_texture = reader.cache.get(left_idx);
-            if reader.left_texture.is_none() {
-                request_page(loader, reader, left_idx);
+        if reader.left_page != left_idx {
+            reader.left_page = left_idx;
+            reader.left_texture = left_idx.and_then(|idx| reader.cache.get(idx));
+            if let Some(idx) = left_idx {
+                if reader.left_texture.is_none() {
+                    request_page(loader, reader, idx);
+                }
             }
             reader.pending_fit = reader.pending_fit.or(Some(QuickFit::Page));
         }
@@ -349,6 +363,7 @@ impl ReaderView {
 
         let left_texture = reader.left_texture.clone();
         let right_texture = reader.right_texture.clone();
+        let left_idx = reader.left_page;
         let right_idx = reader.right_page;
         const FALLBACK_PAGE_SIZE: egui::Vec2 = egui::Vec2::new(600.0, 800.0);
         let left_size = left_texture
@@ -362,7 +377,8 @@ impl ReaderView {
         };
 
         let any_loading =
-            left_texture.is_none() || (right_idx.is_some() && right_texture.is_none());
+            (left_idx.is_some() && left_texture.is_none())
+                || (right_idx.is_some() && right_texture.is_none());
         if !any_loading {
             reader.apply_pending_fit(available.size());
         }
@@ -383,38 +399,50 @@ impl ReaderView {
         );
 
         // Render left page.
-        let left_rect = egui::Rect::from_min_size(spread_top_left, left_size * reader.state.zoom);
-        let left_response = render_page_or_placeholder(
-            ui,
-            reader,
-            loader,
-            left_rect,
-            left_idx,
-            left_texture.as_ref(),
-        );
+        let mut responses: Vec<egui::Response> = Vec::new();
+        if let Some(idx) = left_idx {
+            let left_rect =
+                egui::Rect::from_min_size(spread_top_left, left_size * reader.state.zoom);
+            responses.push(render_page_or_placeholder(
+                ui,
+                reader,
+                loader,
+                left_rect,
+                idx,
+                left_texture.as_ref(),
+            ));
+        }
 
         // Render right page if present.
-        let mut right_response: Option<egui::Response> = None;
         if let Some(idx) = right_idx {
+            let right_top_left = if left_idx.is_some() {
+                egui::pos2(spread_top_left.x + left_size.x * reader.state.zoom, spread_top_left.y)
+            } else {
+                spread_top_left
+            };
             let right_rect = egui::Rect::from_min_size(
-                egui::pos2(spread_top_left.x + left_rect.width(), spread_top_left.y),
+                right_top_left,
                 right_size * reader.state.zoom,
             );
-            let response = render_page_or_placeholder(
+            responses.push(render_page_or_placeholder(
                 ui,
                 reader,
                 loader,
                 right_rect,
                 idx,
                 right_texture.as_ref(),
-            );
-            right_response = Some(response);
+            ));
         }
 
-        // Return a response that covers both pages so context menu and drag work everywhere.
-        match right_response {
-            Some(right) => Some(left_response.union(right)),
-            None => Some(left_response),
+        // Return a response that covers all visible pages.
+        if responses.is_empty() {
+            None
+        } else {
+            let mut combined = responses.remove(0);
+            for r in responses {
+                combined = combined.union(r);
+            }
+            Some(combined)
         }
     }
 
@@ -720,7 +748,8 @@ mod tests {
         let mut reader = dummy_reader();
         reader.state.set_double_page(true, 10);
         reader.next_page_with_animation();
-        assert_eq!(reader.state.current_page, 2);
+        // Cover page is alone; next anchor is page 1.
+        assert_eq!(reader.state.current_page, 1);
         assert!(reader.page_animation.is_none());
     }
 
@@ -730,5 +759,27 @@ mod tests {
         reader.next_page_with_animation();
         thread::sleep(PageAnimation::DURATION + Duration::from_millis(10));
         assert!(reader.page_animation.as_ref().unwrap().is_finished());
+    }
+
+    #[test]
+    fn test_spread_pages_cover_alone_in_double_page_ltr() {
+        let mut reader = dummy_reader();
+        reader.state.mode = ReadingMode::Ltr;
+        reader.state.set_double_page(true, 10);
+        assert_eq!(reader.spread_pages(), (None, Some(0)));
+
+        reader.state.current_page = 1;
+        assert_eq!(reader.spread_pages(), (Some(1), Some(2)));
+    }
+
+    #[test]
+    fn test_spread_pages_cover_alone_in_double_page_rtl() {
+        let mut reader = dummy_reader();
+        reader.state.mode = ReadingMode::Rtl;
+        reader.state.set_double_page(true, 10);
+        assert_eq!(reader.spread_pages(), (Some(0), None));
+
+        reader.state.current_page = 1;
+        assert_eq!(reader.spread_pages(), (Some(2), Some(1)));
     }
 }

@@ -63,23 +63,12 @@ impl ReadingState {
         if total_pages == 0 {
             return;
         }
-        let step = self.page_step();
-        if self.current_page + step < total_pages {
-            self.current_page += step;
-            self.pan = Vec2::ZERO;
-        } else {
-            self.current_page = total_pages - 1;
-            self.pan = Vec2::ZERO;
-        }
+        self.current_page = self.next_anchor(total_pages);
+        self.pan = Vec2::ZERO;
     }
 
     pub fn prev_page(&mut self) {
-        let step = self.page_step();
-        if self.current_page >= step {
-            self.current_page -= step;
-        } else {
-            self.current_page = 0;
-        }
+        self.current_page = self.prev_anchor();
         self.pan = Vec2::ZERO;
     }
 
@@ -107,12 +96,40 @@ impl ReadingState {
         self.set_double_page(!self.double_page, total_pages);
     }
 
-    fn page_step(&self) -> usize {
-        if self.double_page && !self.mode.is_webtoon() {
-            2
-        } else {
-            1
+    /// True when the reader is currently in double-page mode.
+    pub fn is_double_page(&self) -> bool {
+        self.double_page && !self.mode.is_webtoon()
+    }
+
+    /// Returns the last valid spread anchor for the given total page count.
+    ///
+    /// In double-page mode with cover handling, the anchors are `0, 1, 3, 5, ...`.
+    pub fn last_anchor(&self, total_pages: usize) -> usize {
+        match total_pages {
+            0 | 1 => 0,
+            n => n - 1 - (n % 2),
         }
+    }
+
+    fn next_anchor(&self, total_pages: usize) -> usize {
+        if !self.is_double_page() || total_pages <= 1 {
+            return (self.current_page + 1).min(total_pages.saturating_sub(1));
+        }
+        let last = self.last_anchor(total_pages);
+        if self.current_page == 0 {
+            return 1.min(last);
+        }
+        (self.current_page + 2).min(last)
+    }
+
+    fn prev_anchor(&self) -> usize {
+        if !self.is_double_page() {
+            return self.current_page.saturating_sub(1);
+        }
+        if self.current_page <= 1 {
+            return 0;
+        }
+        self.current_page - 2
     }
 
     fn clamp_page(&mut self, total_pages: usize) {
@@ -123,9 +140,17 @@ impl ReadingState {
         if self.current_page >= total_pages {
             self.current_page = total_pages - 1;
         }
-        if self.double_page && !self.mode.is_webtoon() {
-            // Align to the start of a spread.
-            self.current_page = (self.current_page / 2) * 2;
+        if !self.is_double_page() {
+            return;
+        }
+        let last = self.last_anchor(total_pages);
+        if self.current_page == 0 || self.current_page > last {
+            self.current_page = 0;
+            return;
+        }
+        // Align to the nearest odd-numbered anchor.
+        if self.current_page.is_multiple_of(2) {
+            self.current_page = (self.current_page - 1).min(last);
         }
     }
 }
@@ -184,46 +209,55 @@ mod tests {
     }
 
     #[test]
-    fn test_double_page_navigation_steps_by_two() {
+    fn test_double_page_navigation_with_cover_page() {
         let mut state = ReadingState::new(ReadingMode::Ltr, 7);
         state.set_double_page(true, 7);
         assert_eq!(state.current_page, 0);
 
+        // Cover is alone, next spread starts at page 1.
         state.next_page(7);
-        assert_eq!(state.current_page, 2);
+        assert_eq!(state.current_page, 1);
 
         state.next_page(7);
-        assert_eq!(state.current_page, 4);
+        assert_eq!(state.current_page, 3);
 
         state.next_page(7);
-        assert_eq!(state.current_page, 6);
+        assert_eq!(state.current_page, 5);
 
         // At the end, cannot advance further.
         state.next_page(7);
-        assert_eq!(state.current_page, 6);
+        assert_eq!(state.current_page, 5);
 
         state.prev_page();
-        assert_eq!(state.current_page, 4);
-    }
+        assert_eq!(state.current_page, 3);
 
-    #[test]
-    fn test_double_page_rtl_steps_by_two() {
-        let mut state = ReadingState::new(ReadingMode::Rtl, 7);
-        state.set_double_page(true, 7);
-        state.next_page(7);
-        assert_eq!(state.current_page, 2);
+        state.prev_page();
+        assert_eq!(state.current_page, 1);
+
         state.prev_page();
         assert_eq!(state.current_page, 0);
     }
 
     #[test]
-    fn test_go_to_page_aligns_to_spread_start() {
+    fn test_double_page_rtl_navigation_with_cover_page() {
+        let mut state = ReadingState::new(ReadingMode::Rtl, 7);
+        state.set_double_page(true, 7);
+        state.next_page(7);
+        assert_eq!(state.current_page, 1);
+        state.prev_page();
+        assert_eq!(state.current_page, 0);
+    }
+
+    #[test]
+    fn test_go_to_page_aligns_to_spread_anchor() {
         let mut state = ReadingState::new(ReadingMode::Ltr, 10);
         state.set_double_page(true, 10);
         state.go_to_page(3, 10);
-        assert_eq!(state.current_page, 2);
+        assert_eq!(state.current_page, 3);
+        state.go_to_page(4, 10);
+        assert_eq!(state.current_page, 3);
         state.go_to_page(5, 10);
-        assert_eq!(state.current_page, 4);
+        assert_eq!(state.current_page, 5);
     }
 
     #[test]
