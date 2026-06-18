@@ -3,12 +3,13 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct Settings {
     pub theme: Theme,
     pub default_mode: ReadingMode,
     pub default_fit: FitMode,
     pub double_page: bool,
-    pub preload_pages: u8,
+    pub cache_size_mb: u32,
     pub window_size: (f32, f32),
 }
 
@@ -19,7 +20,7 @@ impl Default for Settings {
             default_mode: ReadingMode::default(),
             default_fit: FitMode::default(),
             double_page: false,
-            preload_pages: 2,
+            cache_size_mb: 1024,
             window_size: (1280.0, 720.0),
         }
     }
@@ -80,6 +81,7 @@ mod tests {
     fn test_settings_default() {
         let s = Settings::default();
         assert!(matches!(s.theme, Theme::System));
+        assert_eq!(s.cache_size_mb, 1024);
     }
 
     #[test]

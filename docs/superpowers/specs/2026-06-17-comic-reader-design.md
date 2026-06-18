@@ -136,8 +136,8 @@ pub struct ReadingState {
 2. `LayoutEngine` 根据 `ReadingMode` 计算每页在逻辑画布上的位置与尺寸。
 3. `Renderer` 将逻辑坐标映射到屏幕坐标，仅绘制可见区域内的页面。
 4. 解码任务通过 channel 提交到异步后台工作线程，避免阻塞 UI 主线程。
-5. `ReaderView::request_preloads` 在当前页前后 N 页触发提前解码，结果存入 `PageCache`。
-6. 解码后的图片以 egui `TextureHandle` 形式缓存在 `PageCache`（`HashMap<usize, TextureHandle>`）中；超出当前页固定窗口范围的页面会被裁剪淘汰。
+5. `ReaderView::request_preloads` 以当前页为中心向外预加载页面，结果存入 `PageCache`，直到缓存预算耗尽或所有页面都已缓存/待加载。
+6. 解码后的图片以 egui `TextureHandle` 形式缓存在 `PageCache` 中；`PageCache` 按内存预算（100 MB - 4 GB，默认 1 GB）维护，使用 LRU 策略淘汰最少访问的页面。
 
 ### 5.3 缩放策略
 
@@ -195,7 +195,7 @@ pub trait Parser: Send + Sync {
 
 3. **设置视图（Settings）**
    - 通用：主题、语言、默认阅读模式、存储位置。
-   - 阅读：背景色、翻页动画开关、预加载页数。
+   - 阅读：背景色、翻页动画开关、缓存大小（100 MB - 4 GB，默认 1 GB）。
    - 快捷键：首版使用默认快捷键，界面预留自定义入口，实际自定义功能列入未来规划。
 
 ### 8.2 交互方式
@@ -233,7 +233,7 @@ pub trait Parser: Send + Sync {
 ### 10.1 已实现
 
 - [x] **异步后台加载**：文件解压、图片解码、PDF 渲染通过 channel 提交到单后台工作线程，避免 UI 阻塞。
-- [x] **预加载优化**：当前页前后 N 页提前解码缓存。
+- [x] **基于大小的 LRU 缓存/预加载**：按内存预算（默认 1 GB）缓存解码后的页面，并自动淘汰最少使用的页面。
 - [x] **CBR/RAR 与 PDF 完整解析**：首版已完整支持 `.cbr`/`.rar` 和 `.pdf`。
 
 ### 10.2 未来规划

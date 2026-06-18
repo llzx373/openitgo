@@ -134,7 +134,7 @@ impl OpenReader {
         self.right_page = None;
     }
 
-    pub fn update(&mut self, ctx: &egui::Context, loader: &PageLoader) {
+    pub fn update(&mut self, ctx: &egui::Context, loader: &PageLoader, cache_size_bytes: usize) {
         while let Some(result) = loader.try_recv() {
             if result.epoch != self.current_epoch {
                 continue;
@@ -144,7 +144,8 @@ impl OpenReader {
                 Ok(image) => {
                     let texture =
                         upload_color_image(ctx, image, format!("page_{}", result.page_index));
-                    self.cache.insert(result.page_index, texture);
+                    self.cache
+                        .insert(result.page_index, texture, cache_size_bytes);
                     if self.left_page == Some(result.page_index) {
                         self.left_texture = self.cache.get(result.page_index);
                     }
@@ -176,54 +177,60 @@ impl ReaderView {
         self.open = Some(reader);
     }
 
-    pub fn update(&mut self, ctx: &egui::Context, loader: &PageLoader, preload_pages: u8) {
+    pub fn update(&mut self, ctx: &egui::Context, loader: &PageLoader, cache_size_mb: u32) {
+        let budget = cache_size_mb as usize * 1024 * 1024;
         if let Some(reader) = &mut self.open {
-            reader.update(ctx, loader);
+            reader.update(ctx, loader, budget);
         }
-        self.prune_cache(preload_pages);
+        self.enforce_cache_budget(cache_size_mb);
     }
 
-    pub fn request_preloads(&mut self, loader: &PageLoader, preload_pages: u8) {
+    pub fn request_preloads(&mut self, loader: &PageLoader, cache_size_mb: u32) {
         let Some(reader) = self.open.as_mut() else {
             return;
         };
+        let budget = cache_size_mb as usize * 1024 * 1024;
+        reader.cache.enforce_budget(budget);
+        if reader.cache.total_size_bytes() >= budget {
+            return;
+        }
+
         let current = reader.state.current_page;
         let total = reader.total_pages();
         if total == 0 {
             return;
         }
-        let n = preload_pages as usize;
-        let start = current.saturating_sub(n);
-        let end = (current + n + 1).min(total);
-        for idx in start..end {
-            if idx == current {
-                continue;
+
+        for offset in 1..total {
+            let candidates = [
+                current.saturating_sub(offset),
+                current.saturating_add(offset),
+            ];
+            for &idx in &candidates {
+                if idx >= total {
+                    continue;
+                }
+                if idx == current {
+                    continue;
+                }
+                if reader.cache.contains(idx) || reader.pending_pages.contains(&idx) {
+                    continue;
+                }
+                let Some(source) = reader.comic.page_source(idx).cloned() else {
+                    continue;
+                };
+                reader.pending_pages.insert(idx);
+                loader.request(reader.current_epoch, idx, source);
             }
-            if reader.cache.contains(idx) {
-                continue;
-            }
-            if reader.pending_pages.contains(&idx) {
-                continue;
-            }
-            let Some(source) = reader.comic.page_source(idx).cloned() else {
-                continue;
-            };
-            reader.pending_pages.insert(idx);
-            loader.request(reader.current_epoch, idx, source);
         }
     }
 
-    pub fn prune_cache(&mut self, preload_pages: u8) {
+    pub fn enforce_cache_budget(&mut self, cache_size_mb: u32) {
         let Some(reader) = self.open.as_mut() else {
             return;
         };
-        let current = reader.state.current_page;
-        let n = preload_pages as usize;
-        let keep_start = current.saturating_sub(n + 2);
-        let keep_end = current.saturating_add(n + 2);
-        reader
-            .cache
-            .retain(|page_index| page_index >= keep_start && page_index <= keep_end);
+        let budget = cache_size_mb as usize * 1024 * 1024;
+        reader.cache.enforce_budget(budget);
     }
 
     /// Renders the current page or spread and returns the response covering the page area.

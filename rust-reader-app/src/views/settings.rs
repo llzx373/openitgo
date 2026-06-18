@@ -30,8 +30,8 @@ impl SettingsView {
             });
 
         ui.horizontal(|ui| {
-            ui.label("预加载页数:");
-            ui.add(egui::Slider::new(&mut settings.preload_pages, 0..=10));
+            ui.label("缓存大小 (MB):");
+            ui.add(egui::Slider::new(&mut settings.cache_size_mb, 100..=4096));
         });
 
         ui.label("主题");
