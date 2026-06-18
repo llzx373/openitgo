@@ -30,12 +30,20 @@ pub struct LoadResult {
     pub image: Result<ColorImage, String>,
 }
 
+struct DecodeJob {
+    epoch: Epoch,
+    page_index: usize,
+    bytes: Vec<u8>,
+    format_hint: Option<String>,
+}
+
 pub struct PageLoader {
     high_sender: Sender<LoadRequest>,
     low_sender: Sender<LoadRequest>,
     receiver: Receiver<LoadResult>,
     epoch: Arc<AtomicU64>,
-    _worker: thread::JoinHandle<()>,
+    _io_worker: thread::JoinHandle<()>,
+    _decode_workers: Vec<thread::JoinHandle<()>>,
 }
 
 impl Default for PageLoader {
@@ -46,39 +54,58 @@ impl Default for PageLoader {
 
 impl PageLoader {
     pub fn new() -> Self {
-        let (high_sender, high_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) =
-            bounded(64);
+        let (high_sender, high_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) = bounded(64);
         let (low_sender, low_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) = bounded(64);
         let (result_sender, receiver): (Sender<LoadResult>, Receiver<LoadResult>) = bounded(64);
+        let (decode_sender, decode_receiver): (Sender<DecodeJob>, Receiver<DecodeJob>) = bounded(64);
 
-        let worker = thread::spawn(move || loop {
-            // 1. Drain all pending high-priority requests first.
+        let result_sender_for_io = result_sender.clone();
+        let io_worker = thread::spawn(move || loop {
             if let Ok(req) = high_receiver.try_recv() {
-                process_request(req, &result_sender);
+                process_io_request(req, &result_sender_for_io, &decode_sender);
                 continue;
             }
-
-            // 2. Block until either channel has a request, but prefer high if both are ready.
             select! {
                 recv(high_receiver) -> req => {
                     if let Ok(req) = req {
-                        process_request(req, &result_sender);
+                        process_io_request(req, &result_sender_for_io, &decode_sender);
                     }
                 }
                 recv(low_receiver) -> req => {
                     if let Ok(req) = req {
-                        process_request(req, &result_sender);
+                        process_io_request(req, &result_sender_for_io, &decode_sender);
                     }
                 }
             }
         });
+
+        let worker_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .max(1);
+        let mut decode_workers = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let decode_receiver = decode_receiver.clone();
+            let result_sender = result_sender.clone();
+            decode_workers.push(thread::spawn(move || {
+                while let Ok(job) = decode_receiver.recv() {
+                    let image = decode_image_bytes(&job.bytes, job.format_hint.as_deref());
+                    let _ = result_sender.send(LoadResult {
+                        epoch: job.epoch,
+                        page_index: job.page_index,
+                        image,
+                    });
+                }
+            }));
+        }
 
         Self {
             high_sender,
             low_sender,
             receiver,
             epoch: Arc::new(AtomicU64::new(1)),
-            _worker: worker,
+            _io_worker: io_worker,
+            _decode_workers: decode_workers,
         }
     }
 
@@ -123,13 +150,41 @@ impl PageLoader {
     }
 }
 
-fn process_request(req: LoadRequest, result_sender: &Sender<LoadResult>) {
-    let image = load_page(&req.source);
-    let _ = result_sender.send(LoadResult {
-        epoch: req.epoch,
-        page_index: req.page_index,
-        image,
-    });
+fn process_io_request(
+    req: LoadRequest,
+    result_sender: &Sender<LoadResult>,
+    decode_sender: &Sender<DecodeJob>,
+) {
+    match req.source {
+        PageSource::PdfPage {
+            document,
+            page_number,
+        } => {
+            let image = render_pdf_page(&document, page_number);
+            let _ = result_sender.send(LoadResult {
+                epoch: req.epoch,
+                page_index: req.page_index,
+                image,
+            });
+        }
+        _ => match read_page_bytes(&req.source) {
+            Ok((bytes, format_hint)) => {
+                let _ = decode_sender.send(DecodeJob {
+                    epoch: req.epoch,
+                    page_index: req.page_index,
+                    bytes,
+                    format_hint,
+                });
+            }
+            Err(e) => {
+                let _ = result_sender.send(LoadResult {
+                    epoch: req.epoch,
+                    page_index: req.page_index,
+                    image: Err(e),
+                });
+            }
+        },
+    }
 }
 
 fn read_page_bytes(source: &PageSource) -> Result<(Vec<u8>, Option<String>), String> {
@@ -168,18 +223,6 @@ fn read_page_bytes(source: &PageSource) -> Result<(Vec<u8>, Option<String>), Str
             Ok((bytes, hint))
         }
     }
-}
-
-fn load_page(source: &PageSource) -> Result<ColorImage, String> {
-    match source {
-        PageSource::PdfPage {
-            document,
-            page_number,
-        } => return render_pdf_page(document, *page_number),
-        _ => {}
-    };
-    let (bytes, hint) = read_page_bytes(source)?;
-    decode_image_bytes(&bytes, hint.as_deref())
 }
 
 fn read_rar_entry(archive_path: &Path, name: &str) -> Result<Vec<u8>, String> {
