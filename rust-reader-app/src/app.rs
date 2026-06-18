@@ -35,10 +35,8 @@ impl Default for ReaderApp {
         let library = store.load_library().unwrap_or_default();
         let history = store.load_history().unwrap_or_default();
         let bookmarks = store.load_bookmarks().unwrap_or_default();
-        let library_view = LibraryView {
-            library,
-            mode: Default::default(),
-        };
+        let mut library_view = LibraryView::default();
+        library_view.library = library;
         Self {
             current_view: View::Library,
             settings,
@@ -153,6 +151,8 @@ impl ReaderApp {
             let mut open_path: Option<PathBuf> = None;
             let mut add_requested = false;
             let mut delete_bookmark_idx: Option<usize> = None;
+            let mut update_title: Option<(usize, String)> = None;
+            let mut delete_library_idx: Option<usize> = None;
             self.library_view.ui(
                 ui,
                 &self.history,
@@ -162,6 +162,8 @@ impl ReaderApp {
                     on_open_path: &mut |path| open_path = Some(path),
                     on_add: &mut || add_requested = true,
                     on_delete_bookmark: &mut |idx| delete_bookmark_idx = Some(idx),
+                    on_update_title: &mut |idx, title| update_title = Some((idx, title)),
+                    on_delete_library: &mut |idx| delete_library_idx = Some(idx),
                 },
             );
             if add_requested {
@@ -176,6 +178,14 @@ impl ReaderApp {
             }
             if let Some(path) = open_path {
                 self.open_comic(path);
+            }
+            if let Some((idx, title)) = update_title {
+                if let Some(entry) = self.library_view.library.entries.get_mut(idx) {
+                    entry.title = title;
+                }
+            }
+            if let Some(idx) = delete_library_idx {
+                self.library_view.library.entries.remove(idx);
             }
             if let Some(idx) = delete_bookmark_idx {
                 self.bookmarks.entries.remove(idx);
@@ -773,10 +783,8 @@ mod tests {
             let library = store.load_library().unwrap_or_default();
             let history = store.load_history().unwrap_or_default();
             let bookmarks = store.load_bookmarks().unwrap_or_default();
-            let library_view = LibraryView {
-                library,
-                mode: Default::default(),
-            };
+            let mut library_view = LibraryView::default();
+            library_view.library = library;
             Self {
                 current_view: View::Library,
                 settings,

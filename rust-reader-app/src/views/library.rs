@@ -13,6 +13,8 @@ pub enum LibraryMode {
 pub struct LibraryView {
     pub library: Library,
     pub mode: LibraryMode,
+    edit_buffer: Option<(usize, String)>,
+    pending_delete: Option<usize>,
 }
 
 pub struct LibraryCallbacks<'a> {
@@ -20,6 +22,8 @@ pub struct LibraryCallbacks<'a> {
     pub on_open_path: &'a mut dyn FnMut(PathBuf),
     pub on_add: &'a mut dyn FnMut(),
     pub on_delete_bookmark: &'a mut dyn FnMut(usize),
+    pub on_update_title: &'a mut dyn FnMut(usize, String),
+    pub on_delete_library: &'a mut dyn FnMut(usize),
 }
 
 impl LibraryView {
@@ -81,10 +85,54 @@ impl LibraryView {
         egui::Grid::new("library_grid").show(ui, |ui| {
             for (idx, entry) in self.library.entries.iter().enumerate() {
                 ui.vertical(|ui| {
-                    ui.label(&entry.title);
-                    if ui.button("打开").clicked() {
-                        (callbacks.on_open_library)(idx);
+                    if self.edit_buffer.as_ref().map(|b| b.0) == Some(idx) {
+                        let title = &mut self.edit_buffer.as_mut().unwrap().1;
+                        ui.text_edit_singleline(title);
+                        let mut save = false;
+                        let mut cancel = false;
+                        ui.horizontal(|ui| {
+                            if ui.button("保存").clicked() {
+                                save = true;
+                            }
+                            if ui.button("取消").clicked() {
+                                cancel = true;
+                            }
+                        });
+                        if save {
+                            let new_title = title.trim().to_string();
+                            if !new_title.is_empty() {
+                                (callbacks.on_update_title)(idx, new_title);
+                            }
+                            self.edit_buffer = None;
+                        } else if cancel {
+                            self.edit_buffer = None;
+                        }
+                    } else {
+                        ui.label(&entry.title);
                     }
+                    ui.horizontal(|ui| {
+                        if ui.button("打开").clicked() {
+                            (callbacks.on_open_library)(idx);
+                        }
+                        if ui.button("编辑").clicked() {
+                            self.edit_buffer = Some((idx, entry.title.clone()));
+                            self.pending_delete = None;
+                        }
+                        if self.pending_delete == Some(idx) {
+                            ui.label("确定删除？");
+                            if ui.button("是").clicked() {
+                                (callbacks.on_delete_library)(idx);
+                                self.pending_delete = None;
+                                self.edit_buffer = None;
+                            }
+                            if ui.button("否").clicked() {
+                                self.pending_delete = None;
+                            }
+                        } else if ui.button("删除").clicked() {
+                            self.pending_delete = Some(idx);
+                            self.edit_buffer = None;
+                        }
+                    });
                 });
                 ui.end_row();
             }
@@ -197,10 +245,9 @@ mod tests {
 
     #[test]
     fn test_find_by_id_returns_entry_when_present() {
-        let view = LibraryView {
-            library: sample_library(),
-            mode: LibraryMode::Library,
-        };
+        let mut view = LibraryView::default();
+        view.library = sample_library();
+        view.mode = LibraryMode::Library;
         assert!(view.find_by_id("comic-1").is_some());
         assert!(view.find_by_id("missing").is_none());
     }
