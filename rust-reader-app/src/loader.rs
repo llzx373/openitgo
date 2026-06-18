@@ -173,12 +173,27 @@ fn read_rar_entry(archive_path: &Path, name: &str) -> Result<Vec<u8>, String> {
     Err(format!("rar entry not found: {name}"))
 }
 
+const MAX_IMAGE_DIMENSION: u32 = 4096;
+
 fn decode_image(bytes: &[u8]) -> Result<ColorImage, String> {
     let image = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
+    let image = downsample_if_needed(image);
     let size = [image.width() as _, image.height() as _];
     let rgba = image.to_rgba8();
     let pixels = rgba.as_flat_samples();
     Ok(ColorImage::from_rgba_unmultiplied(size, pixels.as_slice()))
+}
+
+fn downsample_if_needed(image: image::DynamicImage) -> image::DynamicImage {
+    let (w, h) = (image.width(), image.height());
+    let max = w.max(h);
+    if max <= MAX_IMAGE_DIMENSION {
+        return image;
+    }
+    let ratio = MAX_IMAGE_DIMENSION as f32 / max as f32;
+    let new_w = (w as f32 * ratio).round() as u32;
+    let new_h = (h as f32 * ratio).round() as u32;
+    image.resize(new_w.max(1), new_h.max(1), image::imageops::FilterType::Lanczos3)
 }
 
 const PDF_RENDER_DPI: f32 = 150.0;
@@ -286,5 +301,30 @@ mod tests {
         let image = render_pdf_page(&path, 0).unwrap();
         assert!(image.size[0] > 0);
         assert!(image.size[1] > 0);
+    }
+
+    #[test]
+    fn test_downsample_if_needed_keeps_small_image_unchanged() {
+        let img = image::DynamicImage::new_rgba8(100, 200);
+        let out = downsample_if_needed(img);
+        assert_eq!(out.width(), 100);
+        assert_eq!(out.height(), 200);
+    }
+
+    #[test]
+    fn test_downsample_if_needed_scales_huge_image_to_max_dimension() {
+        // Use a very wide image so allocation is small but width exceeds the limit.
+        let img = image::DynamicImage::new_rgba8(5_000, 100);
+        let out = downsample_if_needed(img);
+        assert!(
+            out.width() <= MAX_IMAGE_DIMENSION && out.height() <= MAX_IMAGE_DIMENSION,
+            "downsampled image should fit within max dimension"
+        );
+        let ratio = out.width() as f32 / out.height() as f32;
+        let expected = 5_000.0 / 100.0;
+        assert!(
+            (ratio - expected).abs() < 0.1,
+            "aspect ratio should be preserved"
+        );
     }
 }
