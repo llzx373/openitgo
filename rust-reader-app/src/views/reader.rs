@@ -433,7 +433,7 @@ fn render_page_or_placeholder(
             rect,
             egui::Image::new(texture)
                 .fit_to_exact_size(rect.size())
-                .sense(egui::Sense::drag()),
+                .sense(egui::Sense::click_and_drag()),
         );
         if response.dragged() {
             let delta = response.drag_delta();
@@ -478,7 +478,7 @@ fn render_error_placeholder(
 }
 
 fn render_loading_placeholder(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Response {
-    let response = ui.allocate_rect(rect, egui::Sense::drag());
+    let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.with_layout(
             egui::Layout::centered_and_justified(egui::Direction::TopDown),

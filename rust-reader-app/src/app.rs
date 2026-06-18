@@ -241,6 +241,24 @@ impl ReaderApp {
 
             // Right-click context menu on the page area.
             if let Some(response) = response {
+                // Click left/right halves to turn page (disabled in webtoon mode).
+                if mode != ReadingMode::Webtoon && response.clicked() {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        let center_x = response.rect.center().x;
+                        let rtl = mode == ReadingMode::Rtl;
+                        if pos.x < center_x {
+                            if rtl {
+                                self.reader_next_page();
+                            } else {
+                                self.reader_prev_page();
+                            }
+                        } else if rtl {
+                            self.reader_prev_page();
+                        } else {
+                            self.reader_next_page();
+                        }
+                    }
+                }
                 response.context_menu(|ui| {
                     self.context_menu_items(ui);
                 });
