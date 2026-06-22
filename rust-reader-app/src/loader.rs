@@ -431,16 +431,27 @@ fn process_io_request(
             page_number,
         } => {
             let result = if req.thumbnail {
-                render_pdf_page(&document, page_number).and_then(|image| {
-                    make_thumbnail_from_loaded(image).map(|(thumb, original)| LoadResult {
-                        epoch: req.epoch,
-                        page_index: req.page_index,
-                        thumbnail: true,
-                        dropped: false,
-                        original_size: original,
-                        image: Ok(LoadedImage::Color(thumb)),
-                    })
-                })
+                // Render a small PDF page and report the *full* render size as the
+                // original size so layout does not jump when the full image arrives.
+                pdf_page_render_size(&document, page_number, PDF_MAX_RENDER_WIDTH).and_then(
+                    |full_size| {
+                        render_pdf_page_with_max_width(
+                            &document,
+                            page_number,
+                            THUMBNAIL_MAX_DIMENSION as f32,
+                        )
+                        .and_then(|image| {
+                            make_thumbnail_from_loaded(image).map(|(thumb, _)| LoadResult {
+                                epoch: req.epoch,
+                                page_index: req.page_index,
+                                thumbnail: true,
+                                dropped: false,
+                                original_size: full_size,
+                                image: Ok(LoadedImage::Color(thumb)),
+                            })
+                        })
+                    },
+                )
             } else {
                 render_pdf_page(&document, page_number).map(|image| {
                     let original_size = image.original_size();
@@ -829,20 +840,9 @@ pub(crate) const THUMBNAIL_MAX_DIMENSION: u32 = 256;
 /// preserving aspect ratio.
 fn make_thumbnail(image: image::DynamicImage) -> (ColorImage, [u32; 2]) {
     let original_size = [image.width(), image.height()];
-    let (w, h) = (image.width(), image.height());
-    let max = w.max(h);
-    let thumb = if max <= THUMBNAIL_MAX_DIMENSION {
-        image
-    } else {
-        let ratio = THUMBNAIL_MAX_DIMENSION as f32 / max as f32;
-        let new_w = (w as f32 * ratio).round() as u32;
-        let new_h = (h as f32 * ratio).round() as u32;
-        image.resize(
-            new_w.max(1),
-            new_h.max(1),
-            image::imageops::FilterType::Lanczos3,
-        )
-    };
+    // Use image's optimized fast thumbnail path instead of Lanczos3: it is
+    // much cheaper on CPU and the quality loss is acceptable at 256px.
+    let thumb = image.thumbnail(THUMBNAIL_MAX_DIMENSION, THUMBNAIL_MAX_DIMENSION);
     let rgba = thumb.to_rgba8();
     (
         ColorImage::from_rgba_unmultiplied(
@@ -867,11 +867,29 @@ fn make_thumbnail_from_loaded(loaded: LoadedImage) -> Result<(ColorImage, [u32; 
     Ok(make_thumbnail(image::DynamicImage::ImageRgba8(rgba_image)))
 }
 
+/// Try to read the original image dimensions without decoding pixels.
+fn image_dimensions_from_bytes(bytes: &[u8]) -> Option<[u32; 2]> {
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    reader.into_dimensions().ok().map(|(w, h)| [w, h])
+}
+
 /// Decode raw bytes into a thumbnail ColorImage plus the original page size.
 fn decode_thumbnail_bytes(
     bytes: &[u8],
     format_hint: Option<&str>,
 ) -> Result<(ColorImage, [u32; 2]), String> {
+    // Try the platform fast path first (macOS ImageIO can decode a thumbnail
+    // directly without touching the full-resolution image).
+    #[cfg(target_os = "macos")]
+    if let Some(thumb) = crate::platform::macos::decode_thumbnail_bytes(bytes)? {
+        if let Some(original_size) = image_dimensions_from_bytes(bytes) {
+            return Ok((thumb, original_size));
+        }
+    }
+
+    // Fall back to full decode + fast resize.
     let loaded = decode_image_bytes(bytes, format_hint, false)?;
     make_thumbnail_from_loaded(loaded)
 }
@@ -901,8 +919,39 @@ const PDF_RENDER_DPI: f32 = 150.0;
 const PDF_BASE_DPI: f32 = 72.0;
 const PDF_MAX_RENDER_WIDTH: f32 = 2048.0;
 
-/// Render a PDF page directly to an egui [`ColorImage`].
-pub fn render_pdf_page(document: &Path, page_number: usize) -> Result<LoadedImage, String> {
+/// Compute the rendered pixel size of a PDF page without actually rendering it.
+fn pdf_page_render_size(
+    document: &Path,
+    page_number: usize,
+    max_width: f32,
+) -> Result<[u32; 2], String> {
+    let data = std::fs::read(document).map_err(|e| format!("failed to read PDF file: {e}"))?;
+    let pdf = Pdf::new(data).map_err(|e| format!("failed to parse PDF: {e:?}"))?;
+
+    let page = pdf
+        .pages()
+        .get(page_number)
+        .ok_or_else(|| format!("page index {page_number} out of bounds"))?;
+
+    let (page_width, page_height) = page.render_dimensions();
+    let dpi_scale = PDF_RENDER_DPI / PDF_BASE_DPI;
+    let scale = if page_width > 0.0 {
+        (max_width / page_width).min(dpi_scale)
+    } else {
+        1.0
+    };
+
+    Ok([
+        (page_width * scale).round() as u32,
+        (page_height * scale).round() as u32,
+    ])
+}
+
+fn render_pdf_page_with_max_width(
+    document: &Path,
+    page_number: usize,
+    max_width: f32,
+) -> Result<LoadedImage, String> {
     let data = std::fs::read(document).map_err(|e| format!("failed to read PDF file: {e}"))?;
     let pdf = Pdf::new(data).map_err(|e| format!("failed to parse PDF: {e:?}"))?;
 
@@ -914,7 +963,7 @@ pub fn render_pdf_page(document: &Path, page_number: usize) -> Result<LoadedImag
     let (page_width, _page_height) = page.render_dimensions();
     let dpi_scale = PDF_RENDER_DPI / PDF_BASE_DPI;
     let scale = if page_width > 0.0 {
-        (PDF_MAX_RENDER_WIDTH / page_width).min(dpi_scale)
+        (max_width / page_width).min(dpi_scale)
     } else {
         1.0
     };
@@ -935,6 +984,11 @@ pub fn render_pdf_page(document: &Path, page_number: usize) -> Result<LoadedImag
         size,
         pixmap.data_as_u8_slice(),
     )))
+}
+
+/// Render a PDF page directly to an egui [`ColorImage`].
+pub fn render_pdf_page(document: &Path, page_number: usize) -> Result<LoadedImage, String> {
+    render_pdf_page_with_max_width(document, page_number, PDF_MAX_RENDER_WIDTH)
 }
 
 #[cfg(test)]
@@ -1283,5 +1337,61 @@ mod tests {
             "result should be an error, got {:?}",
             result.image
         );
+    }
+
+    #[test]
+    fn test_loader_request_thumbnail_preserves_original_size() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sample.png");
+        let image = image::RgbaImage::from_pixel(64, 64, image::Rgba([255, 0, 0, 255]));
+        image.save(&path).unwrap();
+
+        let loader = PageLoader::new();
+        let epoch = loader.next_epoch();
+        loader.request_thumbnail(epoch, 0, PageSource::File(path));
+
+        let result = wait_for_result(&loader, epoch, 0, Duration::from_secs(5));
+        assert!(result.thumbnail);
+        assert!(!result.dropped);
+        assert_eq!(result.original_size, [64, 64]);
+        match result.image.expect("thumbnail should decode") {
+            LoadedImage::Color(color) => {
+                assert_eq!(color.size, [64, 64]);
+            }
+            _ => panic!("thumbnail should be a Color image"),
+        }
+    }
+
+    #[test]
+    fn test_loader_request_thumbnail_downscales_large_image() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sample.png");
+        let image = image::RgbaImage::from_pixel(500, 800, image::Rgba([0, 255, 0, 255]));
+        image.save(&path).unwrap();
+
+        let loader = PageLoader::new();
+        let epoch = loader.next_epoch();
+        loader.request_thumbnail(epoch, 0, PageSource::File(path));
+
+        let result = wait_for_result(&loader, epoch, 0, Duration::from_secs(5));
+        assert!(result.thumbnail);
+        assert!(!result.dropped);
+        assert_eq!(result.original_size, [500, 800]);
+        match result.image.expect("thumbnail should decode") {
+            LoadedImage::Color(color) => {
+                assert!(
+                    color.size[0] <= THUMBNAIL_MAX_DIMENSION as usize
+                        && color.size[1] <= THUMBNAIL_MAX_DIMENSION as usize,
+                    "thumbnail dimensions should fit within THUMBNAIL_MAX_DIMENSION"
+                );
+                let actual_ratio = color.size[0] as f32 / color.size[1].max(1) as f32;
+                let expected_ratio = 500.0 / 800.0;
+                assert!(
+                    (actual_ratio - expected_ratio).abs() < 0.05,
+                    "thumbnail aspect ratio should be preserved"
+                );
+            }
+            _ => panic!("thumbnail should be a Color image"),
+        }
     }
 }

@@ -14,6 +14,7 @@ pub mod macos {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
     use core_graphics::image::{CGImage, CGImageAlphaInfo};
     use core_graphics::sys;
+    use egui::ColorImage;
     use foreign_types::ForeignType;
     use std::os::raw::c_void;
 
@@ -168,6 +169,30 @@ pub mod macos {
         )?))
     }
 
+    /// Decode a small (256px on the long edge) thumbnail directly via ImageIO.
+    /// We read the full image source but draw it into a small bitmap context so
+    /// CoreGraphics does the downsample, avoiding a full-size RGBA allocation.
+    pub fn decode_thumbnail_bytes(bytes: &[u8]) -> Result<Option<ColorImage>, String> {
+        use crate::loader::THUMBNAIL_MAX_DIMENSION;
+        timing::log("platform.macos: trying ImageIO thumbnail decode");
+
+        unsafe {
+            let source = ImageSource::from_bytes(bytes)
+                .ok_or_else(|| "ImageIO could not create image source".to_string())?;
+
+            let image_ref = CGImageSourceCreateImageAtIndex(source.0, 0, std::ptr::null());
+            if image_ref.is_null() {
+                return Ok(None);
+            }
+            let cg_image = CGImage::from_ptr(image_ref);
+
+            Ok(Some(render_thumbnail(
+                &cg_image,
+                THUMBNAIL_MAX_DIMENSION as usize,
+            )?))
+        }
+    }
+
     unsafe fn render_into_buffer(
         cg_image: &CGImage,
         width: usize,
@@ -199,6 +224,52 @@ pub mod macos {
         Ok(())
     }
 
+    unsafe fn render_thumbnail(
+        cg_image: &CGImage,
+        max_dimension: usize,
+    ) -> Result<ColorImage, String> {
+        let src_w = cg_image.width();
+        let src_h = cg_image.height();
+        if src_w == 0 || src_h == 0 {
+            return Err("empty source image for thumbnail".to_string());
+        }
+        let max = src_w.max(src_h);
+        let (dst_w, dst_h) = if max <= max_dimension {
+            (src_w, src_h)
+        } else {
+            let ratio = max_dimension as f64 / max as f64;
+            (
+                (src_w as f64 * ratio).round() as usize,
+                (src_h as f64 * ratio).round() as usize,
+            )
+        };
+        let bytes_per_row = dst_w * 4;
+        let mut pixel_data = vec![0u8; dst_h * bytes_per_row];
+
+        let color_space = CGColorSpace::create_device_rgb();
+        let bitmap_info = CGImageAlphaInfo::CGImageAlphaPremultipliedLast as u32;
+        let context = CGContext::create_bitmap_context(
+            Some(pixel_data.as_mut_ptr() as *mut c_void),
+            dst_w,
+            dst_h,
+            8,
+            bytes_per_row,
+            &color_space,
+            bitmap_info,
+        );
+
+        let rect = CGRect::new(
+            &CGPoint::new(0.0, 0.0),
+            &CGSize::new(dst_w as f64, dst_h as f64),
+        );
+        context.draw_image(rect, cg_image);
+        unpremultiply_rgba(&mut pixel_data);
+        Ok(ColorImage::from_rgba_unmultiplied(
+            [dst_w, dst_h],
+            &pixel_data,
+        ))
+    }
+
     fn unpremultiply_rgba(pixels: &mut [u8]) {
         for chunk in pixels.chunks_exact_mut(4) {
             let a = chunk[3];
@@ -215,11 +286,16 @@ pub mod macos {
 #[cfg(not(target_os = "macos"))]
 pub mod macos {
     use crate::loader::LoadedImage;
+    use egui::ColorImage;
 
     pub fn decode_image_bytes(
         _bytes: &[u8],
         _compress: bool,
     ) -> Result<Option<LoadedImage>, String> {
+        Ok(None)
+    }
+
+    pub fn decode_thumbnail_bytes(_bytes: &[u8]) -> Result<Option<ColorImage>, String> {
         Ok(None)
     }
 }
