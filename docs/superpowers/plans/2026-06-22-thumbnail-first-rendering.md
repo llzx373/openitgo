@@ -8,7 +8,7 @@
 low-resolution (256px max) thumbnails for all pages in the background. The
 visible spread renders with thumbnails first, then full-resolution images
 replace them. Full-resolution images are preloaded within a configurable window
-around the current page (default 5 pages each direction).
+around the current page (default 10 pages each direction).
 
 **Architecture:** Reuse the existing `PageLoader` with a new `thumbnail` flag on
 requests/results. `PageCache` gains a separate thumbnail slot per page.
@@ -279,7 +279,7 @@ pub real_image_cache_pages: u32,
 Add to `Default for Settings`:
 
 ```rust
-real_image_cache_pages: 5,
+real_image_cache_pages: 10,
 ```
 
 - [ ] **Step 2: Add a slider in the settings UI**
@@ -318,7 +318,7 @@ Expected: PASS.
 
 ```bash
 git add rust-reader-storage/src/models.rs rust-reader-app/src/views/settings.rs
-git commit -m "feat(settings): add real_image_cache_pages setting (default 5)"
+git commit -m "feat(settings): add real_image_cache_pages setting (default 10)"
 ```
 
 ---
@@ -1426,7 +1426,7 @@ git commit -m "feat: thumbnail-first rendering with configurable full-image wind
 - Load thumbnails for all pages on open (visible pages high priority)
 - Render thumbnails first, then replace with full-resolution images
 - Preload full images only within [current-N, current+N] window
-- Add real_image_cache_pages setting (default 5 pages each direction)
+- Add real_image_cache_pages setting (default 10 pages each direction)
 - Remove dead/duplicate code identified during design"
 ```
 

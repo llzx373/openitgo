@@ -860,6 +860,15 @@ fn render_page_or_placeholder(
     page_index: usize,
     texture: Option<&egui::TextureHandle>,
 ) -> egui::Response {
+    // If the full-resolution page is already cached, always prefer it over a
+    // thumbnail that may have been passed in from an earlier frame.
+    let full_texture = if reader.cache.contains_full(page_index) {
+        reader.cache.get_texture(ui.ctx(), page_index)
+    } else {
+        None
+    };
+    let texture = full_texture.as_ref().or(texture);
+
     if let Some(texture) = texture {
         let response = ui.put(
             rect,
