@@ -410,6 +410,16 @@ impl ReaderView {
                 .cache
                 .enforce_budget_with_protected(budget, &reader.protected_page_indices());
 
+            // If the cache is already near capacity, stop preloading full images.
+            // Otherwise the preload window (real_image_cache_pages each side) is
+            // often larger than the budget can hold, causing a steady decode/evict
+            // thrash that keeps CPU at 100% with no benefit.
+            let free_budget = budget.saturating_sub(reader.cache.total_size_bytes());
+            const MIN_FREE_BYTES_FOR_PRELOAD: usize = 64 * 1024 * 1024;
+            if free_budget < MIN_FREE_BYTES_FOR_PRELOAD {
+                return;
+            }
+
             let current = reader.state.current_page;
             let total = reader.total_pages();
             if total == 0 {
@@ -454,11 +464,22 @@ impl ReaderView {
                 return;
             }
 
+            // Cap the preload window by the remaining cache budget. Preloading more
+            // pages than can fit causes a steady decode/evict thrash that keeps CPU
+            // at 100% with no real benefit.
+            let avg_full = reader.cache.average_full_size_bytes().max(8 * 1024 * 1024);
+            let max_offset = (free_budget / avg_full)
+                .min(real_image_cache_pages)
+                .min(total.saturating_sub(1));
+            if max_offset == 0 {
+                return;
+            }
+
             // Throttle preloads so the UI thread never blocks on a full low-priority
             // channel and so we don't starve the current page decode queue.
             let mut enqueued = 0;
-            const MAX_PRELOADS_PER_FRAME: usize = 16;
-            for offset in 1..=real_image_cache_pages.min(total - 1) {
+            const MAX_PRELOADS_PER_FRAME: usize = 8;
+            for offset in 1..=max_offset {
                 if enqueued >= MAX_PRELOADS_PER_FRAME {
                     break;
                 }

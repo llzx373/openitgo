@@ -68,6 +68,21 @@ impl PageCache {
             .unwrap_or(false)
     }
 
+    /// Average byte size of the currently cached full-resolution images.
+    /// Returns 0 if no full image is cached yet.
+    pub fn average_full_size_bytes(&self) -> usize {
+        let (count, bytes) = self
+            .textures
+            .values()
+            .filter_map(|e| e.image.as_ref().map(|img| img.size_bytes()))
+            .fold((0usize, 0usize), |(c, b), s| (c + 1, b + s));
+        if count == 0 {
+            0
+        } else {
+            bytes / count
+        }
+    }
+
     pub fn contains_thumbnail(&self, page_index: usize) -> bool {
         self.textures
             .get(&page_index)
