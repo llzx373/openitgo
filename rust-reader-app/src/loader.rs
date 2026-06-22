@@ -6,10 +6,10 @@ use pdf_render::pdf_interpret::InterpreterSettings;
 use pdf_render::vello_cpu::color::palette::css::WHITE;
 use pdf_render::{render, RenderSettings};
 use rust_reader_core::models::PageSource;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 struct ZipCache {
@@ -39,6 +39,59 @@ impl ZipCache {
 
     fn remove(&mut self, path: &std::path::Path) {
         self.archives.remove(path);
+    }
+}
+
+/// Shared cache of decompressed raw bytes for zip entries.
+///
+/// Comic archives are often compressed, and the same page is usually read twice
+/// (once for a thumbnail and once for the full image). Caching the decompressed
+/// bytes across all IO workers avoids redundant decompression.
+#[derive(Clone)]
+struct SharedRawCache {
+    inner: Arc<Mutex<SharedRawCacheInner>>,
+}
+
+struct SharedRawCacheInner {
+    map: HashMap<(std::path::PathBuf, usize), Arc<Vec<u8>>>,
+    order: VecDeque<(std::path::PathBuf, usize)>,
+    bytes: usize,
+    max_bytes: usize,
+}
+
+impl SharedRawCache {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(SharedRawCacheInner {
+                map: HashMap::new(),
+                order: VecDeque::new(),
+                bytes: 0,
+                max_bytes,
+            })),
+        }
+    }
+
+    fn get(&self, archive_path: &std::path::Path, index: usize) -> Option<Arc<Vec<u8>>> {
+        let key = (archive_path.to_path_buf(), index);
+        self.inner.lock().unwrap().map.get(&key).cloned()
+    }
+
+    fn insert(&self, archive_path: &std::path::Path, index: usize, bytes: Vec<u8>) {
+        let len = bytes.len();
+        if len > self.inner.lock().unwrap().max_bytes {
+            return;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        while inner.bytes + len > inner.max_bytes && !inner.order.is_empty() {
+            let oldest = inner.order.pop_front().unwrap();
+            if let Some(data) = inner.map.remove(&oldest) {
+                inner.bytes -= data.len();
+            }
+        }
+        let key = (archive_path.to_path_buf(), index);
+        inner.bytes += len;
+        inner.order.push_back(key.clone());
+        inner.map.insert(key, Arc::new(bytes));
     }
 }
 
@@ -148,8 +201,16 @@ impl PageLoader {
         let (result_sender, receiver): (Sender<LoadResult>, Receiver<LoadResult>) = unbounded();
         let (high_decode_sender, high_decode_receiver): (Sender<DecodeJob>, Receiver<DecodeJob>) =
             bounded(64);
-        let (low_decode_sender, low_decode_receiver): (Sender<DecodeJob>, Receiver<DecodeJob>) =
-            bounded(256);
+        // Separate low-priority queues so heavy full-image decodes cannot starve
+        // the small, fast thumbnail decodes.
+        let (low_thumb_decode_sender, low_thumb_decode_receiver): (
+            Sender<DecodeJob>,
+            Receiver<DecodeJob>,
+        ) = bounded(512);
+        let (low_full_decode_sender, low_full_decode_receiver): (
+            Sender<DecodeJob>,
+            Receiver<DecodeJob>,
+        ) = bounded(64);
 
         let compress = Arc::new(AtomicBool::new(compress));
 
@@ -163,7 +224,10 @@ impl PageLoader {
         };
 
         // Spawn multiple IO workers so file reads (especially from archives) can
-        // happen in parallel. Each worker owns its own archive cache.
+        // happen in parallel. Each worker owns its own archive cache, but they
+        // share a single decompressed-bytes cache so the same zip entry is never
+        // decompressed more than once.
+        let raw_cache = SharedRawCache::new(512 * 1024 * 1024);
         let io_thread_count = worker_count;
         let mut io_workers = Vec::with_capacity(io_thread_count);
         for _ in 0..io_thread_count {
@@ -171,7 +235,9 @@ impl PageLoader {
             let low_receiver = low_receiver.clone();
             let result_sender_for_io = result_sender.clone();
             let high_decode_sender = high_decode_sender.clone();
-            let low_decode_sender = low_decode_sender.clone();
+            let low_thumb_decode_sender = low_thumb_decode_sender.clone();
+            let low_full_decode_sender = low_full_decode_sender.clone();
+            let raw_cache = raw_cache.clone();
             io_workers.push(thread::spawn(move || {
                 let mut zip_cache = ZipCache::new();
                 let mut high_disconnected = false;
@@ -186,8 +252,10 @@ impl PageLoader {
                             LoadPriority::High,
                             &result_sender_for_io,
                             &high_decode_sender,
-                            &low_decode_sender,
+                            &low_thumb_decode_sender,
+                            &low_full_decode_sender,
                             &mut zip_cache,
+                            &raw_cache,
                         );
                     }
                     select! {
@@ -198,8 +266,10 @@ impl PageLoader {
                                     LoadPriority::High,
                                     &result_sender_for_io,
                                     &high_decode_sender,
-                                    &low_decode_sender,
+                                    &low_thumb_decode_sender,
+                                    &low_full_decode_sender,
                                     &mut zip_cache,
+                                    &raw_cache,
                                 );
                             } else {
                                 high_disconnected = true;
@@ -215,8 +285,10 @@ impl PageLoader {
                                     LoadPriority::Low,
                                     &result_sender_for_io,
                                     &high_decode_sender,
-                                    &low_decode_sender,
+                                    &low_thumb_decode_sender,
+                                    &low_full_decode_sender,
                                     &mut zip_cache,
+                                    &raw_cache,
                                 );
                             } else {
                                 low_disconnected = true;
@@ -239,7 +311,8 @@ impl PageLoader {
         let mut decode_workers = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
             let high_decode_receiver = high_decode_receiver.clone();
-            let low_decode_receiver = low_decode_receiver.clone();
+            let low_thumb_decode_receiver = low_thumb_decode_receiver.clone();
+            let low_full_decode_receiver = low_full_decode_receiver.clone();
             let result_sender = result_sender.clone();
             let compress = compress.clone();
             decode_workers.push(thread::spawn(move || {
@@ -281,14 +354,22 @@ impl PageLoader {
                 }
 
                 let mut high_disconnected = false;
-                let mut low_disconnected = false;
+                let mut thumb_disconnected = false;
+                let mut full_disconnected = false;
                 loop {
-                    // Always drain pending high-priority jobs first.
+                    // Priority order: high (visible pages), low thumbnails,
+                    // then low full-image preloads.
                     while let Ok(job) = high_decode_receiver.try_recv() {
                         process_job(job, compress.load(Ordering::Relaxed), &result_sender);
                     }
+                    while let Ok(job) = low_thumb_decode_receiver.try_recv() {
+                        process_job(job, compress.load(Ordering::Relaxed), &result_sender);
+                    }
+                    while let Ok(job) = low_full_decode_receiver.try_recv() {
+                        process_job(job, compress.load(Ordering::Relaxed), &result_sender);
+                    }
 
-                    if high_disconnected && low_disconnected {
+                    if high_disconnected && thumb_disconnected && full_disconnected {
                         break;
                     }
 
@@ -298,17 +379,27 @@ impl PageLoader {
                                 process_job(job, compress.load(Ordering::Relaxed), &result_sender);
                             } else {
                                 high_disconnected = true;
-                                if low_disconnected {
+                                if thumb_disconnected && full_disconnected {
                                     break;
                                 }
                             }
                         }
-                        recv(low_decode_receiver) -> job => {
+                        recv(low_thumb_decode_receiver) -> job => {
                             if let Ok(job) = job {
                                 process_job(job, compress.load(Ordering::Relaxed), &result_sender);
                             } else {
-                                low_disconnected = true;
-                                if high_disconnected {
+                                thumb_disconnected = true;
+                                if high_disconnected && full_disconnected {
+                                    break;
+                                }
+                            }
+                        }
+                        recv(low_full_decode_receiver) -> job => {
+                            if let Ok(job) = job {
+                                process_job(job, compress.load(Ordering::Relaxed), &result_sender);
+                            } else {
+                                full_disconnected = true;
+                                if high_disconnected && thumb_disconnected {
                                     break;
                                 }
                             }
@@ -413,8 +504,10 @@ fn process_io_request(
     priority: LoadPriority,
     result_sender: &Sender<LoadResult>,
     high_decode_sender: &Sender<DecodeJob>,
-    low_decode_sender: &Sender<DecodeJob>,
+    low_thumb_decode_sender: &Sender<DecodeJob>,
+    low_full_decode_sender: &Sender<DecodeJob>,
     zip_cache: &mut ZipCache,
+    raw_cache: &SharedRawCache,
 ) {
     let priority_label = match priority {
         LoadPriority::High => "high",
@@ -474,7 +567,7 @@ fn process_io_request(
                 image: Err(e),
             }));
         }
-        _ => match read_page_bytes(&req.source, zip_cache) {
+        _ => match read_page_bytes(&req.source, zip_cache, raw_cache) {
             Ok((bytes, format_hint)) => {
                 let job = DecodeJob {
                     epoch: req.epoch,
@@ -483,9 +576,10 @@ fn process_io_request(
                     bytes,
                     format_hint,
                 };
-                let sender = match priority {
-                    LoadPriority::High => high_decode_sender,
-                    LoadPriority::Low => low_decode_sender,
+                let sender = match (priority, req.thumbnail) {
+                    (LoadPriority::High, _) => high_decode_sender,
+                    (LoadPriority::Low, true) => low_thumb_decode_sender,
+                    (LoadPriority::Low, false) => low_full_decode_sender,
                 };
                 if sender.try_send(job).is_err() {
                     timing::log(&format!(
@@ -525,9 +619,19 @@ fn process_io_request(
 
 fn read_zip_entry(
     zip_cache: &mut ZipCache,
+    raw_cache: &SharedRawCache,
     archive_path: &std::path::Path,
     index: usize,
 ) -> Result<Vec<u8>, String> {
+    if let Some(cached) = raw_cache.get(archive_path, index) {
+        timing::log(&format!(
+            "read_zip_entry index {} -> {} bytes (raw-cache hit)",
+            index,
+            cached.len()
+        ));
+        return Ok(cached.to_vec());
+    }
+
     let first_attempt = timing::time("read_zip_entry (cached)", || -> Result<Vec<u8>, String> {
         let archive = zip_cache.get_or_open(archive_path)?;
         let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
@@ -540,10 +644,11 @@ fn read_zip_entry(
     match first_attempt {
         Ok(bytes) => {
             timing::log(&format!(
-                "read_zip_entry index {} -> {} bytes",
+                "read_zip_entry index {} -> {} bytes (archive read)",
                 index,
                 bytes.len()
             ));
+            raw_cache.insert(archive_path, index, bytes.clone());
             Ok(bytes)
         }
         Err(_) => {
@@ -563,6 +668,7 @@ fn read_zip_entry(
                 index,
                 bytes.len()
             ));
+            raw_cache.insert(archive_path, index, bytes.clone());
             Ok(bytes)
         }
     }
@@ -571,6 +677,7 @@ fn read_zip_entry(
 fn read_page_bytes(
     source: &PageSource,
     zip_cache: &mut ZipCache,
+    raw_cache: &SharedRawCache,
 ) -> Result<(Vec<u8>, Option<String>), String> {
     match source {
         PageSource::PdfPage { .. } => Err("PDF should be rendered on IO thread".to_string()),
@@ -591,7 +698,7 @@ fn read_page_bytes(
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(|s| s.to_lowercase());
-            let bytes = read_zip_entry(zip_cache, archive, *index)?;
+            let bytes = read_zip_entry(zip_cache, raw_cache, archive, *index)?;
             Ok((bytes, hint))
         }
         PageSource::RarEntry { archive, name } => {
@@ -1308,10 +1415,12 @@ mod tests {
         img.save(&path).unwrap();
 
         let (result_sender, result_receiver) = unbounded();
-        // A zero-capacity decode queue guarantees try_send will fail.
+        // Zero-capacity decode queues guarantee try_send will fail.
         let (high_decode_sender, _high_decode_receiver) = bounded(0);
-        let (low_decode_sender, _low_decode_receiver) = bounded(0);
+        let (low_thumb_decode_sender, _low_thumb_decode_receiver) = bounded(0);
+        let (low_full_decode_sender, _low_full_decode_receiver) = bounded(0);
         let mut zip_cache = ZipCache::new();
+        let raw_cache = SharedRawCache::new(64 * 1024 * 1024);
 
         process_io_request(
             LoadRequest {
@@ -1323,8 +1432,10 @@ mod tests {
             LoadPriority::High,
             &result_sender,
             &high_decode_sender,
-            &low_decode_sender,
+            &low_thumb_decode_sender,
+            &low_full_decode_sender,
             &mut zip_cache,
+            &raw_cache,
         );
 
         let result = result_receiver

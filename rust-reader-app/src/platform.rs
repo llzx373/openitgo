@@ -14,7 +14,7 @@ pub mod macos {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
     use core_graphics::image::{CGImage, CGImageAlphaInfo};
     use core_graphics::sys;
-    use egui::ColorImage;
+    use egui::{Color32, ColorImage};
     use foreign_types::ForeignType;
     use std::os::raw::c_void;
 
@@ -29,6 +29,11 @@ pub mod macos {
             options: core_foundation::dictionary::CFDictionaryRef,
         ) -> CGImageSourceRef;
         fn CGImageSourceCreateImageAtIndex(
+            source: CGImageSourceRef,
+            index: usize,
+            options: core_foundation::dictionary::CFDictionaryRef,
+        ) -> sys::CGImageRef;
+        fn CGImageSourceCreateThumbnailAtIndex(
             source: CGImageSourceRef,
             index: usize,
             options: core_foundation::dictionary::CFDictionaryRef,
@@ -108,13 +113,22 @@ pub mod macos {
 
         render_into_buffer(cg_image, width, height, bytes_per_row, &mut pixel_data)?;
 
-        Ok(Some(dynamic_to_loaded_image(
-            image::DynamicImage::ImageRgba8(
-                image::RgbaImage::from_raw(width as u32, height as u32, pixel_data)
-                    .ok_or_else(|| "invalid RGBA buffer size".to_string())?,
-            ),
-            compress,
-        )?))
+        if compress {
+            // Keep the existing image-crate path so we can reuse the DXT5 compressor.
+            Ok(Some(dynamic_to_loaded_image(
+                image::DynamicImage::ImageRgba8(
+                    image::RgbaImage::from_raw(width as u32, height as u32, pixel_data)
+                        .ok_or_else(|| "invalid RGBA buffer size".to_string())?,
+                ),
+                compress,
+            )?))
+        } else {
+            Ok(Some(LoadedImage::Color(color_image_from_rgba(
+                width,
+                height,
+                &pixel_data,
+            ))))
+        }
     }
 
     unsafe fn decode_thumbnail(
@@ -123,35 +137,14 @@ pub mod macos {
     ) -> Result<Option<LoadedImage>, String> {
         let cf_data = CFData::from_buffer(bytes);
 
-        let max_size_key = CFString::from_static_string("kCGImageSourceThumbnailMaxPixelSize");
-        let create_with_transform_key =
-            CFString::from_static_string("kCGImageSourceCreateThumbnailWithTransform");
-        let should_cache_key = CFString::from_static_string("kCGImageSourceShouldCache");
-
-        let max_size = CFNumber::from(MAX_IMAGE_DIMENSION as i64);
-        let one = CFNumber::from(1i32);
-        let zero = CFNumber::from(0i32);
-
-        let options = CFDictionary::from_CFType_pairs(&[
-            (max_size_key, max_size),
-            (create_with_transform_key, one),
-            (should_cache_key, zero),
-        ]);
-
-        let source = CGImageSourceCreateWithData(
-            cf_data.as_concrete_TypeRef(),
-            options.as_concrete_TypeRef(),
-        );
+        let source = CGImageSourceCreateWithData(cf_data.as_concrete_TypeRef(), std::ptr::null());
         if source.is_null() {
             return Err("ImageIO could not create source for thumbnail".to_string());
         }
         let _source_guard = ImageSource(source);
 
-        let image_ref = CGImageSourceCreateImageAtIndex(source, 0, std::ptr::null());
-        if image_ref.is_null() {
-            return Err("ImageIO could not create thumbnail".to_string());
-        }
-        let cg_image = CGImage::from_ptr(image_ref);
+        let cg_image = create_thumbnail_image(source, MAX_IMAGE_DIMENSION as usize)
+            .ok_or_else(|| "ImageIO could not create thumbnail".to_string())?;
 
         let width = cg_image.width();
         let height = cg_image.height();
@@ -160,18 +153,26 @@ pub mod macos {
 
         render_into_buffer(&cg_image, width, height, bytes_per_row, &mut pixel_data)?;
 
-        Ok(Some(dynamic_to_loaded_image(
-            image::DynamicImage::ImageRgba8(
-                image::RgbaImage::from_raw(width as u32, height as u32, pixel_data)
-                    .ok_or_else(|| "invalid RGBA buffer size".to_string())?,
-            ),
-            compress,
-        )?))
+        if compress {
+            Ok(Some(dynamic_to_loaded_image(
+                image::DynamicImage::ImageRgba8(
+                    image::RgbaImage::from_raw(width as u32, height as u32, pixel_data)
+                        .ok_or_else(|| "invalid RGBA buffer size".to_string())?,
+                ),
+                compress,
+            )?))
+        } else {
+            Ok(Some(LoadedImage::Color(color_image_from_rgba(
+                width,
+                height,
+                &pixel_data,
+            ))))
+        }
     }
 
     /// Decode a small (256px on the long edge) thumbnail directly via ImageIO.
-    /// We read the full image source but draw it into a small bitmap context so
-    /// CoreGraphics does the downsample, avoiding a full-size RGBA allocation.
+    /// Uses `CGImageSourceCreateThumbnailAtIndex` so ImageIO itself can downsample
+    /// without decoding the full-resolution image first.
     pub fn decode_thumbnail_bytes(bytes: &[u8]) -> Result<Option<ColorImage>, String> {
         use crate::loader::THUMBNAIL_MAX_DIMENSION;
         timing::log("platform.macos: trying ImageIO thumbnail decode");
@@ -180,16 +181,43 @@ pub mod macos {
             let source = ImageSource::from_bytes(bytes)
                 .ok_or_else(|| "ImageIO could not create image source".to_string())?;
 
-            let image_ref = CGImageSourceCreateImageAtIndex(source.0, 0, std::ptr::null());
-            if image_ref.is_null() {
-                return Ok(None);
-            }
-            let cg_image = CGImage::from_ptr(image_ref);
+            let cg_image = create_thumbnail_image(source.0, THUMBNAIL_MAX_DIMENSION as usize)
+                .ok_or_else(|| "ImageIO could not create thumbnail".to_string())?;
+            let width = cg_image.width();
+            let height = cg_image.height();
+            let bytes_per_row = width * 4;
+            let mut pixel_data = vec![0u8; height * bytes_per_row];
+            render_into_buffer(&cg_image, width, height, bytes_per_row, &mut pixel_data)?;
+            timing::log(&format!(
+                "platform.macos: thumbnail decode done [{}x{}]",
+                width, height
+            ));
+            Ok(Some(color_image_from_rgba(width, height, &pixel_data)))
+        }
+    }
 
-            Ok(Some(render_thumbnail(
-                &cg_image,
-                THUMBNAIL_MAX_DIMENSION as usize,
-            )?))
+    unsafe fn create_thumbnail_image(source: CGImageSourceRef, max_dim: usize) -> Option<CGImage> {
+        let max_size_key = CFString::from_static_string("kCGImageSourceThumbnailMaxPixelSize");
+        let create_if_absent_key =
+            CFString::from_static_string("kCGImageSourceCreateThumbnailFromImageIfAbsent");
+        let should_cache_key = CFString::from_static_string("kCGImageSourceShouldCache");
+
+        let max_size = CFNumber::from(max_dim as i64);
+        let one = CFNumber::from(1i32);
+        let zero = CFNumber::from(0i32);
+
+        let options = CFDictionary::from_CFType_pairs(&[
+            (max_size_key, max_size),
+            (create_if_absent_key, one),
+            (should_cache_key, zero),
+        ]);
+
+        let image_ref =
+            CGImageSourceCreateThumbnailAtIndex(source, 0, options.as_concrete_TypeRef());
+        if image_ref.is_null() {
+            None
+        } else {
+            Some(CGImage::from_ptr(image_ref))
         }
     }
 
@@ -224,50 +252,20 @@ pub mod macos {
         Ok(())
     }
 
-    unsafe fn render_thumbnail(
-        cg_image: &CGImage,
-        max_dimension: usize,
-    ) -> Result<ColorImage, String> {
-        let src_w = cg_image.width();
-        let src_h = cg_image.height();
-        if src_w == 0 || src_h == 0 {
-            return Err("empty source image for thumbnail".to_string());
+    fn color_image_from_rgba(width: usize, height: usize, pixels: &[u8]) -> ColorImage {
+        let size = [width, height];
+        let expected = width * height * 4;
+        if pixels.len() != expected {
+            // Defensive: fall back to the crate helper, which validates dimensions.
+            return ColorImage::from_rgba_unmultiplied(size, pixels);
         }
-        let max = src_w.max(src_h);
-        let (dst_w, dst_h) = if max <= max_dimension {
-            (src_w, src_h)
-        } else {
-            let ratio = max_dimension as f64 / max as f64;
-            (
-                (src_w as f64 * ratio).round() as usize,
-                (src_h as f64 * ratio).round() as usize,
-            )
-        };
-        let bytes_per_row = dst_w * 4;
-        let mut pixel_data = vec![0u8; dst_h * bytes_per_row];
-
-        let color_space = CGColorSpace::create_device_rgb();
-        let bitmap_info = CGImageAlphaInfo::CGImageAlphaPremultipliedLast as u32;
-        let context = CGContext::create_bitmap_context(
-            Some(pixel_data.as_mut_ptr() as *mut c_void),
-            dst_w,
-            dst_h,
-            8,
-            bytes_per_row,
-            &color_space,
-            bitmap_info,
-        );
-
-        let rect = CGRect::new(
-            &CGPoint::new(0.0, 0.0),
-            &CGSize::new(dst_w as f64, dst_h as f64),
-        );
-        context.draw_image(rect, cg_image);
-        unpremultiply_rgba(&mut pixel_data);
-        Ok(ColorImage::from_rgba_unmultiplied(
-            [dst_w, dst_h],
-            &pixel_data,
-        ))
+        let mut out = Vec::with_capacity(width * height);
+        for chunk in pixels.chunks_exact(4) {
+            out.push(Color32::from_rgba_unmultiplied(
+                chunk[0], chunk[1], chunk[2], chunk[3],
+            ));
+        }
+        ColorImage { size, pixels: out }
     }
 
     fn unpremultiply_rgba(pixels: &mut [u8]) {
