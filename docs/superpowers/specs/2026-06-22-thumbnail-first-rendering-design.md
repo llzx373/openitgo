@@ -182,6 +182,37 @@ pub real_image_cache_pages: u32, // default 50
   - `request_full_image_window` only requests pages inside the configured
     window.
 
+## Code Cleanup
+
+The refactor is a good opportunity to remove duplicate and dead code that
+would otherwise need to be updated for the new thumbnail/full-image split.
+
+### Safe Removals
+
+| File | Item | Action |
+|---|---|---|
+| `rust-reader-app/src/widgets/page_view.rs` | entire module | Remove; `PageCache::get_texture` already handles decompress + upload. Remove its declaration from `widgets/mod.rs`. |
+| `rust-reader-app/src/loader.rs` | `PageLoader::request` | Remove; only `request_high` / `request_low` are used. |
+| `rust-reader-app/src/loader.rs` | `LoadPriority` visibility | Make private once `request` is gone. |
+| `rust-reader-app/src/loader.rs` | `CompressedFormat` enum + `LoadedImage::Compressed.format` | Remove; only `Dxt5Srgb` exists and the field is never read. Update `make_compressed` test helper. |
+| `rust-reader-app/src/cache.rs` | `PageCache::enforce_budget` | Remove; it duplicates `enforce_budget_with_protected(max, &[])`. Update the one test that uses it. |
+| `rust-reader-app/examples/diagnose_hang.rs` | entire example | Remove; it was a diagnostic artifact for the now-fixed rapid page-turn hang. |
+| `rust-reader-app/examples/rapid_flip.rs` | unused `PageSource` import | Remove. |
+
+### Consolidations
+
+| Files | Duplication | Action |
+|---|---|---|
+| `rust-reader-app/src/views/reader.rs` and `rust-reader-app/src/widgets/progress_bar.rs` | identical `page_at_x` helper | Export one copy from `widgets/progress_bar.rs` and reuse it in `reader.rs`. |
+| `rust-reader-app/src/views/reader.rs` | texture-size/fallback computed twice | Extract `texture_size_or_fallback(Option<&TextureHandle>) -> Vec2`. |
+
+### Optional / Bigger Cleanup (out of scope unless explicitly requested)
+
+- `rust-reader-storage/src/models.rs` `default_fit` and `theme` settings are
+  stored and exposed in the UI but not wired to behavior.
+- `rust-reader-core/src/layout.rs` is exposed but never imported by the app.
+- `rust-reader-app/examples/rapid_flip.rs` and `flip_through.rs` overlap heavily.
+
 ## Out of Scope
 
 - Persistent on-disk thumbnail cache.
@@ -189,3 +220,4 @@ pub real_image_cache_pages: u32, // default 50
 - Animated placeholder or progress indicator during thumbnail generation.
 - Displaying a distinct error overlay on top of a thumbnail when the full
   image fails.
+- Fully wiring or removing the unrelated `default_fit` / `theme` settings.
