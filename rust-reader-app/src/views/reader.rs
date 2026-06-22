@@ -1,6 +1,5 @@
 use crate::cache::PageCache;
-use crate::loader::{Epoch, PageLoader};
-use crate::widgets::page_view::{upload_image, TextureSlot};
+use crate::loader::PageLoader;
 use crate::widgets::progress_bar::{comic_progress_bar, ProgressBarResponse};
 use crate::widgets::thumbnail_progress_bar::page_thumbnail_tooltip;
 use rust_reader_core::models::{Comic, ReadingMode};
@@ -61,7 +60,7 @@ pub struct OpenReader {
     pub left_page: Option<usize>,
     pub right_page: Option<usize>,
     pub pending_fit: Option<QuickFit>,
-    pub current_epoch: Epoch,
+    pub current_epoch: u64,
     pub pending_pages: HashSet<usize>,
     pub page_errors: HashMap<usize, String>,
     pub cache: PageCache,
@@ -172,11 +171,14 @@ impl OpenReader {
         }
     }
 
-    fn spread_size(&mut self) -> Option<egui::Vec2> {
-        let left_size = self.cache.get(self.left_page?).map(|t| t.size())?;
+    fn spread_size(&mut self, ctx: &egui::Context) -> Option<egui::Vec2> {
+        let left_size = self
+            .cache
+            .get_texture(ctx, self.left_page?)
+            .map(|t| t.size())?;
         let right_size = self
             .cache
-            .get(self.right_page?)
+            .get_texture(ctx, self.right_page?)
             .map(|t| t.size())
             .unwrap_or([0, 0]);
         Some(egui::vec2(
@@ -185,11 +187,11 @@ impl OpenReader {
         ))
     }
 
-    fn apply_pending_fit(&mut self, available: egui::Vec2) {
+    fn apply_pending_fit(&mut self, ctx: &egui::Context, available: egui::Vec2) {
         let Some(fit) = self.pending_fit.take() else {
             return;
         };
-        let Some(spread_size) = self.spread_size() else {
+        let Some(spread_size) = self.spread_size(ctx) else {
             return;
         };
         if spread_size.x <= 0.0 || spread_size.y <= 0.0 {
@@ -229,14 +231,8 @@ impl OpenReader {
         v
     }
 
-    pub fn update(
-        &mut self,
-        ctx: &egui::Context,
-        frame: &mut eframe::Frame,
-        loader: &PageLoader,
-        cache_size_bytes: usize,
-        supports_dxt5: bool,
-    ) {
+    pub fn update(&mut self, ctx: &egui::Context, loader: &PageLoader, cache_size_bytes: usize) {
+        let _ = ctx;
         while let Some(result) = loader.try_recv() {
             if result.epoch != self.current_epoch {
                 continue;
@@ -244,17 +240,9 @@ impl OpenReader {
             self.pending_pages.remove(&result.page_index);
             match result.image {
                 Ok(image) => {
-                    let slot = upload_image(
-                        ctx,
-                        frame,
-                        &format!("page_{}", result.page_index),
-                        image,
-                        supports_dxt5,
-                    );
-                    let gl = frame.gl().map(|g| &**g);
                     let protected = self.protected_page_indices();
                     self.cache
-                        .insert(result.page_index, slot, cache_size_bytes, gl, &protected);
+                        .insert(result.page_index, image, cache_size_bytes, &protected);
                 }
                 Err(err) => {
                     eprintln!("failed to load page {}: {}", result.page_index, err);
@@ -269,12 +257,13 @@ impl ReaderView {
     /// Open a new comic, clearing any previous reader's cache first.
     pub fn open(
         &mut self,
-        gl: Option<&glow::Context>,
+        ctx: &egui::Context,
         comic: Comic,
         state: ReadingState,
         loader: &PageLoader,
     ) {
-        self.clear_cache(gl);
+        let _ = ctx;
+        self.clear_cache();
         let mut reader = OpenReader {
             comic,
             state,
@@ -291,40 +280,28 @@ impl ReaderView {
         self.open = Some(reader);
     }
 
-    /// Clear all cached textures (managed and native) to free GPU memory,
-    /// but keep the current reader open so the user can resume reading.
-    pub fn clear_cache(&mut self, gl: Option<&glow::Context>) {
+    /// Clear all cached images to free GPU memory, but keep the current reader
+    /// open so the user can resume reading.
+    pub fn clear_cache(&mut self) {
         if let Some(reader) = self.open.as_mut() {
-            reader.cache.clear(gl);
+            reader.cache.clear();
         }
     }
 
     /// Fully close the reader: clear cache and drop the open comic.
-    pub fn close(&mut self, gl: Option<&glow::Context>) {
-        self.clear_cache(gl);
+    pub fn close(&mut self) {
+        self.clear_cache();
         self.open = None;
     }
 
-    pub fn update(
-        &mut self,
-        ctx: &egui::Context,
-        frame: &mut eframe::Frame,
-        loader: &PageLoader,
-        cache_size_mb: usize,
-        supports_dxt5: bool,
-    ) {
+    pub fn update(&mut self, ctx: &egui::Context, loader: &PageLoader, cache_size_mb: usize) {
         let budget = cache_size_mb * 1024 * 1024;
         if let Some(reader) = &mut self.open {
-            reader.update(ctx, frame, loader, budget, supports_dxt5);
+            reader.update(ctx, loader, budget);
         }
     }
 
-    pub fn request_preloads(
-        &mut self,
-        _frame: &mut eframe::Frame,
-        loader: &PageLoader,
-        cache_size_mb: usize,
-    ) {
+    pub fn request_preloads(&mut self, loader: &PageLoader, cache_size_mb: usize) {
         let Some(reader) = self.open.as_mut() else {
             return;
         };
@@ -364,7 +341,12 @@ impl ReaderView {
     }
 
     /// Renders the current page or spread and returns the response covering the page area.
-    pub fn ui(&mut self, ui: &mut egui::Ui, loader: &PageLoader) -> Option<egui::Response> {
+    pub fn ui(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        loader: &PageLoader,
+    ) -> Option<egui::Response> {
         let Some(reader) = &mut self.open else {
             ui.label("未打开漫画");
             return None;
@@ -377,12 +359,12 @@ impl ReaderView {
         }
 
         if reader.page_animation.is_some() && reader.can_animate_turn() {
-            return self.render_page_turn_animation(ui, loader);
+            return self.render_page_turn_animation(ctx, ui, loader);
         }
 
         let (left_idx, right_idx) = reader.spread_pages();
-        let left_texture = left_idx.and_then(|idx| reader.cache.get(idx));
-        let right_texture = right_idx.and_then(|idx| reader.cache.get(idx));
+        let left_texture = left_idx.and_then(|idx| reader.cache.get_texture(ctx, idx));
+        let right_texture = right_idx.and_then(|idx| reader.cache.get_texture(ctx, idx));
         if reader.left_page != left_idx || reader.right_page != right_idx {
             reader.left_page = left_idx;
             reader.right_page = right_idx;
@@ -419,7 +401,7 @@ impl ReaderView {
         let any_loading = (left_idx.is_some() && left_texture.is_none())
             || (right_idx.is_some() && right_texture.is_none());
         if !any_loading {
-            reader.apply_pending_fit(available.size());
+            reader.apply_pending_fit(ctx, available.size());
         }
 
         let spread_size = egui::vec2(left_size.x + right_size.x, left_size.y.max(right_size.y));
@@ -488,6 +470,7 @@ impl ReaderView {
 
     fn render_page_turn_animation(
         &mut self,
+        ctx: &egui::Context,
         ui: &mut egui::Ui,
         loader: &PageLoader,
     ) -> Option<egui::Response> {
@@ -501,8 +484,8 @@ impl ReaderView {
         let from_idx = animation.from_page;
         let to_idx = animation.to_page;
 
-        let from_texture = reader.cache.get(from_idx);
-        let to_texture = reader.cache.get(to_idx);
+        let from_texture = reader.cache.get_texture(ctx, from_idx);
+        let to_texture = reader.cache.get_texture(ctx, to_idx);
         if from_texture.is_none() {
             request_page(loader, reader, from_idx);
         }
@@ -602,6 +585,7 @@ impl ReaderView {
 
     pub fn render_progress_thumbnail(
         &mut self,
+        ctx: &egui::Context,
         ui: &mut egui::Ui,
         hovered_page: Option<usize>,
     ) -> Option<egui::Response> {
@@ -610,6 +594,7 @@ impl ReaderView {
         let pointer_pos = ui.input(|i| i.pointer.hover_pos())?;
         Some(page_thumbnail_tooltip(
             ui,
+            ctx,
             &mut reader.cache,
             page_index,
             pointer_pos,
@@ -648,14 +633,15 @@ fn render_page_or_placeholder(
     loader: &PageLoader,
     rect: egui::Rect,
     page_index: usize,
-    texture: Option<&TextureSlot>,
+    texture: Option<&egui::TextureHandle>,
 ) -> egui::Response {
     if let Some(texture) = texture {
-        let mut image = egui::Image::new(texture.image_source()).fit_to_exact_size(rect.size());
-        if let Some(uv) = texture.uv_rect() {
-            image = image.uv(uv);
-        }
-        let response = ui.put(rect, image.sense(egui::Sense::click_and_drag()));
+        let response = ui.put(
+            rect,
+            egui::Image::new(texture)
+                .fit_to_exact_size(rect.size())
+                .sense(egui::Sense::click_and_drag()),
+        );
         if response.dragged() {
             let delta = response.drag_delta();
             reader.state.pan += Vec2::new(delta.x, delta.y);

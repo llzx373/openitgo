@@ -6,7 +6,6 @@ use crate::views::{
     reader::{QuickFit, ReaderView},
     settings::SettingsView,
 };
-use glow::HasContext;
 use rust_reader_core::models::ReadingMode;
 use rust_reader_core::state::ReadingState;
 use rust_reader_storage::{
@@ -58,21 +57,19 @@ impl Default for ReaderApp {
 }
 
 impl eframe::App for ReaderApp {
-    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.record_reader_history();
-        self.reader_view.close(gl);
+        self.reader_view.close();
         let _ = self.store.save_settings(&self.settings);
         let _ = self.store.save_library(&self.library_view.library);
         let _ = self.store.save_history(&self.history);
         let _ = self.store.save_bookmarks(&self.bookmarks);
     }
 
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        let gl = frame.gl().map(|g| &**g);
-
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if matches!(self.last_view, View::Reader) && !matches!(self.current_view, View::Reader) {
             self.record_reader_history();
-            self.reader_view.clear_cache(gl);
+            self.reader_view.clear_cache();
         }
         self.last_view = self.current_view.clone();
 
@@ -84,21 +81,13 @@ impl eframe::App for ReaderApp {
             }
         }
         self.handle_dropped_files(ctx);
-        self.poll_opener(gl);
-
-        let supports_dxt5 = frame
-            .gl()
-            .map(|gl| {
-                gl.supported_extensions()
-                    .contains("GL_EXT_texture_compression_s3tc")
-            })
-            .unwrap_or(false);
+        self.poll_opener(ctx);
 
         let cache_size_mb = self.settings.cache_size_mb as usize;
         self.reader_view
-            .update(ctx, frame, &self.page_loader, cache_size_mb, supports_dxt5);
+            .update(ctx, &self.page_loader, cache_size_mb);
         self.reader_view
-            .request_preloads(frame, &self.page_loader, cache_size_mb);
+            .request_preloads(&self.page_loader, cache_size_mb);
 
         match self.current_view.clone() {
             View::Library => self.render_library(ctx),
@@ -127,7 +116,7 @@ impl ReaderApp {
         Self::default()
     }
 
-    fn poll_opener(&mut self, gl: Option<&glow::Context>) {
+    fn poll_opener(&mut self, ctx: &egui::Context) {
         let Some(mut opener) = self.opener.take() else {
             return;
         };
@@ -143,7 +132,7 @@ impl ReaderApp {
                     if let Some(h) = self.history.entries.iter().find(|h| h.comic_id == comic.id) {
                         state.go_to_page(h.page_index, total);
                     }
-                    self.reader_view.open(gl, comic, state, &self.page_loader);
+                    self.reader_view.open(ctx, comic, state, &self.page_loader);
                     self.current_view = View::Reader;
                     self.error_message = None;
                 }
@@ -249,11 +238,12 @@ impl ReaderApp {
         let frame = egui::Frame::central_panel(&ctx.style())
             .fill(egui::Color32::from_rgb(bg[0], bg[1], bg[2]));
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
-            let response = self.reader_view.ui(ui, &self.page_loader);
+            let response = self.reader_view.ui(ctx, ui, &self.page_loader);
 
             // Floating thumbnail tooltip above the cursor when hovering the progress bar.
             if progress_bar_rect.is_some() {
-                self.reader_view.render_progress_thumbnail(ui, hovered_page);
+                self.reader_view
+                    .render_progress_thumbnail(ctx, ui, hovered_page);
             }
 
             // Right-click context menu on the page area.
@@ -847,8 +837,9 @@ mod tests {
     fn test_record_reader_history_creates_entry() {
         let (mut app, _tmp) = app_with_temp_store();
         let comic = dummy_comic();
+        let ctx = egui::Context::default();
         app.reader_view.open(
-            None,
+            &ctx,
             comic.clone(),
             ReadingState::new(ReadingMode::Ltr, 10),
             &PageLoader::default(),
@@ -885,8 +876,9 @@ mod tests {
         });
 
         app.open_comic(tmp_dir.path().to_path_buf());
+        let ctx = egui::Context::default();
         for _ in 0..100 {
-            app.poll_opener(None);
+            app.poll_opener(&ctx);
             if app.current_view == View::Reader {
                 break;
             }
@@ -914,8 +906,9 @@ mod tests {
         }
 
         app1.open_comic(comic_dir.clone());
+        let ctx = egui::Context::default();
         for _ in 0..100 {
-            app1.poll_opener(None);
+            app1.poll_opener(&ctx);
             if app1.current_view == View::Reader {
                 break;
             }
@@ -929,7 +922,7 @@ mod tests {
         let mut app2 = ReaderApp::with_store_dir(store_tmp.path());
         app2.open_comic(comic_dir);
         for _ in 0..100 {
-            app2.poll_opener(None);
+            app2.poll_opener(&ctx);
             if app2.current_view == View::Reader {
                 break;
             }

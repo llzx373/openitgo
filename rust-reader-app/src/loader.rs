@@ -54,15 +54,45 @@ pub enum CompressedFormat {
     Dxt5Srgb,
 }
 
+#[derive(Debug, Clone)]
 pub enum LoadedImage {
     Compressed {
         data: Vec<u8>,
-        rgba: ColorImage,
         original_size: [u32; 2],
         gpu_size: [u32; 2],
+        #[allow(dead_code)]
         format: CompressedFormat,
     },
     Color(ColorImage),
+}
+
+impl LoadedImage {
+    #[allow(dead_code)]
+    pub fn original_size(&self) -> [u32; 2] {
+        match self {
+            LoadedImage::Compressed { original_size, .. } => *original_size,
+            LoadedImage::Color(img) => [img.size[0] as u32, img.size[1] as u32],
+        }
+    }
+
+    pub fn size_bytes(&self) -> usize {
+        match self {
+            LoadedImage::Compressed { data, .. } => data.len(),
+            LoadedImage::Color(img) => img.size[0] * img.size[1] * 4,
+        }
+    }
+
+    pub fn to_color_image(&self) -> Result<ColorImage, String> {
+        match self {
+            LoadedImage::Compressed {
+                data,
+                original_size,
+                gpu_size,
+                ..
+            } => decompress_dxt5(data, *original_size, *gpu_size),
+            LoadedImage::Color(img) => Ok(img.clone()),
+        }
+    }
 }
 
 pub struct LoadResult {
@@ -330,11 +360,6 @@ fn compress_dxt5(image: image::DynamicImage) -> Result<LoadedImage, String> {
     let rgba = image.to_rgba8();
     let (gpu_w, gpu_h) = dxt5_padded_size(original_w, original_h);
 
-    let color_image = ColorImage::from_rgba_unmultiplied(
-        [original_w as usize, original_h as usize],
-        rgba.as_raw(),
-    );
-
     let pixels = if original_w == gpu_w && original_h == gpu_h {
         rgba.into_raw()
     } else {
@@ -357,7 +382,6 @@ fn compress_dxt5(image: image::DynamicImage) -> Result<LoadedImage, String> {
 
     Ok(LoadedImage::Compressed {
         data: output,
-        rgba: color_image,
         original_size: [original_w, original_h],
         gpu_size: [gpu_w, gpu_h],
         format: CompressedFormat::Dxt5Srgb,
@@ -366,6 +390,56 @@ fn compress_dxt5(image: image::DynamicImage) -> Result<LoadedImage, String> {
 
 pub fn dxt5_padded_size(width: u32, height: u32) -> (u32, u32) {
     (width.div_ceil(4) * 4, height.div_ceil(4) * 4)
+}
+
+pub fn decompress_dxt5(
+    data: &[u8],
+    original_size: [u32; 2],
+    gpu_size: [u32; 2],
+) -> Result<ColorImage, String> {
+    let [gpu_w, gpu_h] = gpu_size;
+    let blocks_x = gpu_w / 4;
+    let blocks_y = gpu_h / 4;
+    let expected = (blocks_x * blocks_y * 16) as usize;
+    if data.len() != expected {
+        return Err(format!(
+            "DXT5 data size mismatch: {} != {}",
+            data.len(),
+            expected
+        ));
+    }
+
+    let mut rgba = vec![0u8; (gpu_w * gpu_h * 4) as usize];
+    let pitch = gpu_w as usize * 4;
+
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let block_idx = ((by * blocks_x + bx) * 16) as usize;
+            let src = &data[block_idx..block_idx + 16];
+            let base = (by * 4) as usize * pitch + (bx * 4) as usize * 4;
+            bcdec_rs::bc3(src, &mut rgba[base..], pitch);
+        }
+    }
+
+    let [orig_w, orig_h] = original_size;
+    if orig_w == gpu_w && orig_h == gpu_h {
+        Ok(ColorImage::from_rgba_unmultiplied(
+            [gpu_w as usize, gpu_h as usize],
+            &rgba,
+        ))
+    } else {
+        let mut cropped = vec![0u8; (orig_w * orig_h * 4) as usize];
+        for y in 0..orig_h {
+            let src_start = (y * gpu_w * 4) as usize;
+            let dst_start = (y * orig_w * 4) as usize;
+            cropped[dst_start..dst_start + (orig_w * 4) as usize]
+                .copy_from_slice(&rgba[src_start..src_start + (orig_w * 4) as usize]);
+        }
+        Ok(ColorImage::from_rgba_unmultiplied(
+            [orig_w as usize, orig_h as usize],
+            &cropped,
+        ))
+    }
 }
 
 fn pad_rgba(src: &image::RgbaImage, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<u8> {
@@ -676,5 +750,22 @@ mod tests {
             }
             LoadedImage::Color(_) => panic!("expected compressed image"),
         }
+    }
+
+    #[test]
+    fn test_dxt5_roundtrip() {
+        let original = image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 128, 64, 255]));
+        let loaded = compress_dxt5(image::DynamicImage::ImageRgba8(original.clone()))
+            .expect("compression should succeed");
+        let color = loaded
+            .to_color_image()
+            .expect("decompression should succeed");
+        assert_eq!(color.size, [8, 8]);
+        // DXT5 is lossy; verify the pixel is close to the original.
+        let pixel = color.pixels[0];
+        assert_eq!(pixel.r(), 255);
+        assert!((128i32 - pixel.g() as i32).abs() <= 2);
+        assert!((64i32 - pixel.b() as i32).abs() <= 2);
+        assert_eq!(pixel.a(), 255);
     }
 }

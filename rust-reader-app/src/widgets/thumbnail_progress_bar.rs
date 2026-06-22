@@ -1,9 +1,11 @@
 use crate::cache::PageCache;
+use egui::Context;
 
 const THUMB_SIZE: egui::Vec2 = egui::Vec2::new(80.0, 120.0);
 
 pub fn page_thumbnail_tooltip(
     ui: &mut egui::Ui,
+    ctx: &Context,
     cache: &mut PageCache,
     page_index: usize,
     tooltip_pos: egui::Pos2,
@@ -16,12 +18,11 @@ pub fn page_thumbnail_tooltip(
     ui.painter()
         .rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
 
-    if let Some(texture) = cache.get(page_index) {
-        let mut image = egui::Image::new(texture.image_source()).fit_to_exact_size(rect.size());
-        if let Some(uv) = texture.uv_rect() {
-            image = image.uv(uv);
-        }
-        ui.put(rect, image);
+    if let Some(handle) = cache.get_texture(ctx, page_index) {
+        ui.put(
+            rect,
+            egui::Image::new(&handle).fit_to_exact_size(rect.size()),
+        );
     } else {
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
             ui.with_layout(

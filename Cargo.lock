@@ -587,6 +587,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bcdec_rs"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f09c37bc0e9f0924b7dae9988265ef3c76c88538f41a3b06caf4bed07cee5226"
+
+[[package]]
 name = "bit-set"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3781,10 +3787,10 @@ checksum = "3582f63211428f83597b51b2ddb88e2a91a9d52d12831f9d08f5e624e8977422"
 name = "rust-reader-app"
 version = "0.1.0"
 dependencies = [
+ "bcdec_rs",
  "crossbeam-channel",
  "eframe",
  "egui",
- "glow 0.14.2",
  "image",
  "pdf-render",
  "rfd",

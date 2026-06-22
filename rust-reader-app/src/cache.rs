@@ -1,11 +1,11 @@
-use crate::widgets::page_view::TextureSlot;
-use glow::HasContext;
+use crate::loader::LoadedImage;
+use egui::{Context, TextureHandle};
 use std::collections::HashMap;
-use std::num::NonZeroU32;
 use std::time::Instant;
 
 struct CacheEntry {
-    slot: TextureSlot,
+    image: LoadedImage,
+    handle: Option<TextureHandle>,
     last_accessed: Instant,
     size_bytes: usize,
 }
@@ -27,41 +27,43 @@ impl PageCache {
         self.total_size_bytes
     }
 
-    /// Returns a clone of the cached slot. For native textures the returned
-    /// `TextureId` must not be used after the page is evicted from the cache.
-    pub fn get(&mut self, page_index: usize) -> Option<TextureSlot> {
+    pub fn contains(&self, page_index: usize) -> bool {
+        self.textures.contains_key(&page_index)
+    }
+
+    pub fn get_texture(&mut self, ctx: &Context, page_index: usize) -> Option<TextureHandle> {
         let entry = self.textures.get_mut(&page_index)?;
         entry.last_accessed = Instant::now();
-        Some(entry.slot.clone())
+        if entry.handle.is_none() {
+            let label = format!("page_{}", page_index);
+            let color = entry.image.to_color_image().ok()?;
+            entry.handle = Some(ctx.load_texture(&label, color, egui::TextureOptions::LINEAR));
+        }
+        entry.handle.clone()
     }
 
     pub fn insert(
         &mut self,
         page_index: usize,
-        slot: TextureSlot,
+        image: LoadedImage,
         max_size_bytes: usize,
-        gl: Option<&glow::Context>,
         protected: &[usize],
     ) {
-        let new_size = slot_size_bytes(&slot);
+        let new_size = image.size_bytes();
 
         if let Some(old) = self.textures.remove(&page_index) {
             self.total_size_bytes -= old.size_bytes;
-            delete_native_texture(gl, old.slot);
         }
 
         if new_size > max_size_bytes {
-            // Evict everything we are allowed to, then allow this single item to overshoot.
             while self.total_size_bytes > 0 {
-                if !self.evict_lru_excluding(gl, protected) {
+                if !self.evict_lru_excluding(protected) {
                     break;
                 }
             }
         } else {
             while self.total_size_bytes + new_size > max_size_bytes {
-                if !self.evict_lru_excluding(gl, protected) {
-                    // All remaining entries are protected; allow going over budget
-                    // rather than hanging.
+                if !self.evict_lru_excluding(protected) {
                     break;
                 }
             }
@@ -71,54 +73,43 @@ impl PageCache {
         self.textures.insert(
             page_index,
             CacheEntry {
-                slot,
+                image,
+                handle: None,
                 last_accessed: Instant::now(),
                 size_bytes: new_size,
             },
         );
     }
 
-    pub fn contains(&self, page_index: usize) -> bool {
-        self.textures.contains_key(&page_index)
-    }
-
-    /// Kept for tests; prefer [`Self::enforce_budget_with_protected`] in production.
-    #[allow(dead_code)]
-    pub fn enforce_budget(&mut self, max_size_bytes: usize, gl: Option<&glow::Context>) {
-        self.enforce_budget_with_protected(max_size_bytes, gl, &[]);
-    }
-
-    pub fn enforce_budget_with_protected(
-        &mut self,
-        max_size_bytes: usize,
-        gl: Option<&glow::Context>,
-        protected: &[usize],
-    ) {
+    pub fn enforce_budget_with_protected(&mut self, max_size_bytes: usize, protected: &[usize]) {
         while self.total_size_bytes > max_size_bytes {
-            if !self.evict_lru_excluding(gl, protected) {
+            if !self.evict_lru_excluding(protected) {
                 break;
             }
         }
     }
 
-    pub fn clear(&mut self, gl: Option<&glow::Context>) {
-        for (_, entry) in self.textures.drain() {
-            delete_native_texture(gl, entry.slot);
-            self.total_size_bytes -= entry.size_bytes;
-        }
+    /// Kept for tests; prefer [`Self::enforce_budget_with_protected`] in production.
+    #[allow(dead_code)]
+    pub fn enforce_budget(&mut self, max_size_bytes: usize) {
+        self.enforce_budget_with_protected(max_size_bytes, &[]);
     }
 
-    fn evict_lru_excluding(&mut self, gl: Option<&glow::Context>, protected: &[usize]) -> bool {
+    pub fn clear(&mut self) {
+        self.textures.clear();
+        self.total_size_bytes = 0;
+    }
+
+    fn evict_lru_excluding(&mut self, protected: &[usize]) -> bool {
         let lru_key = self
             .textures
             .iter()
-            .filter(|(&key, _)| !protected.contains(&key))
+            .filter(|(k, _)| !protected.contains(k))
             .min_by(|(_, a), (_, b)| a.last_accessed.cmp(&b.last_accessed))
             .map(|(&key, _)| key);
 
         if let Some(key) = lru_key {
             if let Some(entry) = self.textures.remove(&key) {
-                delete_native_texture(gl, entry.slot);
                 self.total_size_bytes -= entry.size_bytes;
             }
             true
@@ -134,39 +125,24 @@ impl Default for PageCache {
     }
 }
 
-fn delete_native_texture(gl: Option<&glow::Context>, slot: TextureSlot) {
-    if let TextureSlot::Native(id, _) = slot {
-        if let Some(gl) = gl {
-            if let egui::TextureId::User(native) = id {
-                if let Some(non_zero) = NonZeroU32::new(native as u32) {
-                    unsafe { gl.delete_texture(glow::NativeTexture(non_zero)) };
-                }
-            }
-        }
-    }
-}
-
-fn slot_size_bytes(slot: &TextureSlot) -> usize {
-    match slot {
-        TextureSlot::Managed(handle) => {
-            let size = handle.size();
-            size[0] * size[1] * 4
-        }
-        TextureSlot::Native(_, original_size) => {
-            let gpu_w = original_size[0].div_ceil(4) * 4;
-            let gpu_h = original_size[1].div_ceil(4) * 4;
-            (gpu_w * gpu_h) as usize
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::ColorImage;
 
-    fn make_texture(ctx: &egui::Context, name: &str, width: usize, height: usize) -> TextureSlot {
-        let image = egui::ColorImage::new([width, height], egui::Color32::WHITE);
-        TextureSlot::Managed(ctx.load_texture(name, image, Default::default()))
+    fn make_image(width: usize, height: usize) -> LoadedImage {
+        LoadedImage::Color(ColorImage::new([width, height], egui::Color32::WHITE))
+    }
+
+    fn make_compressed(width: u32, height: u32) -> LoadedImage {
+        let (gpu_w, gpu_h) = crate::loader::dxt5_padded_size(width, height);
+        let block_count = (gpu_w / 4) * (gpu_h / 4);
+        LoadedImage::Compressed {
+            data: vec![0u8; (block_count * 16) as usize],
+            original_size: [width, height],
+            gpu_size: [gpu_w, gpu_h],
+            format: crate::loader::CompressedFormat::Dxt5Srgb,
+        }
     }
 
     #[test]
@@ -175,12 +151,14 @@ mod tests {
         let mut cache = PageCache::new();
         assert!(!cache.contains(0));
 
-        let handle = make_texture(&ctx, "page_0", 2, 2);
-        cache.insert(0, handle.clone(), 1024, None, &[]);
+        let image = make_image(2, 2);
+        cache.insert(0, image, 1024, &[]);
 
         assert!(cache.contains(0));
-        let retrieved = cache.get(0).expect("texture should be in cache");
-        assert_eq!(retrieved.size(), handle.size());
+        let handle = cache
+            .get_texture(&ctx, 0)
+            .expect("texture should be in cache");
+        assert_eq!(handle.size(), [2, 2]);
     }
 
     #[test]
@@ -190,22 +168,22 @@ mod tests {
         // 2x2 RGBA8 = 16 bytes each.
         let budget = 32;
 
-        let h0 = make_texture(&ctx, "page_0", 2, 2);
-        let h1 = make_texture(&ctx, "page_1", 2, 2);
-        let h2 = make_texture(&ctx, "page_2", 2, 2);
-
-        cache.insert(0, h0, budget, None, &[]);
-        cache.insert(1, h1, budget, None, &[]);
+        cache.insert(0, make_image(2, 2), budget, &[]);
+        cache.insert(1, make_image(2, 2), budget, &[]);
         assert_eq!(cache.total_size_bytes(), 32);
         assert!(cache.contains(0));
         assert!(cache.contains(1));
 
         // Inserting a third page should evict the least-recently-used page (page 0).
-        cache.insert(2, h2, budget, None, &[]);
+        cache.insert(2, make_image(2, 2), budget, &[]);
         assert_eq!(cache.total_size_bytes(), 32);
         assert!(!cache.contains(0));
         assert!(cache.contains(1));
         assert!(cache.contains(2));
+
+        // A texture is uploaded lazily, so budget tests don't depend on egui.
+        assert!(cache.get_texture(&ctx, 1).is_some());
+        assert!(cache.get_texture(&ctx, 2).is_some());
     }
 
     #[test]
@@ -214,17 +192,13 @@ mod tests {
         let mut cache = PageCache::new();
         let budget = 32;
 
-        let h0 = make_texture(&ctx, "page_0", 2, 2);
-        let h1 = make_texture(&ctx, "page_1", 2, 2);
-        let h2 = make_texture(&ctx, "page_2", 2, 2);
-
-        cache.insert(0, h0, budget, None, &[]);
-        cache.insert(1, h1, budget, None, &[]);
+        cache.insert(0, make_image(2, 2), budget, &[]);
+        cache.insert(1, make_image(2, 2), budget, &[]);
 
         // Touch page 0 so page 1 becomes the LRU entry.
-        let _ = cache.get(0);
+        let _ = cache.get_texture(&ctx, 0);
 
-        cache.insert(2, h2, budget, None, &[]);
+        cache.insert(2, make_image(2, 2), budget, &[]);
         assert!(cache.contains(0));
         assert!(!cache.contains(1));
         assert!(cache.contains(2));
@@ -236,16 +210,17 @@ mod tests {
         let mut cache = PageCache::new();
         let budget = 8;
 
-        let h0 = make_texture(&ctx, "page_0", 2, 2); // 16 bytes, exceeds budget
-        cache.insert(0, h0, budget, None, &[]);
+        cache.insert(0, make_image(2, 2), budget, &[]); // 16 bytes, exceeds budget
 
         assert!(cache.contains(0));
         assert_eq!(cache.total_size_bytes(), 16);
 
         // Enforcing the budget will evict the oversized texture because it is the only entry.
-        cache.enforce_budget(budget, None);
+        cache.enforce_budget(budget);
         assert!(!cache.contains(0));
         assert_eq!(cache.total_size_bytes(), 0);
+
+        assert!(cache.get_texture(&ctx, 0).is_none());
     }
 
     #[test]
@@ -254,23 +229,17 @@ mod tests {
         let mut cache = PageCache::new();
         let budget = 32;
 
-        let h0 = make_texture(&ctx, "page_0", 2, 2);
-        let h1 = make_texture(&ctx, "page_1", 2, 2);
-        let h2 = make_texture(&ctx, "page_2", 2, 2);
-
-        cache.insert(0, h0, budget, None, &[]);
-        cache.insert(1, h1, budget, None, &[]);
+        cache.insert(0, make_image(2, 2), budget, &[]);
+        cache.insert(1, make_image(2, 2), budget, &[]);
 
         // Insert page 2 while protecting page 0. Page 1 is the only evictable entry.
-        cache.insert(2, h2, budget, None, &[0]);
+        cache.insert(2, make_image(2, 2), budget, &[0]);
         assert!(cache.contains(0));
         assert!(!cache.contains(1));
         assert!(cache.contains(2));
 
-        // Enforcing budget while protecting both remaining pages should not evict them.
-        cache.enforce_budget_with_protected(budget, None, &[0, 2]);
-        assert!(cache.contains(0));
-        assert!(cache.contains(2));
+        assert!(cache.get_texture(&ctx, 0).is_some());
+        assert!(cache.get_texture(&ctx, 2).is_some());
     }
 
     #[test]
@@ -280,31 +249,30 @@ mod tests {
         // 2x2 RGBA8 = 16 bytes each; budget can only hold one.
         let budget = 16;
 
-        let h0 = make_texture(&ctx, "page_0", 2, 2);
-        let h1 = make_texture(&ctx, "page_1", 2, 2);
-
-        cache.insert(0, h0, budget, None, &[]);
+        cache.insert(0, make_image(2, 2), budget, &[]);
         // Insert page 1 while page 0 is protected. Since page 0 cannot be
         // evicted, the budget must be exceeded rather than looping forever.
-        cache.insert(1, h1, budget, None, &[0]);
+        cache.insert(1, make_image(2, 2), budget, &[0]);
 
         assert!(cache.contains(0));
         assert!(cache.contains(1));
         assert!(cache.total_size_bytes() > budget);
+
+        assert!(cache.get_texture(&ctx, 0).is_some());
+        assert!(cache.get_texture(&ctx, 1).is_some());
     }
 
     #[test]
     fn test_slot_size_bytes_managed() {
-        let ctx = egui::Context::default();
-        let slot = make_texture(&ctx, "size_test", 3, 5);
-        // Managed RGBA8 size = width * height * 4.
-        assert_eq!(slot_size_bytes(&slot), 3 * 5 * 4);
+        let image = make_image(3, 5);
+        assert_eq!(image.size_bytes(), 3 * 5 * 4);
     }
 
     #[test]
-    fn test_slot_size_bytes_native() {
-        let slot = TextureSlot::Native(egui::TextureId::User(1), [5, 7]);
-        let (gpu_w, gpu_h) = (8, 8);
-        assert_eq!(slot_size_bytes(&slot), (gpu_w * gpu_h) as usize);
+    fn test_slot_size_bytes_compressed() {
+        let image = make_compressed(5, 7);
+        let (gpu_w, gpu_h) = crate::loader::dxt5_padded_size(5, 7);
+        let block_count = (gpu_w / 4) * (gpu_h / 4);
+        assert_eq!(image.size_bytes(), (block_count * 16) as usize);
     }
 }
