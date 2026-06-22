@@ -108,7 +108,7 @@ impl PageCache {
                 image.to_color_image().ok()
             })?;
             let handle = ctx.load_texture(
-                &format!("page_{}", page_index),
+                format!("page_{}", page_index),
                 color,
                 egui::TextureOptions::LINEAR,
             );
@@ -123,7 +123,7 @@ impl PageCache {
             timing::log(&format!("cache upload thumbnail page {}", page_index));
             let color = timing::time("cache thumbnail upload", || image.to_color_image().ok())?;
             let handle = ctx.load_texture(
-                &format!("page_{}_thumb", page_index),
+                format!("page_{}_thumb", page_index),
                 color,
                 egui::TextureOptions::LINEAR,
             );

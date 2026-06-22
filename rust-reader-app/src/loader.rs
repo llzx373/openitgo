@@ -499,6 +499,7 @@ impl PageLoader {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_io_request(
     req: LoadRequest,
     priority: LoadPriority,

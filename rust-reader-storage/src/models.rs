@@ -165,9 +165,11 @@ mod tests {
 
     #[test]
     fn test_settings_roundtrip_with_background_color() {
-        let mut s = Settings::default();
-        s.background_color = [12, 34, 56];
-        s.library_sort = LibrarySort::Title;
+        let s = Settings {
+            background_color: [12, 34, 56],
+            library_sort: LibrarySort::Title,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&s).unwrap();
         let loaded: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(s, loaded);

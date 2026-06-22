@@ -320,9 +320,11 @@ mod tests {
 
     #[test]
     fn test_find_by_id_returns_entry_when_present() {
-        let mut view = LibraryView::default();
-        view.library = sample_library();
-        view.mode = LibraryMode::Library;
+        let view = LibraryView {
+            library: sample_library(),
+            mode: LibraryMode::Library,
+            ..Default::default()
+        };
         assert!(view.find_by_id("comic-1").is_some());
         assert!(view.find_by_id("missing").is_none());
     }
@@ -341,26 +343,28 @@ mod tests {
 
     #[test]
     fn test_search_filters_by_title_case_insensitive() {
-        let mut view = LibraryView::default();
-        view.library = Library {
-            entries: vec![
-                LibraryEntry {
-                    comic_id: "a".to_string(),
-                    title: "Alpha Comic".to_string(),
-                    path: PathBuf::from("/a"),
-                    cover_path: None,
-                    added_at: 1,
-                },
-                LibraryEntry {
-                    comic_id: "b".to_string(),
-                    title: "Beta Comic".to_string(),
-                    path: PathBuf::from("/b"),
-                    cover_path: None,
-                    added_at: 2,
-                },
-            ],
+        let view = LibraryView {
+            library: Library {
+                entries: vec![
+                    LibraryEntry {
+                        comic_id: "a".to_string(),
+                        title: "Alpha Comic".to_string(),
+                        path: PathBuf::from("/a"),
+                        cover_path: None,
+                        added_at: 1,
+                    },
+                    LibraryEntry {
+                        comic_id: "b".to_string(),
+                        title: "Beta Comic".to_string(),
+                        path: PathBuf::from("/b"),
+                        cover_path: None,
+                        added_at: 2,
+                    },
+                ],
+            },
+            search_query: "alpha".to_string(),
+            ..Default::default()
         };
-        view.search_query = "alpha".to_string();
         let filtered = view.filtered_entries(&History::default(), LibrarySort::Title);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].1.title, "Alpha Comic");
@@ -368,24 +372,26 @@ mod tests {
 
     #[test]
     fn test_sort_by_title() {
-        let mut view = LibraryView::default();
-        view.library = Library {
-            entries: vec![
-                LibraryEntry {
-                    comic_id: "b".to_string(),
-                    title: "Beta".to_string(),
-                    path: PathBuf::from("/b"),
-                    cover_path: None,
-                    added_at: 0,
-                },
-                LibraryEntry {
-                    comic_id: "a".to_string(),
-                    title: "Alpha".to_string(),
-                    path: PathBuf::from("/a"),
-                    cover_path: None,
-                    added_at: 0,
-                },
-            ],
+        let view = LibraryView {
+            library: Library {
+                entries: vec![
+                    LibraryEntry {
+                        comic_id: "b".to_string(),
+                        title: "Beta".to_string(),
+                        path: PathBuf::from("/b"),
+                        cover_path: None,
+                        added_at: 0,
+                    },
+                    LibraryEntry {
+                        comic_id: "a".to_string(),
+                        title: "Alpha".to_string(),
+                        path: PathBuf::from("/a"),
+                        cover_path: None,
+                        added_at: 0,
+                    },
+                ],
+            },
+            ..Default::default()
         };
         let sorted = view.filtered_entries(&History::default(), LibrarySort::Title);
         assert_eq!(sorted[0].1.title, "Alpha");
@@ -394,24 +400,26 @@ mod tests {
 
     #[test]
     fn test_sort_by_added_time() {
-        let mut view = LibraryView::default();
-        view.library = Library {
-            entries: vec![
-                LibraryEntry {
-                    comic_id: "old".to_string(),
-                    title: "Old".to_string(),
-                    path: PathBuf::from("/old"),
-                    cover_path: None,
-                    added_at: 100,
-                },
-                LibraryEntry {
-                    comic_id: "new".to_string(),
-                    title: "New".to_string(),
-                    path: PathBuf::from("/new"),
-                    cover_path: None,
-                    added_at: 200,
-                },
-            ],
+        let view = LibraryView {
+            library: Library {
+                entries: vec![
+                    LibraryEntry {
+                        comic_id: "old".to_string(),
+                        title: "Old".to_string(),
+                        path: PathBuf::from("/old"),
+                        cover_path: None,
+                        added_at: 100,
+                    },
+                    LibraryEntry {
+                        comic_id: "new".to_string(),
+                        title: "New".to_string(),
+                        path: PathBuf::from("/new"),
+                        cover_path: None,
+                        added_at: 200,
+                    },
+                ],
+            },
+            ..Default::default()
         };
         let sorted = view.filtered_entries(&History::default(), LibrarySort::Added);
         assert_eq!(sorted[0].1.title, "New");
@@ -420,24 +428,26 @@ mod tests {
 
     #[test]
     fn test_sort_by_last_read_uses_history() {
-        let mut view = LibraryView::default();
-        view.library = Library {
-            entries: vec![
-                LibraryEntry {
-                    comic_id: "recent".to_string(),
-                    title: "Recent".to_string(),
-                    path: PathBuf::from("/recent"),
-                    cover_path: None,
-                    added_at: 0,
-                },
-                LibraryEntry {
-                    comic_id: "old".to_string(),
-                    title: "Old Read".to_string(),
-                    path: PathBuf::from("/old"),
-                    cover_path: None,
-                    added_at: 0,
-                },
-            ],
+        let view = LibraryView {
+            library: Library {
+                entries: vec![
+                    LibraryEntry {
+                        comic_id: "recent".to_string(),
+                        title: "Recent".to_string(),
+                        path: PathBuf::from("/recent"),
+                        cover_path: None,
+                        added_at: 0,
+                    },
+                    LibraryEntry {
+                        comic_id: "old".to_string(),
+                        title: "Old Read".to_string(),
+                        path: PathBuf::from("/old"),
+                        cover_path: None,
+                        added_at: 0,
+                    },
+                ],
+            },
+            ..Default::default()
         };
         let history = History {
             entries: vec![
