@@ -1,5 +1,7 @@
 # Thumbnail-First Rendering Implementation Plan
 
+> **Status:** Implemented and optimized. See commits `28e50f0`, `1171e87`, `59cdb43`.
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Refactor the comic reader so that opening a file only loads

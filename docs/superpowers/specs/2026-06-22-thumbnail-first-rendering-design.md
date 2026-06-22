@@ -1,5 +1,7 @@
 # Thumbnail-First Rendering Design
 
+> **Status:** Implemented and optimized. See commits `28e50f0`, `1171e87`, `59cdb43`.
+
 ## Goal
 
 Refactor the comic reader rendering pipeline so that opening a file only loads
