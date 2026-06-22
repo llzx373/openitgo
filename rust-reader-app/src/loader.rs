@@ -45,7 +45,7 @@ impl ZipCache {
 pub type Epoch = u64;
 
 #[allow(dead_code)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum LoadPriority {
     High,
     Low,
@@ -93,6 +93,7 @@ pub struct LoadResult {
     pub epoch: Epoch,
     pub page_index: usize,
     pub thumbnail: bool,
+    pub dropped: bool,
     pub original_size: [u32; 2],
     pub image: Result<LoadedImage, String>,
 }
@@ -148,7 +149,7 @@ impl PageLoader {
         let (high_decode_sender, high_decode_receiver): (Sender<DecodeJob>, Receiver<DecodeJob>) =
             bounded(64);
         let (low_decode_sender, low_decode_receiver): (Sender<DecodeJob>, Receiver<DecodeJob>) =
-            bounded(64);
+            bounded(256);
 
         let compress = Arc::new(AtomicBool::new(compress));
 
@@ -249,6 +250,7 @@ impl PageLoader {
                                 epoch: job.epoch,
                                 page_index: job.page_index,
                                 thumbnail: true,
+                                dropped: false,
                                 original_size,
                                 image: Ok(LoadedImage::Color(thumb)),
                             },
@@ -261,6 +263,7 @@ impl PageLoader {
                                     epoch: job.epoch,
                                     page_index: job.page_index,
                                     thumbnail: false,
+                                    dropped: false,
                                     original_size,
                                     image: Ok(image),
                                 }
@@ -271,6 +274,7 @@ impl PageLoader {
                         epoch: job.epoch,
                         page_index: job.page_index,
                         thumbnail: job.thumbnail,
+                        dropped: false,
                         original_size: [0, 0],
                         image: Err(e),
                     }));
@@ -432,6 +436,7 @@ fn process_io_request(
                         epoch: req.epoch,
                         page_index: req.page_index,
                         thumbnail: true,
+                        dropped: false,
                         original_size: original,
                         image: Ok(LoadedImage::Color(thumb)),
                     })
@@ -443,6 +448,7 @@ fn process_io_request(
                         epoch: req.epoch,
                         page_index: req.page_index,
                         thumbnail: false,
+                        dropped: false,
                         original_size,
                         image: Ok(image),
                     }
@@ -452,6 +458,7 @@ fn process_io_request(
                 epoch: req.epoch,
                 page_index: req.page_index,
                 thumbnail: req.thumbnail,
+                dropped: false,
                 original_size: [0, 0],
                 image: Err(e),
             }));
@@ -474,11 +481,15 @@ fn process_io_request(
                         "IO dropped decode job page {} ({} queue full)",
                         req.page_index, priority_label
                     ));
-                    // Notify the UI so it can clear the pending state and retry.
+                    // High-priority failures are real errors the UI should surface.
+                    // Low-priority (preload/thumbnail) failures are transient backpressure;
+                    // tell the UI to drop the pending marker so it can retry later.
+                    let dropped = priority == LoadPriority::Low;
                     let _ = result_sender.send(LoadResult {
                         epoch: req.epoch,
                         page_index: req.page_index,
                         thumbnail: req.thumbnail,
+                        dropped,
                         original_size: [0, 0],
                         image: Err(format!(
                             "{} decode queue full for page {}",
@@ -492,6 +503,7 @@ fn process_io_request(
                     epoch: req.epoch,
                     page_index: req.page_index,
                     thumbnail: req.thumbnail,
+                    dropped: false,
                     original_size: [0, 0],
                     image: Err(e),
                 });

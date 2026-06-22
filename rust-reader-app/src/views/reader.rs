@@ -279,6 +279,13 @@ impl OpenReader {
                     } else {
                         self.pending_pages.remove(&result.page_index);
                     }
+
+                    // Transient backpressure: the job was dropped before decoding.
+                    // Don't record an error; the preload/thumbnail loop will retry.
+                    if result.dropped {
+                        continue;
+                    }
+
                     match result.image {
                         Ok(image) => {
                             if result.thumbnail {
