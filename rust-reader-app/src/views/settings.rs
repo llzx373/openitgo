@@ -37,6 +37,14 @@ impl SettingsView {
             ui.add(egui::Slider::new(&mut settings.cache_size_mb, 100..=4096));
         });
 
+        ui.horizontal(|ui| {
+            ui.label("真实图片缓存页数:");
+            ui.add(egui::Slider::new(
+                &mut settings.real_image_cache_pages,
+                1..=200,
+            ));
+        });
+
         ui.checkbox(
             &mut settings.invert_scroll,
             "反转滚轮方向（适用于 macOS 自然滚动）",

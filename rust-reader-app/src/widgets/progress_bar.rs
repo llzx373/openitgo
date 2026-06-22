@@ -57,7 +57,7 @@ fn draw_filled_bar(ui: &mut egui::Ui, rect: egui::Rect, current_page: usize, tot
     ui.painter().rect_filled(fill_rect, rounding, fill_color);
 }
 
-fn page_at_x(x: f32, rect: egui::Rect, total_pages: usize) -> usize {
+pub(crate) fn page_at_x(x: f32, rect: egui::Rect, total_pages: usize) -> usize {
     if rect.width() <= 0.0 {
         return 0;
     }

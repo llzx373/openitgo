@@ -92,8 +92,11 @@ impl eframe::App for ReaderApp {
         self.page_loader.set_compress(self.settings.compress_images);
         self.reader_view
             .update(ctx, &self.page_loader, cache_size_mb);
-        self.reader_view
-            .request_preloads(&self.page_loader, cache_size_mb);
+        self.reader_view.request_preloads(
+            &self.page_loader,
+            cache_size_mb,
+            self.settings.real_image_cache_pages as usize,
+        );
 
         match self.current_view.clone() {
             View::Library => self.render_library(ctx),

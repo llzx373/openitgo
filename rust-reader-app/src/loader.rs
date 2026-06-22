@@ -51,19 +51,12 @@ pub enum LoadPriority {
     Low,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompressedFormat {
-    Dxt5Srgb,
-}
-
 #[derive(Debug, Clone)]
 pub enum LoadedImage {
     Compressed {
         data: Vec<u8>,
         original_size: [u32; 2],
         gpu_size: [u32; 2],
-        #[allow(dead_code)]
-        format: CompressedFormat,
     },
     Color(ColorImage),
 }
@@ -90,7 +83,6 @@ impl LoadedImage {
                 data,
                 original_size,
                 gpu_size,
-                ..
             } => decompress_dxt5(data, *original_size, *gpu_size),
             LoadedImage::Color(img) => Ok(img.clone()),
         }
@@ -100,18 +92,22 @@ impl LoadedImage {
 pub struct LoadResult {
     pub epoch: Epoch,
     pub page_index: usize,
+    pub thumbnail: bool,
+    pub original_size: [u32; 2],
     pub image: Result<LoadedImage, String>,
 }
 
 pub struct LoadRequest {
     pub epoch: Epoch,
     pub page_index: usize,
+    pub thumbnail: bool,
     pub source: PageSource,
 }
 
 struct DecodeJob {
     epoch: Epoch,
     page_index: usize,
+    thumbnail: bool,
     bytes: Vec<u8>,
     format_hint: Option<String>,
 }
@@ -247,13 +243,37 @@ impl PageLoader {
             let compress = compress.clone();
             decode_workers.push(thread::spawn(move || {
                 fn process_job(job: DecodeJob, compress: bool, result_sender: &Sender<LoadResult>) {
-                    let image =
-                        decode_image_bytes(&job.bytes, job.format_hint.as_deref(), compress);
-                    let _ = result_sender.send(LoadResult {
+                    let result = if job.thumbnail {
+                        decode_thumbnail_bytes(&job.bytes, job.format_hint.as_deref()).map(
+                            |(thumb, original_size)| LoadResult {
+                                epoch: job.epoch,
+                                page_index: job.page_index,
+                                thumbnail: true,
+                                original_size,
+                                image: Ok(LoadedImage::Color(thumb)),
+                            },
+                        )
+                    } else {
+                        decode_image_bytes(&job.bytes, job.format_hint.as_deref(), compress).map(
+                            |image| {
+                                let original_size = image.original_size();
+                                LoadResult {
+                                    epoch: job.epoch,
+                                    page_index: job.page_index,
+                                    thumbnail: false,
+                                    original_size,
+                                    image: Ok(image),
+                                }
+                            },
+                        )
+                    };
+                    let _ = result_sender.send(result.unwrap_or_else(|e| LoadResult {
                         epoch: job.epoch,
                         page_index: job.page_index,
-                        image,
-                    });
+                        thumbnail: job.thumbnail,
+                        original_size: [0, 0],
+                        image: Err(e),
+                    }));
                 }
 
                 let mut high_disconnected = false;
@@ -331,6 +351,7 @@ impl PageLoader {
             .try_send(LoadRequest {
                 epoch,
                 page_index,
+                thumbnail: false,
                 source,
             })
             .is_ok()
@@ -342,23 +363,40 @@ impl PageLoader {
             .try_send(LoadRequest {
                 epoch,
                 page_index,
+                thumbnail: false,
                 source,
             })
             .is_ok()
     }
 
-    #[allow(dead_code)]
-    pub fn request(
+    /// Request a low-priority thumbnail decode in the background.
+    pub fn request_thumbnail(&self, epoch: Epoch, page_index: usize, source: PageSource) -> bool {
+        self.low_sender
+            .try_send(LoadRequest {
+                epoch,
+                page_index,
+                thumbnail: true,
+                source,
+            })
+            .is_ok()
+    }
+
+    /// Request a high-priority thumbnail decode (used when the visible page
+    /// has no full image yet and we want something on screen quickly).
+    pub fn request_thumbnail_high(
         &self,
-        priority: LoadPriority,
         epoch: Epoch,
         page_index: usize,
         source: PageSource,
     ) -> bool {
-        match priority {
-            LoadPriority::High => self.request_high(epoch, page_index, source),
-            LoadPriority::Low => self.request_low(epoch, page_index, source),
-        }
+        self.high_sender
+            .try_send(LoadRequest {
+                epoch,
+                page_index,
+                thumbnail: true,
+                source,
+            })
+            .is_ok()
     }
 
     pub fn try_recv(&self) -> Option<LoadResult> {
@@ -378,27 +416,52 @@ fn process_io_request(
         LoadPriority::High => "high",
         LoadPriority::Low => "low",
     };
+    let kind = if req.thumbnail { "thumbnail" } else { "full" };
     timing::log(&format!(
-        "IO request page {} (epoch {}) priority {}",
-        req.page_index, req.epoch, priority_label
+        "IO request page {} (epoch {}) priority {} kind {}",
+        req.page_index, req.epoch, priority_label, kind
     ));
     match req.source {
         PageSource::PdfPage {
             document,
             page_number,
         } => {
-            let image = render_pdf_page(&document, page_number);
-            let _ = result_sender.send(LoadResult {
+            let result = if req.thumbnail {
+                render_pdf_page(&document, page_number).and_then(|image| {
+                    make_thumbnail_from_loaded(image).map(|(thumb, original)| LoadResult {
+                        epoch: req.epoch,
+                        page_index: req.page_index,
+                        thumbnail: true,
+                        original_size: original,
+                        image: Ok(LoadedImage::Color(thumb)),
+                    })
+                })
+            } else {
+                render_pdf_page(&document, page_number).map(|image| {
+                    let original_size = image.original_size();
+                    LoadResult {
+                        epoch: req.epoch,
+                        page_index: req.page_index,
+                        thumbnail: false,
+                        original_size,
+                        image: Ok(image),
+                    }
+                })
+            };
+            let _ = result_sender.send(result.unwrap_or_else(|e| LoadResult {
                 epoch: req.epoch,
                 page_index: req.page_index,
-                image,
-            });
+                thumbnail: req.thumbnail,
+                original_size: [0, 0],
+                image: Err(e),
+            }));
         }
         _ => match read_page_bytes(&req.source, zip_cache) {
             Ok((bytes, format_hint)) => {
                 let job = DecodeJob {
                     epoch: req.epoch,
                     page_index: req.page_index,
+                    thumbnail: req.thumbnail,
                     bytes,
                     format_hint,
                 };
@@ -415,6 +478,8 @@ fn process_io_request(
                     let _ = result_sender.send(LoadResult {
                         epoch: req.epoch,
                         page_index: req.page_index,
+                        thumbnail: req.thumbnail,
+                        original_size: [0, 0],
                         image: Err(format!(
                             "{} decode queue full for page {}",
                             priority_label, req.page_index
@@ -426,6 +491,8 @@ fn process_io_request(
                 let _ = result_sender.send(LoadResult {
                     epoch: req.epoch,
                     page_index: req.page_index,
+                    thumbnail: req.thumbnail,
+                    original_size: [0, 0],
                     image: Err(e),
                 });
             }
@@ -575,7 +642,6 @@ fn compress_dxt5(image: image::DynamicImage) -> Result<LoadedImage, String> {
         data: output,
         original_size: [original_w, original_h],
         gpu_size: [gpu_w, gpu_h],
-        format: CompressedFormat::Dxt5Srgb,
     })
 }
 
@@ -742,6 +808,60 @@ fn downsample_if_needed(image: image::DynamicImage) -> image::DynamicImage {
         new_h.max(1),
         image::imageops::FilterType::Lanczos3,
     )
+}
+
+/// Maximum pixel size of the long edge for page thumbnails.
+pub(crate) const THUMBNAIL_MAX_DIMENSION: u32 = 256;
+
+/// Resize an already-decoded dynamic image to thumbnail dimensions while
+/// preserving aspect ratio.
+fn make_thumbnail(image: image::DynamicImage) -> (ColorImage, [u32; 2]) {
+    let original_size = [image.width(), image.height()];
+    let (w, h) = (image.width(), image.height());
+    let max = w.max(h);
+    let thumb = if max <= THUMBNAIL_MAX_DIMENSION {
+        image
+    } else {
+        let ratio = THUMBNAIL_MAX_DIMENSION as f32 / max as f32;
+        let new_w = (w as f32 * ratio).round() as u32;
+        let new_h = (h as f32 * ratio).round() as u32;
+        image.resize(
+            new_w.max(1),
+            new_h.max(1),
+            image::imageops::FilterType::Lanczos3,
+        )
+    };
+    let rgba = thumb.to_rgba8();
+    (
+        ColorImage::from_rgba_unmultiplied(
+            [rgba.width() as usize, rgba.height() as usize],
+            &rgba.into_raw(),
+        ),
+        original_size,
+    )
+}
+
+/// Build a thumbnail from any loaded image (Color or Compressed).
+fn make_thumbnail_from_loaded(loaded: LoadedImage) -> Result<(ColorImage, [u32; 2]), String> {
+    let color = loaded.to_color_image()?;
+    let (w, h) = (color.size[0] as u32, color.size[1] as u32);
+    let bytes: Vec<u8> = color
+        .pixels
+        .iter()
+        .flat_map(|p| [p.r(), p.g(), p.b(), p.a()])
+        .collect();
+    let rgba_image = image::RgbaImage::from_raw(w, h, bytes)
+        .ok_or_else(|| "invalid RGBA buffer for thumbnail".to_string())?;
+    Ok(make_thumbnail(image::DynamicImage::ImageRgba8(rgba_image)))
+}
+
+/// Decode raw bytes into a thumbnail ColorImage plus the original page size.
+fn decode_thumbnail_bytes(
+    bytes: &[u8],
+    format_hint: Option<&str>,
+) -> Result<(ColorImage, [u32; 2]), String> {
+    let loaded = decode_image_bytes(bytes, format_hint, false)?;
+    make_thumbnail_from_loaded(loaded)
 }
 
 /// Convert an already-decoded dynamic image into the app's internal format.
@@ -1059,7 +1179,6 @@ mod tests {
                 data,
                 original_size,
                 gpu_size,
-                ..
             } => {
                 assert_eq!(original_size, [5, 7]);
                 let (expected_w, expected_h) = dxt5_padded_size(5, 7);
@@ -1132,6 +1251,7 @@ mod tests {
             LoadRequest {
                 epoch: 1,
                 page_index: 7,
+                thumbnail: false,
                 source: PageSource::File(path),
             },
             LoadPriority::High,

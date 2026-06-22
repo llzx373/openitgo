@@ -1,11 +1,11 @@
 use crate::cache::PageCache;
 use crate::loader::PageLoader;
 use crate::timing;
-use crate::widgets::progress_bar::{comic_progress_bar, ProgressBarResponse};
+use crate::widgets::progress_bar::{comic_progress_bar, page_at_x, ProgressBarResponse};
 use crate::widgets::thumbnail_progress_bar::page_thumbnail_tooltip;
 use rust_reader_core::models::{Comic, ReadingMode};
 use rust_reader_core::state::{ReadingState, Vec2};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 const MIN_ZOOM: f32 = 0.1;
@@ -70,10 +70,12 @@ pub struct OpenReader {
     pub right_page: Option<usize>,
     pub pending_fit: Option<QuickFit>,
     pub current_epoch: u64,
-    /// Pages that have been requested but not yet loaded, with the time the
-    /// request was sent. Used to avoid duplicate requests and to time out lost
-    /// results.
+    /// Full-resolution pages that have been requested but not yet loaded.
     pub pending_pages: HashMap<usize, Instant>,
+    /// Thumbnail requests that are currently in flight.
+    pub pending_thumbnails: HashSet<usize>,
+    /// Next page index to request during the background thumbnail batch.
+    pub thumbnail_batch_next: usize,
     pub page_errors: HashMap<usize, String>,
     pub cache: PageCache,
     pub page_animation: Option<PageAnimation>,
@@ -194,15 +196,11 @@ impl OpenReader {
         }
     }
 
-    fn spread_size(&mut self, ctx: &egui::Context) -> Option<egui::Vec2> {
-        let left_size = self
-            .cache
-            .get_texture(ctx, self.left_page?)
-            .map(|t| t.size())?;
+    fn spread_size(&self) -> Option<egui::Vec2> {
+        let left_size = self.cache.get_original_size(self.left_page?)?;
         let right_size = self
-            .cache
-            .get_texture(ctx, self.right_page?)
-            .map(|t| t.size())
+            .right_page
+            .and_then(|idx| self.cache.get_original_size(idx))
             .unwrap_or([0, 0]);
         Some(egui::vec2(
             (left_size[0] + right_size[0]) as f32,
@@ -210,11 +208,11 @@ impl OpenReader {
         ))
     }
 
-    fn apply_pending_fit(&mut self, ctx: &egui::Context, available: egui::Vec2) {
+    fn apply_pending_fit(&mut self, _ctx: &egui::Context, available: egui::Vec2) {
         let Some(fit) = self.pending_fit.take() else {
             return;
         };
-        let Some(spread_size) = self.spread_size(ctx) else {
+        let Some(spread_size) = self.spread_size() else {
             return;
         };
         if spread_size.x <= 0.0 || spread_size.y <= 0.0 {
@@ -233,6 +231,8 @@ impl OpenReader {
     pub fn bump_epoch(&mut self, loader: &PageLoader) {
         self.current_epoch = loader.next_epoch();
         self.pending_pages.clear();
+        self.pending_thumbnails.clear();
+        self.thumbnail_batch_next = 0;
         self.page_errors.clear();
         self.left_page = None;
         self.right_page = None;
@@ -269,24 +269,42 @@ impl OpenReader {
                         continue;
                     }
                     timing::log(&format!(
-                        "reader received result page {}: {:?}",
+                        "reader received result page {} thumbnail={}: {:?}",
                         result.page_index,
+                        result.thumbnail,
                         result.image.as_ref().map(|_| "Ok").map_err(|e| e.as_str())
                     ));
-                    self.pending_pages.remove(&result.page_index);
+                    if result.thumbnail {
+                        self.pending_thumbnails.remove(&result.page_index);
+                    } else {
+                        self.pending_pages.remove(&result.page_index);
+                    }
                     match result.image {
                         Ok(image) => {
-                            let protected = self.protected_page_indices();
-                            self.cache.insert(
-                                result.page_index,
-                                image,
-                                cache_size_bytes,
-                                &protected,
-                            );
+                            if result.thumbnail {
+                                self.cache.insert_thumbnail(
+                                    result.page_index,
+                                    image,
+                                    result.original_size,
+                                );
+                            } else {
+                                let protected = self.protected_page_indices();
+                                self.cache.insert_full(
+                                    result.page_index,
+                                    image,
+                                    cache_size_bytes,
+                                    &protected,
+                                );
+                            }
                         }
                         Err(err) => {
-                            eprintln!("failed to load page {}: {}", result.page_index, err);
-                            self.page_errors.insert(result.page_index, err);
+                            // Only surface errors for full-resolution loads. A thumbnail
+                            // failure should not block the page from displaying the full
+                            // image once it arrives.
+                            if !result.thumbnail {
+                                eprintln!("failed to load page {}: {}", result.page_index, err);
+                                self.page_errors.insert(result.page_index, err);
+                            }
                         }
                     }
                 }
@@ -335,6 +353,8 @@ impl ReaderView {
             pending_fit: Some(QuickFit::Page),
             current_epoch: 0,
             pending_pages: HashMap::new(),
+            pending_thumbnails: HashSet::new(),
+            thumbnail_batch_next: 0,
             page_errors: HashMap::new(),
             cache: PageCache::new(),
             page_animation: None,
@@ -365,14 +385,19 @@ impl ReaderView {
         }
     }
 
-    pub fn request_preloads(&mut self, loader: &PageLoader, cache_size_mb: usize) {
+    pub fn request_preloads(
+        &mut self,
+        loader: &PageLoader,
+        cache_size_mb: usize,
+        real_image_cache_pages: usize,
+    ) {
         let Some(reader) = self.open.as_mut() else {
             return;
         };
         crate::timing::log_if_slow("reader.request_preloads", Duration::from_millis(5), || {
             let budget = cache_size_mb * 1024 * 1024;
 
-            // Evict stale pages so preloads can continue instead of giving up
+            // Evict stale full pages so preloads can continue instead of giving up
             // when the cache is full.
             reader
                 .cache
@@ -383,15 +408,41 @@ impl ReaderView {
             if total == 0 {
                 return;
             }
-            // Don't preload until the current page is ready, so preloads cannot
-            // delay the visible spread.
-            if !reader.cache.contains(current) {
+
+            // Background batch: generate thumbnails for every page. This is gated
+            // so we never flood the low-priority queue in a single frame.
+            const THUMBNAILS_PER_FRAME: usize = 32;
+            let mut thumb_enqueued = 0;
+            while reader.thumbnail_batch_next < total && thumb_enqueued < THUMBNAILS_PER_FRAME {
+                let idx = reader.thumbnail_batch_next;
+                reader.thumbnail_batch_next += 1;
+                if reader.cache.contains_thumbnail(idx)
+                    || reader.cache.contains_full(idx)
+                    || reader.pending_thumbnails.contains(&idx)
+                {
+                    continue;
+                }
+                let Some(source) = reader.comic.page_source(idx).cloned() else {
+                    continue;
+                };
+                if loader.request_thumbnail(reader.current_epoch, idx, source) {
+                    reader.pending_thumbnails.insert(idx);
+                    thumb_enqueued += 1;
+                } else {
+                    // Channel is full; retry next frame from the same index.
+                    reader.thumbnail_batch_next = idx;
+                    break;
+                }
+            }
+
+            // Don't preload full-resolution pages until the current page is ready,
+            // so preloads cannot delay the visible spread.
+            if !reader.cache.contains_full(current) {
                 return;
             }
 
-            // During rapid page turns, pause preloads briefly so decode workers
-            // are available for the newly visible pages. Once the current page is
-            // ready we can start preloading again.
+            // During rapid page turns, pause full preloads briefly so decode workers
+            // are available for the newly visible pages.
             if reader.last_page_turn.elapsed() < PRELOAD_COOLDOWN_AFTER_TURN {
                 return;
             }
@@ -400,11 +451,7 @@ impl ReaderView {
             // channel and so we don't starve the current page decode queue.
             let mut enqueued = 0;
             const MAX_PRELOADS_PER_FRAME: usize = 16;
-            // Cap how far ahead we scan each frame. Without a cap, a long comic
-            // with most pages cached can cause request_preloads to walk hundreds
-            // of entries every frame just to find a few missing pages.
-            const MAX_PRELOAD_LOOKAHEAD: usize = 50;
-            for offset in 1..=MAX_PRELOAD_LOOKAHEAD.min(total - 1) {
+            for offset in 1..=real_image_cache_pages.min(total - 1) {
                 if enqueued >= MAX_PRELOADS_PER_FRAME {
                     break;
                 }
@@ -419,7 +466,7 @@ impl ReaderView {
                     if idx == current {
                         continue;
                     }
-                    if reader.cache.contains(idx) || reader.pending_pages.contains_key(&idx) {
+                    if reader.cache.contains_full(idx) || reader.pending_pages.contains_key(&idx) {
                         continue;
                     }
                     let Some(source) = reader.comic.page_source(idx).cloned() else {
@@ -484,17 +531,23 @@ impl ReaderView {
         let left_texture = left_idx.and_then(|idx| reader.cache.get_texture(ctx, idx));
         let right_texture = right_idx.and_then(|idx| reader.cache.get_texture(ctx, idx));
 
-        // Request visible pages every frame until they are in the cache. This
-        // covers both spread changes and any transient send failures in the
-        // high-priority queue.
+        // Request full-resolution visible pages every frame until they are cached.
+        // Also request a high-priority thumbnail if nothing is available yet, so
+        // the user sees a low-res preview quickly.
         if let Some(idx) = left_idx {
-            if left_texture.is_none() {
+            if !reader.cache.contains_full(idx) {
                 request_page(loader, reader, idx);
+            }
+            if left_texture.is_none() && !reader.pending_thumbnails.contains(&idx) {
+                request_page_thumbnail(loader, reader, idx);
             }
         }
         if let Some(idx) = right_idx {
-            if right_texture.is_none() {
+            if !reader.cache.contains_full(idx) {
                 request_page(loader, reader, idx);
+            }
+            if right_texture.is_none() && !reader.pending_thumbnails.contains(&idx) {
+                request_page_thumbnail(loader, reader, idx);
             }
         }
 
@@ -505,20 +558,17 @@ impl ReaderView {
         }
 
         let available = ui.available_rect_before_wrap();
-        let left_size = left_texture
-            .as_ref()
-            .map(|t| {
-                let size = t.size();
-                egui::vec2(size[0] as f32, size[1] as f32)
-            })
+        let left_size = left_idx
+            .and_then(|idx| reader.cache.get_original_size(idx))
+            .map(|s| egui::vec2(s[0] as f32, s[1] as f32))
             .unwrap_or(FALLBACK_PAGE_SIZE);
-        let right_size = match (right_idx, right_texture.as_ref()) {
-            (None, _) => egui::Vec2::ZERO,
-            (Some(_), None) => FALLBACK_PAGE_SIZE,
-            (Some(_), Some(t)) => {
-                let size = t.size();
-                egui::vec2(size[0] as f32, size[1] as f32)
-            }
+        let right_size = match right_idx {
+            None => egui::Vec2::ZERO,
+            Some(idx) => reader
+                .cache
+                .get_original_size(idx)
+                .map(|s| egui::vec2(s[0] as f32, s[1] as f32))
+                .unwrap_or(FALLBACK_PAGE_SIZE),
         };
 
         let any_loading = (left_idx.is_some() && left_texture.is_none())
@@ -609,26 +659,29 @@ impl ReaderView {
 
         let from_texture = reader.cache.get_texture(ctx, from_idx);
         let to_texture = reader.cache.get_texture(ctx, to_idx);
-        if from_texture.is_none() {
+        if !reader.cache.contains_full(from_idx) {
             request_page(loader, reader, from_idx);
         }
-        if to_texture.is_none() {
+        if from_texture.is_none() && !reader.pending_thumbnails.contains(&from_idx) {
+            request_page_thumbnail(loader, reader, from_idx);
+        }
+        if !reader.cache.contains_full(to_idx) {
             request_page(loader, reader, to_idx);
         }
-        // Use placeholder sizes if textures are not ready yet.
-        let from_size = from_texture
-            .as_ref()
-            .map(|t| {
-                let size = t.size();
-                egui::vec2(size[0] as f32, size[1] as f32)
-            })
+        if to_texture.is_none() && !reader.pending_thumbnails.contains(&to_idx) {
+            request_page_thumbnail(loader, reader, to_idx);
+        }
+        // Use cached original sizes for layout; fall back to placeholder sizes if
+        // the metadata has not arrived yet.
+        let from_size = reader
+            .cache
+            .get_original_size(from_idx)
+            .map(|s| egui::vec2(s[0] as f32, s[1] as f32))
             .unwrap_or(FALLBACK_PAGE_SIZE);
-        let to_size = to_texture
-            .as_ref()
-            .map(|t| {
-                let size = t.size();
-                egui::vec2(size[0] as f32, size[1] as f32)
-            })
+        let to_size = reader
+            .cache
+            .get_original_size(to_idx)
+            .map(|s| egui::vec2(s[0] as f32, s[1] as f32))
             .unwrap_or(FALLBACK_PAGE_SIZE);
 
         let available = ui.available_rect_before_wrap();
@@ -726,15 +779,6 @@ impl ReaderView {
     }
 }
 
-fn page_at_x(x: f32, rect: egui::Rect, total_pages: usize) -> usize {
-    if rect.width() <= 0.0 || total_pages == 0 {
-        return 0;
-    }
-    let ratio = ((x - rect.min.x) / rect.width()).clamp(0.0, 1.0);
-    let page = (ratio * total_pages as f32).floor() as usize;
-    page.min(total_pages - 1)
-}
-
 fn request_page(loader: &PageLoader, reader: &mut OpenReader, page_index: usize) {
     let total = reader.total_pages();
     if page_index >= total {
@@ -757,6 +801,26 @@ fn request_page(loader: &PageLoader, reader: &mut OpenReader, page_index: usize)
     if loader.request_high(reader.current_epoch, page_index, source) {
         reader.pending_pages.insert(page_index, Instant::now());
         reader.page_errors.remove(&page_index);
+    }
+}
+
+fn request_page_thumbnail(loader: &PageLoader, reader: &mut OpenReader, page_index: usize) {
+    let total = reader.total_pages();
+    if page_index >= total {
+        return;
+    }
+    if reader.pending_thumbnails.contains(&page_index) {
+        return;
+    }
+    let Some(source) = reader.comic.page_source(page_index).cloned() else {
+        return;
+    };
+    timing::log(&format!(
+        "reader request_thumbnail_high page {} epoch {}",
+        page_index, reader.current_epoch
+    ));
+    if loader.request_thumbnail_high(reader.current_epoch, page_index, source) {
+        reader.pending_thumbnails.insert(page_index);
     }
 }
 
@@ -864,6 +928,8 @@ mod tests {
             pending_fit: None,
             current_epoch: 0,
             pending_pages: HashMap::new(),
+            pending_thumbnails: HashSet::new(),
+            thumbnail_batch_next: 0,
             page_errors: HashMap::new(),
             cache: PageCache::new(),
             page_animation: None,

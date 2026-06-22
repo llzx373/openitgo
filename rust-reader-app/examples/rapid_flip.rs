@@ -1,5 +1,4 @@
 use rust_reader_app::loader::PageLoader;
-use rust_reader_core::models::PageSource;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 

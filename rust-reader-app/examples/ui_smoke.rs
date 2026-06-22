@@ -45,7 +45,7 @@ impl eframe::App for SmokeApp {
 
         if let Some(reader) = self.app.reader_view.open.as_ref() {
             let current = reader.state.current_page;
-            if reader.cache.contains(current) {
+            if reader.cache.contains_full(current) {
                 eprintln!(
                     "[smoke] current page {} is in cache after {:.1} s",
                     current,

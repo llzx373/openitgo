@@ -5,10 +5,42 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 struct CacheEntry {
-    image: LoadedImage,
+    /// The original page dimensions, used for layout before any full image is ready.
+    original_size: [u32; 2],
+    thumbnail: Option<LoadedImage>,
+    thumbnail_handle: Option<TextureHandle>,
+    /// The full-resolution image (counts toward the memory budget).
+    image: Option<LoadedImage>,
     handle: Option<TextureHandle>,
     last_accessed: Instant,
+    /// Size of the full-resolution image only; thumbnails are always retained.
     size_bytes: usize,
+}
+
+impl CacheEntry {
+    fn empty(original_size: [u32; 2]) -> Self {
+        Self {
+            original_size,
+            thumbnail: None,
+            thumbnail_handle: None,
+            image: None,
+            handle: None,
+            last_accessed: Instant::now(),
+            size_bytes: 0,
+        }
+    }
+
+    fn with_thumbnail(image: LoadedImage, original_size: [u32; 2]) -> Self {
+        Self {
+            original_size,
+            thumbnail: Some(image),
+            thumbnail_handle: None,
+            image: None,
+            handle: None,
+            last_accessed: Instant::now(),
+            size_bytes: 0,
+        }
+    }
 }
 
 pub struct PageCache {
@@ -24,30 +56,70 @@ impl PageCache {
         }
     }
 
+    #[allow(dead_code)]
     pub fn total_size_bytes(&self) -> usize {
         self.total_size_bytes
     }
 
-    pub fn contains(&self, page_index: usize) -> bool {
-        self.textures.contains_key(&page_index)
+    pub fn contains_full(&self, page_index: usize) -> bool {
+        self.textures
+            .get(&page_index)
+            .map(|e| e.image.is_some())
+            .unwrap_or(false)
     }
 
+    pub fn contains_thumbnail(&self, page_index: usize) -> bool {
+        self.textures
+            .get(&page_index)
+            .map(|e| e.thumbnail.is_some())
+            .unwrap_or(false)
+    }
+
+    pub fn get_original_size(&self, page_index: usize) -> Option<[u32; 2]> {
+        self.textures.get(&page_index).map(|e| e.original_size)
+    }
+
+    /// Returns the full texture if available, otherwise the thumbnail texture.
     pub fn get_texture(&mut self, ctx: &Context, page_index: usize) -> Option<TextureHandle> {
         let entry = self.textures.get_mut(&page_index)?;
         entry.last_accessed = Instant::now();
-        if entry.handle.is_none() {
-            timing::log(&format!("cache decompress page {}", page_index));
-            let label = format!("page_{}", page_index);
-            let color = timing::time("cache decompress+upload", || {
-                entry.image.to_color_image().ok()
-            })?;
-            entry.handle = Some(ctx.load_texture(&label, color, egui::TextureOptions::LINEAR));
-            timing::log(&format!("cache upload page {} done", page_index));
+
+        if let Some(handle) = entry.handle.as_ref() {
+            return Some(handle.clone());
         }
-        entry.handle.clone()
+        if let Some(image) = entry.image.as_ref() {
+            timing::log(&format!("cache upload full page {}", page_index));
+            let color = timing::time("cache full decompress+upload", || {
+                image.to_color_image().ok()
+            })?;
+            let handle = ctx.load_texture(
+                &format!("page_{}", page_index),
+                color,
+                egui::TextureOptions::LINEAR,
+            );
+            entry.handle = Some(handle.clone());
+            return Some(handle);
+        }
+
+        if let Some(handle) = entry.thumbnail_handle.as_ref() {
+            return Some(handle.clone());
+        }
+        if let Some(image) = entry.thumbnail.as_ref() {
+            timing::log(&format!("cache upload thumbnail page {}", page_index));
+            let color = timing::time("cache thumbnail upload", || image.to_color_image().ok())?;
+            let handle = ctx.load_texture(
+                &format!("page_{}_thumb", page_index),
+                color,
+                egui::TextureOptions::LINEAR,
+            );
+            entry.thumbnail_handle = Some(handle.clone());
+            return Some(handle);
+        }
+
+        None
     }
 
-    pub fn insert(
+    pub fn insert_full(
         &mut self,
         page_index: usize,
         image: LoadedImage,
@@ -55,53 +127,72 @@ impl PageCache {
         protected: &[usize],
     ) {
         let new_size = image.size_bytes();
+        let original_size = image.original_size();
         timing::log(&format!(
-            "cache insert page {} size {} budget {}",
+            "cache insert full page {} size {} budget {}",
             page_index, new_size, max_size_bytes
         ));
 
-        if let Some(old) = self.textures.remove(&page_index) {
-            self.total_size_bytes -= old.size_bytes;
+        // Remove any existing full image for this page first so the budget check
+        // accounts for the replacement.
+        if let Some(entry) = self.textures.get_mut(&page_index) {
+            if let Some(old) = entry.image.take() {
+                self.total_size_bytes -= old.size_bytes();
+                entry.handle = None;
+                entry.size_bytes = 0;
+            }
         }
 
+        // Evict other full-resolution pages until there is room for the new one.
         if new_size > max_size_bytes {
             while self.total_size_bytes > 0 {
-                if !self.evict_lru_excluding(protected) {
+                if !self.evict_lru_full_excluding(protected) {
                     break;
                 }
             }
         } else {
             while self.total_size_bytes + new_size > max_size_bytes {
-                if !self.evict_lru_excluding(protected) {
+                if !self.evict_lru_full_excluding(protected) {
                     break;
                 }
             }
         }
 
+        let entry = self
+            .textures
+            .entry(page_index)
+            .or_insert_with(|| CacheEntry::empty(original_size));
+        entry.original_size = original_size;
+        entry.image = Some(image);
+        entry.size_bytes = new_size;
+        entry.last_accessed = Instant::now();
         self.total_size_bytes += new_size;
-        self.textures.insert(
-            page_index,
-            CacheEntry {
-                image,
-                handle: None,
-                last_accessed: Instant::now(),
-                size_bytes: new_size,
-            },
-        );
+    }
+
+    pub fn insert_thumbnail(
+        &mut self,
+        page_index: usize,
+        image: LoadedImage,
+        original_size: [u32; 2],
+    ) {
+        timing::log(&format!("cache insert thumbnail page {}", page_index));
+        let entry = self
+            .textures
+            .entry(page_index)
+            .or_insert_with(|| CacheEntry::with_thumbnail(image.clone(), original_size));
+
+        entry.thumbnail = Some(image);
+        entry.thumbnail_handle = None;
+        entry.original_size = original_size;
+        entry.last_accessed = Instant::now();
     }
 
     pub fn enforce_budget_with_protected(&mut self, max_size_bytes: usize, protected: &[usize]) {
         while self.total_size_bytes > max_size_bytes {
-            if !self.evict_lru_excluding(protected) {
+            if !self.evict_lru_full_excluding(protected) {
                 break;
             }
         }
-    }
-
-    /// Kept for tests; prefer [`Self::enforce_budget_with_protected`] in production.
-    #[allow(dead_code)]
-    pub fn enforce_budget(&mut self, max_size_bytes: usize) {
-        self.enforce_budget_with_protected(max_size_bytes, &[]);
     }
 
     pub fn clear(&mut self) {
@@ -109,17 +200,24 @@ impl PageCache {
         self.total_size_bytes = 0;
     }
 
-    fn evict_lru_excluding(&mut self, protected: &[usize]) -> bool {
+    fn evict_lru_full_excluding(&mut self, protected: &[usize]) -> bool {
         let lru_key = self
             .textures
             .iter()
-            .filter(|(k, _)| !protected.contains(k))
+            .filter(|(k, e)| !protected.contains(k) && e.image.is_some())
             .min_by(|(_, a), (_, b)| a.last_accessed.cmp(&b.last_accessed))
             .map(|(&key, _)| key);
 
         if let Some(key) = lru_key {
-            if let Some(entry) = self.textures.remove(&key) {
-                self.total_size_bytes -= entry.size_bytes;
+            if let Some(entry) = self.textures.get_mut(&key) {
+                if let Some(image) = entry.image.take() {
+                    self.total_size_bytes -= image.size_bytes();
+                }
+                entry.handle = None;
+                entry.size_bytes = 0;
+                if entry.thumbnail.is_none() {
+                    self.textures.remove(&key);
+                }
             }
             true
         } else {
@@ -150,7 +248,6 @@ mod tests {
             data: vec![0u8; (block_count * 16) as usize],
             original_size: [width, height],
             gpu_size: [gpu_w, gpu_h],
-            format: crate::loader::CompressedFormat::Dxt5Srgb,
         }
     }
 
@@ -158,12 +255,12 @@ mod tests {
     fn test_cache_insert_and_get() {
         let ctx = egui::Context::default();
         let mut cache = PageCache::new();
-        assert!(!cache.contains(0));
+        assert!(!cache.contains_full(0));
 
         let image = make_image(2, 2);
-        cache.insert(0, image, 1024, &[]);
+        cache.insert_full(0, image, 1024, &[]);
 
-        assert!(cache.contains(0));
+        assert!(cache.contains_full(0));
         let handle = cache
             .get_texture(&ctx, 0)
             .expect("texture should be in cache");
@@ -177,20 +274,19 @@ mod tests {
         // 2x2 RGBA8 = 16 bytes each.
         let budget = 32;
 
-        cache.insert(0, make_image(2, 2), budget, &[]);
-        cache.insert(1, make_image(2, 2), budget, &[]);
+        cache.insert_full(0, make_image(2, 2), budget, &[]);
+        cache.insert_full(1, make_image(2, 2), budget, &[]);
         assert_eq!(cache.total_size_bytes(), 32);
-        assert!(cache.contains(0));
-        assert!(cache.contains(1));
+        assert!(cache.contains_full(0));
+        assert!(cache.contains_full(1));
 
-        // Inserting a third page should evict the least-recently-used page (page 0).
-        cache.insert(2, make_image(2, 2), budget, &[]);
+        // Inserting a third page should evict the least-recently-used full image (page 0).
+        cache.insert_full(2, make_image(2, 2), budget, &[]);
         assert_eq!(cache.total_size_bytes(), 32);
-        assert!(!cache.contains(0));
-        assert!(cache.contains(1));
-        assert!(cache.contains(2));
+        assert!(!cache.contains_full(0));
+        assert!(cache.contains_full(1));
+        assert!(cache.contains_full(2));
 
-        // A texture is uploaded lazily, so budget tests don't depend on egui.
         assert!(cache.get_texture(&ctx, 1).is_some());
         assert!(cache.get_texture(&ctx, 2).is_some());
     }
@@ -201,16 +297,16 @@ mod tests {
         let mut cache = PageCache::new();
         let budget = 32;
 
-        cache.insert(0, make_image(2, 2), budget, &[]);
-        cache.insert(1, make_image(2, 2), budget, &[]);
+        cache.insert_full(0, make_image(2, 2), budget, &[]);
+        cache.insert_full(1, make_image(2, 2), budget, &[]);
 
         // Touch page 0 so page 1 becomes the LRU entry.
         let _ = cache.get_texture(&ctx, 0);
 
-        cache.insert(2, make_image(2, 2), budget, &[]);
-        assert!(cache.contains(0));
-        assert!(!cache.contains(1));
-        assert!(cache.contains(2));
+        cache.insert_full(2, make_image(2, 2), budget, &[]);
+        assert!(cache.contains_full(0));
+        assert!(!cache.contains_full(1));
+        assert!(cache.contains_full(2));
     }
 
     #[test]
@@ -219,14 +315,14 @@ mod tests {
         let mut cache = PageCache::new();
         let budget = 8;
 
-        cache.insert(0, make_image(2, 2), budget, &[]); // 16 bytes, exceeds budget
+        cache.insert_full(0, make_image(2, 2), budget, &[]); // 16 bytes, exceeds budget
 
-        assert!(cache.contains(0));
+        assert!(cache.contains_full(0));
         assert_eq!(cache.total_size_bytes(), 16);
 
         // Enforcing the budget will evict the oversized texture because it is the only entry.
-        cache.enforce_budget(budget);
-        assert!(!cache.contains(0));
+        cache.enforce_budget_with_protected(budget, &[]);
+        assert!(!cache.contains_full(0));
         assert_eq!(cache.total_size_bytes(), 0);
 
         assert!(cache.get_texture(&ctx, 0).is_none());
@@ -238,14 +334,14 @@ mod tests {
         let mut cache = PageCache::new();
         let budget = 32;
 
-        cache.insert(0, make_image(2, 2), budget, &[]);
-        cache.insert(1, make_image(2, 2), budget, &[]);
+        cache.insert_full(0, make_image(2, 2), budget, &[]);
+        cache.insert_full(1, make_image(2, 2), budget, &[]);
 
         // Insert page 2 while protecting page 0. Page 1 is the only evictable entry.
-        cache.insert(2, make_image(2, 2), budget, &[0]);
-        assert!(cache.contains(0));
-        assert!(!cache.contains(1));
-        assert!(cache.contains(2));
+        cache.insert_full(2, make_image(2, 2), budget, &[0]);
+        assert!(cache.contains_full(0));
+        assert!(!cache.contains_full(1));
+        assert!(cache.contains_full(2));
 
         assert!(cache.get_texture(&ctx, 0).is_some());
         assert!(cache.get_texture(&ctx, 2).is_some());
@@ -258,17 +354,34 @@ mod tests {
         // 2x2 RGBA8 = 16 bytes each; budget can only hold one.
         let budget = 16;
 
-        cache.insert(0, make_image(2, 2), budget, &[]);
+        cache.insert_full(0, make_image(2, 2), budget, &[]);
         // Insert page 1 while page 0 is protected. Since page 0 cannot be
         // evicted, the budget must be exceeded rather than looping forever.
-        cache.insert(1, make_image(2, 2), budget, &[0]);
+        cache.insert_full(1, make_image(2, 2), budget, &[0]);
 
-        assert!(cache.contains(0));
-        assert!(cache.contains(1));
+        assert!(cache.contains_full(0));
+        assert!(cache.contains_full(1));
         assert!(cache.total_size_bytes() > budget);
 
         assert!(cache.get_texture(&ctx, 0).is_some());
         assert!(cache.get_texture(&ctx, 1).is_some());
+    }
+
+    #[test]
+    fn test_cache_thumbnails_are_retained_when_full_is_evicted() {
+        let ctx = egui::Context::default();
+        let mut cache = PageCache::new();
+        let budget = 8;
+
+        cache.insert_thumbnail(0, make_image(2, 2), [2, 2]);
+        cache.insert_full(0, make_image(2, 2), budget, &[]);
+
+        // Evict the full image; the thumbnail should remain.
+        cache.enforce_budget_with_protected(budget, &[]);
+        assert!(!cache.contains_full(0));
+        assert!(cache.contains_thumbnail(0));
+        assert_eq!(cache.get_original_size(0), Some([2, 2]));
+        assert!(cache.get_texture(&ctx, 0).is_some());
     }
 
     #[test]
