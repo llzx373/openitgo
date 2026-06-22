@@ -479,32 +479,62 @@ impl ReaderView {
             // channel and so we don't starve the current page decode queue.
             let mut enqueued = 0;
             const MAX_PRELOADS_PER_FRAME: usize = 8;
-            for offset in 1..=max_offset {
-                if enqueued >= MAX_PRELOADS_PER_FRAME {
-                    break;
+
+            // Direction-aware asymmetric preloading: spend decode resources on the
+            // side the user is most likely to turn to next first. For Ltr that is
+            // forward (current + offset); for Rtl it is backward (current - offset).
+            let mut try_preload = |idx: usize| -> bool {
+                if idx >= total || idx == current {
+                    return false;
                 }
-                let candidates = [
-                    current.saturating_sub(offset),
-                    current.saturating_add(offset),
-                ];
-                for &idx in &candidates {
-                    if idx >= total {
-                        continue;
-                    }
-                    if idx == current {
-                        continue;
-                    }
-                    if reader.cache.contains_full(idx) || reader.pending_pages.contains_key(&idx) {
-                        continue;
-                    }
-                    let Some(source) = reader.comic.page_source(idx).cloned() else {
-                        continue;
-                    };
-                    if loader.request_low(reader.current_epoch, idx, source) {
-                        reader.pending_pages.insert(idx, Instant::now());
-                        enqueued += 1;
+                if reader.cache.contains_full(idx) || reader.pending_pages.contains_key(&idx) {
+                    return false;
+                }
+                let Some(source) = reader.comic.page_source(idx).cloned() else {
+                    return false;
+                };
+                if loader.request_low(reader.current_epoch, idx, source) {
+                    reader.pending_pages.insert(idx, Instant::now());
+                    true
+                } else {
+                    false
+                }
+            };
+
+            match reader.state.mode {
+                ReadingMode::Ltr | ReadingMode::Webtoon => {
+                    for offset in 1..=max_offset {
                         if enqueued >= MAX_PRELOADS_PER_FRAME {
                             break;
+                        }
+                        if try_preload(current.saturating_add(offset)) {
+                            enqueued += 1;
+                        }
+                    }
+                    for offset in 1..=max_offset {
+                        if enqueued >= MAX_PRELOADS_PER_FRAME {
+                            break;
+                        }
+                        if try_preload(current.saturating_sub(offset)) {
+                            enqueued += 1;
+                        }
+                    }
+                }
+                ReadingMode::Rtl => {
+                    for offset in 1..=max_offset {
+                        if enqueued >= MAX_PRELOADS_PER_FRAME {
+                            break;
+                        }
+                        if try_preload(current.saturating_sub(offset)) {
+                            enqueued += 1;
+                        }
+                    }
+                    for offset in 1..=max_offset {
+                        if enqueued >= MAX_PRELOADS_PER_FRAME {
+                            break;
+                        }
+                        if try_preload(current.saturating_add(offset)) {
+                            enqueued += 1;
                         }
                     }
                 }
