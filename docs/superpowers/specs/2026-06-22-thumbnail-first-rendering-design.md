@@ -27,7 +27,7 @@ opening large archives or flipping quickly through a comic.
 | Thumbnail format | RGBA8 `ColorImage` (no DXT5) |
 | Thumbnail retention | Keep all thumbnails for the current comic in memory |
 | Thumbnail generation | Batch all pages on open; visible pages get high priority |
-| Real-image cache | Configurable `real_image_cache_pages`, default 50 each direction |
+| Real-image cache | Configurable `real_image_cache_pages`, default 5 each direction |
 | Real-image preloading | Only inside `[current - N, current + N]` |
 | Loader approach | Reuse `PageLoader`, add `thumbnail` flag to requests/results |
 
@@ -139,7 +139,7 @@ Files:
 Add a new setting:
 
 ```rust
-pub real_image_cache_pages: u32, // default 50
+pub real_image_cache_pages: u32, // default 5
 ```
 
 - Update `Default for Settings`.

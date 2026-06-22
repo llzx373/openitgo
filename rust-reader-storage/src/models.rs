@@ -32,7 +32,7 @@ impl Default for Settings {
             compress_images: false,
             decode_threads: 0,
             cache_size_mb: 1024,
-            real_image_cache_pages: 50,
+            real_image_cache_pages: 5,
             window_size: (1280.0, 720.0),
             show_toolbar: true,
             show_statusbar: true,
