@@ -1,3 +1,4 @@
+use crate::timing;
 use rust_reader_core::models::Comic;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
@@ -19,8 +20,14 @@ impl ComicOpener {
         F: FnOnce(&Path) -> Result<Comic, String> + Send + 'static,
     {
         let (tx, rx) = channel();
+        let path_clone = path.clone();
         std::thread::spawn(move || {
-            let result = parser(&path);
+            timing::log(&format!("ComicOpener parsing {:?}", path_clone));
+            let result = timing::time("ComicOpener parse", || parser(&path_clone));
+            timing::log(&format!(
+                "ComicOpener result: {:?}",
+                result.as_ref().map(|_| "Ok")
+            ));
             let _ = tx.send(result);
         });
         Self {

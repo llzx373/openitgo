@@ -1,3 +1,9 @@
+pub mod app;
 pub mod cache;
 pub mod loader;
+pub mod opener;
+pub mod platform;
+pub mod shortcuts;
+pub mod timing;
+pub mod views;
 pub mod widgets;

@@ -1,4 +1,5 @@
 use crate::loader::LoadedImage;
+use crate::timing;
 use egui::{Context, TextureHandle};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -35,9 +36,13 @@ impl PageCache {
         let entry = self.textures.get_mut(&page_index)?;
         entry.last_accessed = Instant::now();
         if entry.handle.is_none() {
+            timing::log(&format!("cache decompress page {}", page_index));
             let label = format!("page_{}", page_index);
-            let color = entry.image.to_color_image().ok()?;
+            let color = timing::time("cache decompress+upload", || {
+                entry.image.to_color_image().ok()
+            })?;
             entry.handle = Some(ctx.load_texture(&label, color, egui::TextureOptions::LINEAR));
+            timing::log(&format!("cache upload page {} done", page_index));
         }
         entry.handle.clone()
     }
@@ -50,6 +55,10 @@ impl PageCache {
         protected: &[usize],
     ) {
         let new_size = image.size_bytes();
+        timing::log(&format!(
+            "cache insert page {} size {} budget {}",
+            page_index, new_size, max_size_bytes
+        ));
 
         if let Some(old) = self.textures.remove(&page_index) {
             self.total_size_bytes -= old.size_bytes;

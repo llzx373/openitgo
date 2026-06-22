@@ -1,6 +1,7 @@
 use crate::loader::PageLoader;
 use crate::opener::{ComicOpener, OpenStatus};
 use crate::shortcuts::is_shortcut_pressed;
+use crate::timing;
 use crate::views::{
     library::{LibraryCallbacks, LibraryView},
     reader::{QuickFit, ReaderView},
@@ -39,6 +40,10 @@ impl Default for ReaderApp {
         let bookmarks = store.load_bookmarks().unwrap_or_default();
         let mut library_view = LibraryView::default();
         library_view.library = library;
+        let page_loader = PageLoader::new_with_compress(
+            settings.compress_images,
+            settings.decode_threads as usize,
+        );
         Self {
             current_view: View::Library,
             last_view: View::Library,
@@ -50,14 +55,14 @@ impl Default for ReaderApp {
             history,
             bookmarks,
             error_message: None,
-            page_loader: PageLoader::default(),
+            page_loader,
             opener: None,
         }
     }
 }
 
 impl eframe::App for ReaderApp {
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         self.record_reader_history();
         self.reader_view.close();
         let _ = self.store.save_settings(&self.settings);
@@ -84,6 +89,7 @@ impl eframe::App for ReaderApp {
         self.poll_opener(ctx);
 
         let cache_size_mb = self.settings.cache_size_mb as usize;
+        self.page_loader.set_compress(self.settings.compress_images);
         self.reader_view
             .update(ctx, &self.page_loader, cache_size_mb);
         self.reader_view
@@ -126,6 +132,10 @@ impl ReaderApp {
             }
             OpenStatus::Ready(result) => match result {
                 Ok(comic) => {
+                    timing::log(&format!(
+                        "poll_opener comic ready: {} pages",
+                        comic.total_pages()
+                    ));
                     let total = comic.volumes.first().map(|v| v.pages.len()).unwrap_or(0);
                     let mut state = ReadingState::new(self.settings.default_mode, total);
                     state.set_double_page(self.settings.double_page, total);
@@ -449,7 +459,9 @@ impl ReaderApp {
                 egui::Layout::centered_and_justified(egui::Direction::TopDown),
                 |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.spinner();
+                        // Static icon avoids the continuous repaint that egui's
+                        // animated spinner triggers.
+                        ui.label(egui::RichText::new("⏳").size(24.0));
                         ui.label("正在打开漫画...");
                         if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
                             ui.label(egui::RichText::new(name).size(14.0).strong());
@@ -722,6 +734,7 @@ impl ReaderApp {
     }
 
     fn open_comic(&mut self, path: std::path::PathBuf) {
+        timing::log(&format!("open_comic {:?}", path));
         self.opener = Some(ComicOpener::open(path.clone(), |p| {
             rust_reader_parser::parse(p).map_err(|e| e.to_string())
         }));
@@ -816,6 +829,10 @@ mod tests {
             let bookmarks = store.load_bookmarks().unwrap_or_default();
             let mut library_view = LibraryView::default();
             library_view.library = library;
+            let page_loader = PageLoader::new_with_compress(
+                settings.compress_images,
+                settings.decode_threads as usize,
+            );
             Self {
                 current_view: View::Library,
                 last_view: View::Library,
@@ -827,7 +844,7 @@ mod tests {
                 history,
                 bookmarks,
                 error_message: None,
-                page_loader: PageLoader::default(),
+                page_loader,
                 opener: None,
             }
         }

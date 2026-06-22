@@ -1,4 +1,5 @@
-use crossbeam_channel::{bounded, select, Receiver, Sender};
+use crate::timing;
+use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use egui::ColorImage;
 use pdf_render::pdf_interpret::pdf_syntax::Pdf;
 use pdf_render::pdf_interpret::InterpreterSettings;
@@ -7,7 +8,7 @@ use pdf_render::{render, RenderSettings};
 use rust_reader_core::models::PageSource;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -44,6 +45,7 @@ impl ZipCache {
 pub type Epoch = u64;
 
 #[allow(dead_code)]
+#[derive(Clone, Copy)]
 pub enum LoadPriority {
     High,
     Low,
@@ -119,7 +121,8 @@ pub struct PageLoader {
     low_sender: Sender<LoadRequest>,
     receiver: Receiver<LoadResult>,
     epoch: Arc<AtomicU64>,
-    _io_worker: thread::JoinHandle<()>,
+    compress: Arc<AtomicBool>,
+    _io_workers: Vec<thread::JoinHandle<()>>,
     _decode_workers: Vec<thread::JoinHandle<()>>,
 }
 
@@ -130,53 +133,163 @@ impl Default for PageLoader {
 }
 
 impl PageLoader {
+    /// Create a loader that returns original ColorImage by default (no compression).
     pub fn new() -> Self {
+        Self::new_with_compress(false, 0)
+    }
+
+    /// Create a loader with explicit compression and decode-thread limits.
+    ///
+    /// `decode_threads` is the number of background decode workers. `0` means
+    /// use the system's reported parallelism (the previous default).
+    pub fn new_with_compress(compress: bool, decode_threads: usize) -> Self {
         let (high_sender, high_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) =
             bounded(64);
         let (low_sender, low_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) = bounded(64);
-        let (result_sender, receiver): (Sender<LoadResult>, Receiver<LoadResult>) = bounded(64);
-        let (decode_sender, decode_receiver): (Sender<DecodeJob>, Receiver<DecodeJob>) =
+        // Use an unbounded result channel so completed decode results are never
+        // dropped just because the UI thread is temporarily behind.
+        let (result_sender, receiver): (Sender<LoadResult>, Receiver<LoadResult>) = unbounded();
+        let (high_decode_sender, high_decode_receiver): (Sender<DecodeJob>, Receiver<DecodeJob>) =
+            bounded(64);
+        let (low_decode_sender, low_decode_receiver): (Sender<DecodeJob>, Receiver<DecodeJob>) =
             bounded(64);
 
-        let result_sender_for_io = result_sender.clone();
-        let io_worker = thread::spawn(move || {
-            let mut zip_cache = ZipCache::new();
-            loop {
-                if let Ok(req) = high_receiver.try_recv() {
-                    process_io_request(req, &result_sender_for_io, &decode_sender, &mut zip_cache);
-                    continue;
-                }
-                select! {
-                    recv(high_receiver) -> req => {
-                        if let Ok(req) = req {
-                            process_io_request(req, &result_sender_for_io, &decode_sender, &mut zip_cache);
-                        }
-                    }
-                    recv(low_receiver) -> req => {
-                        if let Ok(req) = req {
-                            process_io_request(req, &result_sender_for_io, &decode_sender, &mut zip_cache);
-                        }
-                    }
-                }
-            }
-        });
+        let compress = Arc::new(AtomicBool::new(compress));
 
-        let worker_count = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-            .max(1);
+        let worker_count = if decode_threads == 0 {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+                .max(1)
+        } else {
+            decode_threads.max(1)
+        };
+
+        // Spawn multiple IO workers so file reads (especially from archives) can
+        // happen in parallel. Each worker owns its own archive cache.
+        let io_thread_count = worker_count;
+        let mut io_workers = Vec::with_capacity(io_thread_count);
+        for _ in 0..io_thread_count {
+            let high_receiver = high_receiver.clone();
+            let low_receiver = low_receiver.clone();
+            let result_sender_for_io = result_sender.clone();
+            let high_decode_sender = high_decode_sender.clone();
+            let low_decode_sender = low_decode_sender.clone();
+            io_workers.push(thread::spawn(move || {
+                let mut zip_cache = ZipCache::new();
+                let mut high_disconnected = false;
+                let mut low_disconnected = false;
+                loop {
+                    // Drain every pending high-priority IO request before considering
+                    // a low-priority one. This keeps rapid page turns responsive even
+                    // when an IO worker is busy reading preload entries.
+                    while let Ok(req) = high_receiver.try_recv() {
+                        process_io_request(
+                            req,
+                            LoadPriority::High,
+                            &result_sender_for_io,
+                            &high_decode_sender,
+                            &low_decode_sender,
+                            &mut zip_cache,
+                        );
+                    }
+                    select! {
+                        recv(high_receiver) -> req => {
+                            if let Ok(req) = req {
+                                process_io_request(
+                                    req,
+                                    LoadPriority::High,
+                                    &result_sender_for_io,
+                                    &high_decode_sender,
+                                    &low_decode_sender,
+                                    &mut zip_cache,
+                                );
+                            } else {
+                                high_disconnected = true;
+                                if low_disconnected {
+                                    break;
+                                }
+                            }
+                        }
+                        recv(low_receiver) -> req => {
+                            if let Ok(req) = req {
+                                process_io_request(
+                                    req,
+                                    LoadPriority::Low,
+                                    &result_sender_for_io,
+                                    &high_decode_sender,
+                                    &low_decode_sender,
+                                    &mut zip_cache,
+                                );
+                            } else {
+                                low_disconnected = true;
+                                if high_disconnected {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }));
+        }
+
+        timing::log(&format!(
+            "PageLoader started with {} IO threads and {} decode workers (compress={})",
+            io_thread_count,
+            worker_count,
+            compress.load(Ordering::Relaxed)
+        ));
         let mut decode_workers = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
-            let decode_receiver = decode_receiver.clone();
+            let high_decode_receiver = high_decode_receiver.clone();
+            let low_decode_receiver = low_decode_receiver.clone();
             let result_sender = result_sender.clone();
+            let compress = compress.clone();
             decode_workers.push(thread::spawn(move || {
-                while let Ok(job) = decode_receiver.recv() {
-                    let image = decode_image_bytes(&job.bytes, job.format_hint.as_deref());
+                fn process_job(job: DecodeJob, compress: bool, result_sender: &Sender<LoadResult>) {
+                    let image =
+                        decode_image_bytes(&job.bytes, job.format_hint.as_deref(), compress);
                     let _ = result_sender.send(LoadResult {
                         epoch: job.epoch,
                         page_index: job.page_index,
                         image,
                     });
+                }
+
+                let mut high_disconnected = false;
+                let mut low_disconnected = false;
+                loop {
+                    // Always drain pending high-priority jobs first.
+                    while let Ok(job) = high_decode_receiver.try_recv() {
+                        process_job(job, compress.load(Ordering::Relaxed), &result_sender);
+                    }
+
+                    if high_disconnected && low_disconnected {
+                        break;
+                    }
+
+                    select! {
+                        recv(high_decode_receiver) -> job => {
+                            if let Ok(job) = job {
+                                process_job(job, compress.load(Ordering::Relaxed), &result_sender);
+                            } else {
+                                high_disconnected = true;
+                                if low_disconnected {
+                                    break;
+                                }
+                            }
+                        }
+                        recv(low_decode_receiver) -> job => {
+                            if let Ok(job) = job {
+                                process_job(job, compress.load(Ordering::Relaxed), &result_sender);
+                            } else {
+                                low_disconnected = true;
+                                if high_disconnected {
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
             }));
         }
@@ -186,8 +299,25 @@ impl PageLoader {
             low_sender,
             receiver,
             epoch: Arc::new(AtomicU64::new(1)),
-            _io_worker: io_worker,
+            compress,
+            _io_workers: io_workers,
             _decode_workers: decode_workers,
+        }
+    }
+
+    pub fn set_compress(&self, compress: bool) {
+        if self
+            .compress
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+                if old == compress {
+                    None
+                } else {
+                    Some(compress)
+                }
+            })
+            .is_ok()
+        {
+            timing::log(&format!("PageLoader compress set to {}", compress));
         }
     }
 
@@ -195,22 +325,26 @@ impl PageLoader {
         self.epoch.fetch_add(1, Ordering::SeqCst)
     }
 
-    pub fn request_high(&self, epoch: Epoch, page_index: usize, source: PageSource) {
-        // Receiver dropped means PageLoader is shutting down; ignore.
-        let _ = self.high_sender.send(LoadRequest {
-            epoch,
-            page_index,
-            source,
-        });
+    pub fn request_high(&self, epoch: Epoch, page_index: usize, source: PageSource) -> bool {
+        // Use try_send so the UI thread never blocks waiting for the IO worker.
+        self.high_sender
+            .try_send(LoadRequest {
+                epoch,
+                page_index,
+                source,
+            })
+            .is_ok()
     }
 
-    pub fn request_low(&self, epoch: Epoch, page_index: usize, source: PageSource) {
-        // Receiver dropped means PageLoader is shutting down; ignore.
-        let _ = self.low_sender.send(LoadRequest {
-            epoch,
-            page_index,
-            source,
-        });
+    pub fn request_low(&self, epoch: Epoch, page_index: usize, source: PageSource) -> bool {
+        // Use try_send so preload loops cannot block the UI thread.
+        self.low_sender
+            .try_send(LoadRequest {
+                epoch,
+                page_index,
+                source,
+            })
+            .is_ok()
     }
 
     #[allow(dead_code)]
@@ -220,7 +354,7 @@ impl PageLoader {
         epoch: Epoch,
         page_index: usize,
         source: PageSource,
-    ) {
+    ) -> bool {
         match priority {
             LoadPriority::High => self.request_high(epoch, page_index, source),
             LoadPriority::Low => self.request_low(epoch, page_index, source),
@@ -234,10 +368,20 @@ impl PageLoader {
 
 fn process_io_request(
     req: LoadRequest,
+    priority: LoadPriority,
     result_sender: &Sender<LoadResult>,
-    decode_sender: &Sender<DecodeJob>,
+    high_decode_sender: &Sender<DecodeJob>,
+    low_decode_sender: &Sender<DecodeJob>,
     zip_cache: &mut ZipCache,
 ) {
+    let priority_label = match priority {
+        LoadPriority::High => "high",
+        LoadPriority::Low => "low",
+    };
+    timing::log(&format!(
+        "IO request page {} (epoch {}) priority {}",
+        req.page_index, req.epoch, priority_label
+    ));
     match req.source {
         PageSource::PdfPage {
             document,
@@ -252,12 +396,31 @@ fn process_io_request(
         }
         _ => match read_page_bytes(&req.source, zip_cache) {
             Ok((bytes, format_hint)) => {
-                let _ = decode_sender.send(DecodeJob {
+                let job = DecodeJob {
                     epoch: req.epoch,
                     page_index: req.page_index,
                     bytes,
                     format_hint,
-                });
+                };
+                let sender = match priority {
+                    LoadPriority::High => high_decode_sender,
+                    LoadPriority::Low => low_decode_sender,
+                };
+                if sender.try_send(job).is_err() {
+                    timing::log(&format!(
+                        "IO dropped decode job page {} ({} queue full)",
+                        req.page_index, priority_label
+                    ));
+                    // Notify the UI so it can clear the pending state and retry.
+                    let _ = result_sender.send(LoadResult {
+                        epoch: req.epoch,
+                        page_index: req.page_index,
+                        image: Err(format!(
+                            "{} decode queue full for page {}",
+                            priority_label, req.page_index
+                        )),
+                    });
+                }
             }
             Err(e) => {
                 let _ = result_sender.send(LoadResult {
@@ -275,25 +438,41 @@ fn read_zip_entry(
     archive_path: &std::path::Path,
     index: usize,
 ) -> Result<Vec<u8>, String> {
-    let first_attempt = (|| -> Result<Vec<u8>, String> {
+    let first_attempt = timing::time("read_zip_entry (cached)", || -> Result<Vec<u8>, String> {
         let archive = zip_cache.get_or_open(archive_path)?;
         let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut bytes)
             .map_err(|e| format!("failed to read zip entry: {e}"))?;
         Ok(bytes)
-    })();
+    });
 
     match first_attempt {
-        Ok(bytes) => Ok(bytes),
+        Ok(bytes) => {
+            timing::log(&format!(
+                "read_zip_entry index {} -> {} bytes",
+                index,
+                bytes.len()
+            ));
+            Ok(bytes)
+        }
         Err(_) => {
             // File may have been modified/deleted externally. Drop cache and retry once.
+            timing::log("read_zip_entry cache miss/mismatch, retrying");
             zip_cache.remove(archive_path);
-            let archive = zip_cache.get_or_open(archive_path)?;
-            let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
-            let mut bytes = Vec::new();
-            std::io::Read::read_to_end(&mut entry, &mut bytes)
-                .map_err(|e| format!("failed to read zip entry: {e}"))?;
+            let bytes = timing::time("read_zip_entry (retry)", || -> Result<Vec<u8>, String> {
+                let archive = zip_cache.get_or_open(archive_path)?;
+                let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut bytes)
+                    .map_err(|e| format!("failed to read zip entry: {e}"))?;
+                Ok(bytes)
+            })?;
+            timing::log(&format!(
+                "read_zip_entry retry index {} -> {} bytes",
+                index,
+                bytes.len()
+            ));
             Ok(bytes)
         }
     }
@@ -352,11 +531,15 @@ fn read_rar_entry(archive_path: &Path, name: &str) -> Result<Vec<u8>, String> {
     Err(format!("rar entry not found: {name}"))
 }
 
-const MAX_IMAGE_DIMENSION: u32 = 4096;
+pub(crate) const MAX_IMAGE_DIMENSION: u32 = 4096;
 
 fn compress_dxt5(image: image::DynamicImage) -> Result<LoadedImage, String> {
     let original_w = image.width();
     let original_h = image.height();
+    timing::log(&format!(
+        "compress_dxt5 start: {}x{}",
+        original_w, original_h
+    ));
     let rgba = image.to_rgba8();
     let (gpu_w, gpu_h) = dxt5_padded_size(original_w, original_h);
 
@@ -368,17 +551,25 @@ fn compress_dxt5(image: image::DynamicImage) -> Result<LoadedImage, String> {
 
     let mut output =
         vec![0u8; texpresso::Format::Bc3.compressed_size(gpu_w as usize, gpu_h as usize)];
+    // RangeFit is much faster than ClusterFit/IterativeClusterFit and is good
+    // enough for comic pages. ClusterFit was taking ~18 s for a 1920x1530 image.
     texpresso::Format::Bc3.compress(
         &pixels,
         gpu_w as usize,
         gpu_h as usize,
         texpresso::Params {
-            algorithm: texpresso::Algorithm::ClusterFit,
+            algorithm: texpresso::Algorithm::RangeFit,
             weights: texpresso::COLOUR_WEIGHTS_PERCEPTUAL,
             weigh_colour_by_alpha: false,
         },
         &mut output,
     );
+    timing::log(&format!(
+        "compress_dxt5 done: {}x{} -> {} bytes",
+        original_w,
+        original_h,
+        output.len()
+    ));
 
     Ok(LoadedImage::Compressed {
         data: output,
@@ -397,6 +588,10 @@ pub fn decompress_dxt5(
     original_size: [u32; 2],
     gpu_size: [u32; 2],
 ) -> Result<ColorImage, String> {
+    timing::log(&format!(
+        "decompress_dxt5 start: {:?} -> {:?}",
+        original_size, gpu_size
+    ));
     let [gpu_w, gpu_h] = gpu_size;
     let blocks_x = gpu_w / 4;
     let blocks_y = gpu_h / 4;
@@ -409,37 +604,41 @@ pub fn decompress_dxt5(
         ));
     }
 
-    let mut rgba = vec![0u8; (gpu_w * gpu_h * 4) as usize];
-    let pitch = gpu_w as usize * 4;
+    let result = timing::time("decompress_dxt5 (decode+crop)", || {
+        let mut rgba = vec![0u8; (gpu_w * gpu_h * 4) as usize];
+        let pitch = gpu_w as usize * 4;
 
-    for by in 0..blocks_y {
-        for bx in 0..blocks_x {
-            let block_idx = ((by * blocks_x + bx) * 16) as usize;
-            let src = &data[block_idx..block_idx + 16];
-            let base = (by * 4) as usize * pitch + (bx * 4) as usize * 4;
-            bcdec_rs::bc3(src, &mut rgba[base..], pitch);
+        for by in 0..blocks_y {
+            for bx in 0..blocks_x {
+                let block_idx = ((by * blocks_x + bx) * 16) as usize;
+                let src = &data[block_idx..block_idx + 16];
+                let base = (by * 4) as usize * pitch + (bx * 4) as usize * 4;
+                bcdec_rs::bc3(src, &mut rgba[base..], pitch);
+            }
         }
-    }
 
-    let [orig_w, orig_h] = original_size;
-    if orig_w == gpu_w && orig_h == gpu_h {
-        Ok(ColorImage::from_rgba_unmultiplied(
-            [gpu_w as usize, gpu_h as usize],
-            &rgba,
-        ))
-    } else {
-        let mut cropped = vec![0u8; (orig_w * orig_h * 4) as usize];
-        for y in 0..orig_h {
-            let src_start = (y * gpu_w * 4) as usize;
-            let dst_start = (y * orig_w * 4) as usize;
-            cropped[dst_start..dst_start + (orig_w * 4) as usize]
-                .copy_from_slice(&rgba[src_start..src_start + (orig_w * 4) as usize]);
+        let [orig_w, orig_h] = original_size;
+        if orig_w == gpu_w && orig_h == gpu_h {
+            Ok(ColorImage::from_rgba_unmultiplied(
+                [gpu_w as usize, gpu_h as usize],
+                &rgba,
+            ))
+        } else {
+            let mut cropped = vec![0u8; (orig_w * orig_h * 4) as usize];
+            for y in 0..orig_h {
+                let src_start = (y * gpu_w * 4) as usize;
+                let dst_start = (y * orig_w * 4) as usize;
+                cropped[dst_start..dst_start + (orig_w * 4) as usize]
+                    .copy_from_slice(&rgba[src_start..src_start + (orig_w * 4) as usize]);
+            }
+            Ok(ColorImage::from_rgba_unmultiplied(
+                [orig_w as usize, orig_h as usize],
+                &cropped,
+            ))
         }
-        Ok(ColorImage::from_rgba_unmultiplied(
-            [orig_w as usize, orig_h as usize],
-            &cropped,
-        ))
-    }
+    });
+    timing::log("decompress_dxt5 done");
+    result
 }
 
 fn pad_rgba(src: &image::RgbaImage, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<u8> {
@@ -454,15 +653,79 @@ fn pad_rgba(src: &image::RgbaImage, src_w: u32, src_h: u32, dst_w: u32, dst_h: u
     dst
 }
 
-fn decode_image_bytes(bytes: &[u8], format_hint: Option<&str>) -> Result<LoadedImage, String> {
-    let format = format_hint.and_then(image::ImageFormat::from_extension);
-    let image = if let Some(format) = format {
-        image::load_from_memory_with_format(bytes, format).map_err(|e| e.to_string())?
-    } else {
-        image::load_from_memory(bytes).map_err(|e| e.to_string())?
-    };
-    let image = downsample_if_needed(image);
-    compress_dxt5(image)
+fn decode_image_bytes(
+    bytes: &[u8],
+    format_hint: Option<&str>,
+    compress: bool,
+) -> Result<LoadedImage, String> {
+    timing::log(&format!(
+        "decode_image_bytes start: hint={:?} bytes={} compress={}",
+        format_hint,
+        bytes.len(),
+        compress
+    ));
+
+    // On macOS, try the system's ImageIO/Core Graphics decoder first. It is
+    // significantly faster than the pure-Rust `image` crate for many formats
+    // (especially WebP and JPEG) and handles misnamed files automatically.
+    #[cfg(target_os = "macos")]
+    match crate::platform::macos::decode_image_bytes(bytes, compress) {
+        Ok(Some(image)) => {
+            timing::log(&format!(
+                "decode_image_bytes done via ImageIO: {:?}",
+                image.original_size()
+            ));
+            return Ok(image);
+        }
+        Ok(None) => {
+            timing::log("decode_image_bytes ImageIO declined, falling back to image crate");
+        }
+        Err(err) => {
+            timing::log(&format!(
+                "decode_image_bytes ImageIO failed ({}), falling back to image crate",
+                err
+            ));
+        }
+    }
+
+    // Prefer magic-byte detection over the filename extension, because many
+    // archives contain misnamed files (e.g. PNG data with a .webp extension).
+    let magic_format = image::guess_format(bytes).ok();
+    let ext_format = format_hint.and_then(image::ImageFormat::from_extension);
+    timing::log(&format!(
+        "decode_image_bytes detected formats: magic={:?} ext={:?}",
+        magic_format, ext_format
+    ));
+
+    let image = timing::time("decode_image_bytes (image crate)", || {
+        if let Some(format) = magic_format {
+            image::load_from_memory_with_format(bytes, format).map_err(|e| e.to_string())
+        } else if let Some(format) = ext_format {
+            match image::load_from_memory_with_format(bytes, format) {
+                Ok(img) => Ok(img),
+                Err(first_err) => {
+                    // Fall back to auto-detection from magic bytes.
+                    image::load_from_memory(bytes).map_err(|fallback_err| {
+                        format!(
+                            "hint {:?} decode failed ({}); auto-detect also failed ({})",
+                            format_hint, first_err, fallback_err
+                        )
+                    })
+                }
+            }
+        } else {
+            image::load_from_memory(bytes).map_err(|e| e.to_string())
+        }
+    })?;
+    let image = timing::time("decode_image_bytes (downsample)", || {
+        downsample_if_needed(image)
+    });
+    let result = dynamic_to_loaded_image(image, compress);
+    timing::log(&format!(
+        "decode_image_bytes done: {:?}",
+        result.as_ref().map(|i| i.original_size())
+    ));
+    result
 }
 
 fn downsample_if_needed(image: image::DynamicImage) -> image::DynamicImage {
@@ -479,6 +742,27 @@ fn downsample_if_needed(image: image::DynamicImage) -> image::DynamicImage {
         new_h.max(1),
         image::imageops::FilterType::Lanczos3,
     )
+}
+
+/// Convert an already-decoded dynamic image into the app's internal format.
+///
+/// This is shared between the native macOS decoder and the `image`-crate
+/// fallback path. It does **not** downsample; callers should downsample first
+/// if needed.
+pub(crate) fn dynamic_to_loaded_image(
+    image: image::DynamicImage,
+    compress: bool,
+) -> Result<LoadedImage, String> {
+    let (w, h) = (image.width(), image.height());
+    if compress {
+        compress_dxt5(image)
+    } else {
+        let rgba = image.to_rgba8();
+        Ok(LoadedImage::Color(ColorImage::from_rgba_unmultiplied(
+            [w as usize, h as usize],
+            &rgba.into_raw(),
+        )))
+    }
 }
 
 const PDF_RENDER_DPI: f32 = 150.0;
@@ -719,6 +1003,42 @@ mod tests {
     }
 
     #[test]
+    fn test_loader_decodes_zip_entry_with_wrong_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.cbz");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            // Write PNG bytes but name the entry with a .webp extension.
+            zip.start_file("page01.webp", options).unwrap();
+            let img = image::RgbaImage::from_pixel(32, 32, image::Rgba([255, 0, 0, 255]));
+            let mut buf = Vec::new();
+            img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+                .unwrap();
+            zip.write_all(&buf).unwrap();
+            zip.finish().unwrap();
+        }
+
+        let loader = PageLoader::new();
+        let epoch = loader.next_epoch();
+        loader.request_high(
+            epoch,
+            0,
+            PageSource::ZipEntry {
+                archive: path,
+                name: "page01.webp".to_string(),
+                index: 0,
+            },
+        );
+
+        let result = wait_for_result(&loader, epoch, 0, Duration::from_secs(5));
+        let image = result.image.expect("misnamed PNG should decode");
+        assert_loaded_image_size(image, [32, 32]);
+    }
+
+    #[test]
     fn test_dxt5_padded_size() {
         assert_eq!(dxt5_padded_size(4, 4), (4, 4));
         assert_eq!(dxt5_padded_size(1, 1), (4, 4));
@@ -767,5 +1087,69 @@ mod tests {
         assert!((128i32 - pixel.g() as i32).abs() <= 2);
         assert!((64i32 - pixel.b() as i32).abs() <= 2);
         assert_eq!(pixel.a(), 255);
+    }
+
+    #[test]
+    fn test_decode_image_bytes_falls_back_for_wrong_extension() {
+        // Create a PNG image but tell the decoder the extension is "webp".
+        let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 128, 255, 255]));
+        let mut bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        let loaded = decode_image_bytes(&bytes, Some("webp"), false)
+            .expect("PNG content with .webp hint should decode via magic-byte fallback");
+        assert_eq!(loaded.original_size(), [4, 4]);
+
+        // And the reverse: WebP content with a .png hint.
+        let mut bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::WebP,
+        )
+        .unwrap();
+        let loaded = decode_image_bytes(&bytes, Some("png"), false)
+            .expect("WebP content with .png hint should decode via magic-byte fallback");
+        assert_eq!(loaded.original_size(), [4, 4]);
+    }
+
+    #[test]
+    fn test_io_sends_error_when_decode_queue_full() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sample.png");
+        let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 255]));
+        img.save(&path).unwrap();
+
+        let (result_sender, result_receiver) = unbounded();
+        // A zero-capacity decode queue guarantees try_send will fail.
+        let (high_decode_sender, _high_decode_receiver) = bounded(0);
+        let (low_decode_sender, _low_decode_receiver) = bounded(0);
+        let mut zip_cache = ZipCache::new();
+
+        process_io_request(
+            LoadRequest {
+                epoch: 1,
+                page_index: 7,
+                source: PageSource::File(path),
+            },
+            LoadPriority::High,
+            &result_sender,
+            &high_decode_sender,
+            &low_decode_sender,
+            &mut zip_cache,
+        );
+
+        let result = result_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("expected an error result when decode queue is full");
+        assert_eq!(result.epoch, 1);
+        assert_eq!(result.page_index, 7);
+        assert!(
+            result.image.is_err(),
+            "result should be an error, got {:?}",
+            result.image
+        );
     }
 }

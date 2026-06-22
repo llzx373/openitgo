@@ -42,6 +42,17 @@ impl SettingsView {
             "反转滚轮方向（适用于 macOS 自然滚动）",
         );
 
+        ui.checkbox(
+            &mut settings.compress_images,
+            "DXT5 纹理压缩（节省显存，但打开时 CPU 占用高）",
+        );
+
+        ui.horizontal(|ui| {
+            ui.label("解码线程数:");
+            ui.add(egui::Slider::new(&mut settings.decode_threads, 0..=16).text("0=自动"));
+            ui.label("（重启后生效）");
+        });
+
         ui.label("默认缩放/适应");
         egui::ComboBox::from_id_salt("fit")
             .selected_text(fit_label(settings.default_fit))

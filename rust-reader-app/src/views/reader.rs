@@ -1,14 +1,23 @@
 use crate::cache::PageCache;
 use crate::loader::PageLoader;
+use crate::timing;
 use crate::widgets::progress_bar::{comic_progress_bar, ProgressBarResponse};
 use crate::widgets::thumbnail_progress_bar::page_thumbnail_tooltip;
 use rust_reader_core::models::{Comic, ReadingMode};
 use rust_reader_core::state::{ReadingState, Vec2};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 5.0;
 const FALLBACK_PAGE_SIZE: egui::Vec2 = egui::Vec2::new(600.0, 800.0);
+
+/// How long to pause preloads after the user turns a page. This prevents
+/// rapid flips from getting stuck behind low-priority preload decode jobs.
+const PRELOAD_COOLDOWN_AFTER_TURN: Duration = Duration::from_millis(100);
+/// How long a page may stay in the pending state before we assume the result
+/// was lost and allow a retry.
+const PENDING_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 pub struct ReaderView {
@@ -61,10 +70,16 @@ pub struct OpenReader {
     pub right_page: Option<usize>,
     pub pending_fit: Option<QuickFit>,
     pub current_epoch: u64,
-    pub pending_pages: HashSet<usize>,
+    /// Pages that have been requested but not yet loaded, with the time the
+    /// request was sent. Used to avoid duplicate requests and to time out lost
+    /// results.
+    pub pending_pages: HashMap<usize, Instant>,
     pub page_errors: HashMap<usize, String>,
     pub cache: PageCache,
     pub page_animation: Option<PageAnimation>,
+    /// When the user last turned a page. Used to pause preloads briefly so
+    /// rapid flips don't get stuck behind background preload decoding.
+    pub last_page_turn: Instant,
 }
 
 impl OpenReader {
@@ -86,10 +101,15 @@ impl OpenReader {
         self.pending_fit = Some(fit);
     }
 
+    fn mark_page_turn(&mut self) {
+        self.last_page_turn = Instant::now();
+    }
+
     pub fn first_page(&mut self) {
         let total = self.total_pages();
         if total > 0 {
             self.state.go_to_page(0, total);
+            self.mark_page_turn();
         }
     }
 
@@ -97,6 +117,7 @@ impl OpenReader {
         let total = self.total_pages();
         if total > 0 {
             self.state.go_to_page(total - 1, total);
+            self.mark_page_turn();
         }
     }
 
@@ -113,6 +134,7 @@ impl OpenReader {
         let total = self.total_pages();
         self.state.next_page(total);
         let to = self.state.current_page;
+        self.mark_page_turn();
         self.start_turn_animation(from, to);
     }
 
@@ -120,6 +142,7 @@ impl OpenReader {
         let from = self.state.current_page;
         self.state.prev_page();
         let to = self.state.current_page;
+        self.mark_page_turn();
         self.start_turn_animation(from, to);
     }
 
@@ -233,23 +256,59 @@ impl OpenReader {
 
     pub fn update(&mut self, ctx: &egui::Context, loader: &PageLoader, cache_size_bytes: usize) {
         let _ = ctx;
-        while let Some(result) = loader.try_recv() {
-            if result.epoch != self.current_epoch {
-                continue;
-            }
-            self.pending_pages.remove(&result.page_index);
-            match result.image {
-                Ok(image) => {
-                    let protected = self.protected_page_indices();
-                    self.cache
-                        .insert(result.page_index, image, cache_size_bytes, &protected);
+        crate::timing::log_if_slow(
+            "reader.update recv+insert",
+            Duration::from_millis(5),
+            || {
+                while let Some(result) = loader.try_recv() {
+                    if result.epoch != self.current_epoch {
+                        timing::log(&format!(
+                            "reader dropped stale result page {} epoch {} (current {})",
+                            result.page_index, result.epoch, self.current_epoch
+                        ));
+                        continue;
+                    }
+                    timing::log(&format!(
+                        "reader received result page {}: {:?}",
+                        result.page_index,
+                        result.image.as_ref().map(|_| "Ok").map_err(|e| e.as_str())
+                    ));
+                    self.pending_pages.remove(&result.page_index);
+                    match result.image {
+                        Ok(image) => {
+                            let protected = self.protected_page_indices();
+                            self.cache.insert(
+                                result.page_index,
+                                image,
+                                cache_size_bytes,
+                                &protected,
+                            );
+                        }
+                        Err(err) => {
+                            eprintln!("failed to load page {}: {}", result.page_index, err);
+                            self.page_errors.insert(result.page_index, err);
+                        }
+                    }
                 }
-                Err(err) => {
-                    eprintln!("failed to load page {}: {}", result.page_index, err);
-                    self.page_errors.insert(result.page_index, err);
+
+                // Time out any pending pages whose results never arrived, so the
+                // UI can retry instead of staying stuck forever.
+                let now = Instant::now();
+                let timed_out: Vec<usize> = self
+                    .pending_pages
+                    .iter()
+                    .filter(|(_, &since)| now.duration_since(since) >= PENDING_TIMEOUT)
+                    .map(|(&page, _)| page)
+                    .collect();
+                for page in timed_out {
+                    timing::log(&format!(
+                        "reader pending page {} timed out, allowing retry",
+                        page
+                    ));
+                    self.pending_pages.remove(&page);
                 }
-            }
-        }
+            },
+        );
     }
 }
 
@@ -263,6 +322,10 @@ impl ReaderView {
         loader: &PageLoader,
     ) {
         let _ = ctx;
+        timing::log(&format!(
+            "ReaderView::open total_pages={}",
+            comic.total_pages()
+        ));
         self.clear_cache();
         let mut reader = OpenReader {
             comic,
@@ -271,10 +334,11 @@ impl ReaderView {
             right_page: None,
             pending_fit: Some(QuickFit::Page),
             current_epoch: 0,
-            pending_pages: HashSet::new(),
+            pending_pages: HashMap::new(),
             page_errors: HashMap::new(),
             cache: PageCache::new(),
             page_animation: None,
+            last_page_turn: Instant::now(),
         };
         reader.bump_epoch(loader);
         self.open = Some(reader);
@@ -305,43 +369,87 @@ impl ReaderView {
         let Some(reader) = self.open.as_mut() else {
             return;
         };
-        let budget = cache_size_mb * 1024 * 1024;
-        if reader.cache.total_size_bytes() >= budget {
-            return;
-        }
+        crate::timing::log_if_slow("reader.request_preloads", Duration::from_millis(5), || {
+            let budget = cache_size_mb * 1024 * 1024;
 
-        let current = reader.state.current_page;
-        let total = reader.total_pages();
-        if total == 0 {
-            return;
-        }
+            // Evict stale pages so preloads can continue instead of giving up
+            // when the cache is full.
+            reader
+                .cache
+                .enforce_budget_with_protected(budget, &reader.protected_page_indices());
 
-        for offset in 1..total {
-            let candidates = [
-                current.saturating_sub(offset),
-                current.saturating_add(offset),
-            ];
-            for &idx in &candidates {
-                if idx >= total {
-                    continue;
-                }
-                if idx == current {
-                    continue;
-                }
-                if reader.cache.contains(idx) || reader.pending_pages.contains(&idx) {
-                    continue;
-                }
-                let Some(source) = reader.comic.page_source(idx).cloned() else {
-                    continue;
-                };
-                reader.pending_pages.insert(idx);
-                loader.request_low(reader.current_epoch, idx, source);
+            let current = reader.state.current_page;
+            let total = reader.total_pages();
+            if total == 0 {
+                return;
             }
-        }
+            // Don't preload until the current page is ready, so preloads cannot
+            // delay the visible spread.
+            if !reader.cache.contains(current) {
+                return;
+            }
+
+            // During rapid page turns, pause preloads briefly so decode workers
+            // are available for the newly visible pages. Once the current page is
+            // ready we can start preloading again.
+            if reader.last_page_turn.elapsed() < PRELOAD_COOLDOWN_AFTER_TURN {
+                return;
+            }
+
+            // Throttle preloads so the UI thread never blocks on a full low-priority
+            // channel and so we don't starve the current page decode queue.
+            let mut enqueued = 0;
+            const MAX_PRELOADS_PER_FRAME: usize = 16;
+            // Cap how far ahead we scan each frame. Without a cap, a long comic
+            // with most pages cached can cause request_preloads to walk hundreds
+            // of entries every frame just to find a few missing pages.
+            const MAX_PRELOAD_LOOKAHEAD: usize = 50;
+            for offset in 1..=MAX_PRELOAD_LOOKAHEAD.min(total - 1) {
+                if enqueued >= MAX_PRELOADS_PER_FRAME {
+                    break;
+                }
+                let candidates = [
+                    current.saturating_sub(offset),
+                    current.saturating_add(offset),
+                ];
+                for &idx in &candidates {
+                    if idx >= total {
+                        continue;
+                    }
+                    if idx == current {
+                        continue;
+                    }
+                    if reader.cache.contains(idx) || reader.pending_pages.contains_key(&idx) {
+                        continue;
+                    }
+                    let Some(source) = reader.comic.page_source(idx).cloned() else {
+                        continue;
+                    };
+                    if loader.request_low(reader.current_epoch, idx, source) {
+                        reader.pending_pages.insert(idx, Instant::now());
+                        enqueued += 1;
+                        if enqueued >= MAX_PRELOADS_PER_FRAME {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
     }
 
     /// Renders the current page or spread and returns the response covering the page area.
     pub fn ui(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        loader: &PageLoader,
+    ) -> Option<egui::Response> {
+        crate::timing::log_if_slow("reader.ui", Duration::from_millis(5), || {
+            self.ui_inner(ctx, ui, loader)
+        })
+    }
+
+    fn ui_inner(
         &mut self,
         ctx: &egui::Context,
         ui: &mut egui::Ui,
@@ -363,21 +471,36 @@ impl ReaderView {
         }
 
         let (left_idx, right_idx) = reader.spread_pages();
+        let spread_changed = reader.left_page != left_idx || reader.right_page != right_idx;
+        if spread_changed {
+            timing::log(&format!(
+                "reader spread changed: left={:?} right={:?} double_page={} current={}",
+                left_idx,
+                right_idx,
+                reader.is_double_page(),
+                reader.state.current_page
+            ));
+        }
         let left_texture = left_idx.and_then(|idx| reader.cache.get_texture(ctx, idx));
         let right_texture = right_idx.and_then(|idx| reader.cache.get_texture(ctx, idx));
-        if reader.left_page != left_idx || reader.right_page != right_idx {
-            reader.left_page = left_idx;
-            reader.right_page = right_idx;
-            if let Some(idx) = left_idx {
-                if left_texture.is_none() {
-                    request_page(loader, reader, idx);
-                }
+
+        // Request visible pages every frame until they are in the cache. This
+        // covers both spread changes and any transient send failures in the
+        // high-priority queue.
+        if let Some(idx) = left_idx {
+            if left_texture.is_none() {
+                request_page(loader, reader, idx);
             }
-            if let Some(idx) = right_idx {
-                if right_texture.is_none() {
-                    request_page(loader, reader, idx);
-                }
+        }
+        if let Some(idx) = right_idx {
+            if right_texture.is_none() {
+                request_page(loader, reader, idx);
             }
+        }
+
+        reader.left_page = left_idx;
+        reader.right_page = right_idx;
+        if spread_changed {
             reader.pending_fit = reader.pending_fit.or(Some(QuickFit::Page));
         }
 
@@ -571,6 +694,7 @@ impl ReaderView {
                 let target = page_at_x(pos.x, response.rect, total_pages);
                 if target != current_page {
                     reader.state.go_to_page(target, total_pages);
+                    reader.mark_page_turn();
                     reader.left_page = None;
                     reader.right_page = None;
                 }
@@ -616,15 +740,24 @@ fn request_page(loader: &PageLoader, reader: &mut OpenReader, page_index: usize)
     if page_index >= total {
         return;
     }
-    if reader.pending_pages.contains(&page_index) {
-        return;
+    if let Some(&since) = reader.pending_pages.get(&page_index) {
+        if since.elapsed() < PENDING_TIMEOUT {
+            return;
+        }
+        // Timed out: drop the stale pending entry so we can retry immediately.
+        reader.pending_pages.remove(&page_index);
     }
     let Some(source) = reader.comic.page_source(page_index).cloned() else {
         return;
     };
-    reader.pending_pages.insert(page_index);
-    reader.page_errors.remove(&page_index);
-    loader.request_high(reader.current_epoch, page_index, source);
+    timing::log(&format!(
+        "reader request_high page {} epoch {}",
+        page_index, reader.current_epoch
+    ));
+    if loader.request_high(reader.current_epoch, page_index, source) {
+        reader.pending_pages.insert(page_index, Instant::now());
+        reader.page_errors.remove(&page_index);
+    }
 }
 
 fn render_page_or_placeholder(
@@ -690,7 +823,9 @@ fn render_loading_placeholder(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Resp
         ui.with_layout(
             egui::Layout::centered_and_justified(egui::Direction::TopDown),
             |ui| {
-                ui.spinner();
+                // Use a static icon instead of ui.spinner() to avoid forcing a
+                // continuous repaint while waiting for the decode thread.
+                ui.label(egui::RichText::new("⏳").size(24.0));
                 ui.label("加载中...");
             },
         );
@@ -728,10 +863,11 @@ mod tests {
             right_page: None,
             pending_fit: None,
             current_epoch: 0,
-            pending_pages: HashSet::new(),
+            pending_pages: HashMap::new(),
             page_errors: HashMap::new(),
             cache: PageCache::new(),
             page_animation: None,
+            last_page_turn: Instant::now(),
         }
     }
 
@@ -807,5 +943,26 @@ mod tests {
 
         reader.state.current_page = 1;
         assert_eq!(reader.spread_pages(), (Some(2), Some(1)));
+    }
+
+    #[test]
+    fn test_pending_page_timeout_allows_retry() {
+        let mut reader = dummy_reader();
+        let loader = PageLoader::new();
+        // Simulate a pending entry whose result never arrived.
+        reader
+            .pending_pages
+            .insert(0, Instant::now() - PENDING_TIMEOUT - Duration::from_secs(1));
+
+        request_page(&loader, &mut reader, 0);
+
+        let since = reader
+            .pending_pages
+            .get(&0)
+            .expect("page should be pending again after retry");
+        assert!(
+            since.elapsed() < Duration::from_secs(1),
+            "pending timestamp should be fresh"
+        );
     }
 }
