@@ -23,35 +23,26 @@ const CJK_FONT_CANDIDATES: &[&str] = &[
     "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.otf",
 ];
 
-/// Attempts to load the first available system CJK font and merge it into egui's
-/// default proportional font family.
-pub fn load_cjk_font(ctx: &egui::Context) {
-    let path = match CJK_FONT_CANDIDATES
+/// Loads the first available system CJK font and installs the Phosphor icon font.
+pub fn setup_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+
+    if let Some(path) = CJK_FONT_CANDIDATES
         .iter()
         .map(PathBuf::from)
         .find(|p| p.exists())
     {
-        Some(p) => p,
-        None => return,
-    };
-
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(_) => return,
-    };
-
-    let mut fonts = FontDefinitions::default();
-    fonts
-        .font_data
-        .insert("cjk".to_owned(), FontData::from_owned(bytes));
-
-    if let Some(proportional) = fonts.families.get_mut(&FontFamily::Proportional) {
-        proportional.push("cjk".to_owned());
+        if let Ok(bytes) = std::fs::read(&path) {
+            fonts
+                .font_data
+                .insert("cjk".to_owned(), FontData::from_owned(bytes));
+            if let Some(proportional) = fonts.families.get_mut(&FontFamily::Proportional) {
+                proportional.push("cjk".to_owned());
+            }
+        }
     }
-    if let Some(monospace) = fonts.families.get_mut(&FontFamily::Monospace) {
-        // Keep monospace unchanged unless it fails to render CJK later.
-        let _ = monospace;
-    }
+
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
 
     ctx.set_fonts(fonts);
 }
