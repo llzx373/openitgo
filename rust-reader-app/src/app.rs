@@ -463,15 +463,9 @@ impl ReaderApp {
                         .as_ref()
                         .map(|r| r.state.double_page)
                         .unwrap_or(self.settings.double_page);
-                    if toolbar_selectable(
-                        ui,
-                        regular::BOOK_OPEN,
-                        "双页",
-                        double_page,
-                        display_mode,
-                    )
-                    .on_hover_text("切换到双页模式")
-                    .clicked()
+                    if toolbar_selectable(ui, regular::BOOK_OPEN, "双页", double_page, display_mode)
+                        .on_hover_text("切换到双页模式")
+                        .clicked()
                     {
                         let new_double = !double_page;
                         self.settings.double_page = new_double;
@@ -494,21 +488,32 @@ impl ReaderApp {
                         reader.zoom_in();
                     }
                 }
-                if toolbar_button(ui, regular::ARROWS_OUT_LINE_HORIZONTAL, "适应宽度", display_mode)
-                    .clicked()
+                if toolbar_button(
+                    ui,
+                    regular::ARROWS_OUT_LINE_HORIZONTAL,
+                    "适应宽度",
+                    display_mode,
+                )
+                .clicked()
                 {
                     if let Some(reader) = self.reader_view.open.as_mut() {
                         reader.request_fit(FitMode::Width);
                     }
                 }
-                if toolbar_button(ui, regular::ARROWS_OUT_LINE_VERTICAL, "适应高度", display_mode)
-                    .clicked()
+                if toolbar_button(
+                    ui,
+                    regular::ARROWS_OUT_LINE_VERTICAL,
+                    "适应高度",
+                    display_mode,
+                )
+                .clicked()
                 {
                     if let Some(reader) = self.reader_view.open.as_mut() {
                         reader.request_fit(FitMode::Height);
                     }
                 }
-                if toolbar_button(ui, regular::FRAME_CORNERS, "自动适应", display_mode).clicked() {
+                if toolbar_button(ui, regular::FRAME_CORNERS, "自动适应", display_mode).clicked()
+                {
                     if let Some(reader) = self.reader_view.open.as_mut() {
                         reader.request_fit(FitMode::Page);
                     }
@@ -545,7 +550,8 @@ impl ReaderApp {
                 if toolbar_button(ui, regular::BOOKMARK, "添加书签", display_mode).clicked() {
                     self.add_bookmark(current_page);
                 }
-                if toolbar_button(ui, regular::ARROWS_OUT_SIMPLE, "全屏", display_mode).clicked() {
+                if toolbar_button(ui, regular::ARROWS_OUT_SIMPLE, "全屏", display_mode).clicked()
+                {
                     self.toggle_fullscreen(ctx);
                 }
                 if toolbar_button(ui, regular::GEAR, "设置", display_mode).clicked() {
