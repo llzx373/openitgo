@@ -64,7 +64,7 @@ impl PageCache {
     pub fn contains_full(&self, page_index: usize) -> bool {
         self.textures
             .get(&page_index)
-            .map(|e| e.image.is_some())
+            .map(|e| e.image.is_some() || e.handle.is_some())
             .unwrap_or(false)
     }
 
@@ -74,7 +74,8 @@ impl PageCache {
         let (count, bytes) = self
             .textures
             .values()
-            .filter_map(|e| e.image.as_ref().map(|img| img.size_bytes()))
+            .filter(|e| e.image.is_some() || e.handle.is_some())
+            .map(|e| e.size_bytes)
             .fold((0usize, 0usize), |(c, b), s| (c + 1, b + s));
         if count == 0 {
             0
@@ -104,6 +105,7 @@ impl PageCache {
         }
         if let Some(image) = entry.image.as_ref() {
             timing::log(&format!("cache upload full page {}", page_index));
+            let is_color = matches!(image, LoadedImage::Color(_));
             let color = timing::time("cache full decompress+upload", || {
                 image.to_color_image().ok()
             })?;
@@ -113,6 +115,13 @@ impl PageCache {
                 egui::TextureOptions::LINEAR,
             );
             entry.handle = Some(handle.clone());
+            // Release the CPU-side ColorImage once it has been uploaded to the
+            // GPU. size_bytes is retained as an estimate of GPU texture memory,
+            // so the total budget stays consistent. Compressed images are kept
+            // so they can be re-uploaded if the texture handle is later evicted.
+            if is_color {
+                entry.image = None;
+            }
             return Some(handle);
         }
 
@@ -148,14 +157,15 @@ impl PageCache {
             page_index, new_size, max_size_bytes
         ));
 
-        // Remove any existing full image for this page first so the budget check
-        // accounts for the replacement.
+        // Remove any existing full-resolution data for this page first so the
+        // budget check accounts for the replacement. size_bytes tracks either
+        // CPU image memory or the equivalent GPU texture estimate, so it is
+        // always subtracted here.
         if let Some(entry) = self.textures.get_mut(&page_index) {
-            if let Some(old) = entry.image.take() {
-                self.total_size_bytes -= old.size_bytes();
-                entry.handle = None;
-                entry.size_bytes = 0;
-            }
+            self.total_size_bytes -= entry.size_bytes;
+            entry.image = None;
+            entry.handle = None;
+            entry.size_bytes = 0;
         }
 
         // Evict other full-resolution pages until there is room for the new one.
@@ -219,15 +229,14 @@ impl PageCache {
         let lru_key = self
             .textures
             .iter()
-            .filter(|(k, e)| !protected.contains(k) && e.image.is_some())
+            .filter(|(k, e)| !protected.contains(k) && (e.image.is_some() || e.handle.is_some()))
             .min_by(|(_, a), (_, b)| a.last_accessed.cmp(&b.last_accessed))
             .map(|(&key, _)| key);
 
         if let Some(key) = lru_key {
             if let Some(entry) = self.textures.get_mut(&key) {
-                if let Some(image) = entry.image.take() {
-                    self.total_size_bytes -= image.size_bytes();
-                }
+                self.total_size_bytes -= entry.size_bytes;
+                entry.image = None;
                 entry.handle = None;
                 entry.size_bytes = 0;
                 if entry.thumbnail.is_none() {
