@@ -37,8 +37,11 @@ pub struct LibraryCallbacks<'a> {
     pub on_open_path: &'a mut dyn FnMut(PathBuf),
     pub on_add: &'a mut dyn FnMut(),
     pub on_delete_bookmark: &'a mut dyn FnMut(usize),
+    pub on_update_bookmark: &'a mut dyn FnMut(usize, Option<String>),
     pub on_update_title: &'a mut dyn FnMut(usize, String),
     pub on_delete_library: &'a mut dyn FnMut(usize),
+    pub on_clear_history: &'a mut dyn FnMut(),
+    pub on_delete_history: &'a mut dyn FnMut(usize),
 }
 
 impl LibraryView {
@@ -113,73 +116,98 @@ impl LibraryView {
     ) {
         let entries = self.filtered_entries(history, sort);
         if entries.is_empty() {
-            ui.label("没有匹配的漫画。");
+            self.render_empty_library(ui, callbacks);
             return;
         }
         egui::Grid::new("library_grid").show(ui, |ui| {
             for (original_idx, entry) in entries {
-                ui.vertical(|ui| {
-                    let cover_size = egui::vec2(80.0, 120.0);
-                    if let Some(texture) =
-                        self.cover_texture(ui.ctx(), &entry.comic_id, entry.cover_path.as_ref())
-                    {
-                        ui.image(&texture);
-                    } else {
-                        let (rect, _response) =
-                            ui.allocate_exact_size(cover_size, egui::Sense::hover());
-                        ui.painter()
-                            .rect_filled(rect, 0.0, ui.visuals().widgets.inactive.bg_fill);
+                let cover_size = egui::vec2(80.0, 120.0);
+                let cover_response = if let Some(texture) =
+                    self.cover_texture(ui.ctx(), &entry.comic_id, entry.cover_path.as_ref())
+                {
+                    ui.image(&texture)
+                } else {
+                    let (rect, response) = ui.allocate_exact_size(cover_size, egui::Sense::click());
+                    ui.painter()
+                        .rect_filled(rect, 0.0, ui.visuals().widgets.inactive.bg_fill);
+                    response
+                };
+                cover_response.context_menu(|ui| {
+                    if ui.button("打开").clicked() {
+                        (callbacks.on_open_library)(original_idx);
+                        ui.close_menu();
                     }
-                    if self.edit_buffer.as_ref().map(|b| b.0) == Some(original_idx) {
-                        let title = &mut self.edit_buffer.as_mut().unwrap().1;
-                        ui.text_edit_singleline(title);
-                        let mut save = false;
-                        let mut cancel = false;
-                        ui.horizontal(|ui| {
-                            if ui.button("保存").clicked() {
-                                save = true;
-                            }
-                            if ui.button("取消").clicked() {
-                                cancel = true;
-                            }
-                        });
-                        if save {
-                            let new_title = title.trim().to_string();
-                            if !new_title.is_empty() {
-                                (callbacks.on_update_title)(original_idx, new_title);
-                            }
-                            self.edit_buffer = None;
-                        } else if cancel {
-                            self.edit_buffer = None;
-                        }
-                    } else {
-                        ui.label(&entry.title);
+                    if ui.button("编辑标题").clicked() {
+                        self.edit_buffer = Some((original_idx, entry.title.clone()));
+                        self.pending_delete = None;
+                        ui.close_menu();
                     }
-                    ui.horizontal(|ui| {
-                        if ui.button("打开").clicked() {
-                            (callbacks.on_open_library)(original_idx);
-                        }
-                        if ui.button("编辑").clicked() {
-                            self.edit_buffer = Some((original_idx, entry.title.clone()));
+                    if self.pending_delete == Some(original_idx) {
+                        ui.label("确定删除？");
+                        if ui.button("是").clicked() {
+                            (callbacks.on_delete_library)(original_idx);
                             self.pending_delete = None;
-                        }
-                        if self.pending_delete == Some(original_idx) {
-                            ui.label("确定删除？");
-                            if ui.button("是").clicked() {
-                                (callbacks.on_delete_library)(original_idx);
-                                self.pending_delete = None;
-                                self.edit_buffer = None;
-                            }
-                            if ui.button("否").clicked() {
-                                self.pending_delete = None;
-                            }
-                        } else if ui.button("删除").clicked() {
-                            self.pending_delete = Some(original_idx);
                             self.edit_buffer = None;
+                            ui.close_menu();
+                        }
+                        if ui.button("否").clicked() {
+                            self.pending_delete = None;
+                            ui.close_menu();
+                        }
+                    } else if ui.button("删除").clicked() {
+                        self.pending_delete = Some(original_idx);
+                        ui.close_menu();
+                    }
+                });
+
+                if self.edit_buffer.as_ref().map(|b| b.0) == Some(original_idx) {
+                    let title = &mut self.edit_buffer.as_mut().unwrap().1;
+                    ui.text_edit_singleline(title);
+                    let mut save = false;
+                    let mut cancel = false;
+                    ui.horizontal(|ui| {
+                        if ui.button("保存").clicked() {
+                            save = true;
+                        }
+                        if ui.button("取消").clicked() {
+                            cancel = true;
                         }
                     });
-                });
+                    if save {
+                        let new_title = title.trim().to_string();
+                        if !new_title.is_empty() {
+                            (callbacks.on_update_title)(original_idx, new_title);
+                        }
+                        self.edit_buffer = None;
+                    } else if cancel {
+                        self.edit_buffer = None;
+                    }
+                } else {
+                    ui.label(&entry.title);
+                }
+
+                let progress = library_progress(history, &entry.comic_id);
+                if progress.total > 0 {
+                    ui.add(
+                        egui::ProgressBar::new(progress.ratio())
+                            .text(format!("{}/{}", progress.read, progress.total)),
+                    );
+                }
+
                 ui.end_row();
+            }
+        });
+    }
+
+    fn render_empty_library(&mut self, ui: &mut egui::Ui, callbacks: LibraryCallbacks<'_>) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(64.0);
+            ui.label(egui::RichText::new("书架还是空的").size(20.0).strong());
+            ui.add_space(8.0);
+            ui.label("拖拽漫画文件/文件夹到窗口，或点击下面按钮导入。");
+            ui.add_space(16.0);
+            if ui.button("打开文件夹").clicked() {
+                (callbacks.on_add)();
             }
         });
     }
@@ -242,8 +270,17 @@ impl LibraryView {
             ui.label("暂无阅读历史。");
             return;
         }
+        ui.horizontal(|ui| {
+            ui.heading("历史");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("清空").clicked() {
+                    (callbacks.on_clear_history)();
+                }
+            });
+        });
+        ui.separator();
         egui::Grid::new("history_grid").show(ui, |ui| {
-            for entry in history.entries.iter() {
+            for (idx, entry) in history.entries.iter().enumerate() {
                 let (title, path) = match self.find_by_id(&entry.comic_id) {
                     Some(lib) => (lib.title.clone(), Some(lib.path.clone())),
                     None => (entry.comic_id.clone(), None),
@@ -257,6 +294,9 @@ impl LibraryView {
                     }
                 } else {
                     ui.label("未在书架中");
+                }
+                if ui.button("删除").clicked() {
+                    (callbacks.on_delete_history)(idx);
                 }
                 ui.end_row();
             }
@@ -281,7 +321,34 @@ impl LibraryView {
                 };
                 ui.label(&title);
                 ui.label(format!("第 {} 页", entry.page_index + 1));
-                if let Some(note) = &entry.note {
+                if self.edit_buffer.as_ref().map(|b| b.0) == Some(idx) {
+                    let note = &mut self.edit_buffer.as_mut().unwrap().1;
+                    ui.text_edit_singleline(note);
+                    let mut save = false;
+                    let mut cancel = false;
+                    ui.horizontal(|ui| {
+                        if ui.button("保存").clicked() {
+                            save = true;
+                        }
+                        if ui.button("取消").clicked() {
+                            cancel = true;
+                        }
+                    });
+                    if save {
+                        let trimmed = note.trim().to_string();
+                        (callbacks.on_update_bookmark)(
+                            idx,
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(trimmed)
+                            },
+                        );
+                        self.edit_buffer = None;
+                    } else if cancel {
+                        self.edit_buffer = None;
+                    }
+                } else if let Some(note) = &entry.note {
                     ui.label(note);
                 } else {
                     ui.label("-");
@@ -292,6 +359,9 @@ impl LibraryView {
                             (callbacks.on_open_path)(path);
                         }
                     }
+                    if ui.button("编辑").clicked() {
+                        self.edit_buffer = Some((idx, entry.note.clone().unwrap_or_default()));
+                    }
                     if ui.button("删除").clicked() {
                         (callbacks.on_delete_bookmark)(idx);
                     }
@@ -300,6 +370,28 @@ impl LibraryView {
             }
         });
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct Progress {
+    read: usize,
+    total: usize,
+}
+
+impl Progress {
+    fn ratio(&self) -> f32 {
+        if self.total == 0 {
+            0.0
+        } else {
+            (self.read as f32 / self.total as f32).min(1.0)
+        }
+    }
+}
+
+fn library_progress(_history: &History, _comic_id: &str) -> Progress {
+    // Placeholder: the storage models don't track total pages yet, so we show
+    // a 0 % bar until P3-23 adds richer metadata.
+    Progress::default()
 }
 
 fn last_read_at(history: &History, comic_id: &str) -> u64 {

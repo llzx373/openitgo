@@ -1,7 +1,8 @@
 use crate::cache::PageCache;
 use egui::Context;
 
-const THUMB_SIZE: egui::Vec2 = egui::Vec2::new(80.0, 120.0);
+/// Maximum long-edge dimension of the progress-bar hover thumbnail.
+const THUMB_MAX_SIZE: f32 = 160.0;
 
 pub fn page_thumbnail_tooltip(
     ui: &mut egui::Ui,
@@ -10,8 +11,10 @@ pub fn page_thumbnail_tooltip(
     page_index: usize,
     tooltip_pos: egui::Pos2,
 ) -> egui::Response {
-    let center = egui::pos2(tooltip_pos.x, tooltip_pos.y - THUMB_SIZE.y / 2.0);
-    let rect = egui::Rect::from_center_size(center, THUMB_SIZE);
+    // Preserve the page aspect ratio instead of using a fixed 80x120 rect.
+    let size = thumbnail_size(cache, page_index);
+    let center = egui::pos2(tooltip_pos.x, tooltip_pos.y - size.y / 2.0);
+    let rect = egui::Rect::from_center_size(center, size);
 
     let response = ui.allocate_rect(rect, egui::Sense::hover());
 
@@ -19,10 +22,8 @@ pub fn page_thumbnail_tooltip(
         .rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
 
     if let Some(handle) = cache.get_texture(ctx, page_index) {
-        ui.put(
-            rect,
-            egui::Image::new(&handle).fit_to_exact_size(rect.size()),
-        );
+        // Maintain aspect ratio and letter-box inside the tooltip rect.
+        ui.put(rect, egui::Image::new(&handle).max_size(rect.size()));
     } else {
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
             ui.with_layout(
@@ -45,4 +46,22 @@ pub fn page_thumbnail_tooltip(
     );
 
     response
+}
+
+fn thumbnail_size(cache: &PageCache, page_index: usize) -> egui::Vec2 {
+    let [w, h] = cache.get_original_size(page_index).unwrap_or([80, 120]);
+    if w == 0 || h == 0 {
+        return egui::vec2(80.0, 120.0);
+    }
+    let (w, h) = (w as f32, h as f32);
+    let ratio = w / h;
+    if ratio >= 1.0 {
+        let width = THUMB_MAX_SIZE;
+        let height = (width / ratio).max(1.0);
+        egui::vec2(width, height)
+    } else {
+        let height = THUMB_MAX_SIZE;
+        let width = (height * ratio).max(1.0);
+        egui::vec2(width, height)
+    }
 }

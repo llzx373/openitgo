@@ -61,6 +61,11 @@ impl SettingsView {
             ui.label("（重启后生效）");
         });
 
+        ui.horizontal(|ui| {
+            ui.label("宽页阈值（宽高比）:");
+            ui.add(egui::Slider::new(&mut settings.wide_page_threshold, 1.0..=2.0).step_by(0.05));
+        });
+
         ui.label("默认缩放/适应");
         egui::ComboBox::from_id_salt("fit")
             .selected_text(fit_label(settings.default_fit))

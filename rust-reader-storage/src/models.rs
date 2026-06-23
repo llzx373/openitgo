@@ -9,6 +9,7 @@ pub struct Settings {
     pub default_mode: ReadingMode,
     pub default_fit: FitMode,
     pub double_page: bool,
+    pub wide_page_threshold: f32,
     pub compress_images: bool,
     pub decode_threads: u32,
     pub cache_size_mb: u32,
@@ -29,6 +30,7 @@ impl Default for Settings {
             default_mode: ReadingMode::default(),
             default_fit: FitMode::default(),
             double_page: false,
+            wide_page_threshold: 1.4,
             compress_images: false,
             decode_threads: 0,
             cache_size_mb: 1024,
@@ -161,6 +163,7 @@ mod tests {
         assert!(s.show_statusbar);
         assert!(!s.invert_scroll);
         assert_eq!(s.background_color, [30, 30, 30]);
+        assert!((s.wide_page_threshold - 1.4).abs() < f32::EPSILON);
     }
 
     #[test]

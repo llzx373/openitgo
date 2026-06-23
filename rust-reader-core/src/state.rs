@@ -153,6 +153,50 @@ impl ReadingState {
             self.current_page = (self.current_page - 1).min(last);
         }
     }
+
+    /// Move forward by one logical spread, respecting wide-page boundaries.
+    /// `is_wide` should return true for pages that must be shown alone.
+    pub fn next_spread(&mut self, total_pages: usize, is_wide: impl Fn(usize) -> bool) {
+        if !self.is_double_page() || total_pages <= 1 {
+            self.next_page(total_pages);
+            return;
+        }
+        let last = self.last_anchor(total_pages);
+        if self.current_page == 0 {
+            self.current_page = 1.min(last);
+        } else if is_wide(self.current_page) {
+            self.current_page = (self.current_page + 1).min(last);
+        } else {
+            let candidate = self.current_page + 2;
+            if candidate <= last {
+                self.current_page = candidate;
+            } else if self.current_page < last {
+                self.current_page = last;
+            }
+        }
+        self.pan = Vec2::ZERO;
+    }
+
+    /// Move backward by one logical spread, respecting wide-page boundaries.
+    pub fn prev_spread(&mut self, is_wide: impl Fn(usize) -> bool) {
+        if !self.is_double_page() {
+            self.prev_page();
+            return;
+        }
+        if self.current_page == 0 {
+            return;
+        }
+        if is_wide(self.current_page) {
+            self.current_page = self.current_page.saturating_sub(1);
+        } else if self.current_page <= 1 {
+            self.current_page = 0;
+        } else if is_wide(self.current_page - 1) {
+            self.current_page -= 1;
+        } else {
+            self.current_page = self.current_page.saturating_sub(2);
+        }
+        self.pan = Vec2::ZERO;
+    }
 }
 
 fn default_fit_mode(mode: ReadingMode) -> FitMode {

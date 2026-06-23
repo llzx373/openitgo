@@ -177,7 +177,13 @@ impl ReaderApp {
                     if let Some(h) = self.history.entries.iter().find(|h| h.comic_id == comic.id) {
                         state.go_to_page(h.page_index, total);
                     }
-                    self.reader_view.open(ctx, comic, state, &self.page_loader);
+                    self.reader_view.open(
+                        ctx,
+                        comic,
+                        state,
+                        &self.page_loader,
+                        self.settings.wide_page_threshold,
+                    );
                     self.current_view = View::Reader;
                     self.error_message = None;
                 }
@@ -198,8 +204,11 @@ impl ReaderApp {
             let mut open_path: Option<PathBuf> = None;
             let mut add_requested = false;
             let mut delete_bookmark_idx: Option<usize> = None;
+            let mut update_bookmark: Option<(usize, Option<String>)> = None;
             let mut update_title: Option<(usize, String)> = None;
             let mut delete_library_idx: Option<usize> = None;
+            let mut clear_history = false;
+            let mut delete_history_idx: Option<usize> = None;
             self.library_view.ui(
                 ui,
                 &self.history,
@@ -210,8 +219,11 @@ impl ReaderApp {
                     on_open_path: &mut |path| open_path = Some(path),
                     on_add: &mut || add_requested = true,
                     on_delete_bookmark: &mut |idx| delete_bookmark_idx = Some(idx),
+                    on_update_bookmark: &mut |idx, note| update_bookmark = Some((idx, note)),
                     on_update_title: &mut |idx, title| update_title = Some((idx, title)),
                     on_delete_library: &mut |idx| delete_library_idx = Some(idx),
+                    on_clear_history: &mut || clear_history = true,
+                    on_delete_history: &mut |idx| delete_history_idx = Some(idx),
                 },
             );
             if add_requested {
@@ -235,8 +247,19 @@ impl ReaderApp {
             if let Some(idx) = delete_library_idx {
                 self.library_view.library.entries.remove(idx);
             }
+            if let Some((idx, note)) = update_bookmark {
+                if let Some(entry) = self.bookmarks.entries.get_mut(idx) {
+                    entry.note = note;
+                }
+            }
             if let Some(idx) = delete_bookmark_idx {
                 self.bookmarks.entries.remove(idx);
+            }
+            if clear_history {
+                self.history.entries.clear();
+            }
+            if let Some(idx) = delete_history_idx {
+                self.history.entries.remove(idx);
             }
         });
     }
@@ -793,37 +816,55 @@ impl ReaderApp {
     }
 
     fn add_folder_to_library(&mut self, path: std::path::PathBuf) {
-        match rust_reader_parser::parse(&path) {
-            Ok(comic) => {
-                let added_at = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let comic_id = comic.id.clone();
-                if !self
-                    .library_view
-                    .library
-                    .entries
-                    .iter()
-                    .any(|e| e.path == path)
-                {
-                    if let Some(page) = comic.volumes.first().and_then(|v| v.pages.first()) {
-                        self.request_cover(&comic_id, &path, page.source.clone());
-                    }
-                    self.library_view.library.entries.push(
-                        rust_reader_storage::models::LibraryEntry {
-                            comic_id,
-                            title: comic.title.clone(),
-                            path: path.clone(),
-                            cover_path: None,
-                            added_at,
-                        },
-                    );
-                }
+        if let Ok(comic) = rust_reader_parser::parse(&path) {
+            self.add_comic_to_library(comic, &path);
+            return;
+        }
+
+        // If the selected path is not a comic itself, recursively scan it for
+        // supported archives/folders and import everything found.
+        let mut found = 0;
+        for entry in walk_supported_comics(&path) {
+            if let Ok(comic) = rust_reader_parser::parse(&entry) {
+                self.add_comic_to_library(comic, &entry);
+                found += 1;
             }
-            Err(e) => {
-                self.error_message = Some(format!("无法添加漫画: {}", e));
+        }
+        if found == 0 {
+            self.error_message = Some(format!("无法添加漫画: {}", path.display()));
+        }
+    }
+
+    fn add_comic_to_library(
+        &mut self,
+        comic: rust_reader_core::models::Comic,
+        path: &std::path::Path,
+    ) {
+        let added_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let comic_id = comic.id.clone();
+        if !self
+            .library_view
+            .library
+            .entries
+            .iter()
+            .any(|e| e.path == path)
+        {
+            if let Some(page) = comic.volumes.first().and_then(|v| v.pages.first()) {
+                self.request_cover(&comic_id, path, page.source.clone());
             }
+            self.library_view
+                .library
+                .entries
+                .push(rust_reader_storage::models::LibraryEntry {
+                    comic_id,
+                    title: comic.title.clone(),
+                    path: path.to_path_buf(),
+                    cover_path: None,
+                    added_at,
+                });
         }
     }
 
@@ -855,66 +896,57 @@ impl ReaderApp {
         self.error_message = None;
     }
 
-    fn ensure_in_library(&mut self, path: &std::path::Path) {
-        if self
-            .library_view
-            .library
-            .entries
-            .iter()
-            .any(|e| e.path == path)
-        {
-            return;
-        }
-        let added_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        match rust_reader_parser::parse(path) {
-            Ok(comic) => {
-                let comic_id = comic.id.clone();
-                if let Some(page) = comic.volumes.first().and_then(|v| v.pages.first()) {
-                    self.request_cover(&comic_id, path, page.source.clone());
-                }
-                self.library_view
-                    .library
-                    .entries
-                    .push(rust_reader_storage::models::LibraryEntry {
-                        comic_id,
-                        title: comic.title.clone(),
-                        path: path.to_path_buf(),
-                        cover_path: None,
-                        added_at,
-                    });
-            }
-            Err(_) => {
-                let title = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("Untitled")
-                    .to_string();
-                self.library_view
-                    .library
-                    .entries
-                    .push(rust_reader_storage::models::LibraryEntry {
-                        comic_id: title.clone(),
-                        title,
-                        path: path.to_path_buf(),
-                        cover_path: None,
-                        added_at,
-                    });
-            }
-        }
-    }
-
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped_files: Vec<_> = ctx.input(|i| i.raw.dropped_files.clone());
+        for file in &dropped_files {
+            if let Some(path) = &file.path {
+                self.add_folder_to_library(path.clone());
+            }
+        }
+        // Open the first dropped item if it is already a comic; otherwise stay
+        // in the library so the user can see the imported entries.
         if let Some(file) = dropped_files.first() {
             if let Some(path) = &file.path {
-                self.ensure_in_library(path);
-                self.open_comic(path.clone());
+                if rust_reader_parser::parse(path).is_ok() {
+                    self.open_comic(path.clone());
+                }
             }
         }
     }
+}
+
+/// Recursively walk `root` and return paths that look like supported comic
+/// files or folders containing images.
+fn walk_supported_comics(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut result = Vec::new();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if is_supported_comic_file(&path) {
+                result.push(path);
+            }
+        }
+    }
+    result.sort();
+    result
+}
+
+fn is_supported_comic_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "zip" | "cbz" | "rar" | "cbr" | "pdf"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn cover_filename(comic_id: &str) -> String {
@@ -1079,6 +1111,7 @@ mod tests {
             comic.clone(),
             ReadingState::new(ReadingMode::Ltr, 10),
             &PageLoader::default(),
+            1.4,
         );
         app.reader_view.open.as_mut().unwrap().state.current_page = 5;
         app.record_reader_history();

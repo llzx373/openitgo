@@ -93,6 +93,9 @@ pub struct OpenReader {
     pub webtoon_last_page: usize,
     /// Last seen viewport size, used to re-apply the current fit on resize.
     pub last_available_size: Option<egui::Vec2>,
+    /// Aspect ratio above which a page is treated as a wide spread and shown
+    /// alone even in double-page mode. Inherited from Settings at open time.
+    pub wide_page_threshold: f32,
 }
 
 impl OpenReader {
@@ -145,7 +148,18 @@ impl OpenReader {
     pub fn next_page_with_animation(&mut self) {
         let from = self.state.current_page;
         let total = self.total_pages();
-        self.state.next_page(total);
+        if self.is_double_page() {
+            let threshold = self.wide_page_threshold;
+            let cache = &self.cache;
+            self.state.next_spread(total, |idx| {
+                let Some([w, h]) = cache.get_original_size(idx) else {
+                    return false;
+                };
+                h != 0 && (w as f32 / h as f32) >= threshold
+            });
+        } else {
+            self.state.next_page(total);
+        }
         let to = self.state.current_page;
         self.mark_page_turn();
         self.start_turn_animation(from, to);
@@ -153,7 +167,18 @@ impl OpenReader {
 
     pub fn prev_page_with_animation(&mut self) {
         let from = self.state.current_page;
-        self.state.prev_page();
+        if self.is_double_page() {
+            let threshold = self.wide_page_threshold;
+            let cache = &self.cache;
+            self.state.prev_spread(|idx| {
+                let Some([w, h]) = cache.get_original_size(idx) else {
+                    return false;
+                };
+                h != 0 && (w as f32 / h as f32) >= threshold
+            });
+        } else {
+            self.state.prev_page();
+        }
         let to = self.state.current_page;
         self.mark_page_turn();
         self.start_turn_animation(from, to);
@@ -180,7 +205,9 @@ impl OpenReader {
     /// Returns the page indices to display in left and right slots.
     ///
     /// In double-page mode, the first page (cover) is shown alone on the
-    /// reading side; subsequent spreads use two pages.
+    /// reading side; subsequent spreads use two pages, unless the current page
+    /// is a wide spread (aspect ratio >= `wide_page_threshold`) in which case it
+    /// is shown alone.
     fn spread_pages(&self) -> (Option<usize>, Option<usize>) {
         let current = self.state.current_page;
         let total = self.total_pages();
@@ -190,7 +217,14 @@ impl OpenReader {
         if !self.is_double_page() {
             return (Some(current), None);
         }
-        if current == 0 {
+        if self.is_wide_page(current) {
+            // Wide/cross-page spreads are shown alone on the reading side.
+            match self.state.mode {
+                ReadingMode::Ltr => (None, Some(current)),
+                ReadingMode::Rtl => (Some(current), None),
+                ReadingMode::Webtoon => (Some(current), None),
+            }
+        } else if current == 0 {
             // Cover page shown alone on the reading side.
             match self.state.mode {
                 ReadingMode::Ltr => (None, Some(0)),
@@ -205,6 +239,16 @@ impl OpenReader {
                 ReadingMode::Webtoon => (Some(current), None),
             }
         }
+    }
+
+    fn is_wide_page(&self, page_index: usize) -> bool {
+        let Some([w, h]) = self.cache.get_original_size(page_index) else {
+            return false;
+        };
+        if h == 0 {
+            return false;
+        }
+        (w as f32 / h as f32) >= self.wide_page_threshold
     }
 
     fn spread_size(&self) -> Option<egui::Vec2> {
@@ -384,6 +428,7 @@ impl ReaderView {
         comic: Comic,
         state: ReadingState,
         loader: &PageLoader,
+        wide_page_threshold: f32,
     ) {
         let _ = ctx;
         timing::log(&format!(
@@ -410,6 +455,7 @@ impl ReaderView {
             webtoon_scroll_offset: 0.0,
             webtoon_last_page: state.current_page,
             last_available_size: None,
+            wide_page_threshold,
         };
         reader.bump_epoch(loader);
         self.open = Some(reader);
@@ -1225,6 +1271,7 @@ mod tests {
             webtoon_scroll_offset: 0.0,
             webtoon_last_page: 0,
             last_available_size: None,
+            wide_page_threshold: 1.4,
         }
     }
 
