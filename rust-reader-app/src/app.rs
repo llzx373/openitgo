@@ -682,6 +682,25 @@ impl ReaderApp {
         if is_shortcut_pressed(ctx, &self.settings.shortcuts.page_up) {
             self.reader_page_up();
         }
+
+        // Mouse side buttons: Extra1 is typically "back" and Extra2 is "forward".
+        let extra1_pressed = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Extra1));
+        let extra2_pressed = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Extra2));
+        if extra1_pressed {
+            if rtl {
+                self.reader_next_page();
+            } else {
+                self.reader_prev_page();
+            }
+        }
+        if extra2_pressed {
+            if rtl {
+                self.reader_prev_page();
+            } else {
+                self.reader_next_page();
+            }
+        }
+
         if is_shortcut_pressed(ctx, &self.settings.shortcuts.zoom_in) {
             if let Some(reader) = self.reader_view.open.as_mut() {
                 reader.zoom_in();
