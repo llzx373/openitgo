@@ -43,7 +43,7 @@ pub struct ReaderApp {
 impl Default for ReaderApp {
     fn default() -> Self {
         let store = JsonStore::new(JsonStore::default_dir().unwrap_or_else(|| PathBuf::from(".")));
-        let settings = store.load_settings().unwrap_or_default();
+        let (settings, settings_error) = load_settings_with_error(&store);
         let library = store.load_library().unwrap_or_default();
         let mut history = store.load_history().unwrap_or_default();
         let mut bookmarks = store.load_bookmarks().unwrap_or_default();
@@ -75,7 +75,7 @@ impl Default for ReaderApp {
             store,
             history,
             bookmarks,
-            error_message: None,
+            error_message: settings_error,
             page_loader,
             cover_loader,
             opener: None,
@@ -947,6 +947,16 @@ impl ReaderApp {
     }
 }
 
+fn load_settings_with_error(store: &JsonStore) -> (Settings, Option<String>) {
+    match store.load_settings() {
+        Ok(s) => (s, None),
+        Err(err) => {
+            let (s, e) = *err;
+            (s, Some(e.to_string()))
+        }
+    }
+}
+
 /// Recursively walk `root` and return paths that look like supported comic
 /// files or folders containing images.
 fn walk_supported_comics(root: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -1101,7 +1111,7 @@ mod tests {
     impl ReaderApp {
         fn with_store_dir(dir: &Path) -> Self {
             let store = JsonStore::new(dir);
-            let settings = store.load_settings().unwrap_or_default();
+            let (settings, _settings_error) = load_settings_with_error(&store);
             let library = store.load_library().unwrap_or_default();
             let history = store.load_history().unwrap_or_default();
             let bookmarks = store.load_bookmarks().unwrap_or_default();

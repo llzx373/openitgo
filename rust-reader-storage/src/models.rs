@@ -48,6 +48,55 @@ impl Default for Settings {
     }
 }
 
+impl Settings {
+    /// Validate that all numeric fields are within sensible ranges. Returns an
+    /// error message describing the first invalid field.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.decode_threads > 64 {
+            return Err(format!(
+                "decode_threads must be <= 64, got {}",
+                self.decode_threads
+            ));
+        }
+        if !(100..=16384).contains(&self.cache_size_mb) {
+            return Err(format!(
+                "cache_size_mb must be between 100 and 16384, got {}",
+                self.cache_size_mb
+            ));
+        }
+        if !(1..=500).contains(&self.real_image_cache_pages) {
+            return Err(format!(
+                "real_image_cache_pages must be between 1 and 500, got {}",
+                self.real_image_cache_pages
+            ));
+        }
+        if self.wide_page_threshold < 1.0 || self.wide_page_threshold > 3.0 {
+            return Err(format!(
+                "wide_page_threshold must be between 1.0 and 3.0, got {}",
+                self.wide_page_threshold
+            ));
+        }
+        if self.window_size.0 <= 0.0 || self.window_size.1 <= 0.0 {
+            return Err(format!(
+                "window_size must be positive, got {:?}",
+                self.window_size
+            ));
+        }
+        Ok(())
+    }
+
+    /// Clamp all numeric fields to their valid ranges. Used when repairing a
+    /// settings file that failed validation.
+    pub fn clamp(&mut self) {
+        self.decode_threads = self.decode_threads.min(64);
+        self.cache_size_mb = self.cache_size_mb.clamp(100, 16384);
+        self.real_image_cache_pages = self.real_image_cache_pages.clamp(1, 500);
+        self.wide_page_threshold = self.wide_page_threshold.clamp(1.0, 3.0);
+        self.window_size.0 = self.window_size.0.max(100.0);
+        self.window_size.1 = self.window_size.1.max(100.0);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Shortcuts {
