@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - macOS: drag archives or folders onto the Dock icon to open them, even when the app is not running.
+- macOS packaging script (`scripts/package-macos.sh`) that builds a signed `.app` bundle, plus a Zed task to run it.
 - Menu bar with File / View / Read / Tools / Help menus, available even when the toolbar is hidden.
 - Library grid uses a wrapping card layout that adapts to window width and supports vertical scrolling.
 - Missing library covers are regenerated on demand; deleted-source entries show an overlay and can be removed in bulk.

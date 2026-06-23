@@ -70,5 +70,14 @@
     "use_new_terminal": false,
     "allow_concurrent_runs": false,
     "reveal": "always"
+  },
+  {
+    "label": "Package macOS app",
+    "command": "scripts/package-macos.sh",
+    "args": [],
+    "env": {},
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
   }
 ]
