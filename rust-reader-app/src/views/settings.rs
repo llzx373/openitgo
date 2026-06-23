@@ -1,5 +1,5 @@
 use rust_reader_core::models::{FitMode, ReadingMode};
-use rust_reader_storage::models::{Settings, Theme};
+use rust_reader_storage::models::{Settings, Theme, ToolbarDisplayMode};
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -92,6 +92,27 @@ impl SettingsView {
                 ui.selectable_value(&mut settings.theme, Theme::Dark, "深色");
             });
 
+        ui.label("工具栏显示模式");
+        egui::ComboBox::from_id_salt("toolbar_display_mode")
+            .selected_text(toolbar_mode_label(settings.toolbar_display_mode))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut settings.toolbar_display_mode,
+                    ToolbarDisplayMode::IconAndText,
+                    "图标 + 文字",
+                );
+                ui.selectable_value(
+                    &mut settings.toolbar_display_mode,
+                    ToolbarDisplayMode::IconOnly,
+                    "仅图标",
+                );
+                ui.selectable_value(
+                    &mut settings.toolbar_display_mode,
+                    ToolbarDisplayMode::TextOnly,
+                    "仅文字",
+                );
+            });
+
         ui.separator();
         ui.heading("快捷键");
         self.shortcut_editor(ui, &mut settings.shortcuts);
@@ -159,5 +180,13 @@ fn theme_label(theme: Theme) -> &'static str {
         Theme::System => "跟随系统",
         Theme::Light => "浅色",
         Theme::Dark => "深色",
+    }
+}
+
+fn toolbar_mode_label(mode: ToolbarDisplayMode) -> &'static str {
+    match mode {
+        ToolbarDisplayMode::IconAndText => "图标 + 文字",
+        ToolbarDisplayMode::IconOnly => "仅图标",
+        ToolbarDisplayMode::TextOnly => "仅文字",
     }
 }
