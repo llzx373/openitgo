@@ -1,4 +1,5 @@
 use rust_reader_storage::models::{Bookmarks, History, Library, LibraryEntry, LibrarySort};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +16,7 @@ pub struct LibraryView {
     pub search_query: String,
     edit_buffer: Option<(usize, String)>,
     pending_delete: Option<usize>,
+    cover_textures: HashMap<String, egui::TextureHandle>,
 }
 
 impl Default for LibraryView {
@@ -25,6 +27,7 @@ impl Default for LibraryView {
             search_query: String::new(),
             edit_buffer: None,
             pending_delete: None,
+            cover_textures: HashMap::new(),
         }
     }
 }
@@ -116,6 +119,17 @@ impl LibraryView {
         egui::Grid::new("library_grid").show(ui, |ui| {
             for (original_idx, entry) in entries {
                 ui.vertical(|ui| {
+                    let cover_size = egui::vec2(80.0, 120.0);
+                    if let Some(texture) =
+                        self.cover_texture(ui.ctx(), &entry.comic_id, entry.cover_path.as_ref())
+                    {
+                        ui.image(&texture);
+                    } else {
+                        let (rect, _response) =
+                            ui.allocate_exact_size(cover_size, egui::Sense::hover());
+                        ui.painter()
+                            .rect_filled(rect, 0.0, ui.visuals().widgets.inactive.bg_fill);
+                    }
                     if self.edit_buffer.as_ref().map(|b| b.0) == Some(original_idx) {
                         let title = &mut self.edit_buffer.as_mut().unwrap().1;
                         ui.text_edit_singleline(title);
@@ -192,6 +206,30 @@ impl LibraryView {
         });
 
         entries
+    }
+
+    fn cover_texture(
+        &mut self,
+        ctx: &egui::Context,
+        comic_id: &str,
+        cover_path: Option<&PathBuf>,
+    ) -> Option<egui::TextureHandle> {
+        if let Some(handle) = self.cover_textures.get(comic_id) {
+            return Some(handle.clone());
+        }
+        let path = cover_path?;
+        let image = image::open(path).ok()?;
+        let size = [image.width() as usize, image.height() as usize];
+        let rgba = image.to_rgba8().into_raw();
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
+        let handle = ctx.load_texture(
+            format!("cover_{}", comic_id),
+            color_image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.cover_textures
+            .insert(comic_id.to_string(), handle.clone());
+        Some(handle)
     }
 
     fn render_history(

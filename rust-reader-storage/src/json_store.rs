@@ -30,6 +30,10 @@ impl JsonStore {
         Ok(())
     }
 
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     pub fn save_settings(&self, settings: &Settings) -> Result<(), StorageError> {
         self.write_json("settings.json", settings)
     }

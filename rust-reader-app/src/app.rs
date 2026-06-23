@@ -7,13 +7,15 @@ use crate::views::{
     reader::{QuickFit, ReaderView},
     settings::SettingsView,
 };
-use rust_reader_core::models::ReadingMode;
+use rust_reader_core::models::{PageSource, ReadingMode};
 use rust_reader_core::state::ReadingState;
 use rust_reader_storage::{
     json_store::JsonStore,
     models::{Bookmarks, History, HistoryEntry, Settings},
 };
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct ReaderApp {
@@ -28,7 +30,12 @@ pub struct ReaderApp {
     pub bookmarks: Bookmarks,
     pub error_message: Option<String>,
     pub page_loader: PageLoader,
+    pub cover_loader: PageLoader,
     pub opener: Option<ComicOpener>,
+    /// Cover requests in flight: epoch -> (comic_id, comic_path).
+    pub pending_covers: HashMap<crate::loader::Epoch, (String, PathBuf)>,
+    /// Comic ids for which a cover generation has already been requested.
+    pub requested_cover_ids: HashSet<String>,
 }
 
 impl Default for ReaderApp {
@@ -44,6 +51,7 @@ impl Default for ReaderApp {
             settings.compress_images,
             settings.decode_threads as usize,
         );
+        let cover_loader = PageLoader::new_with_compress(false, 1);
         Self {
             current_view: View::Library,
             last_view: View::Library,
@@ -56,7 +64,10 @@ impl Default for ReaderApp {
             bookmarks,
             error_message: None,
             page_loader,
+            cover_loader,
             opener: None,
+            pending_covers: HashMap::new(),
+            requested_cover_ids: HashSet::new(),
         }
     }
 }
@@ -97,6 +108,7 @@ impl eframe::App for ReaderApp {
             cache_size_mb,
             self.settings.real_image_cache_pages as usize,
         );
+        self.poll_cover_results();
 
         match self.current_view.clone() {
             View::Library => self.render_library(ctx),
@@ -687,6 +699,54 @@ impl ReaderApp {
         }
     }
 
+    fn covers_dir(&self) -> PathBuf {
+        self.store.dir().join("covers")
+    }
+
+    fn request_cover(&mut self, comic_id: &str, path: &Path, source: PageSource) {
+        if !self.requested_cover_ids.insert(comic_id.to_string()) {
+            return;
+        }
+        let epoch = self.cover_loader.next_epoch();
+        if self
+            .cover_loader
+            .request_thumbnail_high(epoch, 0, source)
+        {
+            self.pending_covers
+                .insert(epoch, (comic_id.to_string(), path.to_path_buf()));
+        } else {
+            self.requested_cover_ids.remove(comic_id);
+        }
+    }
+
+    fn poll_cover_results(&mut self) {
+        while let Some(result) = self.cover_loader.try_recv() {
+            if !result.thumbnail || result.dropped {
+                continue;
+            }
+            let (comic_id, _path) = match self.pending_covers.remove(&result.epoch) {
+                Some(v) => v,
+                None => continue,
+            };
+            let image = match result.image {
+                Ok(crate::loader::LoadedImage::Color(img)) => img,
+                _ => continue,
+            };
+            if let Some(cover_path) = save_cover_image(&self.covers_dir(), &comic_id, &image) {
+                if let Some(entry) = self
+                    .library_view
+                    .library
+                    .entries
+                    .iter_mut()
+                    .find(|e| e.comic_id == comic_id)
+                {
+                    entry.cover_path = Some(cover_path);
+                    let _ = self.store.save_library(&self.library_view.library);
+                }
+            }
+        }
+    }
+
     fn add_folder_to_library(&mut self, path: std::path::PathBuf) {
         match rust_reader_parser::parse(&path) {
             Ok(comic) => {
@@ -694,13 +754,7 @@ impl ReaderApp {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                let entry = rust_reader_storage::models::LibraryEntry {
-                    comic_id: comic.id.clone(),
-                    title: comic.title.clone(),
-                    path: path.clone(),
-                    cover_path: None,
-                    added_at,
-                };
+                let comic_id = comic.id.clone();
                 if !self
                     .library_view
                     .library
@@ -708,7 +762,18 @@ impl ReaderApp {
                     .iter()
                     .any(|e| e.path == path)
                 {
-                    self.library_view.library.entries.push(entry);
+                    if let Some(page) = comic.volumes.first().and_then(|v| v.pages.first()) {
+                        self.request_cover(&comic_id, &path, page.source.clone());
+                    }
+                    self.library_view.library.entries.push(
+                        rust_reader_storage::models::LibraryEntry {
+                            comic_id,
+                            title: comic.title.clone(),
+                            path: path.clone(),
+                            cover_path: None,
+                            added_at,
+                        },
+                    );
                 }
             }
             Err(e) => {
@@ -755,26 +820,45 @@ impl ReaderApp {
         {
             return;
         }
-        let title = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Untitled")
-            .to_string();
-        let comic_id = title.clone();
         let added_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        self.library_view
-            .library
-            .entries
-            .push(rust_reader_storage::models::LibraryEntry {
-                comic_id,
-                title,
-                path: path.to_path_buf(),
-                cover_path: None,
-                added_at,
-            });
+        match rust_reader_parser::parse(path) {
+            Ok(comic) => {
+                let comic_id = comic.id.clone();
+                if let Some(page) = comic.volumes.first().and_then(|v| v.pages.first()) {
+                    self.request_cover(&comic_id, path, page.source.clone());
+                }
+                self.library_view
+                    .library
+                    .entries
+                    .push(rust_reader_storage::models::LibraryEntry {
+                        comic_id,
+                        title: comic.title.clone(),
+                        path: path.to_path_buf(),
+                        cover_path: None,
+                        added_at,
+                    });
+            }
+            Err(_) => {
+                let title = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Untitled")
+                    .to_string();
+                self.library_view
+                    .library
+                    .entries
+                    .push(rust_reader_storage::models::LibraryEntry {
+                        comic_id: title.clone(),
+                        title,
+                        path: path.to_path_buf(),
+                        cover_path: None,
+                        added_at,
+                    });
+            }
+        }
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
@@ -786,6 +870,34 @@ impl ReaderApp {
             }
         }
     }
+}
+
+fn save_cover_image(covers_dir: &Path, comic_id: &str, image: &egui::ColorImage) -> Option<PathBuf> {
+    std::fs::create_dir_all(covers_dir).ok()?;
+    let safe: String = comic_id
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    comic_id.hash(&mut hasher);
+    let hash = hasher.finish();
+    let filename = format!("{}_{:016x}.jpg", safe, hash);
+    let path = covers_dir.join(filename);
+    let rgba: Vec<u8> = image
+        .pixels
+        .iter()
+        .flat_map(|c| [c.r(), c.g(), c.b(), c.a()])
+        .collect();
+    let img = image::RgbaImage::from_raw(image.width() as u32, image.height() as u32, rgba)?;
+    let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8();
+    rgb.save_with_format(&path, image::ImageFormat::Jpeg).ok()?;
+    Some(path)
 }
 
 #[cfg(test)]
@@ -836,6 +948,7 @@ mod tests {
                 settings.compress_images,
                 settings.decode_threads as usize,
             );
+            let cover_loader = PageLoader::new_with_compress(false, 1);
             Self {
                 current_view: View::Library,
                 last_view: View::Library,
@@ -848,7 +961,10 @@ mod tests {
                 bookmarks,
                 error_message: None,
                 page_loader,
+                cover_loader,
                 opener: None,
+                pending_covers: HashMap::new(),
+                requested_cover_ids: HashSet::new(),
             }
         }
     }
