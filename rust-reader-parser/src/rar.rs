@@ -1,5 +1,6 @@
 use crate::traits::{is_image_extension, ParseError, Parser};
 use rust_reader_core::models::{Comic, Page, PageSource, Volume};
+use std::collections::HashMap;
 use std::io::Error as IoError;
 use std::path::Path;
 
@@ -21,10 +22,18 @@ impl Parser for RarParser {
             .map_err(|e| ParseError::Io(IoError::other(e)))?;
 
         let mut names: Vec<String> = Vec::new();
-        for entry in open_archive {
+        // Build a name -> header-position index so readers can jump directly to
+        // the desired entry instead of scanning the archive from the start every
+        // time. This index is stored alongside each PageSource.
+        let mut header_positions: HashMap<String, usize> = HashMap::new();
+        for (position, entry) in open_archive.enumerate() {
             let header = entry.map_err(|e| ParseError::Io(IoError::other(e)))?;
-            if header.is_file() && is_image_name(&header.filename.to_string_lossy()) {
-                names.push(header.filename.to_string_lossy().to_string());
+            if header.is_file() {
+                let name = header.filename.to_string_lossy().to_string();
+                header_positions.insert(name.clone(), position);
+                if is_image_name(&name) {
+                    names.push(name);
+                }
             }
         }
 
@@ -37,12 +46,16 @@ impl Parser for RarParser {
         let pages: Vec<Page> = names
             .into_iter()
             .enumerate()
-            .map(|(idx, name)| Page {
-                index: idx,
-                source: PageSource::RarEntry {
-                    archive: archive_path.clone(),
-                    name,
-                },
+            .map(|(idx, name)| {
+                let header_position = header_positions.get(&name).copied().unwrap_or(usize::MAX);
+                Page {
+                    index: idx,
+                    source: PageSource::RarEntry {
+                        archive: archive_path.clone(),
+                        name,
+                        header_position,
+                    },
+                }
             })
             .collect();
 
@@ -86,6 +99,7 @@ mod tests {
             PageSource::RarEntry {
                 archive: path,
                 name: "01.png".to_string(),
+                header_position: 0,
             }
         );
     }

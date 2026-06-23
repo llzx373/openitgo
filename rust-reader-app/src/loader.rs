@@ -12,6 +12,32 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+/// Cache of parsed PDF documents, keyed by file path.
+///
+/// PDF rendering currently parses the full file on every page read. Keeping a
+/// shared parsed document around avoids repeated disk reads and xref parsing for
+/// the same comic.
+#[derive(Clone)]
+struct PdfDocumentCache {
+    inner: Arc<Mutex<HashMap<std::path::PathBuf, Arc<Vec<u8>>>>>,
+}
+
+impl PdfDocumentCache {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn get(&self, path: &std::path::Path) -> Option<Arc<Vec<u8>>> {
+        self.inner.lock().unwrap().get(path).cloned()
+    }
+
+    fn insert(&self, path: std::path::PathBuf, data: Arc<Vec<u8>>) {
+        self.inner.lock().unwrap().insert(path, data);
+    }
+}
+
 struct ZipCache {
     archives: HashMap<std::path::PathBuf, zip::ZipArchive<std::fs::File>>,
 }
@@ -42,19 +68,50 @@ impl ZipCache {
     }
 }
 
-/// Shared cache of decompressed raw bytes for zip entries.
+/// Key for an entry in the shared raw-bytes cache.
+///
+/// Covers ZIP entries (by index), RAR entries (by name), and single files/PDFs
+/// (by path). The `usize` is unused for RAR and files; the `String` is unused
+/// for ZIP. Keeping a single key type simplifies the LRU structure.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RawCacheKey {
+    archive_path: std::path::PathBuf,
+    zip_index: Option<usize>,
+    rar_name: Option<String>,
+}
+
+impl RawCacheKey {
+    fn zip(archive_path: &std::path::Path, index: usize) -> Self {
+        Self {
+            archive_path: archive_path.to_path_buf(),
+            zip_index: Some(index),
+            rar_name: None,
+        }
+    }
+
+    fn rar(archive_path: &std::path::Path, name: &str) -> Self {
+        Self {
+            archive_path: archive_path.to_path_buf(),
+            zip_index: None,
+            rar_name: Some(name.to_string()),
+        }
+    }
+}
+
+/// Shared cache of decompressed raw bytes for archive entries.
 ///
 /// Comic archives are often compressed, and the same page is usually read twice
 /// (once for a thumbnail and once for the full image). Caching the decompressed
-/// bytes across all IO workers avoids redundant decompression.
+/// bytes across all IO workers avoids redundant decompression. This also helps
+/// RAR archives where each read currently re-opens the whole archive.
 #[derive(Clone)]
 struct SharedRawCache {
     inner: Arc<Mutex<SharedRawCacheInner>>,
 }
 
 struct SharedRawCacheInner {
-    map: HashMap<(std::path::PathBuf, usize), Arc<Vec<u8>>>,
-    order: VecDeque<(std::path::PathBuf, usize)>,
+    map: HashMap<RawCacheKey, Arc<Vec<u8>>>,
+    order: VecDeque<RawCacheKey>,
     bytes: usize,
     max_bytes: usize,
 }
@@ -71,24 +128,22 @@ impl SharedRawCache {
         }
     }
 
-    fn get(&self, archive_path: &std::path::Path, index: usize) -> Option<Arc<Vec<u8>>> {
-        let key = (archive_path.to_path_buf(), index);
-        self.inner.lock().unwrap().map.get(&key).cloned()
+    fn get(&self, key: &RawCacheKey) -> Option<Arc<Vec<u8>>> {
+        self.inner.lock().unwrap().map.get(key).cloned()
     }
 
-    fn insert(&self, archive_path: &std::path::Path, index: usize, bytes: Vec<u8>) {
+    fn insert(&self, key: RawCacheKey, bytes: Vec<u8>) {
         let len = bytes.len();
-        if len > self.inner.lock().unwrap().max_bytes {
+        let mut inner = self.inner.lock().unwrap();
+        if len > inner.max_bytes {
             return;
         }
-        let mut inner = self.inner.lock().unwrap();
         while inner.bytes + len > inner.max_bytes && !inner.order.is_empty() {
             let oldest = inner.order.pop_front().unwrap();
             if let Some(data) = inner.map.remove(&oldest) {
                 inner.bytes -= data.len();
             }
         }
-        let key = (archive_path.to_path_buf(), index);
         inner.bytes += len;
         inner.order.push_back(key.clone());
         inner.map.insert(key, Arc::new(bytes));
@@ -228,6 +283,7 @@ impl PageLoader {
         // share a single decompressed-bytes cache so the same zip entry is never
         // decompressed more than once.
         let raw_cache = SharedRawCache::new(512 * 1024 * 1024);
+        let pdf_cache = PdfDocumentCache::new();
         let io_thread_count = worker_count;
         let mut io_workers = Vec::with_capacity(io_thread_count);
         for _ in 0..io_thread_count {
@@ -238,6 +294,7 @@ impl PageLoader {
             let low_thumb_decode_sender = low_thumb_decode_sender.clone();
             let low_full_decode_sender = low_full_decode_sender.clone();
             let raw_cache = raw_cache.clone();
+            let pdf_cache = pdf_cache.clone();
             io_workers.push(thread::spawn(move || {
                 let mut zip_cache = ZipCache::new();
                 let mut high_disconnected = false;
@@ -256,6 +313,7 @@ impl PageLoader {
                             &low_full_decode_sender,
                             &mut zip_cache,
                             &raw_cache,
+                            &pdf_cache,
                         );
                     }
                     select! {
@@ -270,6 +328,7 @@ impl PageLoader {
                                     &low_full_decode_sender,
                                     &mut zip_cache,
                                     &raw_cache,
+                                    &pdf_cache,
                                 );
                             } else {
                                 high_disconnected = true;
@@ -289,6 +348,7 @@ impl PageLoader {
                                     &low_full_decode_sender,
                                     &mut zip_cache,
                                     &raw_cache,
+                                    &pdf_cache,
                                 );
                             } else {
                                 low_disconnected = true;
@@ -509,6 +569,7 @@ fn process_io_request(
     low_full_decode_sender: &Sender<DecodeJob>,
     zip_cache: &mut ZipCache,
     raw_cache: &SharedRawCache,
+    pdf_cache: &PdfDocumentCache,
 ) {
     let priority_label = match priority {
         LoadPriority::High => "high",
@@ -524,41 +585,28 @@ fn process_io_request(
             document,
             page_number,
         } => {
-            let result = if req.thumbnail {
-                // Render a small PDF page and report the *full* render size as the
-                // original size so layout does not jump when the full image arrives.
-                pdf_page_render_size(&document, page_number, PDF_MAX_RENDER_WIDTH).and_then(
-                    |full_size| {
-                        render_pdf_page_with_max_width(
-                            &document,
-                            page_number,
-                            THUMBNAIL_MAX_DIMENSION as f32,
-                        )
-                        .and_then(|image| {
-                            make_thumbnail_from_loaded(image).map(|(thumb, _)| LoadResult {
-                                epoch: req.epoch,
-                                page_index: req.page_index,
-                                thumbnail: true,
-                                dropped: false,
-                                original_size: full_size,
-                                image: Ok(LoadedImage::Color(thumb)),
-                            })
-                        })
-                    },
-                )
-            } else {
-                render_pdf_page(&document, page_number).map(|image| {
-                    let original_size = image.original_size();
-                    LoadResult {
-                        epoch: req.epoch,
-                        page_index: req.page_index,
-                        thumbnail: false,
-                        dropped: false,
-                        original_size,
-                        image: Ok(image),
+            let result = render_pdf_page_cached(&document, page_number, req.thumbnail, pdf_cache)
+                .map(|(image, full_size)| {
+                    if req.thumbnail {
+                        LoadResult {
+                            epoch: req.epoch,
+                            page_index: req.page_index,
+                            thumbnail: true,
+                            dropped: false,
+                            original_size: full_size,
+                            image: Ok(LoadedImage::Color(image)),
+                        }
+                    } else {
+                        LoadResult {
+                            epoch: req.epoch,
+                            page_index: req.page_index,
+                            thumbnail: false,
+                            dropped: false,
+                            original_size: full_size,
+                            image: Ok(LoadedImage::Color(image)),
+                        }
                     }
-                })
-            };
+                });
             let _ = result_sender.send(result.unwrap_or_else(|e| LoadResult {
                 epoch: req.epoch,
                 page_index: req.page_index,
@@ -624,7 +672,8 @@ fn read_zip_entry(
     archive_path: &std::path::Path,
     index: usize,
 ) -> Result<Vec<u8>, String> {
-    if let Some(cached) = raw_cache.get(archive_path, index) {
+    let key = RawCacheKey::zip(archive_path, index);
+    if let Some(cached) = raw_cache.get(&key) {
         timing::log(&format!(
             "read_zip_entry index {} -> {} bytes (raw-cache hit)",
             index,
@@ -649,7 +698,7 @@ fn read_zip_entry(
                 index,
                 bytes.len()
             ));
-            raw_cache.insert(archive_path, index, bytes.clone());
+            raw_cache.insert(key, bytes.clone());
             Ok(bytes)
         }
         Err(_) => {
@@ -669,7 +718,7 @@ fn read_zip_entry(
                 index,
                 bytes.len()
             ));
-            raw_cache.insert(archive_path, index, bytes.clone());
+            raw_cache.insert(key, bytes.clone());
             Ok(bytes)
         }
     }
@@ -702,28 +751,62 @@ fn read_page_bytes(
             let bytes = read_zip_entry(zip_cache, raw_cache, archive, *index)?;
             Ok((bytes, hint))
         }
-        PageSource::RarEntry { archive, name } => {
+        PageSource::RarEntry {
+            archive,
+            name,
+            header_position,
+        } => {
             let hint = std::path::Path::new(name)
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(|s| s.to_lowercase());
-            let bytes = read_rar_entry(archive, name)?;
+            let bytes = read_rar_entry(raw_cache, archive, name, *header_position)?;
             Ok((bytes, hint))
         }
     }
 }
 
-fn read_rar_entry(archive_path: &Path, name: &str) -> Result<Vec<u8>, String> {
+fn read_rar_entry(
+    raw_cache: &SharedRawCache,
+    archive_path: &Path,
+    name: &str,
+    header_position: usize,
+) -> Result<Vec<u8>, String> {
+    let key = RawCacheKey::rar(archive_path, name);
+    if let Some(cached) = raw_cache.get(&key) {
+        timing::log(&format!(
+            "read_rar_entry {} -> {} bytes (raw-cache hit)",
+            name,
+            cached.len()
+        ));
+        return Ok(cached.to_vec());
+    }
+
     let mut archive = unrar::Archive::new(archive_path)
         .open_for_processing()
         .map_err(|e| e.to_string())?;
 
-    while let Some(entry) = archive.read_header().map_err(|e| e.to_string())? {
-        if entry.entry().filename.to_string_lossy() == name {
-            let (bytes, _archive) = entry.read().map_err(|e| e.to_string())?;
-            return Ok(bytes);
+    // Skip headers before the target position. For archives where pages are
+    // ordered by filename, this turns a linear scan into a small constant
+    // overhead once the parser has emitted header_position.
+    let mut current_position: usize = 0;
+    loop {
+        let maybe_entry = archive.read_header().map_err(|e| e.to_string())?;
+        let entry = match maybe_entry {
+            Some(e) => e,
+            None => break,
+        };
+        if current_position >= header_position {
+            if entry.entry().filename.to_string_lossy() == name {
+                let (bytes, _archive) = entry.read().map_err(|e| e.to_string())?;
+                raw_cache.insert(key, bytes.clone());
+                return Ok(bytes);
+            }
+            archive = entry.skip().map_err(|e| e.to_string())?;
+        } else {
+            archive = entry.skip().map_err(|e| e.to_string())?;
+            current_position += 1;
         }
-        archive = entry.skip().map_err(|e| e.to_string())?;
     }
 
     Err(format!("rar entry not found: {name}"))
@@ -1027,15 +1110,22 @@ const PDF_RENDER_DPI: f32 = 150.0;
 const PDF_BASE_DPI: f32 = 72.0;
 const PDF_MAX_RENDER_WIDTH: f32 = 2048.0;
 
-/// Compute the rendered pixel size of a PDF page without actually rendering it.
-fn pdf_page_render_size(
-    document: &Path,
+fn load_pdf_cached(document: &Path, pdf_cache: &PdfDocumentCache) -> Result<Arc<Vec<u8>>, String> {
+    if let Some(data) = pdf_cache.get(document) {
+        return Ok(data);
+    }
+    let data = std::fs::read(document).map_err(|e| format!("failed to read PDF file: {e}"))?;
+    let data = Arc::new(data);
+    pdf_cache.insert(document.to_path_buf(), Arc::clone(&data));
+    Ok(data)
+}
+
+fn render_size_for_pdf_page(
+    data: Arc<Vec<u8>>,
     page_number: usize,
     max_width: f32,
 ) -> Result<[u32; 2], String> {
-    let data = std::fs::read(document).map_err(|e| format!("failed to read PDF file: {e}"))?;
-    let pdf = Pdf::new(data).map_err(|e| format!("failed to parse PDF: {e:?}"))?;
-
+    let pdf = Pdf::new(Arc::clone(&data)).map_err(|e| format!("failed to parse PDF: {e:?}"))?;
     let page = pdf
         .pages()
         .get(page_number)
@@ -1055,14 +1145,20 @@ fn pdf_page_render_size(
     ])
 }
 
-fn render_pdf_page_with_max_width(
+fn render_pdf_page_cached(
     document: &Path,
     page_number: usize,
-    max_width: f32,
-) -> Result<LoadedImage, String> {
-    let data = std::fs::read(document).map_err(|e| format!("failed to read PDF file: {e}"))?;
-    let pdf = Pdf::new(data).map_err(|e| format!("failed to parse PDF: {e:?}"))?;
-
+    thumbnail: bool,
+    pdf_cache: &PdfDocumentCache,
+) -> Result<(ColorImage, [u32; 2]), String> {
+    let data = load_pdf_cached(document, pdf_cache)?;
+    let max_width = if thumbnail {
+        THUMBNAIL_MAX_DIMENSION as f32
+    } else {
+        PDF_MAX_RENDER_WIDTH
+    };
+    let full_size = render_size_for_pdf_page(Arc::clone(&data), page_number, PDF_MAX_RENDER_WIDTH)?;
+    let pdf = Pdf::new(Arc::clone(&data)).map_err(|e| format!("failed to parse PDF: {e:?}"))?;
     let page = pdf
         .pages()
         .get(page_number)
@@ -1088,15 +1184,20 @@ fn render_pdf_page_with_max_width(
     );
 
     let size = [pixmap.width() as usize, pixmap.height() as usize];
-    Ok(LoadedImage::Color(ColorImage::from_rgba_premultiplied(
-        size,
-        pixmap.data_as_u8_slice(),
-    )))
+    let image = ColorImage::from_rgba_premultiplied(size, pixmap.data_as_u8_slice());
+    if thumbnail {
+        make_thumbnail_from_loaded(LoadedImage::Color(image)).map(|(thumb, _)| (thumb, full_size))
+    } else {
+        Ok((image, full_size))
+    }
 }
 
 /// Render a PDF page directly to an egui [`ColorImage`].
+#[allow(dead_code)]
 pub fn render_pdf_page(document: &Path, page_number: usize) -> Result<LoadedImage, String> {
-    render_pdf_page_with_max_width(document, page_number, PDF_MAX_RENDER_WIDTH)
+    let pdf_cache = PdfDocumentCache::new();
+    render_pdf_page_cached(document, page_number, false, &pdf_cache)
+        .map(|(image, _)| LoadedImage::Color(image))
 }
 
 #[cfg(test)]
@@ -1422,6 +1523,7 @@ mod tests {
         let (low_full_decode_sender, _low_full_decode_receiver) = bounded(0);
         let mut zip_cache = ZipCache::new();
         let raw_cache = SharedRawCache::new(64 * 1024 * 1024);
+        let pdf_cache = PdfDocumentCache::new();
 
         process_io_request(
             LoadRequest {
@@ -1437,6 +1539,7 @@ mod tests {
             &low_full_decode_sender,
             &mut zip_cache,
             &raw_cache,
+            &pdf_cache,
         );
 
         let result = result_receiver

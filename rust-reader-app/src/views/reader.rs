@@ -323,7 +323,10 @@ impl OpenReader {
                         Err(err) => {
                             let now = Instant::now();
                             if result.thumbnail {
-                                eprintln!("failed to load thumbnail {}: {}", result.page_index, err);
+                                eprintln!(
+                                    "failed to load thumbnail {}: {}",
+                                    result.page_index, err
+                                );
                                 self.thumbnail_errors
                                     .entry(result.page_index)
                                     .and_modify(|e| {
@@ -777,8 +780,12 @@ impl ReaderView {
             })
             .collect();
 
-        let layouts =
-            layout::compute_layout(ReadingMode::Webtoon, viewport_size, &page_sizes, reader.state.zoom);
+        let layouts = layout::compute_layout(
+            ReadingMode::Webtoon,
+            viewport_size,
+            &page_sizes,
+            reader.state.zoom,
+        );
         let content_height = layouts
             .last()
             .map(|l| l.rect.min.y + l.rect.size.y)
@@ -803,9 +810,10 @@ impl ReaderView {
 
         // Update current_page based on what is centered in the viewport.
         let center_y = reader.webtoon_scroll_offset + available.height() / 2.0;
-        if let Some(layout) = layouts.iter().find(|l| {
-            l.rect.min.y <= center_y && l.rect.min.y + l.rect.size.y > center_y
-        }) {
+        if let Some(layout) = layouts
+            .iter()
+            .find(|l| l.rect.min.y <= center_y && l.rect.min.y + l.rect.size.y > center_y)
+        {
             reader.state.current_page = layout.page_index;
             reader.webtoon_last_page = layout.page_index;
         }
@@ -845,14 +853,8 @@ impl ReaderView {
                 egui::vec2(layout.rect.size.x, layout.rect.size.y),
             );
             let texture = reader.cache.get_texture(ctx, idx);
-            let response = render_page_or_placeholder(
-                ui,
-                reader,
-                loader,
-                rect,
-                idx,
-                texture.as_ref(),
-            );
+            let response =
+                render_page_or_placeholder(ui, reader, loader, rect, idx, texture.as_ref());
             combined_response = Some(match combined_response {
                 Some(prev) => prev.union(response),
                 None => response,

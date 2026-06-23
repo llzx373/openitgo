@@ -47,6 +47,7 @@ pub enum PageSource {
     RarEntry {
         archive: PathBuf,
         name: String,
+        header_position: usize,
     },
     PdfPage {
         document: PathBuf,

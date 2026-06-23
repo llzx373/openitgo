@@ -2,11 +2,11 @@ use crate::loader::PageLoader;
 use crate::opener::{ComicOpener, OpenStatus};
 use crate::shortcuts::is_shortcut_pressed;
 use crate::timing;
+use crate::views::settings::SettingsView;
 use crate::views::{
     library::{LibraryCallbacks, LibraryView},
     reader::ReaderView,
 };
-use crate::views::settings::SettingsView;
 use rust_reader_core::models::{FitMode, PageSource, ReadingMode};
 use rust_reader_core::state::ReadingState;
 use rust_reader_storage::{
@@ -50,8 +50,12 @@ impl Default for ReaderApp {
         let mut library_view = LibraryView::default();
         library_view.library = library;
         let covers_dir = store.dir().join("covers");
-        if migrate_library_ids(&mut library_view.library, &mut history, &mut bookmarks, &covers_dir)
-        {
+        if migrate_library_ids(
+            &mut library_view.library,
+            &mut history,
+            &mut bookmarks,
+            &covers_dir,
+        ) {
             let _ = store.save_library(&library_view.library);
             let _ = store.save_history(&history);
             let _ = store.save_bookmarks(&bookmarks);
@@ -752,10 +756,7 @@ impl ReaderApp {
             return;
         }
         let epoch = self.cover_loader.next_epoch();
-        if self
-            .cover_loader
-            .request_thumbnail_high(epoch, 0, source)
-        {
+        if self.cover_loader.request_thumbnail_high(epoch, 0, source) {
             self.pending_covers
                 .insert(epoch, (comic_id.to_string(), path.to_path_buf()));
         } else {
@@ -937,7 +938,11 @@ fn cover_path_for_comic_id(covers_dir: &Path, comic_id: &str) -> PathBuf {
     covers_dir.join(cover_filename(comic_id))
 }
 
-fn save_cover_image(covers_dir: &Path, comic_id: &str, image: &egui::ColorImage) -> Option<PathBuf> {
+fn save_cover_image(
+    covers_dir: &Path,
+    comic_id: &str,
+    image: &egui::ColorImage,
+) -> Option<PathBuf> {
     std::fs::create_dir_all(covers_dir).ok()?;
     let path = cover_path_for_comic_id(covers_dir, comic_id);
     let rgba: Vec<u8> = image
@@ -982,9 +987,7 @@ fn migrate_library_ids(
     for (old_id, new_id) in &id_map {
         let old_path = cover_path_for_comic_id(covers_dir, old_id);
         let new_path = cover_path_for_comic_id(covers_dir, new_id);
-        if old_path.exists()
-            && !new_path.exists()
-            && std::fs::rename(&old_path, &new_path).is_ok()
+        if old_path.exists() && !new_path.exists() && std::fs::rename(&old_path, &new_path).is_ok()
         {
             for entry in &mut library.entries {
                 if entry.comic_id == *new_id && entry.cover_path.as_deref() == Some(&*old_path) {
