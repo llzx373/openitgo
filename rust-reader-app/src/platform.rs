@@ -279,6 +279,183 @@ pub mod macos {
             chunk[2] = ((chunk[2] as u16 * 255) / a as u16) as u8;
         }
     }
+
+    // TODO: remove #[allow(dead_code)] once Tasks 3 and 4 wire this up
+    #[allow(dead_code)]
+    #[allow(unexpected_cfgs)]
+    pub mod dock_open {
+        use std::ffi::{c_char, CStr};
+        use std::path::PathBuf;
+        use std::sync::Mutex;
+
+        use objc::runtime::{
+            class_addMethod, class_getName, object_getClass, BOOL, Class, Object, Sel, YES,
+        };
+        use objc::{class, msg_send, sel, sel_impl};
+
+        static OPEN_QUEUE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+        #[link(name = "Cocoa", kind = "framework")]
+        extern "C" {}
+
+        /// 向当前 NSApplication delegate 注入 `application:openFiles:` 与
+        /// `application:openFile:`，用于接收 Dock / Finder 拖入或双击打开的文件。
+        ///
+        /// `application:openFile(s):` 由系统在主线程调用，因此使用普通 `Mutex`
+        /// 即可保证线程安全，无需额外同步。
+        pub fn install_dock_open_handler() {
+            // SAFETY: 所有 Objective-C 消息发送都在主线程执行；`NSApplication` 为
+            // AppKit 单例，其 delegate 与 class 在本次运行时有效。
+            unsafe {
+                let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+                if app.is_null() {
+                    eprintln!("warning: install_dock_open_handler: NSApplication is null");
+                    return;
+                }
+                let delegate: *mut Object = msg_send![app, delegate];
+                if delegate.is_null() {
+                    eprintln!("warning: install_dock_open_handler: NSApplication delegate is null");
+                    return;
+                }
+                let cls = object_getClass(delegate) as *mut Class;
+                if cls.is_null() {
+                    eprintln!("warning: install_dock_open_handler: delegate class is null");
+                    return;
+                }
+
+                // SAFETY: 只修改应用自身的 delegate class，绝不修改系统类（NS 前缀）。
+                // 若 class_getName 返回空或以 "NS" 开头，则跳过注入并告警。
+                let name_ptr = class_getName(cls);
+                if name_ptr.is_null() {
+                    eprintln!("warning: install_dock_open_handler: could not get delegate class name");
+                    return;
+                }
+                if let Ok(name) = CStr::from_ptr(name_ptr).to_str() {
+                    if name.is_empty() {
+                        eprintln!("warning: install_dock_open_handler: delegate class name is empty");
+                        return;
+                    }
+                    if name.starts_with("NS") {
+                        eprintln!(
+                            "warning: install_dock_open_handler: refusing to inject into system class {}",
+                            name
+                        );
+                        return;
+                    }
+                }
+
+                let open_files_types = c"v@:@:@".as_ptr() as *const c_char;
+                let added_open_files = class_addMethod(
+                    cls,
+                    sel!(application:openFiles:),
+                    // SAFETY: 目标回调签名与 `extern "C" fn(&Object, Sel, *mut Object, *mut Object)`
+                    // 完全一致，且为 AppKit 要求的 cdecl/Objective-C method 调用约定。
+                    std::mem::transmute::<
+                        extern "C" fn(&Object, Sel, *mut Object, *mut Object),
+                        unsafe extern "C" fn(),
+                    >(open_files_callback),
+                    open_files_types,
+                );
+                if added_open_files == objc::runtime::NO {
+                    eprintln!("warning: install_dock_open_handler: failed to add application:openFiles:");
+                }
+
+                let open_file_types = c"c@:@:@".as_ptr() as *const c_char;
+                let added_open_file = class_addMethod(
+                    cls,
+                    sel!(application:openFile:),
+                    // SAFETY: 目标回调签名与 `extern "C" fn(&Object, Sel, *mut Object, *mut Object) -> BOOL`
+                    // 完全一致，且为 AppKit 要求的 cdecl/Objective-C method 调用约定。
+                    std::mem::transmute::<
+                        extern "C" fn(&Object, Sel, *mut Object, *mut Object) -> BOOL,
+                        unsafe extern "C" fn(),
+                    >(open_file_callback),
+                    open_file_types,
+                );
+                if added_open_file == objc::runtime::NO {
+                    eprintln!("warning: install_dock_open_handler: failed to add application:openFile:");
+                }
+            }
+        }
+
+        /// 取出并清空当前累积的待打开路径。应在主线程每帧调用一次。
+        pub fn take_dock_open_paths() -> Vec<PathBuf> {
+            let mut guard = OPEN_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *guard)
+        }
+
+        // SAFETY: 该函数作为 Objective-C method 被 AppKit 在主线程调用；`files` 为
+        // NSArray 实例，调用者保证其非空且生命周期覆盖本次调用。
+        extern "C" fn open_files_callback(
+            _this: &Object,
+            _sel: Sel,
+            _app: *mut Object,
+            files: *mut Object,
+        ) {
+            if files.is_null() {
+                return;
+            }
+            // SAFETY: `files` 为有效的 `NSArray<NSString *>`；迭代期间数组不会被释放。
+            let paths = unsafe { collect_paths_from_array(files) };
+            let mut guard = OPEN_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+            guard.extend(paths);
+        }
+
+        // SAFETY: 该函数作为 Objective-C method 被 AppKit 在主线程调用；`file` 为
+        // NSString 实例，调用者保证其非空且生命周期覆盖本次调用。
+        extern "C" fn open_file_callback(
+            _this: &Object,
+            _sel: Sel,
+            _app: *mut Object,
+            file: *mut Object,
+        ) -> BOOL {
+            if file.is_null() {
+                return objc::runtime::NO;
+            }
+            // SAFETY: `file` 为有效的 `NSString`；`fileSystemRepresentation` 返回的指针
+            // 在 autorelease pool 释放前有效。
+            if let Some(path) = unsafe { nsstring_to_path(file) } {
+                let mut guard = OPEN_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                guard.push(path);
+                YES
+            } else {
+                // 返回 NO 表示我们未处理该文件，系统可能会尝试其他 handler。
+                objc::runtime::NO
+            }
+        }
+
+        unsafe fn collect_paths_from_array(files: *mut Object) -> Vec<PathBuf> {
+            // SAFETY: `files` 为 `NSArray` 实例，调用 `count` 不会转移所有权。
+            let count: usize = msg_send![files, count];
+            let mut paths = Vec::with_capacity(count);
+            for i in 0..count {
+                // SAFETY: `objectAtIndex:` 返回数组内已保留对象的指针，不会转移所有权。
+                let item: *mut Object = msg_send![files, objectAtIndex:i];
+                if item.is_null() {
+                    continue;
+                }
+                if let Some(path) = nsstring_to_path(item) {
+                    paths.push(path);
+                }
+            }
+            paths
+        }
+
+        unsafe fn nsstring_to_path(s: *mut Object) -> Option<PathBuf> {
+            // SAFETY: `s` 为有效的 `NSString`；`fileSystemRepresentation` 返回以
+            // 文件系统编码表示的、以 NUL 结尾的 C 字符串指针。
+            let fs: *const c_char = msg_send![s, fileSystemRepresentation];
+            if fs.is_null() {
+                return None;
+            }
+            // SAFETY: `fileSystemRepresentation` 保证返回合法且生命周期覆盖当前
+            // autorelease pool 的 C 字符串；使用 `CStr` 仅做只读解析，不越界。
+            CStr::from_ptr(fs)
+                .to_str()
+                .ok()
+                .map(PathBuf::from)
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
