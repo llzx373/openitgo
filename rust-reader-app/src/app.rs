@@ -211,6 +211,8 @@ impl ReaderApp {
             let mut open_idx = None;
             let mut open_path: Option<PathBuf> = None;
             let mut add_requested = false;
+            let mut request_cover_idx: Option<usize> = None;
+            let mut remove_missing = false;
             let mut delete_bookmark_idx: Option<usize> = None;
             let mut update_bookmark: Option<(usize, Option<String>)> = None;
             let mut update_title: Option<(usize, String)> = None;
@@ -226,6 +228,8 @@ impl ReaderApp {
                     on_open_library: &mut |idx| open_idx = Some(idx),
                     on_open_path: &mut |path| open_path = Some(path),
                     on_add: &mut || add_requested = true,
+                    on_request_cover: &mut |idx| request_cover_idx = Some(idx),
+                    on_remove_missing: &mut || remove_missing = true,
                     on_delete_bookmark: &mut |idx| delete_bookmark_idx = Some(idx),
                     on_update_bookmark: &mut |idx, note| update_bookmark = Some((idx, note)),
                     on_update_title: &mut |idx, title| update_title = Some((idx, title)),
@@ -246,6 +250,12 @@ impl ReaderApp {
             }
             if let Some(path) = open_path {
                 self.open_comic(path);
+            }
+            if let Some(idx) = request_cover_idx {
+                self.request_cover_for_library_entry(idx);
+            }
+            if remove_missing {
+                self.remove_missing_library_entries();
             }
             if let Some((idx, title)) = update_title {
                 if let Some(entry) = self.library_view.library.entries.get_mut(idx) {
@@ -1160,6 +1170,51 @@ impl ReaderApp {
                         note: None,
                     });
             }
+        }
+    }
+
+    fn request_cover_for_library_entry(&mut self, idx: usize) {
+        let Some(entry) = self.library_view.library.entries.get(idx) else {
+            return;
+        };
+        if !entry.path.exists() {
+            return;
+        }
+        if !self.requested_cover_ids.insert(entry.comic_id.clone()) {
+            return;
+        }
+        let comic = match rust_reader_parser::parse(&entry.path) {
+            Ok(c) => c,
+            Err(_) => {
+                self.requested_cover_ids.remove(&entry.comic_id);
+                return;
+            }
+        };
+        let Some(page) = comic.volumes.first().and_then(|v| v.pages.first()) else {
+            self.requested_cover_ids.remove(&entry.comic_id);
+            return;
+        };
+        let epoch = self.cover_loader.next_epoch();
+        if !self
+            .cover_loader
+            .request_thumbnail_high(epoch, 0, page.source.clone())
+        {
+            self.requested_cover_ids.remove(&entry.comic_id);
+            return;
+        }
+        self.pending_covers
+            .insert(epoch, (entry.comic_id.clone(), entry.path.clone()));
+    }
+
+    fn remove_missing_library_entries(&mut self) {
+        let before = self.library_view.library.entries.len();
+        self.library_view
+            .library
+            .entries
+            .retain(|e| e.path.exists());
+        let removed = before.saturating_sub(self.library_view.library.entries.len());
+        if removed > 0 {
+            timing::log(&format!("removed {} missing library entries", removed));
         }
     }
 

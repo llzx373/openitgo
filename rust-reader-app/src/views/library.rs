@@ -36,6 +36,8 @@ pub struct LibraryCallbacks<'a> {
     pub on_open_library: &'a mut dyn FnMut(usize),
     pub on_open_path: &'a mut dyn FnMut(PathBuf),
     pub on_add: &'a mut dyn FnMut(),
+    pub on_request_cover: &'a mut dyn FnMut(usize),
+    pub on_remove_missing: &'a mut dyn FnMut(),
     pub on_delete_bookmark: &'a mut dyn FnMut(usize),
     pub on_update_bookmark: &'a mut dyn FnMut(usize, Option<String>),
     pub on_update_title: &'a mut dyn FnMut(usize, String),
@@ -94,6 +96,14 @@ impl LibraryView {
                     });
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.mode == LibraryMode::Library
+                    && ui
+                        .button("清理已删除")
+                        .on_hover_text("移除书库中文件已经不存在的漫画")
+                        .clicked()
+                {
+                    (callbacks.on_remove_missing)();
+                }
                 if ui.button("打开文件夹").clicked() {
                     (callbacks.on_add)();
                 }
@@ -123,17 +133,28 @@ impl LibraryView {
             for (original_idx, entry) in entries {
                 let cover_size = egui::vec2(80.0, 120.0);
                 let is_editing = self.edit_buffer.as_ref().map(|b| b.0) == Some(original_idx);
+                let file_missing = !entry.path.exists();
+                let cover_missing = entry
+                    .cover_path
+                    .as_ref()
+                    .map(|p| !p.exists())
+                    .unwrap_or(true);
+
+                if !file_missing && cover_missing {
+                    (callbacks.on_request_cover)(original_idx);
+                }
 
                 let card_response = ui
                     .group(|ui| {
                         ui.set_min_width(cover_size.x);
                         ui.vertical_centered(|ui| {
-                            if let Some(texture) = self.cover_texture(
+                            let cover_rect = if let Some(texture) = self.cover_texture(
                                 ui.ctx(),
                                 &entry.comic_id,
                                 entry.cover_path.as_ref(),
                             ) {
-                                ui.image(&texture);
+                                let r = ui.image(&texture);
+                                r.rect
                             } else {
                                 let (rect, _response) =
                                     ui.allocate_exact_size(cover_size, egui::Sense::hover());
@@ -141,6 +162,23 @@ impl LibraryView {
                                     rect,
                                     0.0,
                                     ui.visuals().widgets.inactive.bg_fill,
+                                );
+                                rect
+                            };
+
+                            if file_missing {
+                                let overlay = cover_rect.expand2(egui::vec2(4.0, 4.0));
+                                ui.painter().rect_filled(
+                                    overlay,
+                                    0.0,
+                                    egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+                                );
+                                ui.painter().text(
+                                    overlay.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "已删除",
+                                    egui::FontId::proportional(14.0),
+                                    egui::Color32::WHITE,
                                 );
                             }
 
@@ -181,7 +219,8 @@ impl LibraryView {
                             }
                         });
                     })
-                    .response;
+                    .response
+                    .interact(egui::Sense::click());
 
                 if !is_editing && card_response.clicked() {
                     (callbacks.on_open_library)(original_idx);
