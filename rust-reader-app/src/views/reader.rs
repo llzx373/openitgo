@@ -298,20 +298,20 @@ impl OpenReader {
         self.right_page = None;
     }
 
-    fn protected_page_indices(&self) -> Vec<usize> {
-        let mut v = Vec::with_capacity(4);
+    fn protected_page_indices(&self) -> HashSet<usize> {
+        let mut set = HashSet::with_capacity(4);
         let (left, right) = self.spread_pages();
         if let Some(i) = left {
-            v.push(i);
+            set.insert(i);
         }
         if let Some(i) = right {
-            v.push(i);
+            set.insert(i);
         }
         if let Some(a) = self.page_animation {
-            v.push(a.from_page);
-            v.push(a.to_page);
+            set.insert(a.from_page);
+            set.insert(a.to_page);
         }
-        v
+        set
     }
 
     pub fn update(&mut self, ctx: &egui::Context, loader: &PageLoader, cache_size_bytes: usize) {

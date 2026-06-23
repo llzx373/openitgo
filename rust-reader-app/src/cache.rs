@@ -148,7 +148,7 @@ impl PageCache {
         page_index: usize,
         image: LoadedImage,
         max_size_bytes: usize,
-        protected: &[usize],
+        protected: &std::collections::HashSet<usize>,
     ) {
         let new_size = image.size_bytes();
         let original_size = image.original_size();
@@ -212,7 +212,11 @@ impl PageCache {
         entry.last_accessed = Instant::now();
     }
 
-    pub fn enforce_budget_with_protected(&mut self, max_size_bytes: usize, protected: &[usize]) {
+    pub fn enforce_budget_with_protected(
+        &mut self,
+        max_size_bytes: usize,
+        protected: &std::collections::HashSet<usize>,
+    ) {
         while self.total_size_bytes > max_size_bytes {
             if !self.evict_lru_full_excluding(protected) {
                 break;
@@ -225,7 +229,7 @@ impl PageCache {
         self.total_size_bytes = 0;
     }
 
-    fn evict_lru_full_excluding(&mut self, protected: &[usize]) -> bool {
+    fn evict_lru_full_excluding(&mut self, protected: &std::collections::HashSet<usize>) -> bool {
         let lru_key = self
             .textures
             .iter()
@@ -260,6 +264,7 @@ impl Default for PageCache {
 mod tests {
     use super::*;
     use egui::ColorImage;
+    use std::collections::HashSet;
 
     fn make_image(width: usize, height: usize) -> LoadedImage {
         LoadedImage::Color(ColorImage::new([width, height], egui::Color32::WHITE))
@@ -282,7 +287,7 @@ mod tests {
         assert!(!cache.contains_full(0));
 
         let image = make_image(2, 2);
-        cache.insert_full(0, image, 1024, &[]);
+        cache.insert_full(0, image, 1024, &HashSet::new());
 
         assert!(cache.contains_full(0));
         let handle = cache
@@ -298,14 +303,14 @@ mod tests {
         // 2x2 RGBA8 = 16 bytes each.
         let budget = 32;
 
-        cache.insert_full(0, make_image(2, 2), budget, &[]);
-        cache.insert_full(1, make_image(2, 2), budget, &[]);
+        cache.insert_full(0, make_image(2, 2), budget, &HashSet::new());
+        cache.insert_full(1, make_image(2, 2), budget, &HashSet::new());
         assert_eq!(cache.total_size_bytes(), 32);
         assert!(cache.contains_full(0));
         assert!(cache.contains_full(1));
 
         // Inserting a third page should evict the least-recently-used full image (page 0).
-        cache.insert_full(2, make_image(2, 2), budget, &[]);
+        cache.insert_full(2, make_image(2, 2), budget, &HashSet::new());
         assert_eq!(cache.total_size_bytes(), 32);
         assert!(!cache.contains_full(0));
         assert!(cache.contains_full(1));
@@ -321,13 +326,13 @@ mod tests {
         let mut cache = PageCache::new();
         let budget = 32;
 
-        cache.insert_full(0, make_image(2, 2), budget, &[]);
-        cache.insert_full(1, make_image(2, 2), budget, &[]);
+        cache.insert_full(0, make_image(2, 2), budget, &HashSet::new());
+        cache.insert_full(1, make_image(2, 2), budget, &HashSet::new());
 
         // Touch page 0 so page 1 becomes the LRU entry.
         let _ = cache.get_texture(&ctx, 0);
 
-        cache.insert_full(2, make_image(2, 2), budget, &[]);
+        cache.insert_full(2, make_image(2, 2), budget, &HashSet::new());
         assert!(cache.contains_full(0));
         assert!(!cache.contains_full(1));
         assert!(cache.contains_full(2));
@@ -339,13 +344,13 @@ mod tests {
         let mut cache = PageCache::new();
         let budget = 8;
 
-        cache.insert_full(0, make_image(2, 2), budget, &[]); // 16 bytes, exceeds budget
+        cache.insert_full(0, make_image(2, 2), budget, &HashSet::new()); // 16 bytes, exceeds budget
 
         assert!(cache.contains_full(0));
         assert_eq!(cache.total_size_bytes(), 16);
 
         // Enforcing the budget will evict the oversized texture because it is the only entry.
-        cache.enforce_budget_with_protected(budget, &[]);
+        cache.enforce_budget_with_protected(budget, &HashSet::new());
         assert!(!cache.contains_full(0));
         assert_eq!(cache.total_size_bytes(), 0);
 
@@ -358,11 +363,11 @@ mod tests {
         let mut cache = PageCache::new();
         let budget = 32;
 
-        cache.insert_full(0, make_image(2, 2), budget, &[]);
-        cache.insert_full(1, make_image(2, 2), budget, &[]);
+        cache.insert_full(0, make_image(2, 2), budget, &HashSet::new());
+        cache.insert_full(1, make_image(2, 2), budget, &HashSet::new());
 
         // Insert page 2 while protecting page 0. Page 1 is the only evictable entry.
-        cache.insert_full(2, make_image(2, 2), budget, &[0]);
+        cache.insert_full(2, make_image(2, 2), budget, &HashSet::from([0]));
         assert!(cache.contains_full(0));
         assert!(!cache.contains_full(1));
         assert!(cache.contains_full(2));
@@ -378,10 +383,10 @@ mod tests {
         // 2x2 RGBA8 = 16 bytes each; budget can only hold one.
         let budget = 16;
 
-        cache.insert_full(0, make_image(2, 2), budget, &[]);
+        cache.insert_full(0, make_image(2, 2), budget, &HashSet::new());
         // Insert page 1 while page 0 is protected. Since page 0 cannot be
         // evicted, the budget must be exceeded rather than looping forever.
-        cache.insert_full(1, make_image(2, 2), budget, &[0]);
+        cache.insert_full(1, make_image(2, 2), budget, &HashSet::from([0]));
 
         assert!(cache.contains_full(0));
         assert!(cache.contains_full(1));
@@ -398,10 +403,10 @@ mod tests {
         let budget = 8;
 
         cache.insert_thumbnail(0, make_image(2, 2), [2, 2]);
-        cache.insert_full(0, make_image(2, 2), budget, &[]);
+        cache.insert_full(0, make_image(2, 2), budget, &HashSet::new());
 
         // Evict the full image; the thumbnail should remain.
-        cache.enforce_budget_with_protected(budget, &[]);
+        cache.enforce_budget_with_protected(budget, &HashSet::new());
         assert!(!cache.contains_full(0));
         assert!(cache.contains_thumbnail(0));
         assert_eq!(cache.get_original_size(0), Some([2, 2]));
