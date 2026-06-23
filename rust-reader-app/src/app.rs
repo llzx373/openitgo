@@ -7,11 +7,12 @@ use crate::views::{
     library::{LibraryCallbacks, LibraryView},
     reader::ReaderView,
 };
+use egui_phosphor::regular;
 use rust_reader_core::models::{FitMode, PageSource, ReadingMode};
 use rust_reader_core::state::ReadingState;
 use rust_reader_storage::{
     json_store::JsonStore,
-    models::{Bookmarks, History, HistoryEntry, Library, Settings, Theme},
+    models::{Bookmarks, History, HistoryEntry, Library, Settings, Theme, ToolbarDisplayMode},
 };
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -151,6 +152,34 @@ pub enum View {
 enum BarEdge {
     Top,
     Bottom,
+}
+
+fn toolbar_button(
+    ui: &mut egui::Ui,
+    icon: &str,
+    text: &str,
+    mode: ToolbarDisplayMode,
+) -> egui::Response {
+    match mode {
+        ToolbarDisplayMode::IconOnly => ui.button(icon).on_hover_text(text),
+        ToolbarDisplayMode::TextOnly => ui.button(text),
+        ToolbarDisplayMode::IconAndText => ui.button(format!("{} {}", icon, text)),
+    }
+}
+
+fn toolbar_selectable(
+    ui: &mut egui::Ui,
+    icon: &str,
+    text: &str,
+    active: bool,
+    mode: ToolbarDisplayMode,
+) -> egui::Response {
+    let label = match mode {
+        ToolbarDisplayMode::IconOnly => egui::WidgetText::from(icon),
+        ToolbarDisplayMode::TextOnly => egui::WidgetText::from(text),
+        ToolbarDisplayMode::IconAndText => egui::WidgetText::from(format!("{} {}", icon, text)),
+    };
+    ui.selectable_label(active, label).on_hover_text(text)
 }
 
 impl ReaderApp {
@@ -405,20 +434,21 @@ impl ReaderApp {
         mode: ReadingMode,
         zoom: f32,
     ) {
+        let display_mode = self.settings.toolbar_display_mode;
         egui::TopBottomPanel::top("reader_toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("← 书架").clicked() {
+                if toolbar_button(ui, regular::HOUSE, "书架", display_mode).clicked() {
                     self.current_view = View::Library;
                 }
                 ui.separator();
 
                 let modes = [
-                    (ReadingMode::Ltr, "国漫"),
-                    (ReadingMode::Rtl, "日漫"),
-                    (ReadingMode::Webtoon, "韩漫"),
+                    (ReadingMode::Ltr, regular::ARROW_RIGHT, "国漫"),
+                    (ReadingMode::Rtl, regular::ARROW_LEFT, "日漫"),
+                    (ReadingMode::Webtoon, regular::ARROW_DOWN, "韩漫"),
                 ];
-                for (m, label) in modes {
-                    if ui.selectable_label(mode == m, label).clicked() {
+                for (m, icon, label) in modes {
+                    if toolbar_selectable(ui, icon, label, mode == m, display_mode).clicked() {
                         if let Some(reader) = self.reader_view.open.as_mut() {
                             reader.state.set_mode(m, total_pages);
                         }
@@ -433,10 +463,15 @@ impl ReaderApp {
                         .as_ref()
                         .map(|r| r.state.double_page)
                         .unwrap_or(self.settings.double_page);
-                    if ui
-                        .selectable_label(double_page, "双页")
-                        .on_hover_text("切换到双页模式")
-                        .clicked()
+                    if toolbar_selectable(
+                        ui,
+                        regular::BOOK_OPEN,
+                        "双页",
+                        double_page,
+                        display_mode,
+                    )
+                    .on_hover_text("切换到双页模式")
+                    .clicked()
                     {
                         let new_double = !double_page;
                         self.settings.double_page = new_double;
@@ -448,35 +483,39 @@ impl ReaderApp {
                     ui.separator();
                 }
 
-                if ui.button("-").clicked() {
+                if toolbar_button(ui, regular::MINUS, "", display_mode).clicked() {
                     if let Some(reader) = self.reader_view.open.as_mut() {
                         reader.zoom_out();
                     }
                 }
                 ui.label(format!("{:.0}%", zoom * 100.0));
-                if ui.button("+").clicked() {
+                if toolbar_button(ui, regular::PLUS, "", display_mode).clicked() {
                     if let Some(reader) = self.reader_view.open.as_mut() {
                         reader.zoom_in();
                     }
                 }
-                if ui.button("适应宽度").clicked() {
+                if toolbar_button(ui, regular::ARROWS_OUT_LINE_HORIZONTAL, "适应宽度", display_mode)
+                    .clicked()
+                {
                     if let Some(reader) = self.reader_view.open.as_mut() {
                         reader.request_fit(FitMode::Width);
                     }
                 }
-                if ui.button("适应高度").clicked() {
+                if toolbar_button(ui, regular::ARROWS_OUT_LINE_VERTICAL, "适应高度", display_mode)
+                    .clicked()
+                {
                     if let Some(reader) = self.reader_view.open.as_mut() {
                         reader.request_fit(FitMode::Height);
                     }
                 }
-                if ui.button("自动适应").clicked() {
+                if toolbar_button(ui, regular::FRAME_CORNERS, "自动适应", display_mode).clicked() {
                     if let Some(reader) = self.reader_view.open.as_mut() {
                         reader.request_fit(FitMode::Page);
                     }
                 }
                 ui.separator();
 
-                if ui.button("上一页").clicked() {
+                if toolbar_button(ui, regular::CARET_LEFT, "上一页", display_mode).clicked() {
                     self.reader_prev_page();
                 }
                 let mut displayed_page = current_page + 1;
@@ -498,23 +537,23 @@ impl ReaderApp {
                     }
                 }
                 ui.label(format!("/ {}", total_pages));
-                if ui.button("下一页").clicked() {
+                if toolbar_button(ui, regular::CARET_RIGHT, "下一页", display_mode).clicked() {
                     self.reader_next_page();
                 }
                 ui.separator();
 
-                if ui.button("添加书签").clicked() {
+                if toolbar_button(ui, regular::BOOKMARK, "添加书签", display_mode).clicked() {
                     self.add_bookmark(current_page);
                 }
-                if ui.button("全屏").clicked() {
+                if toolbar_button(ui, regular::ARROWS_OUT_SIMPLE, "全屏", display_mode).clicked() {
                     self.toggle_fullscreen(ctx);
                 }
-                if ui.button("设置").clicked() {
+                if toolbar_button(ui, regular::GEAR, "设置", display_mode).clicked() {
                     self.current_view = View::Settings;
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("✕").on_hover_text("隐藏工具栏").clicked() {
+                    if ui.button(regular::X).on_hover_text("隐藏工具栏").clicked() {
                         self.settings.show_toolbar = false;
                     }
                 });
