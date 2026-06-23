@@ -3761,6 +3761,7 @@ dependencies = [
  "egui-phosphor",
  "foreign-types",
  "image",
+ "objc",
  "pdf-render",
  "rfd",
  "rust-reader-core",
