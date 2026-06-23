@@ -39,6 +39,8 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             fonts::setup_fonts(&cc.egui_ctx);
+            #[cfg(target_os = "macos")]
+            crate::platform::macos::dock_open::install_dock_open_handler();
             Ok(Box::new(ReaderApp::new(cc)))
         }),
     )
