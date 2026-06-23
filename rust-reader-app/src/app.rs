@@ -463,11 +463,23 @@ impl ReaderApp {
                     self.reader_prev_page();
                 }
                 let mut displayed_page = current_page + 1;
-                ui.add(
+                let page_response = ui.add(
                     egui::DragValue::new(&mut displayed_page)
                         .speed(1.0)
-                        .range(1..=total_pages.max(1)),
+                        .range(1..=total_pages.max(1))
+                        .update_while_editing(false),
                 );
+                if page_response.lost_focus() {
+                    let target = displayed_page
+                        .saturating_sub(1)
+                        .min(total_pages.saturating_sub(1));
+                    if let Some(reader) = self.reader_view.open.as_mut() {
+                        if target != reader.state.current_page {
+                            reader.state.go_to_page(target, total_pages);
+                            reader.mark_page_turn();
+                        }
+                    }
+                }
                 ui.label(format!("/ {}", total_pages));
                 if ui.button("下一页").clicked() {
                     self.reader_next_page();

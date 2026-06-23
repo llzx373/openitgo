@@ -120,7 +120,7 @@ impl OpenReader {
         self.pending_fit = Some(fit);
     }
 
-    fn mark_page_turn(&mut self) {
+    pub(crate) fn mark_page_turn(&mut self) {
         self.last_page_turn = Instant::now();
     }
 
