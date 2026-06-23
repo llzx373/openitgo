@@ -117,6 +117,11 @@ impl eframe::App for ReaderApp {
             }
         }
         self.handle_dropped_files(ctx);
+        #[cfg(target_os = "macos")]
+        {
+            let dock_paths = crate::platform::macos::dock_open::take_dock_open_paths();
+            self.handle_open_paths(dock_paths);
+        }
         self.poll_opener(ctx);
 
         let cache_size_mb = self.settings.cache_size_mb as usize;
@@ -1273,19 +1278,21 @@ impl ReaderApp {
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
-        let dropped_files: Vec<_> = ctx.input(|i| i.raw.dropped_files.clone());
-        for file in &dropped_files {
-            if let Some(path) = &file.path {
-                self.add_folder_to_library(path.clone());
-            }
+        let paths: Vec<_> = ctx
+            .input(|i| i.raw.dropped_files.clone())
+            .into_iter()
+            .filter_map(|f| f.path)
+            .collect();
+        self.handle_open_paths(paths);
+    }
+
+    fn handle_open_paths(&mut self, paths: Vec<PathBuf>) {
+        for path in &paths {
+            self.add_folder_to_library(path.clone());
         }
-        // Open the first dropped item if it is already a comic; otherwise stay
-        // in the library so the user can see the imported entries.
-        if let Some(file) = dropped_files.first() {
-            if let Some(path) = &file.path {
-                if rust_reader_parser::parse(path).is_ok() {
-                    self.open_comic(path.clone());
-                }
+        if let Some(path) = paths.first() {
+            if rust_reader_parser::parse(path).is_ok() {
+                self.open_comic(path.clone());
             }
         }
     }

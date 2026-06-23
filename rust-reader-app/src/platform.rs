@@ -280,8 +280,6 @@ pub mod macos {
         }
     }
 
-    // TODO: remove #[allow(dead_code)] once Tasks 3 and 4 wire this up
-    #[allow(dead_code)]
     #[allow(unexpected_cfgs)]
     pub mod dock_open {
         use std::ffi::{c_char, CStr};
@@ -289,7 +287,7 @@ pub mod macos {
         use std::sync::Mutex;
 
         use objc::runtime::{
-            class_addMethod, class_getName, object_getClass, BOOL, Class, Object, Sel, YES,
+            class_addMethod, class_getName, object_getClass, Class, Object, Sel, BOOL, YES,
         };
         use objc::{class, msg_send, sel, sel_impl};
 
@@ -327,12 +325,16 @@ pub mod macos {
                 // 若 class_getName 返回空或以 "NS" 开头，则跳过注入并告警。
                 let name_ptr = class_getName(cls);
                 if name_ptr.is_null() {
-                    eprintln!("warning: install_dock_open_handler: could not get delegate class name");
+                    eprintln!(
+                        "warning: install_dock_open_handler: could not get delegate class name"
+                    );
                     return;
                 }
                 if let Ok(name) = CStr::from_ptr(name_ptr).to_str() {
                     if name.is_empty() {
-                        eprintln!("warning: install_dock_open_handler: delegate class name is empty");
+                        eprintln!(
+                            "warning: install_dock_open_handler: delegate class name is empty"
+                        );
                         return;
                     }
                     if name.starts_with("NS") {
@@ -357,7 +359,9 @@ pub mod macos {
                     open_files_types,
                 );
                 if added_open_files == objc::runtime::NO {
-                    eprintln!("warning: install_dock_open_handler: failed to add application:openFiles:");
+                    eprintln!(
+                        "warning: install_dock_open_handler: failed to add application:openFiles:"
+                    );
                 }
 
                 let open_file_types = c"c@:@:@".as_ptr() as *const c_char;
@@ -373,7 +377,9 @@ pub mod macos {
                     open_file_types,
                 );
                 if added_open_file == objc::runtime::NO {
-                    eprintln!("warning: install_dock_open_handler: failed to add application:openFile:");
+                    eprintln!(
+                        "warning: install_dock_open_handler: failed to add application:openFile:"
+                    );
                 }
             }
         }
@@ -450,10 +456,7 @@ pub mod macos {
             }
             // SAFETY: `fileSystemRepresentation` 保证返回合法且生命周期覆盖当前
             // autorelease pool 的 C 字符串；使用 `CStr` 仅做只读解析，不越界。
-            CStr::from_ptr(fs)
-                .to_str()
-                .ok()
-                .map(PathBuf::from)
+            CStr::from_ptr(fs).to_str().ok().map(PathBuf::from)
         }
     }
 }
