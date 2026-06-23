@@ -9,7 +9,7 @@ use rust_reader_core::models::PageSource;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
 /// Cache of parsed PDF documents, keyed by file path.
@@ -104,9 +104,14 @@ impl RawCacheKey {
 /// (once for a thumbnail and once for the full image). Caching the decompressed
 /// bytes across all IO workers avoids redundant decompression. This also helps
 /// RAR archives where each read currently re-opens the whole archive.
+///
+/// We use a std::sync::RwLock rather than DashMap because the LRU order and the
+/// total byte count must remain globally consistent. Reads only take a read lock,
+/// so multiple IO workers can look up entries concurrently; only inserts take a
+/// write lock.
 #[derive(Clone)]
 struct SharedRawCache {
-    inner: Arc<Mutex<SharedRawCacheInner>>,
+    inner: Arc<RwLock<SharedRawCacheInner>>,
 }
 
 struct SharedRawCacheInner {
@@ -119,7 +124,7 @@ struct SharedRawCacheInner {
 impl SharedRawCache {
     fn new(max_bytes: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(SharedRawCacheInner {
+            inner: Arc::new(RwLock::new(SharedRawCacheInner {
                 map: HashMap::new(),
                 order: VecDeque::new(),
                 bytes: 0,
@@ -129,12 +134,12 @@ impl SharedRawCache {
     }
 
     fn get(&self, key: &RawCacheKey) -> Option<Arc<Vec<u8>>> {
-        self.inner.lock().unwrap().map.get(key).cloned()
+        self.inner.read().unwrap().map.get(key).cloned()
     }
 
     fn insert(&self, key: RawCacheKey, bytes: Vec<u8>) {
         let len = bytes.len();
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.write().unwrap();
         if len > inner.max_bytes {
             return;
         }
