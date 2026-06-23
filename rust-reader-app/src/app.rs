@@ -183,6 +183,7 @@ impl ReaderApp {
                         state,
                         &self.page_loader,
                         self.settings.wide_page_threshold,
+                        self.settings.enable_page_animation,
                     );
                     self.current_view = View::Reader;
                     self.error_message = None;
@@ -1112,6 +1113,7 @@ mod tests {
             ReadingState::new(ReadingMode::Ltr, 10),
             &PageLoader::default(),
             1.4,
+            true,
         );
         app.reader_view.open.as_mut().unwrap().state.current_page = 5;
         app.record_reader_history();

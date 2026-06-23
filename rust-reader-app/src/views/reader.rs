@@ -96,6 +96,9 @@ pub struct OpenReader {
     /// Aspect ratio above which a page is treated as a wide spread and shown
     /// alone even in double-page mode. Inherited from Settings at open time.
     pub wide_page_threshold: f32,
+    /// Whether to show the sliding page-turn animation. Inherited from Settings
+    /// at open time; if disabled the reader instantly switches pages.
+    pub enable_page_animation: bool,
 }
 
 impl OpenReader {
@@ -142,7 +145,7 @@ impl OpenReader {
     }
 
     fn can_animate_turn(&self) -> bool {
-        !self.state.mode.is_webtoon() && !self.is_double_page()
+        self.enable_page_animation && !self.state.mode.is_webtoon() && !self.is_double_page()
     }
 
     pub fn next_page_with_animation(&mut self) {
@@ -429,6 +432,7 @@ impl ReaderView {
         state: ReadingState,
         loader: &PageLoader,
         wide_page_threshold: f32,
+        enable_page_animation: bool,
     ) {
         let _ = ctx;
         timing::log(&format!(
@@ -456,6 +460,7 @@ impl ReaderView {
             webtoon_last_page: state.current_page,
             last_available_size: None,
             wide_page_threshold,
+            enable_page_animation,
         };
         reader.bump_epoch(loader);
         self.open = Some(reader);
@@ -1272,6 +1277,7 @@ mod tests {
             webtoon_last_page: 0,
             last_available_size: None,
             wide_page_threshold: 1.4,
+            enable_page_animation: true,
         }
     }
 
