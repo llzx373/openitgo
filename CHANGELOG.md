@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Menu bar with File / View / Read / Tools / Help menus, available even when the toolbar is hidden.
 - Library grid uses a wrapping card layout that adapts to window width and supports vertical scrolling.
 - Missing library covers are regenerated on demand; deleted-source entries show an overlay and can be removed in bulk.
+- Colorful macOS-style app icon and runtime window icon.
+- Phosphor icon font for the reader toolbar.
+- Toolbar display mode setting: icon + text, icon only, or text only.
 
 ### Changed
 
