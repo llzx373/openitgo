@@ -4,7 +4,7 @@ use crate::timing;
 use crate::widgets::progress_bar::{comic_progress_bar, page_at_x, ProgressBarResponse};
 use crate::widgets::thumbnail_progress_bar::page_thumbnail_tooltip;
 use rust_reader_core::layout;
-use rust_reader_core::models::{Comic, ReadingMode};
+use rust_reader_core::models::{Comic, FitMode, ReadingMode};
 use rust_reader_core::state::{ReadingState, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -23,16 +23,6 @@ const PENDING_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Default)]
 pub struct ReaderView {
     pub open: Option<OpenReader>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuickFit {
-    /// Fit the image width to the available viewport width.
-    Width,
-    /// Fit the image height to the available viewport height.
-    Height,
-    /// Fit the whole image inside the available viewport (letterbox).
-    Page,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +59,7 @@ pub struct OpenReader {
     pub state: ReadingState,
     pub left_page: Option<usize>,
     pub right_page: Option<usize>,
-    pub pending_fit: Option<QuickFit>,
+    pub pending_fit: Option<FitMode>,
     pub current_epoch: u64,
     /// Full-resolution pages that have been requested but not yet loaded.
     pub pending_pages: HashMap<usize, Instant>,
@@ -104,7 +94,7 @@ impl OpenReader {
         self.state.zoom = self.state.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
     }
 
-    pub fn request_fit(&mut self, fit: QuickFit) {
+    pub fn request_fit(&mut self, fit: FitMode) {
         self.pending_fit = Some(fit);
     }
 
@@ -225,11 +215,13 @@ impl OpenReader {
         }
 
         let scale = match fit {
-            QuickFit::Width => available.x / spread_size.x,
-            QuickFit::Height => available.y / spread_size.y,
-            QuickFit::Page => (available.x / spread_size.x).min(available.y / spread_size.y),
+            FitMode::Width => available.x / spread_size.x,
+            FitMode::Height => available.y / spread_size.y,
+            FitMode::Page => (available.x / spread_size.x).min(available.y / spread_size.y),
+            FitMode::Original => 1.0,
         };
         self.state.zoom = scale.clamp(MIN_ZOOM, MAX_ZOOM);
+        self.state.fit_mode = fit;
         self.state.pan = Vec2::ZERO;
     }
 
@@ -362,7 +354,7 @@ impl ReaderView {
             state,
             left_page: None,
             right_page: None,
-            pending_fit: Some(QuickFit::Page),
+            pending_fit: Some(state.fit_mode),
             current_epoch: 0,
             pending_pages: HashMap::new(),
             pending_thumbnails: HashSet::new(),
@@ -623,7 +615,7 @@ impl ReaderView {
         reader.left_page = left_idx;
         reader.right_page = right_idx;
         if spread_changed {
-            reader.pending_fit = reader.pending_fit.or(Some(QuickFit::Page));
+            reader.pending_fit = reader.pending_fit.or(Some(FitMode::Page));
         }
 
         let available = ui.available_rect_before_wrap();

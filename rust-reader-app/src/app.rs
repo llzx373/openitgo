@@ -4,10 +4,10 @@ use crate::shortcuts::is_shortcut_pressed;
 use crate::timing;
 use crate::views::{
     library::{LibraryCallbacks, LibraryView},
-    reader::{QuickFit, ReaderView},
-    settings::SettingsView,
+    reader::ReaderView,
 };
-use rust_reader_core::models::{PageSource, ReadingMode};
+use crate::views::settings::SettingsView;
+use rust_reader_core::models::{FitMode, PageSource, ReadingMode};
 use rust_reader_core::state::ReadingState;
 use rust_reader_storage::{
     json_store::JsonStore,
@@ -169,6 +169,7 @@ impl ReaderApp {
                     let total = comic.volumes.first().map(|v| v.pages.len()).unwrap_or(0);
                     let mut state = ReadingState::new(self.settings.default_mode, total);
                     state.set_double_page(self.settings.double_page, total);
+                    state.fit_mode = self.settings.default_fit;
                     if let Some(h) = self.history.entries.iter().find(|h| h.comic_id == comic.id) {
                         state.go_to_page(h.page_index, total);
                     }
@@ -377,7 +378,7 @@ impl ReaderApp {
                         self.settings.double_page = new_double;
                         if let Some(reader) = self.reader_view.open.as_mut() {
                             reader.state.set_double_page(new_double, total_pages);
-                            reader.pending_fit = Some(QuickFit::Page);
+                            reader.pending_fit = Some(FitMode::Page);
                         }
                     }
                     ui.separator();
@@ -396,17 +397,17 @@ impl ReaderApp {
                 }
                 if ui.button("适应宽度").clicked() {
                     if let Some(reader) = self.reader_view.open.as_mut() {
-                        reader.request_fit(QuickFit::Width);
+                        reader.request_fit(FitMode::Width);
                     }
                 }
                 if ui.button("适应高度").clicked() {
                     if let Some(reader) = self.reader_view.open.as_mut() {
-                        reader.request_fit(QuickFit::Height);
+                        reader.request_fit(FitMode::Height);
                     }
                 }
                 if ui.button("自动适应").clicked() {
                     if let Some(reader) = self.reader_view.open.as_mut() {
-                        reader.request_fit(QuickFit::Page);
+                        reader.request_fit(FitMode::Page);
                     }
                 }
                 ui.separator();
@@ -634,17 +635,17 @@ impl ReaderApp {
         }
         if is_shortcut_pressed(ctx, &self.settings.shortcuts.fit_page) {
             if let Some(reader) = self.reader_view.open.as_mut() {
-                reader.request_fit(QuickFit::Page);
+                reader.request_fit(FitMode::Page);
             }
         }
         if is_shortcut_pressed(ctx, &self.settings.shortcuts.fit_width) {
             if let Some(reader) = self.reader_view.open.as_mut() {
-                reader.request_fit(QuickFit::Width);
+                reader.request_fit(FitMode::Width);
             }
         }
         if is_shortcut_pressed(ctx, &self.settings.shortcuts.fit_height) {
             if let Some(reader) = self.reader_view.open.as_mut() {
-                reader.request_fit(QuickFit::Height);
+                reader.request_fit(FitMode::Height);
             }
         }
     }

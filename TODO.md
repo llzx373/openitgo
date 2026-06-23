@@ -24,11 +24,12 @@
   - [x] 4.3 滚轮改为垂直滚动，并自动更新当前页
   - [x] 4.4 键盘翻页后滚动到对应页面顶部
   - [x] 4.5 按需加载可见页缩略图/全图
-- [ ] 5. FitMode 与设置打通
-  - [ ] 5.1 移除或合并 `ReaderView` 中的 `QuickFit`
-  - [ ] 5.2 阅读器统一使用 `ReadingState.fit_mode` 和 `settings.default_fit`
-  - [ ] 5.3 工具栏 fit 按钮直接修改 `reader.state.fit_mode`
-  - [ ] 5.4 打开新漫画时应用默认适配模式
+- [x] 5. FitMode 与设置打通
+  - [x] 5.1 删除 `QuickFit`，统一使用 `FitMode`
+  - [x] 5.2 `ReaderView::open` 使用 `state.fit_mode` 作为初始适配
+  - [x] 5.3 工具栏/快捷键 fit 操作使用 `FitMode`
+  - [x] 5.4 打开漫画时从 `settings.default_fit` 设置 `state.fit_mode`
+  - [x] 5.5 `apply_pending_fit` 同时更新 `state.fit_mode`
 
 ## P1 — 显著提升体验
 
