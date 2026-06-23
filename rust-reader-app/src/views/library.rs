@@ -129,132 +129,168 @@ impl LibraryView {
             self.render_empty_library(ui, callbacks);
             return;
         }
-        egui::Grid::new("library_grid").show(ui, |ui| {
-            for (original_idx, entry) in entries {
-                let cover_size = egui::vec2(80.0, 120.0);
-                let is_editing = self.edit_buffer.as_ref().map(|b| b.0) == Some(original_idx);
-                let file_missing = !entry.path.exists();
-                let cover_missing = entry
-                    .cover_path
-                    .as_ref()
-                    .map(|p| !p.exists())
-                    .unwrap_or(true);
+        const COLUMN_COUNT: usize = 4;
+        const COVER_WIDTH: f32 = 120.0;
+        const COVER_HEIGHT: f32 = 170.0;
+        let cover_size = egui::vec2(COVER_WIDTH, COVER_HEIGHT);
 
-                if !file_missing && cover_missing {
-                    (callbacks.on_request_cover)(original_idx);
-                }
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::Grid::new("library_grid")
+                .num_columns(COLUMN_COUNT)
+                .spacing([16.0, 16.0])
+                .show(ui, |ui| {
+                    for (col, (original_idx, entry)) in entries.into_iter().enumerate() {
+                        let is_editing =
+                            self.edit_buffer.as_ref().map(|b| b.0) == Some(original_idx);
+                        let file_missing = !entry.path.exists();
+                        let cover_missing = entry
+                            .cover_path
+                            .as_ref()
+                            .map(|p| !p.exists())
+                            .unwrap_or(true);
 
-                let card_response = ui
-                    .group(|ui| {
-                        ui.set_min_width(cover_size.x);
-                        ui.vertical_centered(|ui| {
-                            let cover_rect = if let Some(texture) = self.cover_texture(
-                                ui.ctx(),
-                                &entry.comic_id,
-                                entry.cover_path.as_ref(),
-                            ) {
-                                let r = ui.image(&texture);
-                                r.rect
-                            } else {
-                                let (rect, _response) =
-                                    ui.allocate_exact_size(cover_size, egui::Sense::hover());
-                                ui.painter().rect_filled(
-                                    rect,
-                                    0.0,
-                                    ui.visuals().widgets.inactive.bg_fill,
-                                );
-                                rect
-                            };
+                        if !file_missing && cover_missing {
+                            (callbacks.on_request_cover)(original_idx);
+                        }
 
-                            if file_missing {
-                                let overlay = cover_rect.expand2(egui::vec2(4.0, 4.0));
-                                ui.painter().rect_filled(
-                                    overlay,
-                                    0.0,
-                                    egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180),
-                                );
-                                ui.painter().text(
-                                    overlay.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    "已删除",
-                                    egui::FontId::proportional(14.0),
-                                    egui::Color32::WHITE,
-                                );
-                            }
+                        let card_response = ui
+                            .group(|ui| {
+                                ui.set_min_width(cover_size.x);
+                                ui.vertical_centered(|ui| {
+                                    let cover_rect = if let Some(texture) = self.cover_texture(
+                                        ui.ctx(),
+                                        &entry.comic_id,
+                                        entry.cover_path.as_ref(),
+                                    ) {
+                                        let available = ui.available_width();
+                                        let desired = texture.size_vec2();
+                                        let scale =
+                                            (available / desired.x).min(cover_size.y / desired.y);
+                                        let size = desired * scale;
+                                        let (rect, _response) =
+                                            ui.allocate_exact_size(size, egui::Sense::hover());
+                                        ui.painter().image(
+                                            texture.id(),
+                                            rect,
+                                            egui::Rect::from_min_max(
+                                                egui::pos2(0.0, 0.0),
+                                                egui::pos2(1.0, 1.0),
+                                            ),
+                                            egui::Color32::WHITE,
+                                        );
+                                        rect
+                                    } else {
+                                        let (rect, _response) = ui
+                                            .allocate_exact_size(cover_size, egui::Sense::hover());
+                                        ui.painter().rect_filled(
+                                            rect,
+                                            0.0,
+                                            ui.visuals().widgets.inactive.bg_fill,
+                                        );
+                                        rect
+                                    };
 
-                            ui.add_space(4.0);
-
-                            if is_editing {
-                                let title = &mut self.edit_buffer.as_mut().unwrap().1;
-                                ui.text_edit_singleline(title);
-                                let mut save = false;
-                                let mut cancel = false;
-                                ui.horizontal(|ui| {
-                                    if ui.button("保存").clicked() {
-                                        save = true;
+                                    if file_missing {
+                                        let overlay = cover_rect.expand2(egui::vec2(4.0, 4.0));
+                                        ui.painter().rect_filled(
+                                            overlay,
+                                            0.0,
+                                            egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+                                        );
+                                        ui.painter().text(
+                                            overlay.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            "已删除",
+                                            egui::FontId::proportional(14.0),
+                                            egui::Color32::WHITE,
+                                        );
                                     }
-                                    if ui.button("取消").clicked() {
-                                        cancel = true;
+
+                                    ui.add_space(4.0);
+
+                                    if is_editing {
+                                        let title = &mut self.edit_buffer.as_mut().unwrap().1;
+                                        ui.text_edit_singleline(title);
+                                        let mut save = false;
+                                        let mut cancel = false;
+                                        ui.horizontal(|ui| {
+                                            if ui.button("保存").clicked() {
+                                                save = true;
+                                            }
+                                            if ui.button("取消").clicked() {
+                                                cancel = true;
+                                            }
+                                        });
+                                        if save {
+                                            let new_title = title.trim().to_string();
+                                            if !new_title.is_empty() {
+                                                (callbacks.on_update_title)(
+                                                    original_idx,
+                                                    new_title,
+                                                );
+                                            }
+                                            self.edit_buffer = None;
+                                        } else if cancel {
+                                            self.edit_buffer = None;
+                                        }
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new(&entry.title)
+                                                .strong()
+                                                .text_style(egui::TextStyle::Button),
+                                        );
+                                    }
+
+                                    let progress = library_progress(history, &entry.comic_id);
+                                    if progress.total > 0 {
+                                        ui.add(
+                                            egui::ProgressBar::new(progress.ratio()).text(format!(
+                                                "{}/{}",
+                                                progress.read, progress.total
+                                            )),
+                                        );
                                     }
                                 });
-                                if save {
-                                    let new_title = title.trim().to_string();
-                                    if !new_title.is_empty() {
-                                        (callbacks.on_update_title)(original_idx, new_title);
-                                    }
-                                    self.edit_buffer = None;
-                                } else if cancel {
-                                    self.edit_buffer = None;
-                                }
-                            } else {
-                                ui.label(egui::RichText::new(&entry.title).strong());
-                            }
+                            })
+                            .response
+                            .interact(egui::Sense::click());
 
-                            let progress = library_progress(history, &entry.comic_id);
-                            if progress.total > 0 {
-                                ui.add(
-                                    egui::ProgressBar::new(progress.ratio())
-                                        .text(format!("{}/{}", progress.read, progress.total)),
-                                );
+                        if !is_editing && card_response.clicked() {
+                            (callbacks.on_open_library)(original_idx);
+                        }
+                        card_response.context_menu(|ui| {
+                            if ui.button("打开").clicked() {
+                                (callbacks.on_open_library)(original_idx);
+                                ui.close_menu();
+                            }
+                            if ui.button("编辑标题").clicked() {
+                                self.edit_buffer = Some((original_idx, entry.title.clone()));
+                                self.pending_delete = None;
+                                ui.close_menu();
+                            }
+                            if self.pending_delete == Some(original_idx) {
+                                ui.label("确定删除？");
+                                if ui.button("是").clicked() {
+                                    (callbacks.on_delete_library)(original_idx);
+                                    self.pending_delete = None;
+                                    self.edit_buffer = None;
+                                    ui.close_menu();
+                                }
+                                if ui.button("否").clicked() {
+                                    self.pending_delete = None;
+                                    ui.close_menu();
+                                }
+                            } else if ui.button("删除").clicked() {
+                                self.pending_delete = Some(original_idx);
+                                ui.close_menu();
                             }
                         });
-                    })
-                    .response
-                    .interact(egui::Sense::click());
 
-                if !is_editing && card_response.clicked() {
-                    (callbacks.on_open_library)(original_idx);
-                }
-                card_response.context_menu(|ui| {
-                    if ui.button("打开").clicked() {
-                        (callbacks.on_open_library)(original_idx);
-                        ui.close_menu();
-                    }
-                    if ui.button("编辑标题").clicked() {
-                        self.edit_buffer = Some((original_idx, entry.title.clone()));
-                        self.pending_delete = None;
-                        ui.close_menu();
-                    }
-                    if self.pending_delete == Some(original_idx) {
-                        ui.label("确定删除？");
-                        if ui.button("是").clicked() {
-                            (callbacks.on_delete_library)(original_idx);
-                            self.pending_delete = None;
-                            self.edit_buffer = None;
-                            ui.close_menu();
+                        if (col + 1) % COLUMN_COUNT == 0 {
+                            ui.end_row();
                         }
-                        if ui.button("否").clicked() {
-                            self.pending_delete = None;
-                            ui.close_menu();
-                        }
-                    } else if ui.button("删除").clicked() {
-                        self.pending_delete = Some(original_idx);
-                        ui.close_menu();
                     }
                 });
-
-                ui.end_row();
-            }
         });
     }
 
