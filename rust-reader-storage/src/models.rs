@@ -22,6 +22,7 @@ pub struct Settings {
     pub background_color: [u8; 3],
     pub shortcuts: Shortcuts,
     pub library_sort: LibrarySort,
+    pub toolbar_display_mode: ToolbarDisplayMode,
 }
 
 impl Default for Settings {
@@ -44,6 +45,7 @@ impl Default for Settings {
             background_color: [30, 30, 30],
             shortcuts: Shortcuts::default(),
             library_sort: LibrarySort::default(),
+            toolbar_display_mode: ToolbarDisplayMode::default(),
         }
     }
 }
@@ -148,6 +150,15 @@ pub enum LibrarySort {
     Added,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolbarDisplayMode {
+    #[default]
+    IconAndText,
+    IconOnly,
+    TextOnly,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct LibraryEntry {
@@ -236,10 +247,12 @@ mod tests {
         let s = Settings {
             background_color: [12, 34, 56],
             library_sort: LibrarySort::Title,
+            toolbar_display_mode: ToolbarDisplayMode::IconOnly,
             ..Default::default()
         };
         let json = serde_json::to_string(&s).unwrap();
         let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.toolbar_display_mode, ToolbarDisplayMode::IconOnly);
         assert_eq!(s, loaded);
     }
 
