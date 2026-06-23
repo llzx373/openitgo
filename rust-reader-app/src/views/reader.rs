@@ -3,6 +3,7 @@ use crate::loader::PageLoader;
 use crate::timing;
 use crate::widgets::progress_bar::{comic_progress_bar, page_at_x, ProgressBarResponse};
 use crate::widgets::thumbnail_progress_bar::page_thumbnail_tooltip;
+use rust_reader_core::layout;
 use rust_reader_core::models::{Comic, ReadingMode};
 use rust_reader_core::state::{ReadingState, Vec2};
 use std::collections::{HashMap, HashSet};
@@ -82,6 +83,10 @@ pub struct OpenReader {
     /// When the user last turned a page. Used to pause preloads briefly so
     /// rapid flips don't get stuck behind background preload decoding.
     pub last_page_turn: Instant,
+    /// Vertical scroll offset for Webtoon mode, measured from the top of page 0.
+    pub webtoon_scroll_offset: f32,
+    /// The last `current_page` used to sync Webtoon scroll after keyboard nav.
+    pub webtoon_last_page: usize,
 }
 
 impl OpenReader {
@@ -366,6 +371,8 @@ impl ReaderView {
             cache: PageCache::new(),
             page_animation: None,
             last_page_turn: Instant::now(),
+            webtoon_scroll_offset: 0.0,
+            webtoon_last_page: state.current_page,
         };
         reader.bump_epoch(loader);
         self.open = Some(reader);
@@ -571,6 +578,10 @@ impl ReaderView {
             return None;
         }
 
+        if reader.state.mode.is_webtoon() {
+            return self.render_webtoon(ctx, ui, loader);
+        }
+
         if reader.page_animation.is_some() && reader.can_animate_turn() {
             return self.render_page_turn_animation(ctx, ui, loader);
         }
@@ -697,6 +708,115 @@ impl ReaderView {
             }
             Some(combined)
         }
+    }
+
+    fn render_webtoon(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        loader: &PageLoader,
+    ) -> Option<egui::Response> {
+        let reader = self.open.as_mut()?;
+        let total = reader.total_pages();
+        if total == 0 {
+            return None;
+        }
+
+        let available = ui.available_rect_before_wrap();
+        let viewport_size = Vec2::new(available.width(), available.height());
+        let page_sizes: Vec<Vec2> = (0..total)
+            .map(|idx| {
+                reader
+                    .cache
+                    .get_original_size(idx)
+                    .map(|s| Vec2::new(s[0] as f32, s[1] as f32))
+                    .unwrap_or_else(|| Vec2::new(FALLBACK_PAGE_SIZE.x, FALLBACK_PAGE_SIZE.y))
+            })
+            .collect();
+
+        let layouts =
+            layout::compute_layout(ReadingMode::Webtoon, viewport_size, &page_sizes, reader.state.zoom);
+        let content_height = layouts
+            .last()
+            .map(|l| l.rect.min.y + l.rect.size.y)
+            .unwrap_or(0.0);
+        let max_offset = (content_height - available.height()).max(0.0);
+
+        // Sync scroll offset when keyboard navigation changes the current page.
+        if reader.webtoon_last_page != reader.state.current_page {
+            if let Some(layout) = layouts.get(reader.state.current_page) {
+                reader.webtoon_scroll_offset = layout.rect.min.y;
+            }
+            reader.webtoon_last_page = reader.state.current_page;
+        }
+
+        // Apply scroll wheel input.
+        let scroll_delta = ui.input(|i| i.raw_scroll_delta.y);
+        if scroll_delta != 0.0 {
+            reader.webtoon_scroll_offset =
+                (reader.webtoon_scroll_offset - scroll_delta * 3.0).clamp(0.0, max_offset);
+        }
+        reader.webtoon_scroll_offset = reader.webtoon_scroll_offset.clamp(0.0, max_offset);
+
+        // Update current_page based on what is centered in the viewport.
+        let center_y = reader.webtoon_scroll_offset + available.height() / 2.0;
+        if let Some(layout) = layouts.iter().find(|l| {
+            l.rect.min.y <= center_y && l.rect.min.y + l.rect.size.y > center_y
+        }) {
+            reader.state.current_page = layout.page_index;
+            reader.webtoon_last_page = layout.page_index;
+        }
+
+        let top = reader.webtoon_scroll_offset;
+        let bottom = top + available.height();
+        let visible_indices: Vec<usize> = layouts
+            .iter()
+            .filter(|l| {
+                let page_top = l.rect.min.y;
+                let page_bottom = page_top + l.rect.size.y;
+                page_bottom > top && page_top < bottom
+            })
+            .map(|l| l.page_index)
+            .collect();
+
+        // Request thumbnails and full-resolution images for visible pages.
+        for &idx in &visible_indices {
+            if !reader.cache.contains_full(idx) {
+                request_page(loader, reader, idx);
+            }
+            if reader.cache.get_texture(ctx, idx).is_none()
+                && !reader.pending_thumbnails.contains(&idx)
+            {
+                request_page_thumbnail(loader, reader, idx);
+            }
+        }
+
+        let mut combined_response: Option<egui::Response> = None;
+        for idx in visible_indices {
+            let layout = &layouts[idx];
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    available.min.x + layout.rect.min.x,
+                    available.min.y + layout.rect.min.y - top,
+                ),
+                egui::vec2(layout.rect.size.x, layout.rect.size.y),
+            );
+            let texture = reader.cache.get_texture(ctx, idx);
+            let response = render_page_or_placeholder(
+                ui,
+                reader,
+                loader,
+                rect,
+                idx,
+                texture.as_ref(),
+            );
+            combined_response = Some(match combined_response {
+                Some(prev) => prev.union(response),
+                None => response,
+            });
+        }
+
+        combined_response
     }
 
     fn render_page_turn_animation(
@@ -1001,6 +1121,8 @@ mod tests {
             cache: PageCache::new(),
             page_animation: None,
             last_page_turn: Instant::now(),
+            webtoon_scroll_offset: 0.0,
+            webtoon_last_page: 0,
         }
     }
 

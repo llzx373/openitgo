@@ -18,11 +18,12 @@
   - [x] 3.1 在 `app.update` 中根据 `Settings.theme` 调用 `ctx.set_theme`
   - [x] 3.2 支持 System/Dark/Light 切换并即时生效
   - [x] 3.3 跟踪已应用主题避免每帧重复设置
-- [ ] 4. Webtoon 真正连续滚动
-  - [ ] 4.1 在 `reader.rs` 中新增 Webtoon 渲染分支
-  - [ ] 4.2 使用 `layout.rs` 的垂直布局计算每页偏移
-  - [ ] 4.3 滚轮从整页翻页改为垂直滚动 + 边界翻页
-  - [ ] 4.4 按需加载可见页缩略图/全图
+- [x] 4. Webtoon 真正连续滚动
+  - [x] 4.1 在 `reader.rs` 中新增 Webtoon 渲染分支
+  - [x] 4.2 使用 `layout.rs` 的垂直布局计算每页偏移
+  - [x] 4.3 滚轮改为垂直滚动，并自动更新当前页
+  - [x] 4.4 键盘翻页后滚动到对应页面顶部
+  - [x] 4.5 按需加载可见页缩略图/全图
 - [ ] 5. FitMode 与设置打通
   - [ ] 5.1 移除或合并 `ReaderView` 中的 `QuickFit`
   - [ ] 5.2 阅读器统一使用 `ReadingState.fit_mode` 和 `settings.default_fit`
