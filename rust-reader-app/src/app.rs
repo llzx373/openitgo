@@ -129,6 +129,8 @@ impl eframe::App for ReaderApp {
         );
         self.poll_cover_results();
 
+        self.render_menu_bar(ctx);
+
         match self.current_view.clone() {
             View::Library => self.render_library(ctx),
             View::Reader => self.render_reader(ctx),
@@ -572,6 +574,239 @@ impl ReaderApp {
                     });
                 },
             );
+        });
+    }
+
+    fn render_menu_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button("文件", |ui| {
+                    if ui.button("打开文件夹").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.add_folder_to_library(path);
+                        }
+                        ui.close_menu();
+                    }
+                    ui.menu_button("打开最近", |ui| {
+                        let recent: Vec<_> = self
+                            .history
+                            .entries
+                            .iter()
+                            .filter_map(|h| {
+                                self.library_view
+                                    .find_by_id(&h.comic_id)
+                                    .map(|e| (e.title.clone(), e.path.clone()))
+                            })
+                            .collect();
+                        if recent.is_empty() {
+                            ui.weak("暂无记录");
+                        } else {
+                            for (title, path) in recent {
+                                if ui.button(&title).clicked() {
+                                    self.open_comic(path);
+                                    ui.close_menu();
+                                }
+                            }
+                        }
+                    });
+                    ui.separator();
+                    let can_back = matches!(self.current_view, View::Reader | View::Settings);
+                    if ui
+                        .add_enabled(can_back, egui::Button::new("返回书架"))
+                        .clicked()
+                    {
+                        self.current_view = View::Library;
+                        ui.close_menu();
+                    }
+                });
+
+                ui.menu_button("视图", |ui| {
+                    let toolbar_label = if self.settings.show_toolbar {
+                        "隐藏工具栏"
+                    } else {
+                        "显示工具栏"
+                    };
+                    if ui.button(toolbar_label).clicked() {
+                        self.settings.show_toolbar = !self.settings.show_toolbar;
+                        ui.close_menu();
+                    }
+                    let statusbar_label = if self.settings.show_statusbar {
+                        "隐藏状态栏"
+                    } else {
+                        "显示状态栏"
+                    };
+                    if ui.button(statusbar_label).clicked() {
+                        self.settings.show_statusbar = !self.settings.show_statusbar;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("全屏").clicked() {
+                        self.toggle_fullscreen(ctx);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    ui.menu_button("主题", |ui| {
+                        use rust_reader_storage::models::Theme;
+                        for (theme, label) in [
+                            (Theme::System, "跟随系统"),
+                            (Theme::Light, "浅色"),
+                            (Theme::Dark, "深色"),
+                        ] {
+                            if ui
+                                .selectable_label(self.settings.theme == theme, label)
+                                .clicked()
+                            {
+                                self.settings.theme = theme;
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                });
+
+                let is_reader = matches!(self.current_view, View::Reader);
+                ui.add_enabled_ui(is_reader, |ui| {
+                    ui.menu_button("阅读", |ui| {
+                        if ui.button("上一页").clicked() {
+                            self.reader_prev_page();
+                            ui.close_menu();
+                        }
+                        if ui.button("下一页").clicked() {
+                            self.reader_next_page();
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("首页").clicked() {
+                            if let Some(reader) = self.reader_view.open.as_mut() {
+                                reader.first_page();
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button("末页").clicked() {
+                            if let Some(reader) = self.reader_view.open.as_mut() {
+                                reader.last_page();
+                            }
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("添加书签").clicked() {
+                            if let Some(reader) = self.reader_view.open.as_ref() {
+                                self.add_bookmark(reader.state.current_page);
+                            }
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        ui.menu_button("模式", |ui| {
+                            let mode = self
+                                .reader_view
+                                .open
+                                .as_ref()
+                                .map(|r| r.state.mode)
+                                .unwrap_or(self.settings.default_mode);
+                            let total_pages = self
+                                .reader_view
+                                .open
+                                .as_ref()
+                                .map(|r| r.total_pages())
+                                .unwrap_or(0);
+                            for (m, label) in [
+                                (ReadingMode::Ltr, "国漫（从左到右）"),
+                                (ReadingMode::Rtl, "日漫（从右到左）"),
+                                (ReadingMode::Webtoon, "韩漫（条漫）"),
+                            ] {
+                                if ui.selectable_label(mode == m, label).clicked() {
+                                    if let Some(reader) = self.reader_view.open.as_mut() {
+                                        reader.state.set_mode(m, total_pages);
+                                    }
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        let mode = self
+                            .reader_view
+                            .open
+                            .as_ref()
+                            .map(|r| r.state.mode)
+                            .unwrap_or(self.settings.default_mode);
+                        let double_page = self
+                            .reader_view
+                            .open
+                            .as_ref()
+                            .map(|r| r.state.double_page)
+                            .unwrap_or(self.settings.double_page);
+                        if ui
+                            .add_enabled(
+                                !mode.is_webtoon(),
+                                egui::Button::new(if double_page {
+                                    "关闭双页"
+                                } else {
+                                    "双页"
+                                }),
+                            )
+                            .clicked()
+                        {
+                            let new_double = !double_page;
+                            self.settings.double_page = new_double;
+                            if let Some(reader) = self.reader_view.open.as_mut() {
+                                let total = reader.total_pages();
+                                reader.state.set_double_page(new_double, total);
+                                reader.pending_fit = Some(FitMode::Page);
+                            }
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        ui.menu_button("缩放", |ui| {
+                            if ui.button("放大").clicked() {
+                                if let Some(reader) = self.reader_view.open.as_mut() {
+                                    reader.zoom_in();
+                                }
+                                ui.close_menu();
+                            }
+                            if ui.button("缩小").clicked() {
+                                if let Some(reader) = self.reader_view.open.as_mut() {
+                                    reader.zoom_out();
+                                }
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button("适应宽度").clicked() {
+                                if let Some(reader) = self.reader_view.open.as_mut() {
+                                    reader.request_fit(FitMode::Width);
+                                }
+                                ui.close_menu();
+                            }
+                            if ui.button("适应高度").clicked() {
+                                if let Some(reader) = self.reader_view.open.as_mut() {
+                                    reader.request_fit(FitMode::Height);
+                                }
+                                ui.close_menu();
+                            }
+                            if ui.button("自动适应").clicked() {
+                                if let Some(reader) = self.reader_view.open.as_mut() {
+                                    reader.request_fit(FitMode::Page);
+                                }
+                                ui.close_menu();
+                            }
+                        });
+                    });
+                });
+
+                ui.menu_button("工具", |ui| {
+                    if ui.button("设置").clicked() {
+                        self.current_view = View::Settings;
+                        ui.close_menu();
+                    }
+                });
+
+                ui.menu_button("帮助", |ui| {
+                    if ui.button("关于 rustReader").clicked() {
+                        self.error_message = Some(format!(
+                            "rustReader v{}\n一个用 Rust 写的漫画阅读器。",
+                            env!("CARGO_PKG_VERSION")
+                        ));
+                        ui.close_menu();
+                    }
+                });
+            });
         });
     }
 

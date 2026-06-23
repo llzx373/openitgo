@@ -122,17 +122,71 @@ impl LibraryView {
         egui::Grid::new("library_grid").show(ui, |ui| {
             for (original_idx, entry) in entries {
                 let cover_size = egui::vec2(80.0, 120.0);
-                let cover_response = if let Some(texture) =
-                    self.cover_texture(ui.ctx(), &entry.comic_id, entry.cover_path.as_ref())
-                {
-                    ui.image(&texture)
-                } else {
-                    let (rect, response) = ui.allocate_exact_size(cover_size, egui::Sense::click());
-                    ui.painter()
-                        .rect_filled(rect, 0.0, ui.visuals().widgets.inactive.bg_fill);
-                    response
-                };
-                cover_response.context_menu(|ui| {
+                let is_editing = self.edit_buffer.as_ref().map(|b| b.0) == Some(original_idx);
+
+                let card_response = ui
+                    .group(|ui| {
+                        ui.set_min_width(cover_size.x);
+                        ui.vertical_centered(|ui| {
+                            if let Some(texture) = self.cover_texture(
+                                ui.ctx(),
+                                &entry.comic_id,
+                                entry.cover_path.as_ref(),
+                            ) {
+                                ui.image(&texture);
+                            } else {
+                                let (rect, _response) =
+                                    ui.allocate_exact_size(cover_size, egui::Sense::hover());
+                                ui.painter().rect_filled(
+                                    rect,
+                                    0.0,
+                                    ui.visuals().widgets.inactive.bg_fill,
+                                );
+                            }
+
+                            ui.add_space(4.0);
+
+                            if is_editing {
+                                let title = &mut self.edit_buffer.as_mut().unwrap().1;
+                                ui.text_edit_singleline(title);
+                                let mut save = false;
+                                let mut cancel = false;
+                                ui.horizontal(|ui| {
+                                    if ui.button("保存").clicked() {
+                                        save = true;
+                                    }
+                                    if ui.button("取消").clicked() {
+                                        cancel = true;
+                                    }
+                                });
+                                if save {
+                                    let new_title = title.trim().to_string();
+                                    if !new_title.is_empty() {
+                                        (callbacks.on_update_title)(original_idx, new_title);
+                                    }
+                                    self.edit_buffer = None;
+                                } else if cancel {
+                                    self.edit_buffer = None;
+                                }
+                            } else {
+                                ui.label(egui::RichText::new(&entry.title).strong());
+                            }
+
+                            let progress = library_progress(history, &entry.comic_id);
+                            if progress.total > 0 {
+                                ui.add(
+                                    egui::ProgressBar::new(progress.ratio())
+                                        .text(format!("{}/{}", progress.read, progress.total)),
+                                );
+                            }
+                        });
+                    })
+                    .response;
+
+                if !is_editing && card_response.clicked() {
+                    (callbacks.on_open_library)(original_idx);
+                }
+                card_response.context_menu(|ui| {
                     if ui.button("打开").clicked() {
                         (callbacks.on_open_library)(original_idx);
                         ui.close_menu();
@@ -159,40 +213,6 @@ impl LibraryView {
                         ui.close_menu();
                     }
                 });
-
-                if self.edit_buffer.as_ref().map(|b| b.0) == Some(original_idx) {
-                    let title = &mut self.edit_buffer.as_mut().unwrap().1;
-                    ui.text_edit_singleline(title);
-                    let mut save = false;
-                    let mut cancel = false;
-                    ui.horizontal(|ui| {
-                        if ui.button("保存").clicked() {
-                            save = true;
-                        }
-                        if ui.button("取消").clicked() {
-                            cancel = true;
-                        }
-                    });
-                    if save {
-                        let new_title = title.trim().to_string();
-                        if !new_title.is_empty() {
-                            (callbacks.on_update_title)(original_idx, new_title);
-                        }
-                        self.edit_buffer = None;
-                    } else if cancel {
-                        self.edit_buffer = None;
-                    }
-                } else {
-                    ui.label(&entry.title);
-                }
-
-                let progress = library_progress(history, &entry.comic_id);
-                if progress.total > 0 {
-                    ui.add(
-                        egui::ProgressBar::new(progress.ratio())
-                            .text(format!("{}/{}", progress.read, progress.total)),
-                    );
-                }
 
                 ui.end_row();
             }
