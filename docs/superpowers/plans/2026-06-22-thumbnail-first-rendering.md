@@ -1,3 +1,7 @@
+> **Status:** 已实现。缩略图优先渲染逻辑已与代码一致。
+>
+> **注意：** 默认 `real_image_cache_pages` 当前为 10，文档/计划中的 50 仅为历史参考值；渲染后端为 wgpu，所有 glow 相关描述已不适用；`widgets/page_view.rs`、`examples/diagnose_hang.rs` 已删除。
+
 # Thumbnail-First Rendering Implementation Plan
 
 > **Status:** Implemented and optimized. See commits `28e50f0`, `1171e87`, `59cdb43`.

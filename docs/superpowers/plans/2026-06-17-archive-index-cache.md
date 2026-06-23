@@ -1,3 +1,7 @@
+> **Status:** 已实现。ZIP 压缩包索引缓存已落地。
+>
+> **注意：** 本文档中的 TODO 编号（#16）为历史编号，详见 `TODO.md` 中的「历史 TODO 编号对照表」。实现细节（如 `ZipCache` 命名、错误字符串）可能与当前代码略有差异。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 为 ZIP 漫画缓存 `ZipArchive` 句柄和条目索引，避免翻页时重复打开/解析压缩包。

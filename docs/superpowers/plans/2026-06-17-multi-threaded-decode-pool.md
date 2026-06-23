@@ -1,3 +1,7 @@
+> **Status:** 已实现。多线程解码已完成，但实际实现比本文档更复杂（多 IO 线程 + 高/低/缩略图三队列解码池），请勿直接执行。
+>
+> **注意：** 本文档中的 TODO 编号（#15）为历史编号，详见 `TODO.md` 中的「历史 TODO 编号对照表」。当前 `PageLoader` 的字段与签名（如 `high_sender`/`low_sender` 及 `thumbnail` 参数）与计划存在差异。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将图片解码从单后台线程改为多线程解码池，提升加载速度，同时保持 `PageLoader` 对外 API 不变。

@@ -1,3 +1,7 @@
+> **Status:** 已归档。核心目标（后台加载、预加载、RAR/PDF 支持）已实现，但架构与本文档描述有显著差异，请勿直接执行。
+>
+> **注意：** 当前实现使用 wgpu 后端，不存在 `widgets/page_view.rs`；`PageLoader` 实际 API 与计划不同（如 `request_high`/`request_low` 含 `thumbnail` 参数）；PDF/RAR 解析使用外部工具方案。TODO 编号为历史编号，详见 `TODO.md` 对照表。
+
 # 异步加载、预加载、RAR/PDF 解析实现计划
 
 > **For agentic workers:** REQUIRED SUB-_SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

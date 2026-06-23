@@ -1,3 +1,7 @@
+> **Status:** 部分实现。DXT5 压缩/解压思路已落地，但当前运行时使用 wgpu + CPU 端 `bcdec_rs` 解压，未使用 glow；`widgets/page_view.rs` 已删除。
+>
+> **注意：** 文档目标中的 TODO #17 为历史编号，详见 `TODO.md` 中的「历史 TODO 编号对照表」。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将漫画页面的 GPU 纹理从 RGBA8 改为 DXT5/BC3 sRGB 压缩，减少显存占用。

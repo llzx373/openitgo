@@ -1,3 +1,7 @@
+> **Status:** 已实现。书架搜索、排序功能已与代码一致。
+>
+> **注意：** 本文档中的 TODO 编号（#14）为历史编号，详见 `TODO.md` 中的「历史 TODO 编号对照表」。后续又在书架中增加了封面补生成、已删除检测、清理按钮、菜单栏入口等功能，这些不在本文档范围内。
+
 # 书架搜索/排序实现计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

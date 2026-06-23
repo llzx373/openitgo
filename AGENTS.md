@@ -37,12 +37,21 @@ cargo clippy --workspace --all-targets -- -D warnings
 - **Comic IDs** are generated deterministically from the file/folder path via
   `rust_reader_parser::stable_comic_id`. Never use the filename alone.
 - **PageLoader** runs IO and decode workers in background threads; results are
-  sent back to the UI thread via channels.
+  sent back to the UI thread via channels. The app also maintains a separate
+  `cover_loader` for library cover thumbnails.
 - **PageCache** stores GPU textures and keeps `size_bytes` as an estimate of
-  either CPU image memory or equivalent GPU memory.
+  either CPU image memory or equivalent GPU memory. CPU-side `ColorImage` is
+  released after upload when possible.
 - **Settings** are validated on load/save; invalid values are clamped and the
-  user is informed through `error_message`.
+  user is informed through `error_message`. Notable fields include
+  `theme`, `default_mode`, `default_fit`, `double_page`,
+  `wide_page_threshold`, `enable_page_animation`, `compress_images`,
+  `decode_threads`, `cache_size_mb`, `real_image_cache_pages`,
+  `show_toolbar`, `show_statusbar`, `invert_scroll`, and `library_sort`.
 - **History entries** store both `comic_id` and `path` for robust matching.
+- **Library covers** are generated asynchronously from the first page and saved
+  to `covers/`. Missing covers are re-requested on demand, and entries whose
+  source file no longer exist are marked as deleted.
 
 ## Commits
 

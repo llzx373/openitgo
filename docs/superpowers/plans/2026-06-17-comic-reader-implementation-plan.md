@@ -1,3 +1,7 @@
+> **Status:** 已归档。本文档是最初的实现计划，大量细节已被后续重构覆盖，请勿直接执行。
+>
+> **注意：** 本文档中的 TODO 编号（如 #14-#25）为历史编号，当前对应关系请参见根目录 `TODO.md` 中的「历史 TODO 编号对照表」。计划中的文件结构、依赖版本、API 签名等与当前代码存在较大差异（例如 `rust-reader-app/src/widgets/page_view.rs` 已删除，GPU 路径已演进为 wgpu）。
+
 # Comic Reader Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

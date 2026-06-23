@@ -1,6 +1,11 @@
 # Thumbnail-First Rendering Design
 
 > **Status:** Implemented and optimized. See commits `28e50f0`, `1171e87`, `59cdb43`.
+>
+> **Note:** This design was implemented with a few deviations from the original
+> spec. The default full-image preload window is 10 pages in each direction,
+> not 50. The backend is wgpu, not glow. See `docs/superpowers/README.md` for
+> context.
 
 ## Goal
 
@@ -8,7 +13,7 @@ Refactor the comic reader rendering pipeline so that opening a file only loads
 low-resolution thumbnails for all pages in the background. The visible spread
 is first rendered with thumbnails, and full-resolution images are loaded
 afterwards to replace them. Full-resolution images are preloaded within a
-configurable window around the current page (default 50 pages in each
+configurable window around the current page (default 10 pages in each
 direction).
 
 ## Context

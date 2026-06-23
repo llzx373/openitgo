@@ -1,3 +1,7 @@
+> **Status:** 部分实现。DXT5/BC3 压缩思路已落地，但上传路径与本文档不同：当前使用 wgpu 后端，CPU 端通过 `bcdec_rs` 解压 DXT5 后上传为 `wgpu::TextureFormat::Bc3RgbaUnormSrgb`，并未使用 glow；`widgets/page_view.rs` 已删除。请勿直接执行。
+>
+> **注意：** 本文档中的 TODO 编号（#17、#18）为历史编号，详见 `TODO.md` 中的「历史 TODO 编号对照表」。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将漫画页面纹理从 RGBA8 改为 DXT5/BC3 sRGB 压缩上传，减少 GPU 显存占用，不支持时回退到 RGBA8。
