@@ -14,10 +14,10 @@
   - [x] 2.1 所有 parser 使用 `stable_comic_id(path)` 生成 ID
   - [x] 2.2 `ensure_in_library` 解析成功后使用 parser 生成的 ID
   - [x] 2.3 启动时迁移旧 library/history/bookmarks 到新的 path-based ID，并重命名封面文件
-- [ ] 3. 主题设置生效
-  - [ ] 3.1 在 `app.update` 中根据 `Settings.theme` 调用 `ctx.set_visuals`
-  - [ ] 3.2 支持 Dark/Light 切换并即时生效
-  - [ ] 3.3 验证设置持久化与启动恢复
+- [x] 3. 主题设置生效
+  - [x] 3.1 在 `app.update` 中根据 `Settings.theme` 调用 `ctx.set_theme`
+  - [x] 3.2 支持 System/Dark/Light 切换并即时生效
+  - [x] 3.3 跟踪已应用主题避免每帧重复设置
 - [ ] 4. Webtoon 真正连续滚动
   - [ ] 4.1 在 `reader.rs` 中新增 Webtoon 渲染分支
   - [ ] 4.2 使用 `layout.rs` 的垂直布局计算每页偏移

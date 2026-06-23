@@ -11,7 +11,7 @@ use rust_reader_core::models::{PageSource, ReadingMode};
 use rust_reader_core::state::ReadingState;
 use rust_reader_storage::{
     json_store::JsonStore,
-    models::{Bookmarks, History, HistoryEntry, Library, Settings},
+    models::{Bookmarks, History, HistoryEntry, Library, Settings, Theme},
 };
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -36,6 +36,8 @@ pub struct ReaderApp {
     pub pending_covers: HashMap<crate::loader::Epoch, (String, PathBuf)>,
     /// Comic ids for which a cover generation has already been requested.
     pub requested_cover_ids: HashSet<String>,
+    /// The theme currently applied to egui, used to avoid redundant updates.
+    pub current_theme: Theme,
 }
 
 impl Default for ReaderApp {
@@ -75,6 +77,7 @@ impl Default for ReaderApp {
             opener: None,
             pending_covers: HashMap::new(),
             requested_cover_ids: HashSet::new(),
+            current_theme: Theme::System,
         }
     }
 }
@@ -95,6 +98,11 @@ impl eframe::App for ReaderApp {
             self.reader_view.clear_cache();
         }
         self.last_view = self.current_view.clone();
+
+        if self.settings.theme != self.current_theme {
+            self.apply_theme(ctx);
+            self.current_theme = self.settings.theme.clone();
+        }
 
         self.handle_global_input(ctx);
 
@@ -561,6 +569,15 @@ impl ReaderApp {
         }
     }
 
+    fn apply_theme(&mut self, ctx: &egui::Context) {
+        let preference = match self.settings.theme {
+            Theme::System => egui::ThemePreference::System,
+            Theme::Light => egui::ThemePreference::Light,
+            Theme::Dark => egui::ThemePreference::Dark,
+        };
+        ctx.set_theme(preference);
+    }
+
     fn handle_global_input(&mut self, ctx: &egui::Context) {
         let is_reader = matches!(self.current_view, View::Reader);
         if is_shortcut_pressed(ctx, &self.settings.shortcuts.fullscreen) {
@@ -1024,6 +1041,7 @@ mod tests {
                 opener: None,
                 pending_covers: HashMap::new(),
                 requested_cover_ids: HashSet::new(),
+                current_theme: Theme::System,
             }
         }
     }
