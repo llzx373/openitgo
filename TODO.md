@@ -10,10 +10,10 @@
   - [x] 1.3 在书架 UI 中以卡片/网格形式展示封面 + 标题
   - [x] 1.4 封面缺失时显示占位色块
   - [ ] 1.5 历史/书签列表复用封面（后续 P1 统一处理）
-- [ ] 2. 统一 comic_id 生成
-  - [ ] 2.1 移除 `ensure_in_library` 中基于目录 stem 的 ID 生成
-  - [ ] 2.2 统一使用 parser 生成的 `comic.id`（如文件路径 hash）
-  - [ ] 2.3 处理已有库中同名目录冲突的迁移/去重逻辑
+- [x] 2. 统一 comic_id 生成
+  - [x] 2.1 所有 parser 使用 `stable_comic_id(path)` 生成 ID
+  - [x] 2.2 `ensure_in_library` 解析成功后使用 parser 生成的 ID
+  - [x] 2.3 启动时迁移旧 library/history/bookmarks 到新的 path-based ID，并重命名封面文件
 - [ ] 3. 主题设置生效
   - [ ] 3.1 在 `app.update` 中根据 `Settings.theme` 调用 `ctx.set_visuals`
   - [ ] 3.2 支持 Dark/Light 切换并即时生效

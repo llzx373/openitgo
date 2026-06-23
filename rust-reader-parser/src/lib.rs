@@ -4,6 +4,8 @@ pub mod rar;
 pub mod traits;
 pub mod zip;
 
+pub use traits::stable_comic_id;
+
 use rar::RarParser;
 use rust_reader_core::models::Comic;
 use std::path::Path;

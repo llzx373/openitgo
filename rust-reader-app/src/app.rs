@@ -11,7 +11,7 @@ use rust_reader_core::models::{PageSource, ReadingMode};
 use rust_reader_core::state::ReadingState;
 use rust_reader_storage::{
     json_store::JsonStore,
-    models::{Bookmarks, History, HistoryEntry, Settings},
+    models::{Bookmarks, History, HistoryEntry, Library, Settings},
 };
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -43,10 +43,17 @@ impl Default for ReaderApp {
         let store = JsonStore::new(JsonStore::default_dir().unwrap_or_else(|| PathBuf::from(".")));
         let settings = store.load_settings().unwrap_or_default();
         let library = store.load_library().unwrap_or_default();
-        let history = store.load_history().unwrap_or_default();
-        let bookmarks = store.load_bookmarks().unwrap_or_default();
+        let mut history = store.load_history().unwrap_or_default();
+        let mut bookmarks = store.load_bookmarks().unwrap_or_default();
         let mut library_view = LibraryView::default();
         library_view.library = library;
+        let covers_dir = store.dir().join("covers");
+        if migrate_library_ids(&mut library_view.library, &mut history, &mut bookmarks, &covers_dir)
+        {
+            let _ = store.save_library(&library_view.library);
+            let _ = store.save_history(&history);
+            let _ = store.save_bookmarks(&bookmarks);
+        }
         let page_loader = PageLoader::new_with_compress(
             settings.compress_images,
             settings.decode_threads as usize,
@@ -872,8 +879,7 @@ impl ReaderApp {
     }
 }
 
-fn save_cover_image(covers_dir: &Path, comic_id: &str, image: &egui::ColorImage) -> Option<PathBuf> {
-    std::fs::create_dir_all(covers_dir).ok()?;
+fn cover_filename(comic_id: &str) -> String {
     let safe: String = comic_id
         .chars()
         .map(|c| {
@@ -887,8 +893,16 @@ fn save_cover_image(covers_dir: &Path, comic_id: &str, image: &egui::ColorImage)
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     comic_id.hash(&mut hasher);
     let hash = hasher.finish();
-    let filename = format!("{}_{:016x}.jpg", safe, hash);
-    let path = covers_dir.join(filename);
+    format!("{}_{:016x}.jpg", safe, hash)
+}
+
+fn cover_path_for_comic_id(covers_dir: &Path, comic_id: &str) -> PathBuf {
+    covers_dir.join(cover_filename(comic_id))
+}
+
+fn save_cover_image(covers_dir: &Path, comic_id: &str, image: &egui::ColorImage) -> Option<PathBuf> {
+    std::fs::create_dir_all(covers_dir).ok()?;
+    let path = cover_path_for_comic_id(covers_dir, comic_id);
     let rgba: Vec<u8> = image
         .pixels
         .iter()
@@ -898,6 +912,51 @@ fn save_cover_image(covers_dir: &Path, comic_id: &str, image: &egui::ColorImage)
     let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8();
     rgb.save_with_format(&path, image::ImageFormat::Jpeg).ok()?;
     Some(path)
+}
+
+fn migrate_library_ids(
+    library: &mut Library,
+    history: &mut History,
+    bookmarks: &mut Bookmarks,
+    covers_dir: &Path,
+) -> bool {
+    let mut id_map = HashMap::new();
+    for entry in &mut library.entries {
+        let expected = rust_reader_parser::stable_comic_id(&entry.path);
+        if entry.comic_id != expected {
+            id_map.insert(entry.comic_id.clone(), expected.clone());
+            entry.comic_id = expected;
+        }
+    }
+    if id_map.is_empty() {
+        return false;
+    }
+    for h in &mut history.entries {
+        if let Some(new) = id_map.get(&h.comic_id) {
+            h.comic_id = new.clone();
+        }
+    }
+    for b in &mut bookmarks.entries {
+        if let Some(new) = id_map.get(&b.comic_id) {
+            b.comic_id = new.clone();
+        }
+    }
+    let _ = std::fs::create_dir_all(covers_dir);
+    for (old_id, new_id) in &id_map {
+        let old_path = cover_path_for_comic_id(covers_dir, old_id);
+        let new_path = cover_path_for_comic_id(covers_dir, new_id);
+        if old_path.exists()
+            && !new_path.exists()
+            && std::fs::rename(&old_path, &new_path).is_ok()
+        {
+            for entry in &mut library.entries {
+                if entry.comic_id == *new_id && entry.cover_path.as_deref() == Some(&*old_path) {
+                    entry.cover_path = Some(new_path.clone());
+                }
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -998,12 +1057,7 @@ mod tests {
         write_dummy_image(tmp_dir.path(), "page0.png");
         write_dummy_image(tmp_dir.path(), "page1.png");
 
-        let comic_id = tmp_dir
-            .path()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        let comic_id = rust_reader_parser::stable_comic_id(tmp_dir.path());
         app.history.entries.push(HistoryEntry {
             comic_id: comic_id.clone(),
             volume_index: 0,
@@ -1055,6 +1109,7 @@ mod tests {
         app1.record_reader_history();
         app1.store.save_history(&app1.history).unwrap();
 
+        let expected_id = rust_reader_parser::stable_comic_id(&comic_dir);
         let mut app2 = ReaderApp::with_store_dir(store_tmp.path());
         app2.open_comic(comic_dir);
         for _ in 0..100 {
@@ -1070,7 +1125,7 @@ mod tests {
             .open
             .as_ref()
             .expect("reader should be open");
-        assert_eq!(reader.comic.id, "test-comic");
+        assert_eq!(reader.comic.id, expected_id);
         assert_eq!(reader.state.current_page, 6);
     }
 

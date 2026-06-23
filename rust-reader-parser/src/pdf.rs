@@ -40,7 +40,7 @@ impl Parser for PdfParser {
             .to_string();
 
         Ok(Comic {
-            id: title.clone(),
+            id: crate::stable_comic_id(path),
             title,
             path: document,
             volumes: vec![Volume {

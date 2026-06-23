@@ -1,4 +1,6 @@
 use rust_reader_core::models::Comic;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use thiserror::Error;
 
@@ -21,6 +23,18 @@ pub trait Parser: Send + Sync {
     fn parse(path: &Path) -> Result<Comic, ParseError>
     where
         Self: Sized;
+}
+
+/// Generate a stable, unique comic id from a filesystem path.
+///
+/// Using the canonicalized path avoids collisions when two comics have the
+/// same filename in different directories. The hash is deterministic for a
+/// given Rust release and host; it only needs to be stable within this app.
+pub fn stable_comic_id(path: &Path) -> String {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut hasher = DefaultHasher::new();
+    canonical.as_os_str().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 /// Supported image file extensions, all lowercase.

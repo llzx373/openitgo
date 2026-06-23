@@ -36,7 +36,7 @@ impl Parser for FolderParser {
             .to_string();
 
         Ok(Comic {
-            id: title.clone(),
+            id: crate::stable_comic_id(path),
             title,
             path: path.to_path_buf(),
             volumes: vec![Volume {
