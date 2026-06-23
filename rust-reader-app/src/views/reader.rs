@@ -54,6 +54,18 @@ impl PageAnimation {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PageErrorRetry {
+    pub count: u32,
+    pub last_retry: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct ThumbnailError {
+    pub retries: u32,
+    pub last_retry: Instant,
+}
+
 pub struct OpenReader {
     pub comic: Comic,
     pub state: ReadingState,
@@ -68,6 +80,8 @@ pub struct OpenReader {
     /// Next page index to request during the background thumbnail batch.
     pub thumbnail_batch_next: usize,
     pub page_errors: HashMap<usize, String>,
+    pub page_error_retries: HashMap<usize, PageErrorRetry>,
+    pub thumbnail_errors: HashMap<usize, ThumbnailError>,
     pub cache: PageCache,
     pub page_animation: Option<PageAnimation>,
     /// When the user last turned a page. Used to pause preloads briefly so
@@ -293,6 +307,7 @@ impl OpenReader {
                                     image,
                                     result.original_size,
                                 );
+                                self.thumbnail_errors.remove(&result.page_index);
                             } else {
                                 let protected = self.protected_page_indices();
                                 self.cache.insert_full(
@@ -301,15 +316,37 @@ impl OpenReader {
                                     cache_size_bytes,
                                     &protected,
                                 );
+                                self.page_errors.remove(&result.page_index);
+                                self.page_error_retries.remove(&result.page_index);
                             }
                         }
                         Err(err) => {
-                            // Only surface errors for full-resolution loads. A thumbnail
-                            // failure should not block the page from displaying the full
-                            // image once it arrives.
-                            if !result.thumbnail {
+                            let now = Instant::now();
+                            if result.thumbnail {
+                                eprintln!("failed to load thumbnail {}: {}", result.page_index, err);
+                                self.thumbnail_errors
+                                    .entry(result.page_index)
+                                    .and_modify(|e| {
+                                        e.retries += 1;
+                                        e.last_retry = now;
+                                    })
+                                    .or_insert(ThumbnailError {
+                                        retries: 1,
+                                        last_retry: now,
+                                    });
+                            } else {
                                 eprintln!("failed to load page {}: {}", result.page_index, err);
-                                self.page_errors.insert(result.page_index, err);
+                                self.page_errors.insert(result.page_index, err.clone());
+                                self.page_error_retries
+                                    .entry(result.page_index)
+                                    .and_modify(|e| {
+                                        e.count += 1;
+                                        e.last_retry = now;
+                                    })
+                                    .or_insert(PageErrorRetry {
+                                        count: 1,
+                                        last_retry: now,
+                                    });
                             }
                         }
                     }
@@ -362,6 +399,8 @@ impl ReaderView {
             pending_thumbnails: HashSet::new(),
             thumbnail_batch_next: 0,
             page_errors: HashMap::new(),
+            page_error_retries: HashMap::new(),
+            thumbnail_errors: HashMap::new(),
             cache: PageCache::new(),
             page_animation: None,
             last_page_turn: Instant::now(),
@@ -1006,6 +1045,25 @@ fn request_page_thumbnail(loader: &PageLoader, reader: &mut OpenReader, page_ind
     }
 }
 
+fn error_retry_backoff(count: u32) -> Duration {
+    let seconds = 2u32.pow(count.min(5)).min(30);
+    Duration::from_secs(seconds as u64)
+}
+
+fn should_retry_page_error(reader: &OpenReader, page_index: usize) -> bool {
+    match reader.page_error_retries.get(&page_index) {
+        Some(retry) => retry.last_retry.elapsed() >= error_retry_backoff(retry.count),
+        None => true,
+    }
+}
+
+fn should_retry_thumbnail_error(reader: &OpenReader, page_index: usize) -> bool {
+    match reader.thumbnail_errors.get(&page_index) {
+        Some(err) => err.last_retry.elapsed() >= error_retry_backoff(err.retries),
+        None => true,
+    }
+}
+
 fn render_page_or_placeholder(
     ui: &mut egui::Ui,
     reader: &mut OpenReader,
@@ -1036,8 +1094,22 @@ fn render_page_or_placeholder(
         }
         response
     } else if let Some(err) = reader.page_errors.get(&page_index).cloned() {
+        let can_retry = should_retry_page_error(reader, page_index);
         render_error_placeholder(ui, rect, &err, || {
-            request_page(loader, reader, page_index);
+            if can_retry {
+                request_page(loader, reader, page_index);
+            }
+        })
+    } else if reader.thumbnail_errors.contains_key(&page_index) {
+        let can_retry = should_retry_thumbnail_error(reader, page_index);
+        render_thumbnail_error_placeholder(ui, rect, || {
+            if can_retry {
+                request_page_thumbnail(loader, reader, page_index);
+                if let Some(err) = reader.thumbnail_errors.get_mut(&page_index) {
+                    err.retries += 1;
+                    err.last_retry = Instant::now();
+                }
+            }
         })
     } else {
         render_loading_placeholder(ui, rect)
@@ -1062,6 +1134,27 @@ fn render_error_placeholder(
                     error.to_string()
                 };
                 ui.label(egui::RichText::new(short).size(12.0));
+                ui.label(egui::RichText::new("点击重试").size(12.0));
+            },
+        );
+    });
+    if response.clicked() {
+        retry();
+    }
+    response
+}
+
+fn render_thumbnail_error_placeholder(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    mut retry: impl FnMut(),
+) -> egui::Response {
+    let response = ui.allocate_rect(rect, egui::Sense::click());
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+        ui.with_layout(
+            egui::Layout::centered_and_justified(egui::Direction::TopDown),
+            |ui| {
+                ui.colored_label(ui.visuals().error_fg_color, "缩略图加载失败");
                 ui.label(egui::RichText::new("点击重试").size(12.0));
             },
         );
@@ -1122,6 +1215,8 @@ mod tests {
             pending_thumbnails: HashSet::new(),
             thumbnail_batch_next: 0,
             page_errors: HashMap::new(),
+            page_error_retries: HashMap::new(),
+            thumbnail_errors: HashMap::new(),
             cache: PageCache::new(),
             page_animation: None,
             last_page_turn: Instant::now(),
