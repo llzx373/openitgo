@@ -317,18 +317,37 @@ impl ReaderApp {
             if self.settings.invert_scroll {
                 scroll = -scroll;
             }
-            if scroll > 2.0 {
-                self.reader_page_down();
-            } else if scroll < -2.0 {
-                self.reader_page_up();
+            let modifiers = ui.input(|i| i.modifiers);
+            let ctrl_or_cmd = modifiers.command || modifiers.ctrl;
+            if ctrl_or_cmd {
+                if let Some(reader) = self.reader_view.open.as_mut() {
+                    if scroll > 2.0 {
+                        reader.zoom_in();
+                    } else if scroll < -2.0 {
+                        reader.zoom_out();
+                    }
+                }
+            } else if mode != ReadingMode::Webtoon {
+                if scroll > 2.0 {
+                    self.reader_page_down();
+                } else if scroll < -2.0 {
+                    self.reader_page_up();
+                }
             }
 
-            // Double-click toggles fullscreen.
+            // Double-click toggles between Original (100%) and Page fit.
             if ui.input(|i| {
                 i.pointer
                     .button_double_clicked(egui::PointerButton::Primary)
             }) {
-                self.toggle_fullscreen(ctx);
+                if let Some(reader) = self.reader_view.open.as_mut() {
+                    let new_fit = if reader.state.fit_mode == FitMode::Original {
+                        FitMode::Page
+                    } else {
+                        FitMode::Original
+                    };
+                    reader.request_fit(new_fit);
+                }
             }
         });
     }

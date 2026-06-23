@@ -77,6 +77,8 @@ pub struct OpenReader {
     pub webtoon_scroll_offset: f32,
     /// The last `current_page` used to sync Webtoon scroll after keyboard nav.
     pub webtoon_last_page: usize,
+    /// Last seen viewport size, used to re-apply the current fit on resize.
+    pub last_available_size: Option<egui::Vec2>,
 }
 
 impl OpenReader {
@@ -365,6 +367,7 @@ impl ReaderView {
             last_page_turn: Instant::now(),
             webtoon_scroll_offset: 0.0,
             webtoon_last_page: state.current_page,
+            last_available_size: None,
         };
         reader.bump_epoch(loader);
         self.open = Some(reader);
@@ -619,6 +622,16 @@ impl ReaderView {
         }
 
         let available = ui.available_rect_before_wrap();
+        let available_size = available.size();
+        if reader
+            .last_available_size
+            .map(|s| s != available_size)
+            .unwrap_or(false)
+        {
+            reader.pending_fit = reader.pending_fit.or(Some(reader.state.fit_mode));
+        }
+        reader.last_available_size = Some(available_size);
+
         let left_size = left_idx
             .and_then(|idx| reader.cache.get_original_size(idx))
             .map(|s| egui::vec2(s[0] as f32, s[1] as f32))
@@ -641,9 +654,8 @@ impl ReaderView {
         let spread_size = egui::vec2(left_size.x + right_size.x, left_size.y.max(right_size.y));
         let scaled_spread = spread_size * reader.state.zoom;
 
-        let half_size = scaled_spread / 2.0;
-        let max_pan_x = (available.width() / 2.0 + half_size.x).max(0.0);
-        let max_pan_y = (available.height() / 2.0 + half_size.y).max(0.0);
+        let max_pan_x = ((scaled_spread.x - available.width()) / 2.0).max(0.0);
+        let max_pan_y = ((scaled_spread.y - available.height()) / 2.0).max(0.0);
         reader.state.pan.x = reader.state.pan.x.clamp(-max_pan_x, max_pan_x);
         reader.state.pan.y = reader.state.pan.y.clamp(-max_pan_y, max_pan_y);
 
@@ -1115,6 +1127,7 @@ mod tests {
             last_page_turn: Instant::now(),
             webtoon_scroll_offset: 0.0,
             webtoon_last_page: 0,
+            last_available_size: None,
         }
     }
 
