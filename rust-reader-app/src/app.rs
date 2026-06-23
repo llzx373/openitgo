@@ -174,7 +174,12 @@ impl ReaderApp {
                     let mut state = ReadingState::new(self.settings.default_mode, total);
                     state.set_double_page(self.settings.double_page, total);
                     state.fit_mode = self.settings.default_fit;
-                    if let Some(h) = self.history.entries.iter().find(|h| h.comic_id == comic.id) {
+                    if let Some(h) = self
+                        .history
+                        .entries
+                        .iter()
+                        .find(|h| history_matches(h, &comic.id, &comic.path))
+                    {
                         state.go_to_page(h.page_index, total);
                     }
                     self.reader_view.open(
@@ -778,6 +783,7 @@ impl ReaderApp {
     fn record_reader_history(&mut self) {
         if let Some(reader) = self.reader_view.open.as_ref() {
             let comic_id = reader.comic.id.clone();
+            let path = reader.comic.path.clone();
             let page_index = reader.state.current_page;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -787,13 +793,16 @@ impl ReaderApp {
                 .history
                 .entries
                 .iter_mut()
-                .find(|h| h.comic_id == comic_id)
+                .find(|h| history_matches(h, &comic_id, &path))
             {
+                entry.comic_id = comic_id;
+                entry.path = path;
                 entry.page_index = page_index;
                 entry.last_read_at = now;
             } else {
                 self.history.entries.push(HistoryEntry {
                     comic_id,
+                    path,
                     volume_index: 0,
                     page_index,
                     last_read_at: now,
@@ -957,6 +966,13 @@ fn load_settings_with_error(store: &JsonStore) -> (Settings, Option<String>) {
     }
 }
 
+fn history_matches(entry: &HistoryEntry, comic_id: &str, path: &std::path::Path) -> bool {
+    if entry.comic_id == comic_id {
+        return true;
+    }
+    !entry.path.as_os_str().is_empty() && entry.path == path
+}
+
 /// Recursively walk `root` and return paths that look like supported comic
 /// files or folders containing images.
 fn walk_supported_comics(root: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -1050,6 +1066,9 @@ fn migrate_library_ids(
     for h in &mut history.entries {
         if let Some(new) = id_map.get(&h.comic_id) {
             h.comic_id = new.clone();
+            if let Some(entry) = library.entries.iter().find(|e| e.comic_id == *new) {
+                h.path = entry.path.clone();
+            }
         }
     }
     for b in &mut bookmarks.entries {
@@ -1177,6 +1196,7 @@ mod tests {
         let comic_id = rust_reader_parser::stable_comic_id(tmp_dir.path());
         app.history.entries.push(HistoryEntry {
             comic_id: comic_id.clone(),
+            path: tmp_dir.path().to_path_buf(),
             volume_index: 0,
             page_index: 1,
             last_read_at: 0,

@@ -176,11 +176,25 @@ pub struct Library {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct HistoryEntry {
     pub comic_id: String,
+    pub path: std::path::PathBuf,
     pub volume_index: usize,
     pub page_index: usize,
     pub last_read_at: u64,
+}
+
+impl Default for HistoryEntry {
+    fn default() -> Self {
+        Self {
+            comic_id: String::new(),
+            path: std::path::PathBuf::new(),
+            volume_index: 0,
+            page_index: 0,
+            last_read_at: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

@@ -583,12 +583,14 @@ mod tests {
             entries: vec![
                 HistoryEntry {
                     comic_id: "old".to_string(),
+                    path: std::path::PathBuf::new(),
                     volume_index: 0,
                     page_index: 0,
                     last_read_at: 100,
                 },
                 HistoryEntry {
                     comic_id: "recent".to_string(),
+                    path: std::path::PathBuf::new(),
                     volume_index: 0,
                     page_index: 0,
                     last_read_at: 300,
