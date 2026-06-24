@@ -14,6 +14,10 @@ pub enum ParseError {
     Unsupported,
     #[error("No pages found")]
     NoPages,
+    #[error("Invalid EPUB: {0}")]
+    InvalidEpub(String),
+    #[error("Invalid text file: {0}")]
+    InvalidText(String),
 }
 
 pub trait Parser: Send + Sync {
