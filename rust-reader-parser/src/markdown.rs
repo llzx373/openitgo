@@ -1,5 +1,5 @@
-use crate::traits::ParseError;
 use crate::stable_comic_id;
+use crate::traits::ParseError;
 use rust_reader_core::ebook::{Ebook, EbookChapter};
 use std::fs;
 use std::path::Path;
@@ -15,8 +15,8 @@ impl MarkdownParser {
     }
 
     pub fn parse(path: &Path) -> Result<Ebook, ParseError> {
-        let text = fs::read_to_string(path)
-            .map_err(|e| ParseError::InvalidText(format!("{}", e)))?;
+        let text =
+            fs::read_to_string(path).map_err(|e| ParseError::InvalidText(format!("{}", e)))?;
 
         if text.trim().is_empty() {
             return Err(ParseError::NoPages);

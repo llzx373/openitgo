@@ -1,5 +1,5 @@
-use crate::traits::ParseError;
 use crate::stable_comic_id;
+use crate::traits::ParseError;
 use rust_reader_core::ebook::{Ebook, EbookChapter, EbookResource};
 use std::path::Path;
 
@@ -14,8 +14,8 @@ impl EpubParser {
     }
 
     pub fn parse(path: &Path) -> Result<Ebook, ParseError> {
-        let mut doc = epub::doc::EpubDoc::new(path)
-            .map_err(|e| ParseError::InvalidEpub(format!("{}", e)))?;
+        let mut doc =
+            epub::doc::EpubDoc::new(path).map_err(|e| ParseError::InvalidEpub(format!("{}", e)))?;
 
         let title = doc.mdata("title").unwrap_or_default();
         let language = doc.mdata("language");

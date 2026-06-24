@@ -1,5 +1,5 @@
-use crate::traits::ParseError;
 use crate::stable_comic_id;
+use crate::traits::ParseError;
 use rust_reader_core::ebook::{Ebook, EbookChapter};
 use std::path::Path;
 
