@@ -10,6 +10,31 @@
 
 ---
 
+## 实现状态摘要（2026-06-24 更新）
+
+本计划 **Phase 1 ~ Phase 3 的核心基础设施已实现并验证通过**，Phase 4 的目录面板、历史/书签、书架混排仍待完成。
+
+已拍板决策：
+1. **书架混排**：暂时只通过"打开文件"阅读，不进入书架（C）。
+2. **Linux 平台**：先接受 X11 only（A）。
+3. **EPUB 渲染策略**：使用自研 HTML + 内嵌 CSS/JS（A）。
+4. **TXT 分章**：按空行/`# 章节名`/`Chapter`/`第 X 章` 分章，无标记时按 3000 字虚拟章节（A）。
+5. **电子书设置最小集合**：字体、字号、行高、页边距、主题、阅读模式；暂不加入翻页动画、字重、对齐方式。
+6. **历史与书签**：复用现有 `History` / `Bookmarks`，把 `page_index` 解释为章节索引，字符偏移后续再扩展（A）。
+7. **文件扩展名**：`.epub`、`.txt`、`.mobi`/`.azw3`/`.azw`、`.md`。
+
+实际实现与原始计划的关键偏差：
+- `EbookRenderer` 的 JS 章节加载 URL 从 `ebook://chapter/N` 改为 **`ebook://reader?chapter=N`**，Rust 协议处理程序按 **查询参数优先、壳页面兜底** 的顺序处理。
+- CSS 模式类名从 `single`/`double` 改为 **`single paginated`** / **`double paginated`**，以同时匹配 `body.paginated` 与 `body.double` 选择器。
+- 为防止 wry 在 macOS 上 `window.ipc` 注入时机不稳定，JS 侧增加了 **`sendIpc`** 重试包装器。
+- 协议响应增加了 **`Cache-Control: no-cache`**，避免壳页面/章节被 WebKit 缓存导致 reload 异常。
+- 增加环境变量 **`RUST_READER_OPEN`**，方便开发/测试时自动打开指定漫画或电子书。
+
+已知问题：
+- 打开 EPUB 后，WebView 会重复 reload 2~3 次，随后稳定。内容已能正常加载，不影响阅读，但需后续定位根因（可能与 EPUB 章节 HTML 内含的 `<base>`/脚本或 WebKit 自定义协议行为有关）。
+
+---
+
 ## 需要你拍板的问题（先回答再继续）
 
 1. **书架是否混排电子书与漫画？**
@@ -64,9 +89,9 @@
 
 ---
 
-## Phase 1: 电子书领域模型
+## Phase 1: 电子书领域模型 ✅
 
-### Task 1: 在 rust-reader-core 新增 ebook 模块
+### Task 1: 在 rust-reader-core 新增 ebook 模块 ✅
 
 **Files:**
 - Create: `rust-reader-core/src/ebook.rs`
@@ -178,7 +203,7 @@ git commit -m "feat(core): add ebook domain model with reading modes"
 
 ---
 
-### Task 2: 扩展 ParseError 以支持电子书错误
+### Task 2: 扩展 ParseError 以支持电子书错误 ✅
 
 **Files:**
 - Modify: `rust-reader-parser/src/traits.rs`
@@ -220,7 +245,7 @@ git commit -m "feat(parser): extend ParseError for ebook formats"
 
 ---
 
-### Task 3: 实现 EPUB 解析器
+### Task 3: 实现 EPUB 解析器 ✅
 
 **Files:**
 - Create: `rust-reader-parser/src/epub.rs`
@@ -363,7 +388,7 @@ git commit -m "feat(parser): add EPUB parser"
 
 ---
 
-### Task 3.5: 实现 MOBI/AZW3 解析器
+### Task 3.5: 实现 MOBI/AZW3 解析器 ✅
 
 **Files:**
 - Create: `rust-reader-parser/src/mobi.rs`
@@ -477,7 +502,7 @@ git commit -m "feat(parser): add MOBI/AZW3 parser"
 
 ---
 
-### Task 4: 实现 TXT 解析器
+### Task 4: 实现 TXT 解析器 ✅
 
 **Files:**
 - Create: `rust-reader-parser/src/txt.rs`
@@ -630,7 +655,7 @@ git commit -m "feat(parser): add TXT parser"
 
 ---
 
-### Task 4.5: 实现 Markdown 解析器
+### Task 4.5: 实现 Markdown 解析器 ✅
 
 **Files:**
 - Create: `rust-reader-parser/src/markdown.rs`
@@ -778,7 +803,7 @@ git commit -m "feat(parser): add Markdown parser"
 
 ---
 
-### Task 5: 在 parser 入口统一分发电子书
+### Task 5: 在 parser 入口统一分发电子书 ✅
 
 **Files:**
 - Modify: `rust-reader-parser/src/lib.rs`
@@ -840,9 +865,9 @@ git add rust-reader-parser/src/lib.rs rust-reader-parser/tests/ebook_integration
 git commit -m "feat(parser): add parse_ebook dispatch and integration tests"
 ```
 
-## Phase 2: 电子书设置与存储
+## Phase 2: 电子书设置与存储 ✅
 
-### Task 6: 新增 EbookSettings 模型
+### Task 6: 新增 EbookSettings 模型 ✅
 
 **Files:**
 - Modify: `rust-reader-storage/src/models.rs`
@@ -955,7 +980,7 @@ git commit -m "feat(storage): add EbookSettings model"
 
 ---
 
-### Task 7: 在 SettingsView 添加电子书设置 UI
+### Task 7: 在 SettingsView 添加电子书设置 UI ✅
 
 **Files:**
 - Modify: `rust-reader-app/src/views/settings.rs`
@@ -1014,9 +1039,9 @@ git commit -m "feat(ui): add ebook settings panel"
 
 ---
 
-## Phase 3: wry 渲染层
+## Phase 3: wry 渲染层 ✅
 
-### Task 8: 添加 wry 依赖
+### Task 8: 添加 wry 依赖 ✅
 
 **Files:**
 - Modify: `rust-reader-app/Cargo.toml`
@@ -1045,7 +1070,7 @@ git commit -m "chore(deps): add wry for ebook rendering"
 
 ---
 
-### Task 9: 创建 EbookRenderer 封装 wry WebView
+### Task 9: 创建 EbookRenderer 封装 wry WebView ✅
 
 **Files:**
 - Create: `rust-reader-app/src/ebook_renderer.rs`
@@ -1292,6 +1317,10 @@ fn escape_html(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+> **实际实现偏差：** 协议路由已改为先检查查询参数 `chapter=`，再回退到阅读器壳页面。章节 URL 为 `ebook://reader?chapter=N`，壳页面 URL 为 `ebook://reader`。响应头增加了 `Cache-Control: no-cache, no-store, must-revalidate`。章节 HTML 由 `rust_reader_parser::html::render_chapter_html` 统一渲染，不在 renderer 内重复实现。
+>
+> JS 侧所有 `window.ipc.postMessage` 调用已封装为 `sendIpc(obj)`，在 `window.ipc` 尚未注入时自动重试，避免 macOS 上偶发的 IPC 桥未就绪导致脚本崩溃。`JsSettings.mode` 实际输出为 `"single paginated"` / `"double paginated"` / `"scroll"`，以匹配 CSS 选择器 `body.paginated` 与 `body.double`。
+
 fn is_text_like_path(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -1495,9 +1524,9 @@ git add rust-reader-app/src/ebook_renderer.rs rust-reader-app/src/main.rs
 git commit -m "feat(ebook): add wry-based EbookRenderer with custom protocol"
 ```
 
-## Phase 4: APP 集成与 UI
+## Phase 4: APP 集成与 UI ⚠️ 基础集成已完成，目录面板与书架混排待实现
 
-### Task 10: 创建 EbookView
+### Task 10: 创建 EbookView ✅
 
 **Files:**
 - Create: `rust-reader-app/src/views/ebook.rs`
@@ -1601,7 +1630,7 @@ git commit -m "feat(ebook): add EbookView state holder"
 
 ---
 
-### Task 11: 在 ReaderApp 添加 View::Ebook 与渲染分支
+### Task 11: 在 ReaderApp 添加 View::Ebook 与渲染分支 ✅
 
 **Files:**
 - Modify: `rust-reader-app/src/app.rs`
@@ -1695,7 +1724,7 @@ git commit -m "feat(app): add View::Ebook and render_ebook branch"
 
 ---
 
-### Task 12: 电子书专用菜单栏与工具栏
+### Task 12: 电子书专用菜单栏与工具栏 ⚠️ 菜单/工具栏已集成，"目录"按钮与状态栏为占位待实现
 
 **Files:**
 - Modify: `rust-reader-app/src/app.rs`
@@ -1809,7 +1838,7 @@ git commit -m "feat(app): add ebook-specific menu, toolbar and statusbar"
 
 ---
 
-### Task 13: 文件打开逻辑：漫画 vs 电子书
+### Task 13: 文件打开逻辑：漫画 vs 电子书 ✅
 
 **Files:**
 - Modify: `rust-reader-app/src/app.rs`
@@ -1961,7 +1990,7 @@ git commit -m "feat(app): dispatch comic vs ebook based on file extension"
 
 ---
 
-### Task 14: 书架支持电子书
+### Task 14: 书架支持电子书 ❌ 待实现（当前决策：暂不进入书架，仅通过打开文件阅读）
 
 **Files:**
 - Modify: `rust-reader-storage/src/models.rs`
@@ -2020,9 +2049,9 @@ git add rust-reader-storage/src/models.rs rust-reader-app/src/views/library.rs r
 git commit -m "feat(library): support ebook entries in library"
 ```
 
-## Phase 5: 测试、验证与收尾
+## Phase 5: 测试、验证与收尾 ⏳ 集成测试与书架 EPUB fixture 待补充
 
-### Task 15: 电子书集成测试
+### Task 15: 电子书集成测试 ⏳ 解析器单元测试已存在，EPUB fixture 与 renderer 纯函数测试待补充
 
 **Files:**
 - Create: `rust-reader-app/tests/ebook_view_integration.rs`
@@ -2063,7 +2092,7 @@ git commit -m "test(ebook): add EPUB/TXT integration tests"
 
 ---
 
-### Task 16: 完整验证与代码清理
+### Task 16: 完整验证与代码清理 ⏳ 验证流水线已通过，书架混排与目录面板完成后可收尾
 
 **Files:**
 - 所有已修改文件
@@ -2098,21 +2127,19 @@ git commit -m "feat(ebook): full ebook reader support (EPUB, TXT, wry)"
 
 ---
 
-## 依赖用户决策的占位清单
+## 已锁定决策
 
-以下实现细节会根据你的回答变化，当前计划按推荐项（A）编写：
+以下问题已根据实际实现确定：
 
-| 问题 | 当前计划假设 | 若选其他 |
-|------|-------------|---------|
-| 书架混排 | A) 同一书架 + `MediaType` | B 需重写 Task 14；C 可跳过 Task 14 |
-| Linux Wayland | A) X11 only | B 需重写 Task 9 平台分支 |
-| EPUB 渲染 | A) 自研 HTML/CSS/JS | B 需引入 Readium，重写 Task 9 |
-| TXT 分章 | A) 标题+空行分章，否则字数分章 | B 需修改 Task 4 |
-| 设置范围 | 字体/字号/行高/边距/主题/模式 | 增加项需扩展 Task 6/7 |
-| 历史/书签 | A) 复用现有结构 + char offset | B 需新增独立模型 |
-| 文件扩展名 | `.epub`、`.txt` | 增加扩展名需修改 `is_ebook_file` |
-
-请在回复中选择上述问题的答案，我会把计划里的占位假设锁定为具体实现。
+| 问题 | 最终决策 | 说明 |
+|------|---------|------|
+| 书架混排 | C) 暂不进入书架 | 当前仅通过"打开文件"阅读；Task 14 保留为未来扩展 |
+| Linux Wayland | A) X11 only | 使用 `WebViewBuilder::build_as_child`，Wayland 支持后续再评估 |
+| EPUB 渲染 | A) 自研 HTML/CSS/JS | `ebook://reader` 壳页面 + `?chapter=N` 查询加载 |
+| TXT 分章 | A) 标题+空行分章，否则字数分章 | 见 `rust-reader-parser/src/txt.rs` |
+| 设置范围 | 字体、字号、行高、页边距、主题、阅读模式 | 暂不加入翻页动画、字重、对齐方式 |
+| 历史/书签 | A) 复用现有结构 + char offset | `page_index` 对应章节索引，字符偏移后续扩展 |
+| 文件扩展名 | `.epub`、`.txt`、`.mobi`/`.azw`/`.azw3`、`.md` | 见 `app.rs` 中的 `is_ebook_file` |
 
 ---
 

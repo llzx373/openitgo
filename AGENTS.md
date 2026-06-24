@@ -3,7 +3,8 @@
 ## Project Overview
 
 `rustReader` is a desktop comic/manga reader built with Rust, `eframe`, `egui`, and `wgpu`.
-It supports ZIP/CBZ, RAR/CBR, PDF, and folders of images.
+It supports ZIP/CBZ, RAR/CBR, PDF, and folders of images, plus EPUB, TXT, MOBI/AZW3, and
+Markdown ebooks through an embedded `wry` webview renderer.
 
 ## Repository Layout
 
@@ -52,6 +53,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 - **Library covers** are generated asynchronously from the first page and saved
   to `covers/`. Missing covers are re-requested on demand, and entries whose
   source file no longer exist are marked as deleted.
+- **EbookRenderer** hosts a `wry` child webview and serves a small HTML reader
+  shell over the custom `ebook://` protocol. Chapter content is fetched via
+  `ebook://reader?chapter=N` and rendered by `rust_reader_parser::html::render_chapter_html`.
+  The JS side uses a `sendIpc` helper that retries if the `window.ipc` bridge is
+  not yet injected.
 
 ## Commits
 
