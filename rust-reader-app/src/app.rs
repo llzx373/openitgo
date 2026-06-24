@@ -1498,19 +1498,9 @@ impl ReaderApp {
             OpenStatus::Ready(result) => match result {
                 Ok(ebook) => {
                     let screen = ctx.screen_rect();
-                    let toolbar_height = ctx.style().spacing.interact_size.y * 2.0;
-                    let statusbar_height = ctx.style().spacing.interact_size.y * 1.5;
                     let bounds = wry::Rect {
-                        position: wry::dpi::LogicalPosition::new(
-                            screen.min.x,
-                            screen.min.y + toolbar_height,
-                        )
-                        .into(),
-                        size: wry::dpi::LogicalSize::new(
-                            screen.width(),
-                            screen.height() - toolbar_height - statusbar_height,
-                        )
-                        .into(),
+                        position: wry::dpi::LogicalPosition::new(screen.min.x, screen.min.y).into(),
+                        size: wry::dpi::LogicalSize::new(screen.width(), screen.height()).into(),
                     };
                     match self
                         .ebook_view
@@ -1520,7 +1510,10 @@ impl ReaderApp {
                             self.current_view = View::Ebook;
                             self.error_message = None;
                         }
-                        Err(e) => self.error_message = Some(format!("无法创建阅读器: {}", e)),
+                        Err(e) => {
+                            self.error_message = Some(format!("无法创建阅读器: {}", e));
+                            self.current_view = View::Library;
+                        }
                     }
                 }
                 Err(e) => {
