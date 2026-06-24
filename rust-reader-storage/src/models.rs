@@ -1,3 +1,4 @@
+use rust_reader_core::ebook::EbookReadingMode;
 use rust_reader_core::models::{FitMode, ReadingMode};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -23,6 +24,7 @@ pub struct Settings {
     pub shortcuts: Shortcuts,
     pub library_sort: LibrarySort,
     pub toolbar_display_mode: ToolbarDisplayMode,
+    pub ebook: EbookSettings,
 }
 
 impl Default for Settings {
@@ -46,6 +48,7 @@ impl Default for Settings {
             shortcuts: Shortcuts::default(),
             library_sort: LibrarySort::default(),
             toolbar_display_mode: ToolbarDisplayMode::default(),
+            ebook: EbookSettings::default(),
         }
     }
 }
@@ -84,6 +87,18 @@ impl Settings {
                 self.window_size
             ));
         }
+        if !(10..=72).contains(&self.ebook.font_size) {
+            return Err(format!(
+                "ebook.font_size must be between 10 and 72, got {}",
+                self.ebook.font_size
+            ));
+        }
+        if self.ebook.line_height < 1.0 || self.ebook.line_height > 3.0 {
+            return Err(format!(
+                "ebook.line_height must be between 1.0 and 3.0, got {}",
+                self.ebook.line_height
+            ));
+        }
         Ok(())
     }
 
@@ -96,6 +111,8 @@ impl Settings {
         self.wide_page_threshold = self.wide_page_threshold.clamp(1.0, 3.0);
         self.window_size.0 = self.window_size.0.max(100.0);
         self.window_size.1 = self.window_size.1.max(100.0);
+        self.ebook.font_size = self.ebook.font_size.clamp(10, 72);
+        self.ebook.line_height = self.ebook.line_height.clamp(1.0, 3.0);
     }
 }
 
@@ -157,6 +174,41 @@ pub enum ToolbarDisplayMode {
     IconAndText,
     IconOnly,
     TextOnly,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EbookTheme {
+    #[default]
+    Light,
+    Dark,
+    Sepia,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct EbookSettings {
+    pub reading_mode: EbookReadingMode,
+    pub font_family: String,
+    pub font_size: u32,
+    pub line_height: f32,
+    pub margin_horizontal: u32,
+    pub margin_vertical: u32,
+    pub theme: EbookTheme,
+}
+
+impl Default for EbookSettings {
+    fn default() -> Self {
+        Self {
+            reading_mode: EbookReadingMode::SinglePage,
+            font_family: "system-ui".to_string(),
+            font_size: 16,
+            line_height: 1.6,
+            margin_horizontal: 24,
+            margin_vertical: 24,
+            theme: EbookTheme::Light,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -269,5 +321,17 @@ mod tests {
         };
         let json = serde_json::to_string(&lib).unwrap();
         assert!(json.contains("Test"));
+    }
+
+    #[test]
+    fn test_ebook_settings_default() {
+        let s = EbookSettings::default();
+        assert_eq!(s.reading_mode, EbookReadingMode::SinglePage);
+        assert_eq!(s.font_family, "system-ui");
+        assert_eq!(s.font_size, 16);
+        assert!((s.line_height - 1.6).abs() < f32::EPSILON);
+        assert_eq!(s.margin_horizontal, 24);
+        assert_eq!(s.margin_vertical, 24);
+        assert_eq!(s.theme, EbookTheme::Light);
     }
 }
