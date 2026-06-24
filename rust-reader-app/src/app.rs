@@ -1145,92 +1145,102 @@ impl ReaderApp {
     }
 
     fn handle_global_input(&mut self, ctx: &egui::Context) {
-        let is_reader = matches!(self.current_view, View::Reader);
         if is_shortcut_pressed(ctx, &self.settings.shortcuts.fullscreen) {
             self.toggle_fullscreen(ctx);
         }
 
-        if !is_reader {
-            return;
-        }
+        match self.current_view {
+            View::Reader => {
+                if is_shortcut_pressed(ctx, &self.settings.shortcuts.back_to_library) {
+                    if ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
+                        self.toggle_fullscreen(ctx);
+                    } else {
+                        self.current_view = View::Library;
+                    }
+                }
 
-        if is_shortcut_pressed(ctx, &self.settings.shortcuts.back_to_library) {
-            if ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
-                self.toggle_fullscreen(ctx);
-            } else {
-                self.current_view = View::Library;
-            }
-        }
+                let rtl = self
+                    .reader_view
+                    .open
+                    .as_ref()
+                    .map(|r| r.state.mode == ReadingMode::Rtl)
+                    .unwrap_or(false);
+                if is_shortcut_pressed(ctx, &self.settings.shortcuts.next_page) {
+                    if rtl {
+                        self.reader_prev_page();
+                    } else {
+                        self.reader_next_page();
+                    }
+                }
+                if is_shortcut_pressed(ctx, &self.settings.shortcuts.prev_page) {
+                    if rtl {
+                        self.reader_next_page();
+                    } else {
+                        self.reader_prev_page();
+                    }
+                }
+                if is_shortcut_pressed(ctx, &self.settings.shortcuts.page_down) {
+                    self.reader_page_down();
+                }
+                if is_shortcut_pressed(ctx, &self.settings.shortcuts.page_up) {
+                    self.reader_page_up();
+                }
 
-        let rtl = self
-            .reader_view
-            .open
-            .as_ref()
-            .map(|r| r.state.mode == ReadingMode::Rtl)
-            .unwrap_or(false);
-        if is_shortcut_pressed(ctx, &self.settings.shortcuts.next_page) {
-            if rtl {
-                self.reader_prev_page();
-            } else {
-                self.reader_next_page();
-            }
-        }
-        if is_shortcut_pressed(ctx, &self.settings.shortcuts.prev_page) {
-            if rtl {
-                self.reader_next_page();
-            } else {
-                self.reader_prev_page();
-            }
-        }
-        if is_shortcut_pressed(ctx, &self.settings.shortcuts.page_down) {
-            self.reader_page_down();
-        }
-        if is_shortcut_pressed(ctx, &self.settings.shortcuts.page_up) {
-            self.reader_page_up();
-        }
+                // Mouse side buttons: Extra1 is typically "back" and Extra2 is "forward".
+                let extra1_pressed =
+                    ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Extra1));
+                let extra2_pressed =
+                    ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Extra2));
+                if extra1_pressed {
+                    if rtl {
+                        self.reader_next_page();
+                    } else {
+                        self.reader_prev_page();
+                    }
+                }
+                if extra2_pressed {
+                    if rtl {
+                        self.reader_prev_page();
+                    } else {
+                        self.reader_next_page();
+                    }
+                }
 
-        // Mouse side buttons: Extra1 is typically "back" and Extra2 is "forward".
-        let extra1_pressed = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Extra1));
-        let extra2_pressed = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Extra2));
-        if extra1_pressed {
-            if rtl {
-                self.reader_next_page();
-            } else {
-                self.reader_prev_page();
+                if is_shortcut_pressed(ctx, &self.settings.shortcuts.zoom_in) {
+                    if let Some(reader) = self.reader_view.open.as_mut() {
+                        reader.zoom_in();
+                    }
+                }
+                if is_shortcut_pressed(ctx, &self.settings.shortcuts.zoom_out) {
+                    if let Some(reader) = self.reader_view.open.as_mut() {
+                        reader.zoom_out();
+                    }
+                }
+                if is_shortcut_pressed(ctx, &self.settings.shortcuts.fit_page) {
+                    if let Some(reader) = self.reader_view.open.as_mut() {
+                        reader.request_fit(FitMode::Page);
+                    }
+                }
+                if is_shortcut_pressed(ctx, &self.settings.shortcuts.fit_width) {
+                    if let Some(reader) = self.reader_view.open.as_mut() {
+                        reader.request_fit(FitMode::Width);
+                    }
+                }
+                if is_shortcut_pressed(ctx, &self.settings.shortcuts.fit_height) {
+                    if let Some(reader) = self.reader_view.open.as_mut() {
+                        reader.request_fit(FitMode::Height);
+                    }
+                }
             }
-        }
-        if extra2_pressed {
-            if rtl {
-                self.reader_prev_page();
-            } else {
-                self.reader_next_page();
+            View::Ebook => {
+                if is_shortcut_pressed(ctx, &self.settings.shortcuts.next_page) {
+                    self.ebook_view.next_page();
+                }
+                if is_shortcut_pressed(ctx, &self.settings.shortcuts.prev_page) {
+                    self.ebook_view.prev_page();
+                }
             }
-        }
-
-        if is_shortcut_pressed(ctx, &self.settings.shortcuts.zoom_in) {
-            if let Some(reader) = self.reader_view.open.as_mut() {
-                reader.zoom_in();
-            }
-        }
-        if is_shortcut_pressed(ctx, &self.settings.shortcuts.zoom_out) {
-            if let Some(reader) = self.reader_view.open.as_mut() {
-                reader.zoom_out();
-            }
-        }
-        if is_shortcut_pressed(ctx, &self.settings.shortcuts.fit_page) {
-            if let Some(reader) = self.reader_view.open.as_mut() {
-                reader.request_fit(FitMode::Page);
-            }
-        }
-        if is_shortcut_pressed(ctx, &self.settings.shortcuts.fit_width) {
-            if let Some(reader) = self.reader_view.open.as_mut() {
-                reader.request_fit(FitMode::Width);
-            }
-        }
-        if is_shortcut_pressed(ctx, &self.settings.shortcuts.fit_height) {
-            if let Some(reader) = self.reader_view.open.as_mut() {
-                reader.request_fit(FitMode::Height);
-            }
+            _ => {}
         }
     }
 
