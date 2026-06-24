@@ -145,90 +145,93 @@ function pageHeight() {{
   return measure.clientHeight;
 }}
 
-const CONTENT_TAGS = new Set([
-  'P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
-  'UL', 'OL', 'LI', 'BLOCKQUOTE', 'PRE', 'FIGURE', 'TABLE',
-  'IMG', 'HR', 'ADDRESS', 'DL', 'DT', 'DD'
-]);
-
-function isEmptyUnit(el) {{
-  if (el.tagName === 'IMG' || el.tagName === 'HR') return false;
-  return (el.textContent || '').trim().length === 0;
-}}
-
-function collectPageUnits(root) {{
-  const units = [];
-  function walk(el) {{
-    for (const child of el.children) {{
-      if (child.tagName === 'SCRIPT' || child.tagName === 'STYLE') continue;
-      if (CONTENT_TAGS.has(child.tagName)) {{
-        units.push(child);
-      }} else if (child.children.length > 0) {{
-        walk(child);
-      }} else if ((child.textContent || '').trim().length > 0) {{
-        units.push(child);
-      }}
+function collectLineBoxes(root) {{
+  const boxes = [];
+  const rootRect = root.getBoundingClientRect();
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+  while (walker.nextNode()) {{
+    const node = walker.currentNode;
+    const parent = node.parentElement;
+    if (!parent || parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE') continue;
+    if ((node.textContent || '').trim().length === 0) continue;
+    const range = document.createRange();
+    range.selectNode(node);
+    for (const r of range.getClientRects()) {{
+      if (r.width <= 0 || r.height <= 0) continue;
+      boxes.push({{
+        top: r.top - rootRect.top,
+        bottom: r.bottom - rootRect.top,
+        left: r.left - rootRect.left,
+        right: r.right - rootRect.left
+      }});
     }}
   }}
-  walk(root);
-  units.sort((a, b) => {{
-    const ar = a.getBoundingClientRect();
-    const br = b.getBoundingClientRect();
-    return ar.top - br.top || ar.left - br.left;
-  }});
-  return units;
+  for (const el of root.querySelectorAll('img, hr, svg, canvas')) {{
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    boxes.push({{
+      top: r.top - rootRect.top,
+      bottom: r.bottom - rootRect.top,
+      left: r.left - rootRect.left,
+      right: r.right - rootRect.left,
+      atomic: true
+    }});
+  }}
+  boxes.sort((a, b) => a.top - b.top || a.left - b.left);
+  return boxes;
 }}
 
-function trimTrailingEmptyUnits(units) {{
-  while (units.length > 0 && isEmptyUnit(units[units.length - 1])) {{
-    units.pop();
+function findSafeEnd(boxes, start, target) {{
+  let safeEnd = target;
+  const n = boxes.length;
+  let i = 0;
+  while (i < n && boxes[i].top <= start) i++;
+  let j = i;
+  while (j < n && boxes[j].top <= target) {{
+    if (boxes[j].bottom > target) {{
+      safeEnd = Math.min(safeEnd, boxes[j].top);
+    }}
+    j++;
   }}
+  return safeEnd;
 }}
 
-function trimTrailingEmptySpreads(spreads) {{
-  function isEmpty(html) {{
-    const div = document.createElement('div');
-    div.innerHTML = html;
-    const text = (div.textContent || '').trim();
-    if (text.length > 0) return false;
-    return !div.querySelector('img, hr, svg, canvas');
-  }}
-  while (spreads.length > 1 && isEmpty(spreads[spreads.length - 1])) {{
-    spreads.pop();
-  }}
-  return spreads;
-}}
-
-function buildSinglePage(blocks, ph) {{
+function buildClonedSpread(start, end) {{
+  const clone = measure.cloneNode(true);
+  clone.removeAttribute('id');
   const wrapper = document.createElement('div');
   wrapper.style.position = 'relative';
   wrapper.style.overflow = 'hidden';
-  wrapper.style.height = ph + 'px';
-  for (const block of blocks) {{
-    wrapper.appendChild(block.cloneNode(true));
-  }}
+  wrapper.style.height = (end - start) + 'px';
+  clone.style.position = 'absolute';
+  clone.style.top = -start + 'px';
+  clone.style.width = '100%';
+  wrapper.appendChild(clone);
   return wrapper.outerHTML;
 }}
 
-function buildDoublePage(leftBlocks, rightBlocks, ph) {{
+function buildDoubleSpread(leftStart, leftEnd, rightEnd, ph) {{
   const wrapper = document.createElement('div');
   wrapper.style.display = 'flex';
   wrapper.style.width = '100%';
   wrapper.style.height = ph + 'px';
   wrapper.style.overflow = 'hidden';
-  function makeCell(blocks) {{
+  function makeCell(start, end) {{
     const cell = document.createElement('div');
     cell.style.flex = '1';
     cell.style.height = ph + 'px';
     cell.style.overflow = 'hidden';
     cell.style.position = 'relative';
-    for (const block of blocks) {{
-      cell.appendChild(block.cloneNode(true));
-    }}
+    const clone = measure.cloneNode(true);
+    clone.removeAttribute('id');
+    clone.style.position = 'absolute';
+    clone.style.top = -start + 'px';
+    clone.style.width = '100%';
+    cell.appendChild(clone);
     return cell;
   }}
-  wrapper.appendChild(makeCell(leftBlocks));
-  wrapper.appendChild(makeCell(rightBlocks));
+  wrapper.appendChild(makeCell(leftStart, leftEnd));
+  wrapper.appendChild(makeCell(leftEnd, rightEnd));
   return wrapper.outerHTML;
 }}
 
@@ -239,31 +242,24 @@ function splitSinglePage(html) {{
     measure.innerHTML = '';
     return [html];
   }}
-  const units = collectPageUnits(measure);
-  trimTrailingEmptyUnits(units);
-  if (units.length === 0) {{
+  const boxes = collectLineBoxes(measure);
+  if (boxes.length === 0) {{
     measure.innerHTML = '';
     return [html];
   }}
+  const maxBottom = boxes.reduce((m, b) => Math.max(m, b.bottom), 0);
   const spreads = [];
-  let current = [];
-  let currentH = 0;
-  for (const unit of units) {{
-    const h = unit.getBoundingClientRect().height;
-    if (current.length > 0 && currentH + h > ph) {{
-      spreads.push(buildSinglePage(current, ph));
-      current = [];
-      currentH = 0;
-    }}
-    current.push(unit);
-    currentH += h;
-  }}
-  if (current.length > 0) {{
-    spreads.push(buildSinglePage(current, ph));
+  let start = 0;
+  while (start < maxBottom) {{
+    const target = start + ph;
+    let end = findSafeEnd(boxes, start, target);
+    if (end <= start) end = target;
+    if (end > maxBottom) end = maxBottom;
+    spreads.push(buildClonedSpread(start, end));
+    start = end;
   }}
   measure.innerHTML = '';
-  const trimmed = trimTrailingEmptySpreads(spreads);
-  return trimmed.length > 0 ? trimmed : [html];
+  return spreads.length > 0 ? spreads : [html];
 }}
 
 function splitDoublePage(html) {{
@@ -276,50 +272,26 @@ function splitDoublePage(html) {{
     measure.style.width = originalWidth;
     return [html];
   }}
-  const units = collectPageUnits(measure);
-  trimTrailingEmptyUnits(units);
-  if (units.length === 0) {{
+  const boxes = collectLineBoxes(measure);
+  if (boxes.length === 0) {{
     measure.innerHTML = '';
     measure.style.width = originalWidth;
     return [html];
   }}
+  const maxBottom = boxes.reduce((m, b) => Math.max(m, b.bottom), 0);
   const spreads = [];
-  let leftBlocks = [];
-  let rightBlocks = [];
-  let leftH = 0;
-  let rightH = 0;
-  for (const unit of units) {{
-    const h = unit.getBoundingClientRect().height;
-    if (leftBlocks.length > 0 && leftH + h > ph) {{
-      if (rightBlocks.length > 0 && rightH + h > ph) {{
-        spreads.push(buildDoublePage(leftBlocks, rightBlocks, ph));
-        leftBlocks = [];
-        rightBlocks = [];
-        leftH = 0;
-        rightH = 0;
-      }}
-    }}
-    if (leftBlocks.length === 0 || leftH + h <= ph) {{
-      leftBlocks.push(unit);
-      leftH += h;
-    }} else if (rightBlocks.length === 0 || rightH + h <= ph) {{
-      rightBlocks.push(unit);
-      rightH += h;
-    }} else {{
-      spreads.push(buildDoublePage(leftBlocks, rightBlocks, ph));
-      leftBlocks = [unit];
-      rightBlocks = [];
-      leftH = h;
-      rightH = 0;
-    }}
-  }}
-  if (leftBlocks.length > 0 || rightBlocks.length > 0) {{
-    spreads.push(buildDoublePage(leftBlocks, rightBlocks, ph));
+  let start = 0;
+  while (start < maxBottom) {{
+    const leftEnd = findSafeEnd(boxes, start, start + ph);
+    let rightEnd = findSafeEnd(boxes, leftEnd, leftEnd + ph);
+    if (rightEnd <= start) rightEnd = start + ph * 2;
+    if (rightEnd > maxBottom) rightEnd = maxBottom;
+    spreads.push(buildDoubleSpread(start, leftEnd, rightEnd, ph));
+    start = rightEnd;
   }}
   measure.innerHTML = '';
   measure.style.width = originalWidth;
-  const trimmed = trimTrailingEmptySpreads(spreads);
-  return trimmed.length > 0 ? trimmed : [html];
+  return spreads.length > 0 ? spreads : [html];
 }}
 
 function splitIntoSpreads(html) {{
@@ -731,14 +703,13 @@ mod tests {
     }
 
     #[test]
-    fn test_reader_html_uses_block_level_pagination() {
+    fn test_reader_html_uses_line_box_pagination() {
         let html = reader_html(&EbookSettings::default(), 1);
-        assert!(html.contains("const CONTENT_TAGS"));
-        assert!(html.contains("function collectPageUnits"));
-        assert!(html.contains("function buildSinglePage"));
-        assert!(html.contains("function buildDoublePage"));
-        assert!(html.contains("function trimTrailingEmptyUnits"));
-        assert!(html.contains("function trimTrailingEmptySpreads"));
+        assert!(html.contains("function collectLineBoxes"));
+        assert!(html.contains("function findSafeEnd"));
+        assert!(html.contains("function buildClonedSpread"));
+        assert!(html.contains("function buildDoubleSpread"));
+        assert!(html.contains("getClientRects"));
     }
 
     #[test]
