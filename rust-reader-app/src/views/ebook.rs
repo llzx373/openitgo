@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::ebook_renderer::EbookRenderer;
 use rust_reader_core::ebook::Ebook;
 use rust_reader_storage::models::EbookSettings;
@@ -14,10 +12,11 @@ pub struct OpenEbook {
     pub ebook: Ebook,
     pub renderer: EbookRenderer,
     pub current_chapter: usize,
-    pub char_offset: usize,
 }
 
 impl EbookView {
+    /// Opens an ebook. Reserved for the future ebook open flow.
+    #[allow(dead_code)]
     pub fn open(
         &mut self,
         parent: &(impl wry::raw_window_handle::HasWindowHandle
@@ -31,9 +30,12 @@ impl EbookView {
             ebook,
             renderer,
             current_chapter: 0,
-            char_offset: 0,
         });
         Ok(())
+    }
+
+    pub fn close(&mut self) {
+        self.open = None; // Drops the EbookRenderer and its WebView.
     }
 
     pub fn update_bounds(&mut self, bounds: Rect) {
@@ -60,11 +62,18 @@ impl EbookView {
         }
     }
 
+    /// Navigates to a chapter. Reserved for the future table-of-contents panel.
+    #[allow(dead_code)]
     pub fn goto_chapter(&mut self, chapter: usize) {
         if let Some(open) = self.open.as_mut() {
             open.current_chapter = chapter;
-            open.char_offset = 0;
             open.renderer.goto_chapter(chapter, 0);
+        }
+    }
+
+    pub fn sync_position(&mut self) {
+        if let Some(open) = self.open.as_mut() {
+            open.current_chapter = open.renderer.current_position().0;
         }
     }
 

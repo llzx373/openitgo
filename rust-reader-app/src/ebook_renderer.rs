@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use rust_reader_core::ebook::{Ebook, EbookReadingMode};
 use rust_reader_storage::models::{EbookSettings, EbookTheme};
 use std::borrow::Cow;
@@ -140,6 +138,11 @@ impl EbookRenderer {
         if let Err(e) = self.webview.evaluate_script("prevPage();") {
             eprintln!("EbookRenderer::prev_page failed: {e}");
         }
+    }
+
+    pub fn current_position(&self) -> (usize, usize) {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        (state.current_chapter, state.char_offset)
     }
 }
 

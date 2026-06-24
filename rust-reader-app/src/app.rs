@@ -107,6 +107,9 @@ impl eframe::App for ReaderApp {
             self.record_reader_history();
             self.reader_view.clear_cache();
         }
+        if matches!(self.last_view, View::Ebook) && !matches!(self.current_view, View::Ebook) {
+            self.ebook_view.close();
+        }
         self.last_view = self.current_view.clone();
 
         if self.settings.theme != self.current_theme {
@@ -145,7 +148,7 @@ impl eframe::App for ReaderApp {
         match self.current_view.clone() {
             View::Library => self.render_library(ctx),
             View::Reader => self.render_reader(ctx),
-            View::Ebook => self.render_ebook(ctx, _frame),
+            View::Ebook => self.render_ebook(ctx),
             View::Settings => self.render_settings(ctx),
             View::Loading(path) => self.render_loading(ctx, path),
         }
@@ -438,7 +441,7 @@ impl ReaderApp {
         });
     }
 
-    fn render_ebook(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn render_ebook(&mut self, ctx: &egui::Context) {
         if self.ebook_view.open.is_none() {
             self.current_view = View::Library;
             return;
@@ -451,59 +454,34 @@ impl ReaderApp {
                 i.screen_rect().size(),
             )
         });
-        if Self::should_show_bar(
+        let show_toolbar = Self::should_show_bar(
             self.settings.show_toolbar,
             fullscreen,
             mouse_pos,
             screen_size,
             BarEdge::Top,
-        ) {
-            self.render_ebook_toolbar(ctx);
-        }
-        if Self::should_show_bar(
+        );
+        let show_statusbar = Self::should_show_bar(
             self.settings.show_statusbar,
             fullscreen,
             mouse_pos,
             screen_size,
             BarEdge::Bottom,
-        ) {
+        );
+        if show_toolbar {
+            self.render_ebook_toolbar(ctx);
+        }
+        if show_statusbar {
             self.render_ebook_statusbar(ctx);
         }
 
-        let top_height = if Self::should_show_bar(
-            self.settings.show_toolbar,
-            fullscreen,
-            mouse_pos,
-            screen_size,
-            BarEdge::Top,
-        ) {
-            ctx.style().spacing.interact_size.y * 2.0
-        } else {
-            0.0
-        };
-        let bottom_height = if Self::should_show_bar(
-            self.settings.show_statusbar,
-            fullscreen,
-            mouse_pos,
-            screen_size,
-            BarEdge::Bottom,
-        ) {
-            ctx.style().spacing.interact_size.y * 1.5
-        } else {
-            0.0
-        };
-        let avail = ctx.screen_rect();
-        let bounds = wry::Rect {
-            position: wry::dpi::LogicalPosition::new(avail.min.x, avail.min.y + top_height).into(),
-            size: wry::dpi::LogicalSize::new(
-                avail.width(),
-                avail.height() - top_height - bottom_height,
-            )
-            .into(),
-        };
-        self.ebook_view.update_bounds(bounds);
-
         egui::CentralPanel::default().show(ctx, |ui| {
+            let rect = ui.max_rect();
+            let bounds = wry::Rect {
+                position: wry::dpi::LogicalPosition::new(rect.min.x, rect.min.y).into(),
+                size: wry::dpi::LogicalSize::new(rect.width(), rect.height()).into(),
+            };
+            self.ebook_view.update_bounds(bounds);
             self.ebook_view.ui(ctx, ui);
         });
     }
@@ -672,6 +650,7 @@ impl ReaderApp {
     }
 
     fn render_ebook_toolbar(&mut self, ctx: &egui::Context) {
+        self.ebook_view.sync_position();
         let total = self
             .ebook_view
             .open
@@ -694,10 +673,10 @@ impl ReaderApp {
                 if ui.button("目录").clicked() {
                     // TODO: open TOC panel
                 }
-                if ui.button("上一章").clicked() {
+                if ui.button("上一页").clicked() {
                     self.ebook_view.prev_page();
                 }
-                if ui.button("下一章").clicked() {
+                if ui.button("下一页").clicked() {
                     self.ebook_view.next_page();
                 }
                 ui.label(format!("{} / {}", current + 1, total));
@@ -712,6 +691,7 @@ impl ReaderApp {
     }
 
     fn render_ebook_statusbar(&mut self, ctx: &egui::Context) {
+        self.ebook_view.sync_position();
         let (title, progress) = self
             .ebook_view
             .open
