@@ -362,4 +362,37 @@ mod tests {
         assert_eq!(s.margin_vertical, 24);
         assert_eq!(s.theme, EbookTheme::Light);
     }
+
+    #[test]
+    fn test_history_entry_defaults() {
+        let h = HistoryEntry::default();
+        assert_eq!(h.volume_index, 0);
+        assert_eq!(h.page_index, 0);
+        assert_eq!(h.char_offset, None);
+    }
+
+    #[test]
+    fn test_history_entry_roundtrip_with_char_offset() {
+        let h = HistoryEntry {
+            comic_id: "ebook1".to_string(),
+            path: PathBuf::from("/tmp/book.epub"),
+            volume_index: 0,
+            page_index: 2,
+            char_offset: Some(1500),
+            last_read_at: 12345,
+        };
+        let json = serde_json::to_string(&h).unwrap();
+        let loaded: HistoryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.page_index, 2);
+        assert_eq!(loaded.char_offset, Some(1500));
+        assert_eq!(h, loaded);
+    }
+
+    #[test]
+    fn test_history_entry_deserializes_missing_char_offset_as_none() {
+        let json =
+            r#"{"comic_id":"id","path":"/tmp","volume_index":0,"page_index":1,"last_read_at":0}"#;
+        let h: HistoryEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(h.char_offset, None);
+    }
 }

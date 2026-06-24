@@ -1975,6 +1975,37 @@ mod tests {
         assert_eq!(reader.state.current_page, 6);
     }
 
+    #[test]
+    fn test_history_matches_by_comic_id() {
+        let h = HistoryEntry {
+            comic_id: "abc".to_string(),
+            path: PathBuf::from("/old/path"),
+            ..Default::default()
+        };
+        assert!(history_matches(&h, "abc", Path::new("/new/path")));
+    }
+
+    #[test]
+    fn test_history_matches_by_path_when_comic_id_differs() {
+        let h = HistoryEntry {
+            comic_id: "abc".to_string(),
+            path: PathBuf::from("/book.epub"),
+            ..Default::default()
+        };
+        assert!(history_matches(&h, "def", Path::new("/book.epub")));
+        assert!(!history_matches(&h, "def", Path::new("/other.epub")));
+    }
+
+    #[test]
+    fn test_history_matches_empty_path_falls_back_to_false() {
+        let h = HistoryEntry {
+            comic_id: "abc".to_string(),
+            path: PathBuf::new(),
+            ..Default::default()
+        };
+        assert!(!history_matches(&h, "def", Path::new("/book.epub")));
+    }
+
     fn should_show_bar(
         show_setting: bool,
         fullscreen: bool,
