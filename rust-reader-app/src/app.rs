@@ -119,6 +119,7 @@ impl Default for ReaderApp {
 impl eframe::App for ReaderApp {
     fn on_exit(&mut self) {
         self.record_reader_history();
+        self.record_ebook_history();
         self.reader_view.close();
         let _ = self.store.save_settings(&self.settings);
         let _ = self.store.save_library(&self.library_view.library);
@@ -132,6 +133,7 @@ impl eframe::App for ReaderApp {
             self.reader_view.clear_cache();
         }
         if matches!(self.last_view, View::Ebook) && !matches!(self.current_view, View::Ebook) {
+            self.record_ebook_history();
             self.ebook_view.close();
         }
         self.last_view = self.current_view.clone();
@@ -1304,6 +1306,42 @@ impl ReaderApp {
                     path,
                     volume_index: 0,
                     page_index,
+                    char_offset: None,
+                    last_read_at: now,
+                });
+            }
+        }
+    }
+
+    fn record_ebook_history(&mut self) {
+        self.ebook_view.sync_position();
+        if let Some(open) = self.ebook_view.open.as_ref() {
+            let ebook_id = open.ebook.id.clone();
+            let path = open.ebook.path.clone();
+            let chapter = open.current_chapter;
+            let char_offset = open.renderer.current_position().1;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if let Some(entry) = self
+                .history
+                .entries
+                .iter_mut()
+                .find(|h| history_matches(h, &ebook_id, &path))
+            {
+                entry.comic_id = ebook_id;
+                entry.path = path;
+                entry.page_index = chapter;
+                entry.char_offset = Some(char_offset);
+                entry.last_read_at = now;
+            } else {
+                self.history.entries.push(HistoryEntry {
+                    comic_id: ebook_id,
+                    path,
+                    volume_index: 0,
+                    page_index: chapter,
+                    char_offset: Some(char_offset),
                     last_read_at: now,
                 });
             }
@@ -1555,9 +1593,23 @@ impl ReaderApp {
                     };
                     match self
                         .ebook_view
-                        .open(frame, bounds, ebook, &self.settings.ebook)
+                        .open(frame, bounds, ebook.clone(), &self.settings.ebook)
                     {
                         Ok(()) => {
+                            if let Some(h) = self
+                                .history
+                                .entries
+                                .iter()
+                                .find(|h| history_matches(h, &ebook.id, &ebook.path))
+                            {
+                                let chapter = h.page_index;
+                                let offset = h.char_offset.unwrap_or(0);
+                                self.ebook_view.goto_chapter(chapter);
+                                self.ebook_view
+                                    .open
+                                    .as_mut()
+                                    .map(|o| o.renderer.goto_chapter(chapter, offset));
+                            }
                             self.current_view = View::Ebook;
                             self.error_message = None;
                         }
@@ -1841,6 +1893,7 @@ mod tests {
             path: tmp_dir.path().to_path_buf(),
             volume_index: 0,
             page_index: 1,
+            char_offset: None,
             last_read_at: 0,
         });
 

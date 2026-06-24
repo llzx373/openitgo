@@ -255,6 +255,8 @@ pub struct HistoryEntry {
     pub path: std::path::PathBuf,
     pub volume_index: usize,
     pub page_index: usize,
+    #[serde(default)]
+    pub char_offset: Option<usize>,
     pub last_read_at: u64,
 }
 
@@ -265,6 +267,7 @@ impl Default for HistoryEntry {
             path: std::path::PathBuf::new(),
             volume_index: 0,
             page_index: 0,
+            char_offset: None,
             last_read_at: 0,
         }
     }
