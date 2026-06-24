@@ -87,6 +87,8 @@ impl EbookRenderer {
                 let body = request.body();
                 if let Ok(msg) = serde_json::from_str::<JsToRust>(body) {
                     handle_ipc_message(msg, &ipc_state);
+                } else {
+                    eprintln!("ebook ipc: malformed message: {}", body);
                 }
             })
             .with_url("ebook://reader")

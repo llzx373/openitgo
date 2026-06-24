@@ -13,9 +13,17 @@ pub fn render_chapter_html(ebook: &Ebook, chapter_index: usize) -> Result<String
         let text =
             std::fs::read_to_string(path).map_err(|e| ParseError::InvalidText(format!("{}", e)))?;
         let parts = if is_markdown_path(path) {
-            split_markdown(&text)
+            let mut ch = split_markdown(&text);
+            if ch.is_empty() {
+                ch = split_by_word_count(&text, CHAPTER_WORDS);
+            }
+            ch
         } else {
-            split_txt(&text)
+            let mut ch = split_txt(&text);
+            if ch.is_empty() {
+                ch = split_by_word_count(&text, CHAPTER_WORDS);
+            }
+            ch
         };
         let (_, body) = parts.get(chapter_index).ok_or(ParseError::NoPages)?.clone();
         let html = if is_markdown_path(path) {
@@ -110,7 +118,7 @@ fn is_text_like_path(path: &Path) -> bool {
 fn is_markdown_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("md"))
+        .map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
         .unwrap_or(false)
 }
 
