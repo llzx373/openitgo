@@ -34,30 +34,6 @@ html, body {{
   font-size: var(--size);
   line-height: var(--line);
 }}
-#content {{
-  width: 100%;
-  height: 100%;
-  padding: var(--margin-v) var(--margin-h);
-  box-sizing: border-box;
-}}
-body.paginated #content {{
-  column-width: calc(100vw - var(--margin-h) * 2);
-  column-gap: 0;
-  column-fill: auto;
-  overflow: hidden;
-  scroll-snap-type: x mandatory;
-  scroll-behavior: smooth;
-}}
-body.paginated.no-anim #content {{
-  scroll-behavior: auto;
-}}
-body.double #content {{
-  column-width: calc((100vw - var(--margin-h) * 2) / 2);
-}}
-body.paginated #content > *,
-body.paginated #content img {{
-  break-inside: avoid;
-}}
 p {{ margin: 0 0 1em 0; text-indent: 2em; }}
 img {{ max-width: 100%; height: auto; }}
 #flipper {{
@@ -115,12 +91,10 @@ body.scroll #spread {{
 </style>
 </head>
 <body class="{mode}">
-<div id="content"></div>
 <div id="measure"></div>
 <div id="spread"></div>
 <div id="flipper"></div>
 <script>
-const content = document.getElementById('content');
 const measure = document.getElementById('measure');
 const spread = document.getElementById('spread');
 const flipper = document.getElementById('flipper');
@@ -301,7 +275,6 @@ function renderSpread(index) {{
   spread.innerHTML = '';
   spread.appendChild(getSpreadElement(index));
   spread.style.display = 'block';
-  content.style.display = 'none';
 }}
 
 function currentSpreadCharOffset() {{
@@ -419,11 +392,6 @@ function applySettings(json) {{
   root.style.setProperty('--margin-h', s.margin_h + 'px');
   root.style.setProperty('--margin-v', s.margin_v + 'px');
   document.body.className = s.mode;
-  if (s.animate) {{
-    document.body.classList.remove('no-anim');
-  }} else {{
-    document.body.classList.add('no-anim');
-  }}
   // 设置变化可能导致分页改变，重新切分
   if (currentChapterHtml) {{
     if (isScrollMode()) {{
@@ -431,7 +399,6 @@ function applySettings(json) {{
       const offset = currentSpreadCharOffset();
       spread.innerHTML = currentChapterHtml;
       spread.style.display = 'block';
-      content.style.display = 'none';
       spreads = [];
       currentSpread = 0;
       if (offset > 0) {{
@@ -459,7 +426,6 @@ async function loadChapter(index, charOffset) {{
     if (isScrollMode()) {{
       spread.innerHTML = currentChapterHtml;
       spread.style.display = 'block';
-      content.style.display = 'none';
       if (charOffset) {{
         scrollToOffset(charOffset);
       }}
