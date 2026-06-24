@@ -15,6 +15,8 @@ struct RendererState {
     char_offset: usize,
     current_page: usize,
     total_pages: usize,
+    current_spread: usize,
+    total_spreads: usize,
     settings: EbookSettings,
 }
 
@@ -26,6 +28,8 @@ struct JsToRust {
     char_offset: Option<usize>,
     page: Option<usize>,
     total_pages: Option<usize>,
+    spread: Option<usize>,
+    total_spreads: Option<usize>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -83,6 +87,8 @@ impl EbookRenderer {
             char_offset: 0,
             current_page: 0,
             total_pages: 1,
+            current_spread: 0,
+            total_spreads: 1,
             settings,
         }));
 
@@ -158,6 +164,12 @@ impl EbookRenderer {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.total_pages.max(1)
     }
+
+    #[allow(dead_code)]
+    pub fn current_spread_count(&self) -> usize {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.total_spreads.max(1)
+    }
 }
 
 fn handle_ipc_message(msg: JsToRust, state: &Arc<Mutex<RendererState>>) {
@@ -174,6 +186,12 @@ fn handle_ipc_message(msg: JsToRust, state: &Arc<Mutex<RendererState>>) {
             }
             if let Some(total) = msg.total_pages {
                 state.total_pages = total.max(1);
+            }
+            if let Some(spread) = msg.spread {
+                state.current_spread = spread;
+            }
+            if let Some(total) = msg.total_spreads {
+                state.total_spreads = total.max(1);
             }
         }
     }
@@ -740,5 +758,17 @@ mod tests {
         let js = JsSettings::from(&settings);
         assert!(js.animate);
         assert!(js.invert_scroll);
+    }
+
+    #[test]
+    fn test_js_to_rust_deserializes_spread_fields() {
+        let json =
+            r#"{"type":"position","chapter":1,"spread":3,"char_offset":120,"total_spreads":12}"#;
+        let msg: JsToRust = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.kind, "position");
+        assert_eq!(msg.chapter, Some(1));
+        assert_eq!(msg.spread, Some(3));
+        assert_eq!(msg.char_offset, Some(120));
+        assert_eq!(msg.total_spreads, Some(12));
     }
 }
