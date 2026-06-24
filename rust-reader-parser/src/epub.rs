@@ -14,7 +14,7 @@ impl EpubParser {
     }
 
     pub fn parse(path: &Path) -> Result<Ebook, ParseError> {
-        let doc =
+        let mut doc =
             epub::doc::EpubDoc::new(path).map_err(|e| ParseError::InvalidEpub(format!("{}", e)))?;
 
         let title = doc
@@ -59,22 +59,46 @@ impl EpubParser {
             chapters
         }
 
+        fn extract_title(html: &str) -> Option<String> {
+            let start = html.find("<title")?;
+            let after_tag = html[start..].find('>')? + start + 1;
+            let end = html[after_tag..].find("</title>")? + after_tag;
+            let title = html[after_tag..end].trim();
+            if title.is_empty() {
+                None
+            } else {
+                Some(title.to_string())
+            }
+        }
+
         let mut chapters: Vec<EbookChapter> = collect_navpoints(&doc.toc, &mut 0);
 
         if chapters.is_empty() {
-            chapters = doc
+            let spine_items: Vec<(usize, String, String)> = doc
                 .spine
                 .iter()
                 .enumerate()
                 .filter_map(|(idx, item)| {
-                    doc.resources.get(&item.idref).map(|resource| EbookChapter {
-                        index: idx,
-                        id: item.idref.clone(),
-                        href: resource.path.to_string_lossy().to_string(),
-                        title: None,
+                    doc.resources.get(&item.idref).map(|resource| {
+                        (
+                            idx,
+                            item.idref.clone(),
+                            resource.path.to_string_lossy().to_string(),
+                        )
                     })
                 })
                 .collect();
+            for (idx, idref, href) in spine_items {
+                let title = doc
+                    .get_resource_str(&idref)
+                    .and_then(|(html, _)| extract_title(&html));
+                chapters.push(EbookChapter {
+                    index: idx,
+                    id: idref,
+                    href,
+                    title,
+                });
+            }
         }
 
         if chapters.is_empty() {

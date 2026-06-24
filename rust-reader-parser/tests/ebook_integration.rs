@@ -2,6 +2,21 @@ use rust_reader_parser::parse_ebook;
 use std::io::Write;
 
 #[test]
+fn test_parse_minimal_epub() {
+    let path = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/minimal.epub"
+    ));
+    let ebook = parse_ebook(&path).unwrap();
+    assert_eq!(ebook.title, "Minimal EPUB");
+    assert!(!ebook.chapters.is_empty());
+    assert!(ebook
+        .chapters
+        .iter()
+        .any(|c| c.title.as_deref() == Some("Chapter 1")));
+}
+
+#[test]
 fn test_parse_txt_ebook() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("book.txt");
