@@ -178,12 +178,12 @@ function splitSinglePage(html) {{
   const spreads = [];
   for (let y = 0; y < totalHeight; y += ph) {{
     const clone = measure.cloneNode(true);
+    clone.removeAttribute('id');
     const wrapper = document.createElement('div');
     wrapper.style.position = 'relative';
     wrapper.style.overflow = 'hidden';
     wrapper.style.height = ph + 'px';
-    const inner = clone.firstElementChild || clone;
-    inner.removeAttribute('id');
+    const inner = clone;
     inner.style.position = 'absolute';
     inner.style.top = -y + 'px';
     inner.style.width = '100%';
@@ -195,8 +195,41 @@ function splitSinglePage(html) {{
 }}
 
 function splitDoublePage(html) {{
-  // TODO: implement double-page spread splitting (Task 7).
-  return [html];
+  measure.innerHTML = html;
+  const ph = pageHeight();
+  if (!ph || ph <= 0) {{
+    measure.innerHTML = '';
+    return [html];
+  }}
+  const totalHeight = measure.scrollHeight;
+  const spreads = [];
+  for (let y = 0; y < totalHeight; y += ph * 2) {{
+    const wrapper = document.createElement('div');
+    wrapper.style.display = 'flex';
+    wrapper.style.width = '100%';
+    wrapper.style.height = ph + 'px';
+    wrapper.style.overflow = 'hidden';
+    for (let col = 0; col < 2; col++) {{
+      const pageY = y + col * ph;
+      if (pageY >= totalHeight) break;
+      const cell = document.createElement('div');
+      cell.style.flex = '1';
+      cell.style.height = ph + 'px';
+      cell.style.overflow = 'hidden';
+      cell.style.position = 'relative';
+      const clone = measure.cloneNode(true);
+      clone.removeAttribute('id');
+      const inner = clone;
+      inner.style.position = 'absolute';
+      inner.style.top = -pageY + 'px';
+      inner.style.width = '100%';
+      cell.appendChild(inner);
+      wrapper.appendChild(cell);
+    }}
+    spreads.push(wrapper.outerHTML);
+  }}
+  measure.innerHTML = '';
+  return spreads;
 }}
 
 function splitIntoSpreads(html) {{
@@ -504,6 +537,18 @@ mod tests {
         let html = reader_html(&settings, 1);
         assert!(html.contains("pageHeight"));
         assert!(html.contains("splitSinglePage"));
+    }
+
+    #[test]
+    fn test_reader_html_contains_double_page_split_logic() {
+        use rust_reader_core::ebook::EbookReadingMode;
+        use rust_reader_storage::models::EbookSettings;
+        let settings = EbookSettings {
+            reading_mode: EbookReadingMode::DoublePage,
+            ..Default::default()
+        };
+        let html = reader_html(&settings, 1);
+        assert!(html.contains("splitDoublePage"));
     }
 
     #[test]
