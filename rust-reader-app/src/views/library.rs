@@ -1,4 +1,6 @@
-use rust_reader_storage::models::{Bookmarks, History, Library, LibraryEntry, LibrarySort};
+use rust_reader_storage::models::{
+    Bookmarks, History, Library, LibraryEntry, LibrarySort, MediaType,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -6,6 +8,7 @@ use std::path::PathBuf;
 pub enum LibraryMode {
     #[default]
     Library,
+    Ebooks,
     History,
     Bookmarks,
 }
@@ -73,6 +76,12 @@ impl LibraryView {
                 self.mode = LibraryMode::Library;
             }
             if ui
+                .selectable_label(self.mode == LibraryMode::Ebooks, "电子书")
+                .clicked()
+            {
+                self.mode = LibraryMode::Ebooks;
+            }
+            if ui
                 .selectable_label(self.mode == LibraryMode::History, "历史")
                 .clicked()
             {
@@ -84,9 +93,14 @@ impl LibraryView {
             {
                 self.mode = LibraryMode::Bookmarks;
             }
-            if self.mode == LibraryMode::Library {
+            if matches!(self.mode, LibraryMode::Library | LibraryMode::Ebooks) {
                 ui.separator();
-                ui.add(egui::TextEdit::singleline(&mut self.search_query).hint_text("搜索漫画"));
+                let hint = if self.mode == LibraryMode::Ebooks {
+                    "搜索电子书"
+                } else {
+                    "搜索漫画"
+                };
+                ui.add(egui::TextEdit::singleline(&mut self.search_query).hint_text(hint));
                 egui::ComboBox::from_id_salt("library_sort")
                     .selected_text(sort_label(*library_sort))
                     .show_ui(ui, |ui| {
@@ -96,10 +110,10 @@ impl LibraryView {
                     });
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if self.mode == LibraryMode::Library
+                if matches!(self.mode, LibraryMode::Library | LibraryMode::Ebooks)
                     && ui
                         .button("清理已删除")
-                        .on_hover_text("移除书库中文件已经不存在的漫画")
+                        .on_hover_text("移除书库中文件已经不存在的条目")
                         .clicked()
                 {
                     (callbacks.on_remove_missing)();
@@ -111,7 +125,9 @@ impl LibraryView {
         });
 
         match self.mode {
-            LibraryMode::Library => self.render_library(ui, history, *library_sort, callbacks),
+            LibraryMode::Library | LibraryMode::Ebooks => {
+                self.render_library(ui, history, *library_sort, callbacks)
+            }
             LibraryMode::History => self.render_history(ui, history, callbacks),
             LibraryMode::Bookmarks => self.render_bookmarks(ui, bookmarks, callbacks),
         }
@@ -313,7 +329,14 @@ impl LibraryView {
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| query.is_empty() || e.title.to_lowercase().contains(&query))
+            .filter(|(_, e)| {
+                let media_ok = match self.mode {
+                    LibraryMode::Ebooks => e.media_type == MediaType::Ebook,
+                    LibraryMode::Library => e.media_type == MediaType::Comic,
+                    _ => true,
+                };
+                media_ok && (query.is_empty() || e.title.to_lowercase().contains(&query))
+            })
             .map(|(i, e)| (i, e.clone()))
             .collect();
 
@@ -538,6 +561,7 @@ mod tests {
                 path: PathBuf::from("/tmp/comic-1"),
                 cover_path: None,
                 added_at: 0,
+                media_type: MediaType::Comic,
             }],
         }
     }
@@ -576,6 +600,7 @@ mod tests {
                         path: PathBuf::from("/a"),
                         cover_path: None,
                         added_at: 1,
+                        media_type: MediaType::Comic,
                     },
                     LibraryEntry {
                         comic_id: "b".to_string(),
@@ -583,6 +608,7 @@ mod tests {
                         path: PathBuf::from("/b"),
                         cover_path: None,
                         added_at: 2,
+                        media_type: MediaType::Comic,
                     },
                 ],
             },
@@ -605,6 +631,7 @@ mod tests {
                         path: PathBuf::from("/b"),
                         cover_path: None,
                         added_at: 0,
+                        media_type: MediaType::Comic,
                     },
                     LibraryEntry {
                         comic_id: "a".to_string(),
@@ -612,6 +639,7 @@ mod tests {
                         path: PathBuf::from("/a"),
                         cover_path: None,
                         added_at: 0,
+                        media_type: MediaType::Comic,
                     },
                 ],
             },
@@ -633,6 +661,7 @@ mod tests {
                         path: PathBuf::from("/old"),
                         cover_path: None,
                         added_at: 100,
+                        media_type: MediaType::Comic,
                     },
                     LibraryEntry {
                         comic_id: "new".to_string(),
@@ -640,6 +669,7 @@ mod tests {
                         path: PathBuf::from("/new"),
                         cover_path: None,
                         added_at: 200,
+                        media_type: MediaType::Comic,
                     },
                 ],
             },
@@ -661,6 +691,7 @@ mod tests {
                         path: PathBuf::from("/recent"),
                         cover_path: None,
                         added_at: 0,
+                        media_type: MediaType::Comic,
                     },
                     LibraryEntry {
                         comic_id: "old".to_string(),
@@ -668,6 +699,7 @@ mod tests {
                         path: PathBuf::from("/old"),
                         cover_path: None,
                         added_at: 0,
+                        media_type: MediaType::Comic,
                     },
                 ],
             },
@@ -694,5 +726,42 @@ mod tests {
         let sorted = view.filtered_entries(&history, LibrarySort::LastRead);
         assert_eq!(sorted[0].1.comic_id, "recent");
         assert_eq!(sorted[1].1.comic_id, "old");
+    }
+
+    #[test]
+    fn test_filter_by_media_type() {
+        let mut view = LibraryView {
+            library: Library {
+                entries: vec![
+                    LibraryEntry {
+                        comic_id: "comic-1".to_string(),
+                        title: "Comic One".to_string(),
+                        path: PathBuf::from("/c1"),
+                        cover_path: None,
+                        added_at: 0,
+                        media_type: MediaType::Comic,
+                    },
+                    LibraryEntry {
+                        comic_id: "ebook-1".to_string(),
+                        title: "Ebook One".to_string(),
+                        path: PathBuf::from("/e1.epub"),
+                        cover_path: None,
+                        added_at: 0,
+                        media_type: MediaType::Ebook,
+                    },
+                ],
+            },
+            ..Default::default()
+        };
+
+        view.mode = LibraryMode::Library;
+        let comics = view.filtered_entries(&History::default(), LibrarySort::Title);
+        assert_eq!(comics.len(), 1);
+        assert_eq!(comics[0].1.media_type, MediaType::Comic);
+
+        view.mode = LibraryMode::Ebooks;
+        let ebooks = view.filtered_entries(&History::default(), LibrarySort::Title);
+        assert_eq!(ebooks.len(), 1);
+        assert_eq!(ebooks[0].1.media_type, MediaType::Ebook);
     }
 }

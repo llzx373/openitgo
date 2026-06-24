@@ -15,7 +15,8 @@ use rust_reader_core::state::ReadingState;
 use rust_reader_storage::{
     json_store::JsonStore,
     models::{
-        Bookmarks, EbookTheme, History, HistoryEntry, Library, Settings, Theme, ToolbarDisplayMode,
+        Bookmarks, EbookTheme, History, HistoryEntry, Library, MediaType, Settings, Theme,
+        ToolbarDisplayMode,
     },
 };
 use std::collections::{HashMap, HashSet};
@@ -33,6 +34,14 @@ fn is_ebook_file(path: &std::path::Path) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+fn media_type_for_path(path: &std::path::Path) -> MediaType {
+    if is_ebook_file(path) {
+        MediaType::Ebook
+    } else {
+        MediaType::Comic
+    }
 }
 
 pub struct ReaderApp {
@@ -1347,22 +1356,25 @@ impl ReaderApp {
     }
 
     fn add_folder_to_library(&mut self, path: std::path::PathBuf) {
+        if path.is_file() {
+            self.add_file_to_library(path);
+            return;
+        }
+
         if let Ok(comic) = rust_reader_parser::parse(&path) {
             self.add_comic_to_library(comic, &path);
             return;
         }
 
         // If the selected path is not a comic itself, recursively scan it for
-        // supported archives/folders and import everything found.
+        // supported archives/folders and ebooks and import everything found.
         let mut found = 0;
-        for entry in walk_supported_comics(&path) {
-            if let Ok(comic) = rust_reader_parser::parse(&entry) {
-                self.add_comic_to_library(comic, &entry);
-                found += 1;
-            }
+        for entry in walk_supported_files(&path) {
+            self.add_file_to_library(entry);
+            found += 1;
         }
         if found == 0 {
-            self.error_message = Some(format!("无法添加漫画: {}", path.display()));
+            self.error_message = Some(format!("无法添加文件或文件夹: {}", path.display()));
         }
     }
 
@@ -1395,7 +1407,46 @@ impl ReaderApp {
                     path: path.to_path_buf(),
                     cover_path: None,
                     added_at,
+                    media_type: media_type_for_path(path),
                 });
+        }
+    }
+
+    fn add_ebook_to_library(&mut self, path: std::path::PathBuf) {
+        let Ok(ebook) = rust_reader_parser::parse_ebook(&path) else {
+            return;
+        };
+        let added_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let media_type = media_type_for_path(&path);
+        if !self
+            .library_view
+            .library
+            .entries
+            .iter()
+            .any(|e| e.path == path)
+        {
+            self.library_view
+                .library
+                .entries
+                .push(rust_reader_storage::models::LibraryEntry {
+                    comic_id: ebook.id,
+                    title: ebook.title,
+                    path,
+                    cover_path: None,
+                    added_at,
+                    media_type,
+                });
+        }
+    }
+
+    fn add_file_to_library(&mut self, path: std::path::PathBuf) {
+        if is_ebook_file(&path) {
+            self.add_ebook_to_library(path);
+        } else if let Ok(comic) = rust_reader_parser::parse(&path) {
+            self.add_comic_to_library(comic, &path);
         }
     }
 
@@ -1563,8 +1614,8 @@ fn history_matches(entry: &HistoryEntry, comic_id: &str, path: &std::path::Path)
 }
 
 /// Recursively walk `root` and return paths that look like supported comic
-/// files or folders containing images.
-fn walk_supported_comics(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+/// files, ebook files, or folders containing images.
+fn walk_supported_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut result = Vec::new();
     let mut dirs = vec![root.to_path_buf()];
     while let Some(dir) = dirs.pop() {
@@ -1575,7 +1626,7 @@ fn walk_supported_comics(root: &std::path::Path) -> Vec<std::path::PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 dirs.push(path);
-            } else if is_supported_comic_file(&path) {
+            } else if is_supported_comic_file(&path) || is_ebook_file(&path) {
                 result.push(path);
             }
         }
