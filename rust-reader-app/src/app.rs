@@ -693,7 +693,7 @@ impl ReaderApp {
 
     fn render_ebook_toolbar(&mut self, ctx: &egui::Context) {
         self.ebook_view.sync_position();
-        let (total, current, current_page, total_pages) = self
+        let (total, current, current_spread, total_spreads) = self
             .ebook_view
             .open
             .as_ref()
@@ -701,8 +701,8 @@ impl ReaderApp {
                 (
                     e.ebook.total_chapters(),
                     e.current_chapter,
-                    e.current_page,
-                    e.renderer.current_page_count(),
+                    e.current_spread,
+                    e.renderer.current_spread_count(),
                 )
             })
             .unwrap_or((0, 0, 0, 0));
@@ -750,17 +750,8 @@ impl ReaderApp {
                     };
                     self.ebook_view.apply_settings(&self.settings.ebook);
                 }
-                let page_label = if total_pages > 0 {
-                    format!(
-                        "第 {} / {} 章 · 第 {} / {} 页",
-                        current + 1,
-                        total,
-                        current_page + 1,
-                        total_pages
-                    )
-                } else {
-                    format!("第 {} / {} 章", current + 1, total)
-                };
+                let (_, page_label) =
+                    Self::ebook_status_text(current, total, current_spread, total_spreads, None);
                 ui.label(page_label);
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -772,12 +763,12 @@ impl ReaderApp {
         });
     }
 
-    /// Returns the status-bar text for an ebook: chapter title and page progress.
+    /// Returns the status-bar text for an ebook: chapter title and spread progress.
     fn ebook_status_text(
         current_chapter: usize,
         total_chapters: usize,
-        current_page: usize,
-        total_pages: usize,
+        current_spread: usize,
+        total_spreads: usize,
         title: Option<&str>,
     ) -> (String, String) {
         let title = title.unwrap_or("无标题").to_string();
@@ -786,17 +777,13 @@ impl ReaderApp {
         } else {
             "无章节".to_string()
         };
-        let pages = if total_pages > 0 {
-            format!("第 {} / {} 页", current_page + 1, total_pages)
-        } else {
-            "".to_string()
-        };
-        let progress = if total_pages > 0 {
+        let progress = if total_spreads > 0 {
             format!(
-                "{} · {}  {:.0}%",
-                chapter,
-                pages,
-                current_page as f32 / total_pages as f32 * 100.0
+                "第 {} / {} 章 · 第 {} / {} 页",
+                current_chapter + 1,
+                total_chapters,
+                current_spread + 1,
+                total_spreads
             )
         } else {
             chapter
@@ -819,8 +806,8 @@ impl ReaderApp {
                 Self::ebook_status_text(
                     e.current_chapter,
                     e.ebook.total_chapters(),
-                    e.current_page,
-                    e.renderer.current_page_count(),
+                    e.current_spread,
+                    e.renderer.current_spread_count(),
                     title,
                 )
             })
@@ -2174,14 +2161,25 @@ mod tests {
     }
 
     #[test]
+    fn test_ebook_status_text_includes_spread() {
+        let (title, progress) = ReaderApp::ebook_status_text(0, 3, 2, 10, Some("第一章"));
+        assert_eq!(title, "第一章");
+        assert!(
+            progress.contains("第 3 / 10 页"),
+            "progress should show spread: {}",
+            progress
+        );
+    }
+
+    #[test]
     fn test_ebook_status_text_formats_progress() {
         let (title, progress) = ReaderApp::ebook_status_text(0, 3, 2, 10, Some("第一章"));
         assert_eq!(title, "第一章");
-        assert_eq!(progress, "第 1 / 3 章 · 第 3 / 10 页  20%");
+        assert_eq!(progress, "第 1 / 3 章 · 第 3 / 10 页");
 
         let (title, progress) = ReaderApp::ebook_status_text(2, 3, 9, 10, None);
         assert_eq!(title, "无标题");
-        assert_eq!(progress, "第 3 / 3 章 · 第 10 / 10 页  90%");
+        assert_eq!(progress, "第 3 / 3 章 · 第 10 / 10 页");
     }
 
     #[test]

@@ -160,12 +160,6 @@ impl EbookRenderer {
         (state.current_chapter, state.char_offset, state.current_page)
     }
 
-    pub fn current_page_count(&self) -> usize {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.total_pages.max(1)
-    }
-
-    #[allow(dead_code)]
     pub fn current_spread_count(&self) -> usize {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.total_spreads.max(1)
