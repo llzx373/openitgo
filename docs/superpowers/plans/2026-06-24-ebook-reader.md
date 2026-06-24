@@ -12,10 +12,10 @@
 
 ## 实现状态摘要（2026-06-24 更新）
 
-本计划 **Phase 1 ~ Phase 3 的核心基础设施已实现并验证通过**，Phase 4 的目录面板、历史/书签、书架混排仍待完成。
+本计划 **Phase 1 ~ Phase 5 已全部实现并验证通过**。
 
 已拍板决策：
-1. **书架混排**：暂时只通过"打开文件"阅读，不进入书架（C）。
+1. **书架混排**：同一书架，`LibraryEntry` 增加 `media_type` 字段区分漫画与电子书（A）。
 2. **Linux 平台**：先接受 X11 only（A）。
 3. **EPUB 渲染策略**：使用自研 HTML + 内嵌 CSS/JS（A）。
 4. **TXT 分章**：按空行/`# 章节名`/`Chapter`/`第 X 章` 分章，无标记时按 3000 字虚拟章节（A）。
@@ -30,43 +30,19 @@
 - 协议响应增加了 **`Cache-Control: no-cache`**，避免壳页面/章节被 WebKit 缓存导致 reload 异常。
 - 增加环境变量 **`RUST_READER_OPEN`**，方便开发/测试时自动打开指定漫画或电子书。
 
-已知问题：
-- 打开 EPUB 后，WebView 会重复 reload 2~3 次，随后稳定。内容已能正常加载，不影响阅读，但需后续定位根因（可能与 EPUB 章节 HTML 内含的 `<base>`/脚本或 WebKit 自定义协议行为有关）。
-
 ---
 
-## 需要你拍板的问题（先回答再继续）
+## 已确定决策
 
-1. **书架是否混排电子书与漫画？**
-   - A) 同一书架，LibraryEntry 增加 `media_type` 字段区分（推荐，改动小）
-   - B) 完全独立的书架/标签页，像 LibraryView 里再加一个"电子书"tab
-   - C) 暂时只通过"打开文件"阅读，不进入书架
-
-2. **Linux 平台要求？**
-   - wry 的 `build_as_child` 在 Linux 仅支持 X11，不支持 Wayland。
-   - A) 先接受 X11 only，后续再处理 Wayland（推荐，实现最简单）
-   - B) 必须支持 Wayland，需要引入 gtk 路径（`WebViewBuilderExtUnix::new_gtk` + `gtk::Fixed`），复杂度显著增加
-
-3. **EPUB 渲染策略？**
-   - A) 用 wry 加载我们生成的单页 HTML + 内嵌 CSS/JS，自己控制分页/主题/字体（推荐，轻量、可控）
-   - B) 集成 Readium 等成熟 JS 阅读引擎（功能强但集成重，本计划按 A 写）
-
-4. **TXT 分章/分页策略？**
-   - A) 按空行或 `# 章节名` 标记分章，无标记时按固定字数（如 3000 字）分虚拟章节（推荐）
-   - B) 只把整个文件当一章，靠 CSS 列分页
-
-5. **电子书设置最小集合？**
-   - 必选项：字体、字号、行高、页边距、主题（白天/夜晚/sepia）、阅读模式（单页/双页/连续）。
-   - 是否需要：翻页动画、字重、对齐方式、横竖屏适配？
-
-6. **历史与书签是否复用现有结构？**
-   - A) 复用 `History` / `Bookmarks`，把 `page_index` 解释为章节索引，再新增字符偏移字段（推荐，改动小）
-   - B) 新建独立的 `EbookHistory` / `EbookBookmarks`
-
-7. **文件扩展名范围？**
-   - 暂定 `.epub`、`.txt`。是否需要 `.mobi` / `.azw3` / `.md`？
-
-请回复上述问题的选项或补充说明。得到答案后，我会把计划里对应的占位决策替换为具体实现。
+| 问题 | 决策 | 说明 |
+|------|------|------|
+| 书架混排 | A | `LibraryEntry` 增加 `media_type` 字段，书架按"全部 / 漫画 / 电子书"过滤 |
+| Linux 平台 | A | 先接受 X11 only，使用 `WebViewBuilder::build_as_child` |
+| EPUB 渲染 | A | 自研 HTML + 内嵌 CSS/JS，`ebook://reader` 壳页面 + `?chapter=N` 查询加载 |
+| TXT 分章 | A | 按空行/`# 章节名`/`Chapter`/`第 X 章` 分章，无标记时按 3000 字虚拟章节 |
+| 电子书设置 | 最小集合 | 字体、字号、行高、页边距、主题、阅读模式；暂不加入翻页动画、字重、对齐方式 |
+| 历史/书签 | A | 复用现有 `History` / `Bookmarks`，`page_index` 解释为章节索引，新增 `char_offset` |
+| 文件扩展名 | 见实现 | `.epub`、`.txt`、`.mobi`/`.azw`/`.azw3`、`.md`/`.markdown` |
 
 ---
 
@@ -1524,7 +1500,7 @@ git add rust-reader-app/src/ebook_renderer.rs rust-reader-app/src/main.rs
 git commit -m "feat(ebook): add wry-based EbookRenderer with custom protocol"
 ```
 
-## Phase 4: APP 集成与 UI ⚠️ 基础集成已完成，目录面板与书架混排待实现
+## Phase 4: APP 集成与 UI ✅
 
 ### Task 10: 创建 EbookView ✅
 
@@ -1724,7 +1700,7 @@ git commit -m "feat(app): add View::Ebook and render_ebook branch"
 
 ---
 
-### Task 12: 电子书专用菜单栏与工具栏 ⚠️ 菜单/工具栏已集成，"目录"按钮与状态栏为占位待实现
+### Task 12: 电子书专用菜单栏与工具栏 ✅
 
 **Files:**
 - Modify: `rust-reader-app/src/app.rs`
@@ -1763,7 +1739,7 @@ fn render_ebook_menu(&mut self, ui: &mut egui::Ui) {
     }
     ui.separator();
     if ui.button("目录").clicked() {
-        // 目录面板实现待定：用户决定采用侧栏/弹窗/独立页面后补充。
+        self.ebook_view.toggle_toc();
         ui.close_menu();
     }
     ui.separator();
@@ -1805,7 +1781,7 @@ fn render_ebook_toolbar(&mut self, ctx: &egui::Context) {
             ui.separator();
 
             if ui.button("目录").clicked() {
-                // 目录面板实现待定：用户决定采用侧栏/弹窗/独立页面后补充。
+                self.ebook_view.toggle_toc();
             }
             if ui.button("上一章").clicked() {
                 self.ebook_view.prev_page();
@@ -1990,7 +1966,7 @@ git commit -m "feat(app): dispatch comic vs ebook based on file extension"
 
 ---
 
-### Task 14: 书架支持电子书 ❌ 待实现（当前决策：暂不进入书架，仅通过打开文件阅读）
+### Task 14: 书架支持电子书 ✅
 
 **Files:**
 - Modify: `rust-reader-storage/src/models.rs`
@@ -2049,9 +2025,9 @@ git add rust-reader-storage/src/models.rs rust-reader-app/src/views/library.rs r
 git commit -m "feat(library): support ebook entries in library"
 ```
 
-## Phase 5: 测试、验证与收尾 ⏳ 集成测试与书架 EPUB fixture 待补充
+## Phase 5: 测试、验证与收尾 ✅
 
-### Task 15: 电子书集成测试 ⏳ 解析器单元测试已存在，EPUB fixture 与 renderer 纯函数测试待补充
+### Task 15: 电子书集成测试 ✅
 
 **Files:**
 - Create: `rust-reader-app/tests/ebook_view_integration.rs`
@@ -2092,7 +2068,7 @@ git commit -m "test(ebook): add EPUB/TXT integration tests"
 
 ---
 
-### Task 16: 完整验证与代码清理 ⏳ 验证流水线已通过，书架混排与目录面板完成后可收尾
+### Task 16: 完整验证与代码清理 ✅
 
 **Files:**
 - 所有已修改文件
@@ -2133,13 +2109,13 @@ git commit -m "feat(ebook): full ebook reader support (EPUB, TXT, wry)"
 
 | 问题 | 最终决策 | 说明 |
 |------|---------|------|
-| 书架混排 | C) 暂不进入书架 | 当前仅通过"打开文件"阅读；Task 14 保留为未来扩展 |
+| 书架混排 | A) 同一书架，按 `media_type` 过滤 | `LibraryEntry` 增加 `media_type`，书架支持"全部 / 漫画 / 电子书"过滤 |
 | Linux Wayland | A) X11 only | 使用 `WebViewBuilder::build_as_child`，Wayland 支持后续再评估 |
-| EPUB 渲染 | A) 自研 HTML/CSS/JS | `ebook://reader` 壳页面 + `?chapter=N` 查询加载 |
+| EPUB 渲染 | A) 自研 HTML/CSS/JS | `ebook://reader` 壳页面 + `?chapter=N` 查询加载；章节 HTML 经 sanitize 后插入 |
 | TXT 分章 | A) 标题+空行分章，否则字数分章 | 见 `rust-reader-parser/src/txt.rs` |
 | 设置范围 | 字体、字号、行高、页边距、主题、阅读模式 | 暂不加入翻页动画、字重、对齐方式 |
-| 历史/书签 | A) 复用现有结构 + char offset | `page_index` 对应章节索引，字符偏移后续扩展 |
-| 文件扩展名 | `.epub`、`.txt`、`.mobi`/`.azw`/`.azw3`、`.md` | 见 `app.rs` 中的 `is_ebook_file` |
+| 历史/书签 | A) 复用现有结构 + char offset | `HistoryEntry.page_index` 对应章节索引，`char_offset` 保存字符偏移；电子书书签同理 |
+| 文件扩展名 | `.epub`、`.txt`、`.mobi`/`.azw`/`.azw3`、`.md`/`.markdown` | 见 `app.rs` 中的 `is_ebook_file` |
 
 ---
 

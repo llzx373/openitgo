@@ -17,7 +17,7 @@
 | `specs/2026-06-17-gpu-texture-compression-design.md` | 部分实现 | 对应设计文档 |
 | `plans/2026-06-22-thumbnail-first-rendering.md` | 已实现 | 缩略图优先渲染，部分 API 与计划有差异 |
 | `specs/2026-06-22-thumbnail-first-rendering-design.md` | 已实现 | 对应设计文档 |
-| `plans/2026-06-24-ebook-reader.md` | 部分实现 | 电子书阅读基础功能已实现，目录面板与书架混排待完成 |
+| `plans/2026-06-24-ebook-reader.md` | 已实现 | 电子书阅读完整功能已实现，包括目录面板、历史书签、书架混排与 reload 修复 |
 
 阅读建议：
 - 想了解当前功能与交互，请优先查看根目录 `README.md`、`CHANGELOG.md`、`TODO.md`。
