@@ -13,6 +13,8 @@ struct RendererState {
     ebook: Ebook,
     current_chapter: usize,
     char_offset: usize,
+    current_page: usize,
+    total_pages: usize,
     settings: EbookSettings,
 }
 
@@ -22,6 +24,8 @@ struct JsToRust {
     kind: String,
     chapter: Option<usize>,
     char_offset: Option<usize>,
+    page: Option<usize>,
+    total_pages: Option<usize>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -34,6 +38,8 @@ struct JsSettings {
     line: f32,
     margin_h: u32,
     margin_v: u32,
+    animate: bool,
+    invert_scroll: bool,
 }
 
 impl From<&EbookSettings> for JsSettings {
@@ -56,6 +62,8 @@ impl From<&EbookSettings> for JsSettings {
             line: s.line_height,
             margin_h: s.margin_horizontal,
             margin_v: s.margin_vertical,
+            animate: s.enable_page_animation,
+            invert_scroll: s.invert_scroll,
         }
     }
 }
@@ -73,6 +81,8 @@ impl EbookRenderer {
             ebook,
             current_chapter: 0,
             char_offset: 0,
+            current_page: 0,
+            total_pages: 1,
             settings,
         }));
 
@@ -139,9 +149,14 @@ impl EbookRenderer {
         }
     }
 
-    pub fn current_position(&self) -> (usize, usize) {
+    pub fn current_position(&self) -> (usize, usize, usize) {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        (state.current_chapter, state.char_offset)
+        (state.current_chapter, state.char_offset, state.current_page)
+    }
+
+    pub fn current_page_count(&self) -> usize {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.total_pages.max(1)
     }
 }
 
@@ -153,6 +168,12 @@ fn handle_ipc_message(msg: JsToRust, state: &Arc<Mutex<RendererState>>) {
             }
             if let Some(offset) = msg.char_offset {
                 state.char_offset = offset;
+            }
+            if let Some(page) = msg.page {
+                state.current_page = page;
+            }
+            if let Some(total) = msg.total_pages {
+                state.total_pages = total.max(1);
             }
         }
     }
@@ -255,6 +276,11 @@ body.paginated #content {{
   column-gap: 0;
   column-fill: auto;
   overflow: hidden;
+  scroll-snap-type: x mandatory;
+  scroll-behavior: smooth;
+}}
+body.paginated.no-anim #content {{
+  scroll-behavior: auto;
 }}
 body.double #content {{
   column-width: calc((100vw - var(--margin-h) * 2) / 2);
@@ -262,16 +288,57 @@ body.double #content {{
 body.scroll #content {{
   overflow-y: auto;
 }}
+body.paginated #content > *,
+body.paginated #content img {{
+  break-inside: avoid;
+}}
 p {{ margin: 0 0 1em 0; text-indent: 2em; }}
 img {{ max-width: 100%; height: auto; }}
+#flipper {{
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  perspective: 1500px;
+  display: none;
+  z-index: 100;
+}}
+#flipper .sheet {{
+  position: absolute;
+  top: 0;
+  height: 100%;
+  transform-style: preserve-3d;
+  transition: transform 0.45s ease-in-out;
+}}
+#flipper .front, #flipper .back {{
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  backface-visibility: hidden;
+  overflow: hidden;
+  background: var(--bg);
+}}
+#flipper .back {{
+  transform: rotateY(180deg) scaleX(-1);
+}}
 </style>
 </head>
 <body class="{mode}">
 <div id="content"></div>
+<div id="flipper"></div>
 <script>
 const content = document.getElementById('content');
+const flipper = document.getElementById('flipper');
 let currentChapter = 0;
 let currentOffset = 0;
+let isFlipping = false;
+let currentSettings = {{
+  mode: '{mode}',
+  animate: {animate},
+  invert_scroll: {invert_scroll}
+}};
 
 // Prevent anchors and other navigation from reloading the shell.
 document.addEventListener('click', function(e) {{
@@ -299,8 +366,32 @@ function sendIpc(obj) {{
   }}
 }}
 
+function isPaginated() {{
+  return document.body.classList.contains('paginated') || document.body.classList.contains('double');
+}}
+
+function pageWidth() {{
+  if (document.body.classList.contains('double')) return content.clientWidth / 2;
+  return content.clientWidth;
+}}
+
+function totalPages() {{
+  if (!isPaginated()) return 1;
+  const pw = pageWidth();
+  if (pw <= 0) return 1;
+  return Math.max(1, Math.round(content.scrollWidth / pw));
+}}
+
+function currentPage() {{
+  if (!isPaginated()) return 0;
+  const pw = pageWidth();
+  if (pw <= 0) return 0;
+  return Math.max(0, Math.min(totalPages() - 1, Math.round(content.scrollLeft / pw)));
+}}
+
 function applySettings(json) {{
   const s = typeof json === 'string' ? JSON.parse(json) : json;
+  currentSettings = s;
   const root = document.documentElement;
   root.style.setProperty('--bg', s.bg);
   root.style.setProperty('--fg', s.fg);
@@ -310,6 +401,11 @@ function applySettings(json) {{
   root.style.setProperty('--margin-h', s.margin_h + 'px');
   root.style.setProperty('--margin-v', s.margin_v + 'px');
   document.body.className = s.mode;
+  if (s.animate) {{
+    document.body.classList.remove('no-anim');
+  }} else {{
+    document.body.classList.add('no-anim');
+  }}
 }}
 
 async function loadChapter(index, offset) {{
@@ -321,6 +417,8 @@ async function loadChapter(index, offset) {{
     content.innerHTML = html;
     if (offset) {{
       scrollToOffset(offset);
+    }} else {{
+      content.scrollLeft = 0;
     }}
     reportPosition();
   }} catch (e) {{
@@ -338,7 +436,7 @@ function scrollToOffset(offset) {{
       const range = document.createRange();
       range.setStart(node, offset - count);
       const rect = range.getBoundingClientRect();
-      if (document.body.classList.contains('paginated') || document.body.classList.contains('double')) {{
+      if (isPaginated()) {{
         content.scrollLeft = rect.left + content.scrollLeft - content.getBoundingClientRect().left;
       }} else {{
         content.scrollTop = rect.top + content.scrollTop - content.getBoundingClientRect().top;
@@ -350,49 +448,172 @@ function scrollToOffset(offset) {{
 }}
 
 function reportPosition() {{
-  const rect = content.getBoundingClientRect();
-  let offset = 0;
-  const textNodes = [];
-  const walk = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, null);
-  while (walk.nextNode()) textNodes.push(walk.currentNode);
-  for (const node of textNodes) {{
-    const r = document.createRange();
-    r.selectNode(node);
-    const br = r.getBoundingClientRect();
-    if (br.left >= rect.left && br.top >= rect.top) {{
-      break;
+  if (isPaginated()) {{
+    const page = currentPage();
+    const pw = pageWidth();
+    const rect = content.getBoundingClientRect();
+    const pageLeft = rect.left + page * pw;
+    let offset = 0;
+    const textNodes = [];
+    const walk = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, null);
+    while (walk.nextNode()) textNodes.push(walk.currentNode);
+    for (const node of textNodes) {{
+      const r = document.createRange();
+      r.selectNode(node);
+      const br = r.getBoundingClientRect();
+      if (br.left >= pageLeft && br.left < pageLeft + pw && br.top >= rect.top) {{
+        break;
+      }}
+      offset += node.length;
     }}
-    offset += node.length;
+    sendIpc({{
+      type: 'position',
+      chapter: currentChapter,
+      char_offset: offset,
+      page: page,
+      total_pages: totalPages()
+    }});
+  }} else {{
+    const rect = content.getBoundingClientRect();
+    let offset = 0;
+    const textNodes = [];
+    const walk = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, null);
+    while (walk.nextNode()) textNodes.push(walk.currentNode);
+    for (const node of textNodes) {{
+      const r = document.createRange();
+      r.selectNode(node);
+      const br = r.getBoundingClientRect();
+      if (br.left >= rect.left && br.top >= rect.top) {{
+        break;
+      }}
+      offset += node.length;
+    }}
+    sendIpc({{
+      type: 'position',
+      chapter: currentChapter,
+      char_offset: offset,
+      page: 0,
+      total_pages: 1
+    }});
   }}
-  sendIpc({{
-    type: 'position',
-    chapter: currentChapter,
-    char_offset: offset
-  }});
 }}
 
-function pageDelta() {{
-  return document.body.classList.contains('double') ? content.clientWidth / 2 : content.clientWidth;
+function goToPage(page, animate) {{
+  if (!isPaginated()) return;
+  const total = totalPages();
+  page = Math.max(0, Math.min(total - 1, page));
+  if (page === currentPage()) return;
+  if (animate && currentSettings.animate) {{
+    flipToPage(page);
+  }} else {{
+    content.scrollTo({{ left: page * pageWidth(), behavior: animate ? 'smooth' : 'auto' }});
+  }}
 }}
 
 function nextPage() {{
   if (document.body.classList.contains('scroll')) {{
     content.scrollTop += content.clientHeight * 0.9;
   }} else {{
-    content.scrollLeft += pageDelta();
+    goToPage(currentPage() + 1, true);
   }}
-  reportPosition();
 }}
 
 function prevPage() {{
   if (document.body.classList.contains('scroll')) {{
     content.scrollTop -= content.clientHeight * 0.9;
   }} else {{
-    content.scrollLeft -= pageDelta();
+    goToPage(currentPage() - 1, true);
   }}
-  reportPosition();
 }}
 
+function capturePage(page) {{
+  const container = document.createElement('div');
+  container.className = 'page-capture';
+  container.style.width = '100%';
+  container.style.height = '100%';
+  container.style.position = 'relative';
+  container.style.overflow = 'hidden';
+
+  const clone = content.cloneNode(true);
+  const pw = pageWidth();
+  clone.style.position = 'absolute';
+  clone.style.left = -(page * pw) + 'px';
+  clone.style.top = '0';
+  clone.style.width = content.scrollWidth + 'px';
+  clone.style.height = content.clientHeight + 'px';
+  clone.style.padding = '0';
+  clone.style.margin = '0';
+  clone.style.overflow = 'visible';
+
+  container.appendChild(clone);
+  return container;
+}}
+
+function flipToPage(targetPage) {{
+  if (isFlipping) return;
+  const fromPage = currentPage();
+  const direction = targetPage > fromPage ? 1 : -1;
+  if (targetPage === fromPage) return;
+  isFlipping = true;
+
+  const sheet = document.createElement('div');
+  sheet.className = 'sheet';
+  const isDouble = document.body.classList.contains('double');
+  sheet.style.left = isDouble ? '50%' : '0';
+  sheet.style.width = isDouble ? '50%' : '100%';
+
+  const front = document.createElement('div');
+  front.className = 'front';
+  front.appendChild(capturePage(fromPage));
+  const back = document.createElement('div');
+  back.className = 'back';
+  back.appendChild(capturePage(targetPage));
+
+  sheet.appendChild(front);
+  sheet.appendChild(back);
+  flipper.innerHTML = '';
+  flipper.appendChild(sheet);
+  flipper.style.display = 'block';
+
+  content.scrollLeft = targetPage * pageWidth();
+
+  requestAnimationFrame(() => {{
+    sheet.style.transform = direction > 0 ? 'rotateY(-180deg)' : 'rotateY(180deg)';
+  }});
+
+  setTimeout(() => {{
+    flipper.style.display = 'none';
+    flipper.innerHTML = '';
+    isFlipping = false;
+    reportPosition();
+  }}, 450);
+}}
+
+function onWheel(e) {{
+  if (!isPaginated()) return;
+  e.preventDefault();
+  const delta = currentSettings.invert_scroll ? -e.deltaY : e.deltaY;
+  if (delta > 0 || e.deltaX > 0) {{
+    nextPage();
+  }} else if (delta < 0 || e.deltaX < 0) {{
+    prevPage();
+  }}
+}}
+
+function onClick(e) {{
+  if (!isPaginated()) return;
+  if (window.getSelection().toString().length > 0) return;
+  const rect = content.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  if (x < rect.width / 2) {{
+    prevPage();
+  }} else {{
+    nextPage();
+  }}
+}}
+
+content.addEventListener('wheel', onWheel, {{ passive: false }});
+content.addEventListener('click', onClick);
 window.addEventListener('scroll', reportPosition, true);
 window.addEventListener('resize', reportPosition);
 applySettings({settings_json});
@@ -409,6 +630,8 @@ sendIpc({{ type: 'ready' }});
         margin_h = js.margin_h,
         margin_v = js.margin_v,
         mode = js.mode,
+        animate = js.animate,
+        invert_scroll = js.invert_scroll,
         settings_json = serde_json::to_string(&js).unwrap_or_default()
     )
 }
@@ -426,13 +649,16 @@ mod tests {
         assert!(html.contains("function applySettings"));
         assert!(html.contains("function nextPage"));
         assert!(html.contains("function prevPage"));
+        assert!(html.contains("function goToPage"));
         assert!(html.contains("function reportPosition"));
         assert!(html.contains("function sendIpc"));
+        assert!(html.contains("function onWheel"));
+        assert!(html.contains("function onClick"));
         assert!(html.contains("window.ipc.postMessage"));
     }
 
     #[test]
-    fn test_reader_html_includes_css_variables() {
+    fn test_reader_html_includes_pagination_css() {
         let settings = EbookSettings {
             font_size: 20,
             line_height: 1.8,
@@ -445,6 +671,8 @@ mod tests {
         assert!(html.contains("--line: 1.8"));
         assert!(html.contains("--margin-h: 32px"));
         assert!(html.contains("--margin-v: 40px"));
+        assert!(html.contains("scroll-snap-type: x mandatory"));
+        assert!(html.contains("break-inside: avoid"));
     }
 
     #[test]
@@ -500,5 +728,17 @@ mod tests {
         let js = JsSettings::from(&settings);
         assert_eq!(js.bg, "#f4ecd8");
         assert_eq!(js.fg, "#5b4636");
+    }
+
+    #[test]
+    fn test_js_settings_pagination_flags() {
+        let settings = EbookSettings {
+            enable_page_animation: true,
+            invert_scroll: true,
+            ..Default::default()
+        };
+        let js = JsSettings::from(&settings);
+        assert!(js.animate);
+        assert!(js.invert_scroll);
     }
 }

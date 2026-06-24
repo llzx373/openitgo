@@ -217,6 +217,8 @@ pub struct EbookSettings {
     pub margin_horizontal: u32,
     pub margin_vertical: u32,
     pub theme: EbookTheme,
+    pub enable_page_animation: bool,
+    pub invert_scroll: bool,
 }
 
 impl Default for EbookSettings {
@@ -229,6 +231,8 @@ impl Default for EbookSettings {
             margin_horizontal: 24,
             margin_vertical: 24,
             theme: EbookTheme::Light,
+            enable_page_animation: false,
+            invert_scroll: false,
         }
     }
 }
@@ -377,6 +381,8 @@ mod tests {
         assert_eq!(s.margin_horizontal, 24);
         assert_eq!(s.margin_vertical, 24);
         assert_eq!(s.theme, EbookTheme::Light);
+        assert!(!s.enable_page_animation);
+        assert!(!s.invert_scroll);
     }
 
     #[test]

@@ -188,6 +188,12 @@ impl SettingsView {
                 ui.selectable_value(&mut settings.ebook.theme, EbookTheme::Dark, "夜晚");
                 ui.selectable_value(&mut settings.ebook.theme, EbookTheme::Sepia, "羊皮纸");
             });
+
+        ui.checkbox(&mut settings.ebook.enable_page_animation, "翻页动画");
+        ui.checkbox(
+            &mut settings.ebook.invert_scroll,
+            "反转滚轮方向（适用于 macOS 自然滚动）",
+        );
     }
 
     fn shortcut_editor(
