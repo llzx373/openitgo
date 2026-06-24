@@ -705,7 +705,7 @@ impl ReaderApp {
                 }
                 ui.separator();
                 if ui.button("目录").clicked() {
-                    // TODO: open TOC panel
+                    self.ebook_view.toggle_toc();
                 }
                 if ui.button("上一页").clicked() {
                     self.ebook_view.prev_page();
