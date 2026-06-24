@@ -1,6 +1,7 @@
 mod chapters;
 pub mod epub;
 pub mod folder;
+pub mod html;
 pub mod markdown;
 pub mod mobi;
 pub mod pdf;
