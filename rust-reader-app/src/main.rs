@@ -1,5 +1,7 @@
 mod app;
 mod cache;
+#[allow(dead_code)]
+mod ebook_renderer;
 mod fonts;
 mod loader;
 mod opener;
