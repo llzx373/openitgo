@@ -283,6 +283,8 @@ pub struct Bookmark {
     pub comic_id: String,
     pub volume_index: usize,
     pub page_index: usize,
+    #[serde(default)]
+    pub char_offset: Option<usize>,
     pub note: Option<String>,
 }
 
@@ -394,5 +396,28 @@ mod tests {
             r#"{"comic_id":"id","path":"/tmp","volume_index":0,"page_index":1,"last_read_at":0}"#;
         let h: HistoryEntry = serde_json::from_str(json).unwrap();
         assert_eq!(h.char_offset, None);
+    }
+
+    #[test]
+    fn test_bookmark_defaults_and_roundtrip() {
+        let b = Bookmark {
+            comic_id: "ebook1".to_string(),
+            volume_index: 0,
+            page_index: 3,
+            char_offset: Some(1200),
+            note: Some("note".to_string()),
+        };
+        let json = serde_json::to_string(&b).unwrap();
+        let loaded: Bookmark = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.page_index, 3);
+        assert_eq!(loaded.char_offset, Some(1200));
+        assert_eq!(b, loaded);
+    }
+
+    #[test]
+    fn test_bookmark_deserializes_missing_char_offset_as_none() {
+        let json = r#"{"comic_id":"id","volume_index":0,"page_index":1,"note":null}"#;
+        let b: Bookmark = serde_json::from_str(json).unwrap();
+        assert_eq!(b.char_offset, None);
     }
 }

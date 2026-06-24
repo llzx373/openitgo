@@ -67,6 +67,7 @@ fn test_bookmarks_roundtrip() {
             comic_id: "id1".to_string(),
             volume_index: 0,
             page_index: 3,
+            char_offset: Some(100),
             note: Some("remember this page".to_string()),
         }],
     };

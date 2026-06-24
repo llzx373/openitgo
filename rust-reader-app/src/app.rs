@@ -713,6 +713,10 @@ impl ReaderApp {
                 if ui.button("下一页").clicked() {
                     self.ebook_view.next_page();
                 }
+                ui.separator();
+                if ui.button("添加书签").clicked() {
+                    self.add_ebook_bookmark();
+                }
                 ui.label(format!("{} / {}", current + 1, total));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1044,6 +1048,48 @@ impl ReaderApp {
         });
     }
 
+    fn render_ebook_bookmarks(&mut self, ui: &mut egui::Ui) {
+        let Some(open) = self.ebook_view.open.as_ref() else {
+            return;
+        };
+        let comic_id = open.ebook.id.clone();
+        let chapters: Vec<Option<String>> = open
+            .ebook
+            .chapters
+            .iter()
+            .map(|c| c.title.clone())
+            .collect();
+        let entries: Vec<(usize, usize, Option<String>)> = self
+            .bookmarks
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.comic_id == comic_id)
+            .map(|(idx, b)| (idx, b.page_index, b.note.clone()))
+            .collect();
+        if entries.is_empty() {
+            return;
+        }
+        ui.menu_button("书签", |ui| {
+            for (idx, chapter, note) in entries {
+                let title = chapters
+                    .get(chapter)
+                    .cloned()
+                    .flatten()
+                    .unwrap_or_else(|| format!("第 {} 章", chapter + 1));
+                let label = note.unwrap_or(title);
+                if ui.button(label).clicked() {
+                    self.ebook_view.goto_chapter(chapter);
+                    ui.close_menu();
+                }
+                if ui.small_button("删除").clicked() {
+                    self.bookmarks.entries.remove(idx);
+                    ui.close_menu();
+                }
+            }
+        });
+    }
+
     fn render_ebook_menu(&mut self, ui: &mut egui::Ui) {
         if ui.button("上一页").clicked() {
             self.ebook_view.prev_page();
@@ -1055,9 +1101,15 @@ impl ReaderApp {
         }
         ui.separator();
         if ui.button("目录").clicked() {
-            // TODO: open TOC panel
+            self.ebook_view.toggle_toc();
             ui.close_menu();
         }
+        ui.separator();
+        if ui.button("添加书签").clicked() {
+            self.add_ebook_bookmark();
+            ui.close_menu();
+        }
+        self.render_ebook_bookmarks(ui);
         ui.separator();
         if ui.button("增大字体").clicked() {
             self.settings.ebook.font_size = (self.settings.ebook.font_size + 1).min(72);
@@ -1516,6 +1568,30 @@ impl ReaderApp {
                         comic_id,
                         volume_index: 0,
                         page_index,
+                        char_offset: None,
+                        note: None,
+                    });
+            }
+        }
+    }
+
+    fn add_ebook_bookmark(&mut self) {
+        self.ebook_view.sync_position();
+        if let Some(open) = self.ebook_view.open.as_ref() {
+            let comic_id = open.ebook.id.clone();
+            let page_index = open.current_chapter;
+            let char_offset = open.renderer.current_position().1;
+            let exists = self.bookmarks.entries.iter().any(|b| {
+                b.comic_id == comic_id && b.volume_index == 0 && b.page_index == page_index
+            });
+            if !exists {
+                self.bookmarks
+                    .entries
+                    .push(rust_reader_storage::models::Bookmark {
+                        comic_id,
+                        volume_index: 0,
+                        page_index,
+                        char_offset: Some(char_offset),
                         note: None,
                     });
             }
