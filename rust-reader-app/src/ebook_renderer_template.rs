@@ -254,8 +254,43 @@ function goToSpread(index, animate) {{
   }}
 }}
 
+let spreadElementCache = {{}};
+
+function createSpreadElement(html) {{
+  const el = document.createElement('div');
+  el.innerHTML = html;
+  return el.firstElementChild || el;
+}}
+
+function preloadAdjacent() {{
+  const indices = [currentSpread - 1, currentSpread + 1];
+  for (const idx of indices) {{
+    if (idx >= 0 && idx < spreads.length) {{
+      if (!spreadElementCache[idx]) {{
+        spreadElementCache[idx] = createSpreadElement(spreads[idx]);
+      }}
+    }}
+  }}
+  // Prune cached spreads that are no longer adjacent
+  for (const key of Object.keys(spreadElementCache)) {{
+    const k = parseInt(key, 10);
+    if (Math.abs(k - currentSpread) > 1) {{
+      delete spreadElementCache[k];
+    }}
+  }}
+}}
+
+function getSpreadElement(index) {{
+  if (index < 0 || index >= spreads.length) {{
+    return document.createElement('div');
+  }}
+  if (spreadElementCache[index]) return spreadElementCache[index];
+  return createSpreadElement(spreads[index]);
+}}
+
 function renderSpread(index) {{
-  spread.innerHTML = spreads[index];
+  spread.innerHTML = '';
+  spread.appendChild(getSpreadElement(index));
   spread.style.display = 'block';
   content.style.display = 'none';
 }}
@@ -288,9 +323,6 @@ function scrollToOffset(offset) {{
   }}
 }}
 
-// TODO(Task 9): implement preloading of adjacent spreads.
-function preloadAdjacent() {{}}
-
 // TODO(Task 10): implement 3D flip animation between spreads.
 function flipToSpread(targetIndex) {{
   renderSpread(targetIndex);
@@ -322,6 +354,7 @@ function applySettings(json) {{
 async function loadChapter(index, charOffset) {{
   index = index ?? 0;
   currentChapter = index;
+  spreadElementCache = {{}}; // clear stale cache
   try {{
     const res = await fetch('ebook://reader?chapter=' + currentChapter);
     currentChapterHtml = await res.text();
@@ -604,5 +637,13 @@ mod tests {
         assert!(html.contains("#spread"));
         assert!(html.contains("function splitSinglePage"));
         assert!(html.contains("function splitDoublePage"));
+    }
+
+    #[test]
+    fn test_reader_html_contains_preload_logic() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(html.contains("function preloadAdjacent"));
+        assert!(html.contains("spreadElementCache"));
     }
 }
