@@ -54,9 +54,6 @@ body.paginated.no-anim #content {{
 body.double #content {{
   column-width: calc((100vw - var(--margin-h) * 2) / 2);
 }}
-body.scroll #content {{
-  overflow-y: auto;
-}}
 body.paginated #content > *,
 body.paginated #content img {{
   break-inside: avoid;
@@ -111,6 +108,9 @@ img {{ max-width: 100%; height: auto; }}
   padding: var(--margin-v) var(--margin-h);
   box-sizing: border-box;
   overflow: hidden;
+}}
+body.scroll #spread {{
+  overflow-y: scroll;
 }}
 </style>
 </head>
@@ -325,7 +325,7 @@ function findSpreadForOffset(offset) {{
 
 function scrollToOffset(offset) {{
   const textNodes = [];
-  const walk = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, null);
+  const walk = document.createTreeWalker(spread, NodeFilter.SHOW_TEXT, null);
   while (walk.nextNode()) textNodes.push(walk.currentNode);
   let count = 0;
   for (const node of textNodes) {{
@@ -333,7 +333,7 @@ function scrollToOffset(offset) {{
       const range = document.createRange();
       range.setStart(node, offset - count);
       const rect = range.getBoundingClientRect();
-      content.scrollTop = rect.top + content.scrollTop - content.getBoundingClientRect().top;
+      spread.scrollTop = rect.top + spread.scrollTop - spread.getBoundingClientRect().top;
       break;
     }}
     count += node.length;
@@ -425,12 +425,26 @@ function applySettings(json) {{
     document.body.classList.add('no-anim');
   }}
   // 设置变化可能导致分页改变，重新切分
-  if (currentChapterHtml && !isScrollMode()) {{
-    cancelFlip();
-    const offset = currentSpreadCharOffset();
-    spreads = splitIntoSpreads(currentChapterHtml);
-    currentSpread = findSpreadForOffset(offset);
-    goToSpread(currentSpread, false);
+  if (currentChapterHtml) {{
+    if (isScrollMode()) {{
+      cancelFlip();
+      const offset = currentSpreadCharOffset();
+      spread.innerHTML = currentChapterHtml;
+      spread.style.display = 'block';
+      content.style.display = 'none';
+      spreads = [];
+      currentSpread = 0;
+      if (offset > 0) {{
+        scrollToOffset(offset);
+      }}
+      reportPosition();
+    }} else {{
+      cancelFlip();
+      const offset = currentSpreadCharOffset();
+      spreads = splitIntoSpreads(currentChapterHtml);
+      currentSpread = findSpreadForOffset(offset);
+      goToSpread(currentSpread, false);
+    }}
   }}
 }}
 
@@ -443,9 +457,9 @@ async function loadChapter(index, charOffset) {{
     const res = await fetch('ebook://reader?chapter=' + currentChapter);
     currentChapterHtml = await res.text();
     if (isScrollMode()) {{
-      content.innerHTML = currentChapterHtml;
-      content.style.display = 'block';
-      spread.style.display = 'none';
+      spread.innerHTML = currentChapterHtml;
+      spread.style.display = 'block';
+      content.style.display = 'none';
       if (charOffset) {{
         scrollToOffset(charOffset);
       }}
@@ -482,11 +496,11 @@ function reportPosition() {{
       total_spreads: spreads.length
     }});
   }} else {{
-    // Scroll mode fallback: use #content's visible text start.
-    const rect = content.getBoundingClientRect();
+    // Scroll mode fallback: use #spread's visible text start.
+    const rect = spread.getBoundingClientRect();
     let offset = 0;
     const textNodes = [];
-    const walk = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, null);
+    const walk = document.createTreeWalker(spread, NodeFilter.SHOW_TEXT, null);
     while (walk.nextNode()) textNodes.push(walk.currentNode);
     for (const node of textNodes) {{
       const r = document.createRange();
@@ -515,7 +529,7 @@ function textLength(html) {{
 
 function nextPage() {{
   if (isScrollMode()) {{
-    content.scrollTop += content.clientHeight * 0.9;
+    spread.scrollTop += spread.clientHeight * 0.9;
     return;
   }}
   if (currentSpread + 1 < spreads.length) {{
@@ -527,7 +541,7 @@ function nextPage() {{
 
 function prevPage() {{
   if (isScrollMode()) {{
-    content.scrollTop -= content.clientHeight * 0.9;
+    spread.scrollTop -= spread.clientHeight * 0.9;
     return;
   }}
   if (currentSpread > 0) {{
@@ -767,5 +781,15 @@ mod tests {
         assert!(html.contains("!isScrollMode()"));
         assert!(html.contains("splitIntoSpreads(currentChapterHtml)"));
         assert!(html.contains("goToSpread(currentSpread, false)"));
+    }
+
+    #[test]
+    fn test_reader_html_scroll_mode_shows_vertical_scrollbar() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(html.contains("body.scroll #spread"));
+        assert!(html.contains("overflow-y: scroll"));
+        assert!(html.contains("spread.innerHTML = currentChapterHtml"));
+        assert!(html.contains("spread.scrollTop +="));
     }
 }
