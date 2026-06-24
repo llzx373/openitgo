@@ -49,6 +49,7 @@ fn test_history_roundtrip() {
             path: PathBuf::from("/tmp/comic"),
             volume_index: 0,
             page_index: 7,
+            char_offset: None,
             last_read_at: 456,
         }],
     };

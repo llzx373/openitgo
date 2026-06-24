@@ -1058,8 +1058,7 @@ impl ReaderApp {
             ui.close_menu();
         }
         if ui.button("减小字体").clicked() {
-            self.settings.ebook.font_size =
-                self.settings.ebook.font_size.saturating_sub(1).max(10);
+            self.settings.ebook.font_size = self.settings.ebook.font_size.saturating_sub(1).max(10);
             self.ebook_view.apply_settings(&self.settings.ebook);
             ui.close_menu();
         }

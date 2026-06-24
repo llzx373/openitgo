@@ -712,6 +712,7 @@ mod tests {
                     path: std::path::PathBuf::new(),
                     volume_index: 0,
                     page_index: 0,
+                    char_offset: None,
                     last_read_at: 100,
                 },
                 HistoryEntry {
@@ -719,6 +720,7 @@ mod tests {
                     path: std::path::PathBuf::new(),
                     volume_index: 0,
                     page_index: 0,
+                    char_offset: None,
                     last_read_at: 300,
                 },
             ],
