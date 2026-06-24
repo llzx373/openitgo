@@ -14,6 +14,7 @@ pub struct OpenEbook {
     pub renderer: EbookRenderer,
     pub current_chapter: usize,
     pub current_page: usize,
+    pub current_spread: usize,
 }
 
 impl EbookView {
@@ -33,6 +34,7 @@ impl EbookView {
             renderer,
             current_chapter: 0,
             current_page: 0,
+            current_spread: 0,
         });
         Ok(())
     }
@@ -100,6 +102,8 @@ impl EbookView {
             let (chapter, _, page) = open.renderer.current_position();
             open.current_chapter = chapter;
             open.current_page = page;
+            // Placeholder: use current_spread_count() until Task 5 adds current_spread().
+            open.current_spread = open.renderer.current_spread_count();
         }
     }
 
@@ -182,5 +186,23 @@ mod tests {
         let chapter = &ebook.chapters[1];
         assert_eq!(chapter.index, 1);
         assert_eq!(chapter.title.as_deref(), Some("第二章"));
+    }
+
+    #[test]
+    fn test_open_ebook_has_current_spread_field() {
+        // Compile-time check that OpenEbook exposes a pub current_spread: usize field.
+        fn assert_field_exists(renderer: EbookRenderer) -> usize {
+            let ebook = sample_ebook();
+            let mut open = OpenEbook {
+                ebook,
+                renderer,
+                current_chapter: 0,
+                current_page: 0,
+                current_spread: 0,
+            };
+            open.current_spread = 7;
+            open.current_spread
+        }
+        let _ = assert_field_exists;
     }
 }
