@@ -16,6 +16,8 @@ pub enum ParseError {
     NoPages,
     #[error("Invalid EPUB: {0}")]
     InvalidEpub(String),
+    #[error("Invalid MOBI: {0}")]
+    InvalidMobi(String),
     #[error("Invalid text file: {0}")]
     InvalidText(String),
 }

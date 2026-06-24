@@ -93,3 +93,15 @@ impl EpubParser {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_supports_epub() {
+        assert!(EpubParser::supports(Path::new("book.epub")));
+        assert!(!EpubParser::supports(Path::new("book.pdf")));
+        assert!(!EpubParser::supports(Path::new("book.mobi")));
+    }
+}

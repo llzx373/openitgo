@@ -18,8 +18,8 @@ impl MobiParser {
     }
 
     pub fn parse(path: &Path) -> Result<Ebook, ParseError> {
-        let book = mobi::Mobi::from_path(path)
-            .map_err(|e| ParseError::InvalidArchive(format!("{}", e)))?;
+        let book =
+            mobi::Mobi::from_path(path).map_err(|e| ParseError::InvalidMobi(format!("{}", e)))?;
 
         let title = book.title();
         let author = book.author().unwrap_or_default();
@@ -33,7 +33,7 @@ impl MobiParser {
 
         let content = book
             .content_as_string()
-            .map_err(|e| ParseError::InvalidArchive(format!("{}", e)))?;
+            .map_err(|e| ParseError::InvalidMobi(format!("{}", e)))?;
 
         let words: Vec<&str> = content.split_whitespace().collect();
         let chunk_size = 3000;
@@ -69,5 +69,19 @@ impl MobiParser {
             spine: Vec::new(),
             chapters,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_supports_mobi() {
+        assert!(MobiParser::supports(Path::new("book.mobi")));
+        assert!(MobiParser::supports(Path::new("book.azw")));
+        assert!(MobiParser::supports(Path::new("book.azw3")));
+        assert!(!MobiParser::supports(Path::new("book.epub")));
+        assert!(!MobiParser::supports(Path::new("book.txt")));
     }
 }

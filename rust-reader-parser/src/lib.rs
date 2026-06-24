@@ -1,3 +1,4 @@
+mod chapters;
 pub mod epub;
 pub mod folder;
 pub mod markdown;
