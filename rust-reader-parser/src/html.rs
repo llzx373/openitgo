@@ -52,7 +52,7 @@ pub fn render_chapter_html(ebook: &Ebook, chapter_index: usize) -> Result<String
         let html = doc
             .get_resource_str_by_path(&chapter.href)
             .ok_or(ParseError::NoPages)?;
-        Ok(html)
+        Ok(sanitize_epub_html(&html))
     } else {
         Err(ParseError::Unsupported)
     }
@@ -60,6 +60,153 @@ pub fn render_chapter_html(ebook: &Ebook, chapter_index: usize) -> Result<String
 
 fn split_txt(text: &str) -> Vec<(Option<String>, String)> {
     split_by_heading(text, txt_extract_title, txt_is_heading)
+}
+
+/// Sanitizes EPUB chapter HTML for display inside a controlled WebView shell.
+/// Removes `<base>` tags (which would change the shell's base URL and cause
+/// reloads), scripts, stylesheet links, and disables anchor navigation.
+pub fn sanitize_epub_html(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let chars: Vec<(usize, char)> = html.char_indices().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let (start_idx, c) = chars[i];
+        if c != '<' {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+
+        let mut end_j = None;
+        let mut in_quote = None::<char>;
+        let mut j = i + 1;
+        while j < chars.len() {
+            let (_, ch) = chars[j];
+            match in_quote {
+                None => {
+                    if ch == '"' || ch == '\'' {
+                        in_quote = Some(ch);
+                    } else if ch == '>' {
+                        end_j = Some(j);
+                        break;
+                    }
+                }
+                Some(q) => {
+                    if ch == q {
+                        in_quote = None;
+                    }
+                }
+            }
+            j += 1;
+        }
+
+        let end_j = match end_j {
+            Some(e) => e,
+            None => {
+                out.push_str(&html[start_idx..]);
+                break;
+            }
+        };
+
+        let tag = &html[start_idx..=chars[end_j].0];
+        let lower = tag.to_ascii_lowercase();
+        if lower.starts_with("<script") {
+            // Drop the whole script block, including its body.
+            let after = &html[chars[end_j].0 + 1..];
+            let close = after.to_ascii_lowercase().find("</script>");
+            let skip = match close {
+                Some(pos) => after[pos..]
+                    .char_indices()
+                    .nth("</script>".len())
+                    .map(|(i, _)| pos + i)
+                    .unwrap_or(after.len()),
+                None => after.len(),
+            };
+            let new_pos = chars[end_j].0 + 1 + skip;
+            i = match chars.binary_search_by_key(&new_pos, |(idx, _)| *idx) {
+                Ok(p) => p,
+                Err(p) => p.min(chars.len()),
+            };
+            continue;
+        }
+        if lower.starts_with("<base") || lower.starts_with("<link") {
+            // Drop these tags entirely.
+        } else if is_anchor_open_tag(&lower) {
+            out.push_str("<span");
+            strip_attributes(&lower, tag, &mut out, &["href", "onclick"]);
+        } else if is_anchor_close_tag(&lower) {
+            out.push_str("</span>");
+        } else {
+            out.push_str(tag);
+        }
+        i = end_j + 1;
+    }
+    out
+}
+
+fn is_anchor_open_tag(lower: &str) -> bool {
+    lower.starts_with("<a")
+        && matches!(
+            lower.as_bytes().get(2).copied(),
+            Some(b' ') | Some(b'>') | Some(b'\t') | Some(b'\n') | Some(b'\r') | Some(b'/')
+        )
+}
+
+fn is_anchor_close_tag(lower: &str) -> bool {
+    lower.starts_with("</a")
+        && matches!(
+            lower.as_bytes().get(3).copied(),
+            None | Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')
+        )
+}
+
+fn strip_attributes(lower_tag: &str, original_tag: &str, out: &mut String, names: &[&str]) {
+    // original_tag starts with '<' and ends with '>'; strip both ends.
+    let inner = &original_tag[1..original_tag.len().saturating_sub(1)];
+    let lower_inner = &lower_tag[1..lower_tag.len().saturating_sub(1)];
+    // Skip the tag name ('a').
+    let mut i = 1usize;
+    let mut first = true;
+    while i < inner.len() {
+        while i < inner.len() && inner.as_bytes()[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= inner.len() {
+            break;
+        }
+        let attr_start = i;
+        let mut in_quote = None::<u8>;
+        let mut j = i;
+        while j < inner.len() {
+            let c = inner.as_bytes()[j];
+            if in_quote.is_none() && c.is_ascii_whitespace() {
+                break;
+            }
+            if in_quote.is_none() && (c == b'"' || c == b'\'') {
+                in_quote = Some(c);
+            } else if in_quote == Some(c) {
+                in_quote = None;
+            }
+            j += 1;
+        }
+        let attr = &inner[attr_start..j];
+        let lower_attr = &lower_inner[attr_start..j];
+        let name_end = lower_attr
+            .find(|c: char| c == '=' || c.is_ascii_whitespace())
+            .unwrap_or(lower_attr.len());
+        let name = &lower_attr[..name_end];
+        if !names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+            if first {
+                out.push(' ');
+                first = false;
+            } else {
+                out.push(' ');
+            }
+            out.push_str(attr);
+        }
+        i = j;
+    }
+    out.push('>');
 }
 
 fn txt_is_heading(line: &str) -> bool {
@@ -238,5 +385,28 @@ mod tests {
             render_chapter_html(&ebook, 0),
             Err(ParseError::Unsupported)
         ));
+    }
+
+    #[test]
+    fn test_sanitize_epub_html_removes_base_and_scripts() {
+        let html = r#"<html><head><base href="OEBPS/"/><script>alert('x');</script><link rel="stylesheet" href="style.css"/></head><body><a href="ch2.xhtml" class="next">下一章</a><p>Hello</p></body></html>"#;
+        let clean = sanitize_epub_html(html);
+        assert!(!clean.contains("<base"));
+        assert!(!clean.contains("<script"));
+        assert!(!clean.contains("</script"));
+        assert!(!clean.contains("<link"));
+        assert!(!clean.contains("href="));
+        assert!(!clean.contains("onclick"));
+        assert!(clean.contains("<span"));
+        assert!(clean.contains("class=\"next\""));
+        assert!(clean.contains("下一章"));
+        assert!(clean.contains("<p>Hello</p>"));
+    }
+
+    #[test]
+    fn test_sanitize_epub_html_preserves_non_anchor_tags() {
+        let html = r#"<p id="p1" class="text">Hello <abbr title="test">abbr</abbr></p>"#;
+        let clean = sanitize_epub_html(html);
+        assert_eq!(clean, html);
     }
 }

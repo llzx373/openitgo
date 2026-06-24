@@ -728,6 +728,26 @@ impl ReaderApp {
         });
     }
 
+    /// Returns the status-bar text for an ebook: chapter title and progress.
+    fn ebook_status_text(
+        current_chapter: usize,
+        total_chapters: usize,
+        title: Option<&str>,
+    ) -> (String, String) {
+        let title = title.unwrap_or("无标题").to_string();
+        let chapter = if total_chapters > 0 {
+            format!("第 {} / {} 章", current_chapter + 1, total_chapters)
+        } else {
+            "无章节".to_string()
+        };
+        let percent = if total_chapters > 0 {
+            (current_chapter + 1) as f32 / total_chapters as f32 * 100.0
+        } else {
+            0.0
+        };
+        (title, format!("{}  {:.0}%", chapter, percent))
+    }
+
     fn render_ebook_statusbar(&mut self, ctx: &egui::Context) {
         self.ebook_view.sync_position();
         let (title, progress) = self
@@ -739,22 +759,16 @@ impl ReaderApp {
                     .ebook
                     .chapters
                     .get(e.current_chapter)
-                    .and_then(|c| c.title.clone())
-                    .unwrap_or_else(|| "无标题".to_string());
-                let progress = if e.ebook.total_chapters() > 0 {
-                    (e.current_chapter + 1) as f32 / e.ebook.total_chapters() as f32 * 100.0
-                } else {
-                    0.0
-                };
-                (title, progress)
+                    .and_then(|c| c.title.as_deref());
+                Self::ebook_status_text(e.current_chapter, e.ebook.total_chapters(), title)
             })
-            .unwrap_or_else(|| ("".to_string(), 0.0));
+            .unwrap_or_else(|| ("".to_string(), "".to_string()));
 
         egui::TopBottomPanel::bottom("ebook_statusbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(title);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(format!("{:.0}%", progress));
+                    ui.label(progress);
                 });
             });
         });
@@ -2049,6 +2063,54 @@ mod tests {
             .expect("reader should be open");
         assert_eq!(reader.comic.id, expected_id);
         assert_eq!(reader.state.current_page, 6);
+    }
+
+    #[test]
+    fn test_is_ebook_file_recognizes_extensions() {
+        assert!(is_ebook_file(Path::new("book.epub")));
+        assert!(is_ebook_file(Path::new("book.mobi")));
+        assert!(is_ebook_file(Path::new("book.azw3")));
+        assert!(is_ebook_file(Path::new("notes.md")));
+        assert!(is_ebook_file(Path::new("notes.markdown")));
+        assert!(is_ebook_file(Path::new("book.TXT")));
+        assert!(!is_ebook_file(Path::new("book.pdf")));
+        assert!(!is_ebook_file(Path::new("book")));
+    }
+
+    #[test]
+    fn test_open_path_dispatches_to_ebook_opener() {
+        let (mut app, _tmp) = app_with_temp_store();
+        app.open_path(PathBuf::from("/tmp/fake.epub"));
+        assert!(matches!(app.current_view, View::Loading(_)));
+        assert!(app.ebook_opener.is_some());
+        assert!(app.opener.is_none());
+    }
+
+    #[test]
+    fn test_open_path_dispatches_to_comic_opener() {
+        let (mut app, _tmp) = app_with_temp_store();
+        app.open_path(PathBuf::from("/tmp/fake.cbz"));
+        assert!(matches!(app.current_view, View::Loading(_)));
+        assert!(app.opener.is_some());
+        assert!(app.ebook_opener.is_none());
+    }
+
+    #[test]
+    fn test_ebook_status_text_formats_progress() {
+        let (title, progress) = ReaderApp::ebook_status_text(0, 3, Some("第一章"));
+        assert_eq!(title, "第一章");
+        assert_eq!(progress, "第 1 / 3 章  33%");
+
+        let (title, progress) = ReaderApp::ebook_status_text(2, 3, None);
+        assert_eq!(title, "无标题");
+        assert_eq!(progress, "第 3 / 3 章  100%");
+    }
+
+    #[test]
+    fn test_ebook_status_text_handles_empty_book() {
+        let (title, progress) = ReaderApp::ebook_status_text(0, 0, None);
+        assert_eq!(title, "无标题");
+        assert_eq!(progress, "无章节  0%");
     }
 
     #[test]

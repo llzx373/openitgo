@@ -202,8 +202,13 @@ fn handle_ebook_protocol(
             .unwrap();
     }
 
+    // Return an empty 200 response for unknown resource requests instead of a
+    // 404, which can be treated as a navigation error by WebKit and trigger a
+    // reload of the shell page.
     wry::http::Response::builder()
-        .status(404)
+        .status(200)
+        .header("Content-Type", "text/plain")
+        .header("Cache-Control", "no-cache, no-store, must-revalidate")
         .body(Vec::new().into())
         .unwrap()
 }
@@ -267,6 +272,23 @@ img {{ max-width: 100%; height: auto; }}
 const content = document.getElementById('content');
 let currentChapter = 0;
 let currentOffset = 0;
+
+// Prevent anchors and other navigation from reloading the shell.
+document.addEventListener('click', function(e) {{
+  let el = e.target;
+  while (el && el !== document.body) {{
+    if (el.tagName === 'A') {{
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }}
+    el = el.parentElement;
+  }}
+}}, true);
+window.addEventListener('beforeunload', function(e) {{
+  e.preventDefault();
+  e.returnValue = '';
+}});
 
 function sendIpc(obj) {{
   const json = JSON.stringify(obj);
@@ -405,6 +427,78 @@ mod tests {
         assert!(html.contains("function nextPage"));
         assert!(html.contains("function prevPage"));
         assert!(html.contains("function reportPosition"));
+        assert!(html.contains("function sendIpc"));
         assert!(html.contains("window.ipc.postMessage"));
+    }
+
+    #[test]
+    fn test_reader_html_includes_css_variables() {
+        let settings = EbookSettings {
+            font_size: 20,
+            line_height: 1.8,
+            margin_horizontal: 32,
+            margin_vertical: 40,
+            ..Default::default()
+        };
+        let html = reader_html(&settings);
+        assert!(html.contains("--size: 20px"));
+        assert!(html.contains("--line: 1.8"));
+        assert!(html.contains("--margin-h: 32px"));
+        assert!(html.contains("--margin-v: 40px"));
+    }
+
+    #[test]
+    fn test_js_settings_mode_strings() {
+        use rust_reader_core::ebook::EbookReadingMode;
+
+        let settings = EbookSettings {
+            reading_mode: EbookReadingMode::SinglePage,
+            ..Default::default()
+        };
+        let js = JsSettings::from(&settings);
+        assert_eq!(js.mode, "single paginated");
+
+        let settings = EbookSettings {
+            reading_mode: EbookReadingMode::DoublePage,
+            ..Default::default()
+        };
+        let js = JsSettings::from(&settings);
+        assert_eq!(js.mode, "double paginated");
+
+        let settings = EbookSettings {
+            reading_mode: EbookReadingMode::Scroll,
+            ..Default::default()
+        };
+        let js = JsSettings::from(&settings);
+        assert_eq!(js.mode, "scroll");
+    }
+
+    #[test]
+    fn test_js_settings_theme_colors() {
+        use rust_reader_storage::models::EbookTheme;
+
+        let settings = EbookSettings {
+            theme: EbookTheme::Light,
+            ..Default::default()
+        };
+        let js = JsSettings::from(&settings);
+        assert_eq!(js.bg, "#ffffff");
+        assert_eq!(js.fg, "#1a1a1a");
+
+        let settings = EbookSettings {
+            theme: EbookTheme::Dark,
+            ..Default::default()
+        };
+        let js = JsSettings::from(&settings);
+        assert_eq!(js.bg, "#1a1a1a");
+        assert_eq!(js.fg, "#e8e8e8");
+
+        let settings = EbookSettings {
+            theme: EbookTheme::Sepia,
+            ..Default::default()
+        };
+        let js = JsSettings::from(&settings);
+        assert_eq!(js.bg, "#f4ecd8");
+        assert_eq!(js.fg, "#5b4636");
     }
 }
