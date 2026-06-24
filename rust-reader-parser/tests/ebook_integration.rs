@@ -49,3 +49,23 @@ fn test_parse_unsupported_extension() {
     let result = parse_ebook(&path);
     assert!(result.is_err());
 }
+
+#[test]
+fn test_parse_fake_epub_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("fake.epub");
+    std::fs::write(&path, b"not an epub").unwrap();
+
+    let result = parse_ebook(&path);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_parse_fake_mobi_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("fake.mobi");
+    std::fs::write(&path, b"not a mobi").unwrap();
+
+    let result = parse_ebook(&path);
+    assert!(result.is_err());
+}

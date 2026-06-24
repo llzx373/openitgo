@@ -104,4 +104,13 @@ mod tests {
         assert!(!EpubParser::supports(Path::new("book.pdf")));
         assert!(!EpubParser::supports(Path::new("book.mobi")));
     }
+
+    #[test]
+    fn test_parse_missing_epub_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("missing.epub");
+
+        let result = EpubParser::parse(&path);
+        assert!(result.is_err());
+    }
 }
