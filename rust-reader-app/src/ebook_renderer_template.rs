@@ -489,11 +489,11 @@ function reportPosition() {{
       offset += textLength(spreads[i]);
     }}
     sendIpc({{
-      type: 'position',
-      chapter: currentChapter,
-      spread: currentSpread,
-      char_offset: offset,
-      total_spreads: spreads.length
+      "type": "position",
+      "chapter": currentChapter,
+      "spread": currentSpread,
+      "char_offset": offset,
+      "total_spreads": spreads.length
     }});
   }} else {{
     // Scroll mode fallback: use #spread's visible text start.
@@ -512,11 +512,11 @@ function reportPosition() {{
       offset += node.length;
     }}
     sendIpc({{
-      type: 'position',
-      chapter: currentChapter,
-      spread: 0,
-      char_offset: offset,
-      total_spreads: 1
+      "type": "position",
+      "chapter": currentChapter,
+      "spread": 0,
+      "char_offset": offset,
+      "total_spreads": 1
     }});
   }}
 }}
@@ -598,7 +598,7 @@ window.addEventListener('resize', () => {{
 
 applySettings({settings_json});
 loadChapter(0, 0);
-sendIpc({{ type: 'ready' }});
+sendIpc({{ "type": "ready" }});
 </script>
 </body>
 </html>"#,
@@ -791,5 +791,16 @@ mod tests {
         assert!(html.contains("overflow-y: scroll"));
         assert!(html.contains("spread.innerHTML = currentChapterHtml"));
         assert!(html.contains("spread.scrollTop +="));
+    }
+
+    #[test]
+    fn test_reader_html_reports_spread_position() {
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(html.contains("\"type\": \"position\""));
+        assert!(html.contains("\"chapter\":"));
+        assert!(html.contains("\"spread\":"));
+        assert!(html.contains("\"char_offset\":"));
+        assert!(html.contains("\"total_spreads\":"));
+        assert!(html.contains("\"type\": \"ready\""));
     }
 }
