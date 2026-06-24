@@ -287,17 +287,42 @@ pub mod macos {
         use std::sync::Mutex;
 
         use objc::runtime::{
-            class_addMethod, class_getName, object_getClass, Class, Object, Sel, BOOL, YES,
+            class_addMethod, class_getInstanceMethod, class_getName,
+            method_exchangeImplementations, object_getClass, Class, Object, Sel, BOOL, YES,
         };
         use objc::{class, msg_send, sel, sel_impl};
 
         static OPEN_QUEUE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
+        fn dock_log(msg: &str) {
+            use std::io::Write;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/rustreader-dock.log")
+                .and_then(|mut f| writeln!(f, "[{}] {}", now, msg));
+        }
+
         #[link(name = "Cocoa", kind = "framework")]
         extern "C" {}
 
+        /// 尽早通过 swizzle `-[NSApplication setDelegate:]`，
+        /// 在 winit 设置 delegate 的瞬间就向其实际类注入打开文件方法。
+        ///
+        /// 在 `eframe::run_native` 之前调用，这样无论 winit 何时创建 delegate 对象，
+        /// 文件打开事件在分发前 delegate 都已经具备响应能力。
+        pub fn install_dock_open_handler_early() {
+            // SAFETY: 仅交换 `NSApplication` 的 `setDelegate:` 实现，并在设置 delegate
+            // 后向其类注入 `application:openFiles:` 等方法，不破坏 AppKit 原有行为。
+            unsafe { swizzle_nsapplication_set_delegate() };
+        }
+
         /// 向当前 NSApplication delegate 注入 `application:openFiles:` 与
-        /// `application:openFile:`，用于接收 Dock / Finder 拖入或双击打开的文件。
+        /// `application:openFile:`，作为 Apple Event 处理器的补充。
         ///
         /// `application:openFile(s):` 由系统在主线程调用，因此使用普通 `Mutex`
         /// 即可保证线程安全，无需额外同步。
@@ -316,71 +341,186 @@ pub mod macos {
                     return;
                 }
                 let cls = object_getClass(delegate) as *mut Class;
-                if cls.is_null() {
-                    eprintln!("warning: install_dock_open_handler: delegate class is null");
-                    return;
-                }
+                add_open_methods_to_class(cls);
+            }
+        }
 
-                // SAFETY: 只修改应用自身的 delegate class，绝不修改系统类（NS 前缀）。
-                // 若 class_getName 返回空或以 "NS" 开头，则跳过注入并告警。
-                let name_ptr = class_getName(cls);
-                if name_ptr.is_null() {
+        /// Swizzle `-[NSApplication setDelegate:]` so that whenever a delegate is
+        /// assigned we immediately inject `application:openFiles:` and friends into
+        /// the delegate's class.
+        ///
+        /// # Safety
+        /// Must be called on the main thread before `NSApplication` finishes launching.
+        unsafe fn swizzle_nsapplication_set_delegate() {
+            let ns_app_cls = match Class::get("NSApplication") {
+                Some(cls) => cls as *const Class as *mut Class,
+                None => {
                     eprintln!(
-                        "warning: install_dock_open_handler: could not get delegate class name"
+                        "warning: swizzle_nsapplication_set_delegate: NSApplication not found"
                     );
                     return;
                 }
-                if let Ok(name) = CStr::from_ptr(name_ptr).to_str() {
-                    if name.is_empty() {
-                        eprintln!(
-                            "warning: install_dock_open_handler: delegate class name is empty"
-                        );
-                        return;
-                    }
-                    if name.starts_with("NS") {
-                        eprintln!(
-                            "warning: install_dock_open_handler: refusing to inject into system class {}",
-                            name
-                        );
-                        return;
-                    }
-                }
+            };
 
-                let open_files_types = c"v@:@:@".as_ptr() as *const c_char;
-                let added_open_files = class_addMethod(
-                    cls,
-                    sel!(application:openFiles:),
-                    // SAFETY: 目标回调签名与 `extern "C" fn(&Object, Sel, *mut Object, *mut Object)`
-                    // 完全一致，且为 AppKit 要求的 cdecl/Objective-C method 调用约定。
-                    std::mem::transmute::<
-                        extern "C" fn(&Object, Sel, *mut Object, *mut Object),
-                        unsafe extern "C" fn(),
-                    >(open_files_callback),
-                    open_files_types,
-                );
-                if added_open_files == objc::runtime::NO {
-                    eprintln!(
-                        "warning: install_dock_open_handler: failed to add application:openFiles:"
-                    );
-                }
+            let original_sel = sel!(setDelegate:);
+            let swizzled_sel = sel!(rustReader_setDelegate:);
 
-                let open_file_types = c"c@:@:@".as_ptr() as *const c_char;
-                let added_open_file = class_addMethod(
-                    cls,
-                    sel!(application:openFile:),
-                    // SAFETY: 目标回调签名与 `extern "C" fn(&Object, Sel, *mut Object, *mut Object) -> BOOL`
-                    // 完全一致，且为 AppKit 要求的 cdecl/Objective-C method 调用约定。
-                    std::mem::transmute::<
-                        extern "C" fn(&Object, Sel, *mut Object, *mut Object) -> BOOL,
-                        unsafe extern "C" fn(),
-                    >(open_file_callback),
-                    open_file_types,
+            // Add our custom method to NSApplication; if it already exists, log and bail.
+            let added = class_addMethod(
+                ns_app_cls,
+                swizzled_sel,
+                std::mem::transmute::<
+                    extern "C" fn(&Object, Sel, *mut Object),
+                    unsafe extern "C" fn(),
+                >(rust_reader_set_delegate),
+                c"v@:@".as_ptr() as *const c_char,
+            );
+            if added == objc::runtime::NO {
+                dock_log("dock_open: setDelegate: swizzle method already exists");
+                return;
+            }
+
+            let original_method_ptr = class_getInstanceMethod(ns_app_cls, original_sel);
+            if original_method_ptr.is_null() {
+                eprintln!("warning: swizzle_nsapplication_set_delegate: setDelegate: not found");
+                return;
+            }
+            let swizzled_method_ptr = class_getInstanceMethod(ns_app_cls, swizzled_sel);
+            if swizzled_method_ptr.is_null() {
+                eprintln!(
+                    "warning: swizzle_nsapplication_set_delegate: rustReader_setDelegate: not found"
                 );
-                if added_open_file == objc::runtime::NO {
-                    eprintln!(
-                        "warning: install_dock_open_handler: failed to add application:openFile:"
-                    );
+                return;
+            }
+
+            // SAFETY: 两个指针均指向已存在的 Method 结构；仅做实现交换，不改变方法数量。
+            unsafe {
+                method_exchangeImplementations(
+                    original_method_ptr as *mut objc::runtime::Method,
+                    swizzled_method_ptr as *mut objc::runtime::Method,
+                );
+            }
+            dock_log("dock_open: swizzled NSApplication setDelegate:");
+        }
+
+        // SAFETY: 该函数作为 Objective-C method 被 `NSApplication` 调用；
+        // `delegate` 为新的 `NSApplicationDelegate` 实例。
+        extern "C" fn rust_reader_set_delegate(this: &Object, _sel: Sel, delegate: *mut Object) {
+            // 通过交换后的 selector 调用原始实现。
+            let _: () = unsafe { msg_send![this, rustReader_setDelegate:delegate] };
+            if !delegate.is_null() {
+                // SAFETY: `object_getClass` 返回 delegate 的真实类；向其注入方法。
+                let cls = unsafe { object_getClass(delegate) as *mut Class };
+                unsafe { add_open_methods_to_class(cls) };
+            }
+        }
+
+        /// 向指定 Objective-C 类添加 `application:openFiles:` 与
+        /// `application:openFile:` 方法。
+        ///
+        /// # Safety
+        /// `cls` 必须是有效的、非系统的 AppKit delegate 类指针。
+        unsafe fn add_open_methods_to_class(cls: *mut Class) {
+            if cls.is_null() {
+                eprintln!("warning: add_open_methods_to_class: class is null");
+                return;
+            }
+
+            // SAFETY: 只修改应用自身的 delegate class，绝不修改系统类（NS 前缀）。
+            // 若 class_getName 返回空或以 "NS" 开头，则跳过注入并告警。
+            let name_ptr = class_getName(cls);
+            if name_ptr.is_null() {
+                eprintln!("warning: add_open_methods_to_class: could not get delegate class name");
+                return;
+            }
+            if let Ok(name) = CStr::from_ptr(name_ptr).to_str() {
+                if name.is_empty() {
+                    eprintln!("warning: add_open_methods_to_class: delegate class name is empty");
+                    return;
                 }
+                if name.starts_with("NS") {
+                    eprintln!(
+                        "warning: add_open_methods_to_class: refusing to inject into system class {}",
+                        name
+                    );
+                    return;
+                }
+            }
+
+            let class_name = CStr::from_ptr(name_ptr).to_string_lossy();
+
+            // `application:openFiles:`（旧式路径数组）。
+            add_delegate_method_if_missing(
+                cls,
+                sel!(application:openFiles:),
+                // SAFETY: 目标回调签名与 `extern "C" fn(&Object, Sel, *mut Object, *mut Object)`
+                // 完全一致，且为 AppKit 要求的 cdecl/Objective-C method 调用约定。
+                std::mem::transmute::<
+                    extern "C" fn(&Object, Sel, *mut Object, *mut Object),
+                    unsafe extern "C" fn(),
+                >(open_files_callback),
+                c"v@:@:@".as_ptr() as *const c_char,
+                "application:openFiles:",
+                &class_name,
+            );
+
+            // `application:openFile:`（旧式单文件，返回 BOOL）。
+            add_delegate_method_if_missing(
+                cls,
+                sel!(application:openFile:),
+                // SAFETY: 目标回调签名与 `extern "C" fn(&Object, Sel, *mut Object, *mut Object) -> BOOL`
+                // 完全一致，且为 AppKit 要求的 cdecl/Objective-C method 调用约定。
+                std::mem::transmute::<
+                    extern "C" fn(&Object, Sel, *mut Object, *mut Object) -> BOOL,
+                    unsafe extern "C" fn(),
+                >(open_file_callback),
+                c"c@:@:@".as_ptr() as *const c_char,
+                "application:openFile:",
+                &class_name,
+            );
+
+            // macOS 10.13+ 推荐使用 `application:openURLs:` 接收文件/文件夹。
+            add_delegate_method_if_missing(
+                cls,
+                sel!(application:openURLs:),
+                // SAFETY: 目标回调签名与 `extern "C" fn(&Object, Sel, *mut Object, *mut Object)`
+                // 完全一致，且为 AppKit 要求的 cdecl/Objective-C method 调用约定。
+                std::mem::transmute::<
+                    extern "C" fn(&Object, Sel, *mut Object, *mut Object),
+                    unsafe extern "C" fn(),
+                >(open_urls_callback),
+                c"v@:@:@".as_ptr() as *const c_char,
+                "application:openURLs:",
+                &class_name,
+            );
+        }
+
+        /// 如果 delegate 类尚未实现指定 selector，则注入方法。
+        ///
+        /// # Safety
+        /// `cls` 必须是有效的 Objective-C 类；`imp` / `types` 必须匹配 selector 的签名。
+        unsafe fn add_delegate_method_if_missing(
+            cls: *mut Class,
+            sel: Sel,
+            imp: unsafe extern "C" fn(),
+            types: *const c_char,
+            method_name: &str,
+            class_name: &str,
+        ) {
+            if !class_getInstanceMethod(cls, sel).is_null() {
+                return;
+            }
+            let added = class_addMethod(cls, sel, imp, types);
+            if added == objc::runtime::NO {
+                eprintln!(
+                    "warning: add_delegate_method_if_missing: failed to add {} on {}",
+                    method_name, class_name
+                );
+            } else {
+                dock_log(&format!(
+                    "dock_open: installed {} on delegate class {}",
+                    method_name, class_name
+                ));
             }
         }
 
@@ -388,6 +528,13 @@ pub mod macos {
         pub fn take_dock_open_paths() -> Vec<PathBuf> {
             let mut guard = OPEN_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
             std::mem::take(&mut *guard)
+        }
+
+        fn push_path(path: PathBuf) {
+            let mut guard = OPEN_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+            if !guard.iter().any(|p| p == &path) {
+                guard.push(path);
+            }
         }
 
         // SAFETY: 该函数作为 Objective-C method 被 AppKit 在主线程调用；`files` 为
@@ -403,8 +550,45 @@ pub mod macos {
             }
             // SAFETY: `files` 为有效的 `NSArray<NSString *>`；迭代期间数组不会被释放。
             let paths = unsafe { collect_paths_from_array(files) };
+            if !paths.is_empty() {
+                dock_log(&format!(
+                    "dock_open: received {} file(s) via application:openFiles:",
+                    paths.len()
+                ));
+            }
             let mut guard = OPEN_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-            guard.extend(paths);
+            for path in paths {
+                if !guard.iter().any(|p| p == &path) {
+                    guard.push(path);
+                }
+            }
+        }
+
+        // SAFETY: 该函数作为 Objective-C method 被 AppKit 在主线程调用；`urls` 为
+        // NSArray<NSURL *> 实例，调用者保证其非空且生命周期覆盖本次调用。
+        extern "C" fn open_urls_callback(
+            _this: &Object,
+            _sel: Sel,
+            _app: *mut Object,
+            urls: *mut Object,
+        ) {
+            if urls.is_null() {
+                return;
+            }
+            // SAFETY: `urls` 为有效的 `NSArray<NSURL *>`；迭代期间数组不会被释放。
+            let paths = unsafe { collect_paths_from_url_array(urls) };
+            if !paths.is_empty() {
+                dock_log(&format!(
+                    "dock_open: received {} file(s) via application:openURLs:",
+                    paths.len()
+                ));
+            }
+            let mut guard = OPEN_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+            for path in paths {
+                if !guard.iter().any(|p| p == &path) {
+                    guard.push(path);
+                }
+            }
         }
 
         // SAFETY: 该函数作为 Objective-C method 被 AppKit 在主线程调用；`file` 为
@@ -421,8 +605,11 @@ pub mod macos {
             // SAFETY: `file` 为有效的 `NSString`；`fileSystemRepresentation` 返回的指针
             // 在 autorelease pool 释放前有效。
             if let Some(path) = unsafe { nsstring_to_path(file) } {
-                let mut guard = OPEN_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-                guard.push(path);
+                dock_log(&format!(
+                    "dock_open: received file via application:openFile: {}",
+                    path.display()
+                ));
+                push_path(path);
                 YES
             } else {
                 // 返回 NO 表示我们未处理该文件，系统可能会尝试其他 handler。
@@ -441,6 +628,25 @@ pub mod macos {
                     continue;
                 }
                 if let Some(path) = nsstring_to_path(item) {
+                    paths.push(path);
+                }
+            }
+            paths
+        }
+
+        unsafe fn collect_paths_from_url_array(urls: *mut Object) -> Vec<PathBuf> {
+            // SAFETY: `urls` 为 `NSArray<NSURL *>` 实例，调用 `count` 不会转移所有权。
+            let count: usize = msg_send![urls, count];
+            let mut paths = Vec::with_capacity(count);
+            for i in 0..count {
+                // SAFETY: `objectAtIndex:` 返回数组内已保留对象的指针，不会转移所有权。
+                let url: *mut Object = msg_send![urls, objectAtIndex:i];
+                if url.is_null() {
+                    continue;
+                }
+                // SAFETY: `path` 返回 `NSString`，生命周期覆盖当前 autorelease pool。
+                let path_str: *mut Object = msg_send![url, path];
+                if let Some(path) = nsstring_to_path(path_str) {
                     paths.push(path);
                 }
             }

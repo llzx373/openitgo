@@ -11,41 +11,45 @@
 ## 用户行为
 
 1. 用户把一个或多个文件/文件夹拖到 Dock 上的 rustReader 图标。
-2. 如果应用未运行，系统启动应用并把路径通过 `NSApplicationDelegate` 的 `application:openFiles:` 传进来。
+2. 如果应用未运行，系统启动应用并把路径通过 `NSApplicationDelegate` 的 `application:openURLs:` 传进来。
 3. 如果应用已运行，系统直接把同一委托方法调进来。
 4. 应用把文件加入书库；如果第一个拖入项本身就是漫画文件，则直接进入阅读器。
 
 ## 技术背景
 
-- `eframe`/`winit` 目前**不会**自动处理 `application:openFile:` / `application:openFiles:` 事件（见 winit issue #1751）。
-- 因此需要自己向 `NSApp.delegate` 注入这两个方法。
-- 同时需要在 `Info.plist` 中声明支持的文档类型，否则打包成 `.app` 后系统不会允许拖到 Dock 上。
+- `eframe`/`winit` 目前**不会**自动处理 `application:openFile:` / `application:openFiles:` / `application:openURLs:` 事件（见 winit issue #1751）。
+- 更关键的是：应用**未运行时**，系统会在 `NSApplication` 设置 delegate 后的极早期就把打开事件派发出去。如果在 `eframe::run_native` 的 `AppCreator` 闭包里才注入 delegate 方法，事件已经错过，系统会弹出 “cannot open files in the Comic Archive format” 错误。
+- 因此需要在 delegate 被设置的那一瞬间就向其类注入打开文件方法。
 
 ## 方案选择
 
-采用 **方案 A：通过 objc 运行时给现有 `NSApplicationDelegate` 注入 `application:openFiles:` 方法**。
+采用 **方案 A+：通过 objc 运行时 swizzle `-[NSApplication setDelegate:]`，在 winit 设置 delegate 时动态注入打开文件方法**。
 
 原因：
 
-- 符合 macOS 原生事件分发路径。
-- 应用未运行和已运行时都能收到。
-- 实现相对集中，只新增一个 macOS-only 模块。
-
-备选方案 B（Carbon Apple Event）因为 API 已废弃且没有现成 Rust 绑定，不作为首选。
+- 不依赖 winit delegate 类的加载时机或类名。
+- 在 delegate 对象被赋值的同时完成方法注入，保证事件分发前 delegate 已经具备响应能力。
+- 同时注入 `application:openURLs:`（macOS 10.13+ 推荐）、`application:openFiles:` 和 `application:openFile:` 三个方法，覆盖各种派发路径。
 
 ## 架构
 
 ```text
 +----------------------------------+
 | macOS (Dock / Finder)            |
-|  application:openFiles:          |
+|  application:openURLs:           |
++-------------+--------------------+
+              |
+              v
++-------------+--------------------+
+| NSApplication.setDelegate:       |
+|  rust_reader_set_delegate()      |
+|  -> add_open_methods_to_class()  |
 +-------------+--------------------+
               |
               v
 +-------------+--------------------+
 | platform::macos::dock_open       |
-|  - install_dock_open_handler()   |
-|  - DOCK_OPEN_QUEUE (Mutex)       |
+|  - OPEN_QUEUE (Mutex)            |
 +-------------+--------------------+
               |
               v
@@ -57,9 +61,9 @@
 +----------------------------------+
 ```
 
-## 新增模块
+## 新增/修改模块
 
-在 `rust-reader-app/src/platform/macos/` 下新增 `dock_open.rs`（或直接放在 `platform.rs` 的 `macos` 模块里）。
+位置：`rust-reader-app/src/platform.rs` 的 `#[cfg(target_os = "macos")] pub mod macos` 内。
 
 核心 API：
 
@@ -68,45 +72,65 @@
 pub mod dock_open {
     use std::path::PathBuf;
 
-    /// 安装 Dock/Finder 拖入打开处理器。应在 `eframe` 创建 event loop 之后、
-    /// 主窗口事件循环开始之前调用一次。
+    /// 尽早 swizzle NSApplication.setDelegate:，使 delegate 被设置时立即
+    /// 注入 application:openURLs:/openFiles:/openFile: 方法。
+    /// 应在 main() 中、eframe::run_native 之前调用。
+    pub fn install_dock_open_handler_early();
+
+    /// 向当前 NSApplication delegate 注入打开文件方法（兜底/热更新场景）。
     pub fn install_dock_open_handler();
 
-    /// 取出当前累积的待打开路径。由 `ReaderApp::update` 每帧调用。
+    /// 取出当前累积的待打开路径。由 ReaderApp::update 每帧调用。
     pub fn take_dock_open_paths() -> Vec<PathBuf>;
 }
 ```
 
 ### 实现要点
 
-1. 使用 `cocoa` 和 `objc` crate 取得 `NSApplication::sharedApplication()` 的当前 `delegate`。
-2. 通过 `object_getClass` 取得 delegate 的 `Class`。
-3. 使用 `class_addMethod` 向该类添加 `application:openFiles:` 方法（selector `sel!(application:openFiles:)`）。
-   - 如果 winit 未来自己实现了该方法，可以再改为 `method_exchangeImplementations` 做包装；目前 winit 未实现，所以直接添加即可。
-4. 方法内部把 `NSArray<NSString>` 转换成 Rust `Vec<PathBuf>`，存入全局 `Mutex<Vec<PathBuf>>`。
-5. 同样添加 `application:openFile:` 作为单文件兜底。
+1. **Swizzle `-[NSApplication setDelegate:]`**
+   - 向 `NSApplication` 类添加 `rustReader_setDelegate:` 方法。
+   - 使用 `method_exchangeImplementations` 交换 `setDelegate:` 与 `rustReader_setDelegate:` 的实现。
+   - 在 `rust_reader_set_delegate` 中先调用原始 `setDelegate:`，再通过 `object_getClass` 取得新 delegate 的真实类，调用 `add_open_methods_to_class` 注入方法。
+
+2. **注入 delegate 方法**
+   - `application:openURLs:`（`v@:@@`）: 接收 `NSArray<NSURL *>`，提取 `-[NSURL path]` 后入队。
+   - `application:openFiles:`（`v@:@@`）: 接收 `NSArray<NSString *>`，提取文件系统路径后入队。
+   - `application:openFile:`（`c@:@@` 返回 `BOOL`）: 单文件兜底，返回 `YES` 表示已处理。
+   - 注入前通过 `class_getInstanceMethod` 检查是否已存在，避免重复添加或打印误报警告。
+
+3. **路径队列与消费**
+   - 使用 `Mutex<Vec<PathBuf>>` 作为 `OPEN_QUEUE`。
+   - delegate 回调将路径推入队列；`ReaderApp::update` 每帧调用 `take_dock_open_paths()` 取出并处理。
 
 ## 与现有代码集成
 
 ### 初始化
 
-在 `rust-reader-app/src/main.rs` 的 `eframe::run_native` 创建闭包里调用：
+在 `rust-reader-app/src/main.rs` 的 `main()` 最开头调用：
 
 ```rust
-eframe::run_native(
-    "rustReader",
-    options,
-    Box::new(|cc| {
-        #[cfg(target_os = "macos")]
-        crate::platform::macos::dock_open::install_dock_open_handler();
+fn main() -> eframe::Result<()> {
+    #[cfg(target_os = "macos")]
+    crate::platform::macos::dock_open::install_dock_open_handler_early();
 
-        fonts::setup_fonts(&cc.egui_ctx);
-        Ok(Box::new(ReaderApp::new(cc)))
-    }),
-)
+    // ... viewport / options ...
+
+    eframe::run_native(
+        "rustReader",
+        options,
+        Box::new(|cc| {
+            fonts::setup_fonts(&cc.egui_ctx);
+
+            #[cfg(target_os = "macos")]
+            crate::platform::macos::dock_open::install_dock_open_handler();
+
+            Ok(Box::new(ReaderApp::new(cc)))
+        }),
+    )
+}
 ```
 
-此时 `eframe`/`winit` 已经创建好 `NSApplication` 并设置好 delegate，注入方法不会破坏现有事件循环。
+`install_dock_open_handler_early()` 负责在 delegate 被设置的第一时间注入方法；`install_dock_open_handler()` 作为兜底，在 eframe 创建好应用后再检查一次当前 delegate。
 
 ### 每帧处理
 
@@ -114,26 +138,20 @@ eframe::run_native(
 
 ```rust
 self.handle_dropped_files(ctx);
-for path in crate::platform::macos::dock_open::take_dock_open_paths() {
-    self.add_folder_to_library(path.clone());
-}
-```
 
-为了保持与窗口拖入行为一致，处理完后再尝试打开第一个路径：
-
-```rust
-let dock_paths = crate::platform::macos::dock_open::take_dock_open_paths();
-if let Some(first) = dock_paths.first() {
-    if rust_reader_parser::parse(first).is_ok() {
-        self.open_comic(first.clone());
+#[cfg(target_os = "macos")]
+{
+    let dock_paths = crate::platform::macos::dock_open::take_dock_open_paths();
+    if !dock_paths.is_empty() {
+        self.handle_open_paths(dock_paths);
     }
 }
-for path in dock_paths {
-    self.add_folder_to_library(path);
-}
 ```
 
-如果第一个拖入项是文件夹，`add_folder_to_library` 会递归扫描并导入；此时保持留在书库界面，让用户看到导入结果。
+`handle_open_paths` 会：
+
+- 把所有路径加入书库（文件会被解析，文件夹会被递归扫描）。
+- 如果第一个路径是可解析的漫画文件，直接进入阅读器。
 
 ## Info.plist 声明
 
@@ -176,34 +194,31 @@ for path in dock_paths {
 说明：
 
 - 只有在打包成 `.app` 并使用该 `Info.plist` 时，系统才会允许把对应文件拖到 Dock 图标上。
-- 从终端 `cargo run` 运行时，Dock 上的图标是原始二进制，不是 `.app` 包，系统通常不会接受 Dock 拖入；但代码层面的处理仍然保留，便于后续打包测试。
+- 打包脚本 `scripts/package-macos.sh` 会基于该模板生成最终的 `Info.plist` 并签名。
 
 ## 错误处理
 
 - 如果路径无法解析成漫画，`add_folder_to_library` 已经在 UI 显示错误信息。
 - 如果 delegate 为 nil 或注入失败，仅在日志中记录，不阻断程序启动。
 - Objective-C 转换路径失败时，忽略该项。
+- 队列中去重：同一事件可能同时触发多个 delegate 方法，入队时检查是否已存在，避免重复打开。
 
 ## 依赖
 
-在 `rust-reader-app/Cargo.toml` 的 macOS target 依赖中新增：
+在 `rust-reader-app/Cargo.toml` 的 macOS target 依赖中已有：
 
 ```toml
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
-cocoa = "0.26"
 ```
-
-（版本以 `cargo` 当前可解析为准。）
 
 ## 测试计划
 
-1. 单元测试：新增一个 macOS-only 的转换测试，验证 `NSArray<NSString>` 到 `Vec<PathBuf>` 的辅助函数。
-2. 集成测试：
-   - 构建 `.app` 后把 `.zip`/`.cbz` 拖到 Dock 图标，确认应用启动并进入阅读器。
+1. 集成测试：
+   - 构建 `.app` 后把 `.zip`/`.cbz` 拖到 Dock 图标，确认应用**未运行**时启动并进入阅读器。
    - 应用已运行时拖入文件夹，确认书库新增条目。
    - 拖入多个文件时，确认第一个可解析项被打开，其余被导入。
-3. 回归测试：运行 `cargo fmt/check/test/clippy --workspace`。
+2. 回归测试：运行 `cargo fmt/check/test/clippy --workspace`。
 
 ## 未涉及范围
 

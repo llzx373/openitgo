@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Library card click now triggers on the whole card, not just the cover.
 
+### Fixed
+
+- macOS: 修复应用未运行时通过 Finder / Dock 打开压缩包报 “rustReader cannot open files in the “Comic Archive” format” 的错误。通过 swizzle `-[NSApplication setDelegate:]` 在 winit 设置 delegate 前注入 `application:openURLs:` / `application:openFiles:` / `application:openFile:` 实现。
+
 ## [0.1.0] - 2026-06-23
 
 ### Added

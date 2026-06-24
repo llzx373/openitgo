@@ -23,6 +23,9 @@ fn load_app_icon() -> Option<std::sync::Arc<egui::IconData>> {
 }
 
 fn main() -> eframe::Result<()> {
+    #[cfg(target_os = "macos")]
+    crate::platform::macos::dock_open::install_dock_open_handler_early();
+
     let mut viewport = egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]);
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(icon);
