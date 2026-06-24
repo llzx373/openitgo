@@ -337,11 +337,15 @@ function reportPosition() {{
   }}));
 }}
 
+function pageDelta() {{
+  return document.body.classList.contains('double') ? content.clientWidth / 2 : content.clientWidth;
+}}
+
 function nextPage() {{
   if (document.body.classList.contains('scroll')) {{
     content.scrollTop += content.clientHeight * 0.9;
   }} else {{
-    content.scrollLeft += content.clientWidth;
+    content.scrollLeft += pageDelta();
   }}
   reportPosition();
 }}
@@ -350,7 +354,7 @@ function prevPage() {{
   if (document.body.classList.contains('scroll')) {{
     content.scrollTop -= content.clientHeight * 0.9;
   }} else {{
-    content.scrollLeft -= content.clientWidth;
+    content.scrollLeft -= pageDelta();
   }}
   reportPosition();
 }}
