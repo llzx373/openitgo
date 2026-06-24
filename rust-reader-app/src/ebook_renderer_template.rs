@@ -390,10 +390,6 @@ function flipToSpread(targetIndex) {{
   }}, 450);
 }}
 
-function isPaginated() {{
-  return document.body.classList.contains('paginated') || document.body.classList.contains('double');
-}}
-
 function applySettings(json) {{
   const s = typeof json === 'string' ? JSON.parse(json) : json;
   currentSettings = s;
@@ -519,19 +515,21 @@ function prevPage() {{
 }}
 
 function onWheel(e) {{
-  if (!isPaginated()) return;
+  if (isScrollMode()) return;
   e.preventDefault();
-  const delta = currentSettings.invert_scroll ? -e.deltaY : e.deltaY;
-  if (delta > 0 || e.deltaX > 0) {{
+  const deltaY = currentSettings.invert_scroll ? -e.deltaY : e.deltaY;
+  const deltaX = currentSettings.invert_scroll ? -e.deltaX : e.deltaX;
+  if (deltaY > 0 || deltaX > 0) {{
     nextPage();
-  }} else if (delta < 0 || e.deltaX < 0) {{
+  }} else if (deltaY < 0 || deltaX < 0) {{
     prevPage();
   }}
 }}
 
 function onClick(e) {{
-  if (!isPaginated()) return;
-  if (window.getSelection().toString().length > 0) return;
+  if (isScrollMode()) return;
+  const sel = window.getSelection();
+  if (sel && sel.toString().length > 0) return;
   const rect = spread.getBoundingClientRect();
   const x = e.clientX - rect.left;
   if (x < rect.width / 2) {{
@@ -642,6 +640,8 @@ mod tests {
         assert!(html.contains("function sendIpc"));
         assert!(html.contains("function onWheel"));
         assert!(html.contains("function onClick"));
+        assert!(html.contains("addEventListener('wheel', onWheel, { passive: false })"));
+        assert!(html.contains("addEventListener('click', onClick)"));
         assert!(html.contains("window.ipc.postMessage"));
     }
 
