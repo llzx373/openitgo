@@ -111,7 +111,7 @@ fn escape_html(s: &str) -> String {
 fn is_text_like_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| matches!(e.to_ascii_lowercase().as_str(), "txt" | "md"))
+        .map(|e| matches!(e.to_ascii_lowercase().as_str(), "txt" | "md" | "markdown"))
         .unwrap_or(false)
 }
 
@@ -203,6 +203,17 @@ mod tests {
         let html = render_chapter_html(&ebook, 0).unwrap();
         assert!(html.contains("world"));
         assert!(html.contains("more text"));
+        assert!(html.starts_with("<div class=\"chapter\">"));
+    }
+
+    #[test]
+    fn test_render_markdown_extension_chapter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("book.markdown");
+        std::fs::write(&path, "# Hello\n\nworld").unwrap();
+        let ebook = ebook_with_path(path);
+        let html = render_chapter_html(&ebook, 0).unwrap();
+        assert!(html.contains("world"));
         assert!(html.starts_with("<div class=\"chapter\">"));
     }
 
