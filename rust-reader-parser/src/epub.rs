@@ -3,6 +3,70 @@ use crate::traits::ParseError;
 use rust_reader_core::ebook::{Ebook, EbookChapter, EbookResource};
 use std::path::Path;
 
+fn decode_html_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '&' {
+            out.push(c);
+            continue;
+        }
+        let mut entity = String::new();
+        while let Some(&ch) = chars.peek() {
+            if ch == ';' || ch == '&' {
+                break;
+            }
+            entity.push(ch);
+            chars.next();
+        }
+        if chars.peek() != Some(&';') {
+            out.push('&');
+            out.push_str(&entity);
+            continue;
+        }
+        chars.next(); // consume ';'
+        let decoded = if let Some(stripped) = entity.strip_prefix('#') {
+            if let Some(hex) = stripped
+                .strip_prefix('x')
+                .or_else(|| stripped.strip_prefix('X'))
+            {
+                u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+            } else {
+                stripped.parse::<u32>().ok().and_then(char::from_u32)
+            }
+        } else {
+            match entity.as_str() {
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                _ => None,
+            }
+        };
+        if let Some(d) = decoded {
+            out.push(d);
+        } else {
+            out.push('&');
+            out.push_str(&entity);
+            out.push(';');
+        }
+    }
+    out
+}
+
+fn extract_title(html: &str) -> Option<String> {
+    let start = html.find("<title")?;
+    let after_tag = html[start..].find('>')? + start + 1;
+    let end = html[after_tag..].find("</title>")? + after_tag;
+    let title = decode_html_entities(html[after_tag..end].trim());
+    if title.is_empty() {
+        None
+    } else {
+        Some(title)
+    }
+}
+
 pub struct EpubParser;
 
 impl EpubParser {
@@ -57,18 +121,6 @@ impl EpubParser {
                 chapters.extend(collect_navpoints(&point.children, base_idx));
             }
             chapters
-        }
-
-        fn extract_title(html: &str) -> Option<String> {
-            let start = html.find("<title")?;
-            let after_tag = html[start..].find('>')? + start + 1;
-            let end = html[after_tag..].find("</title>")? + after_tag;
-            let title = html[after_tag..end].trim();
-            if title.is_empty() {
-                None
-            } else {
-                Some(title.to_string())
-            }
         }
 
         let mut chapters: Vec<EbookChapter> = collect_navpoints(&doc.toc, &mut 0);
@@ -136,5 +188,53 @@ mod tests {
 
         let result = EpubParser::parse(&path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_title_normal() {
+        let html = "<html><head><title>Chapter 1</title></head></html>";
+        assert_eq!(extract_title(html), Some("Chapter 1".to_string()));
+    }
+
+    #[test]
+    fn test_extract_title_trims_whitespace_and_newlines() {
+        let html = "<title>\n  Part Two  \n</title>";
+        assert_eq!(extract_title(html), Some("Part Two".to_string()));
+    }
+
+    #[test]
+    fn test_extract_title_decodes_entities() {
+        let html = "<title>Tom &amp; Jerry &#x2014; &#39;Quote&#39;</title>";
+        assert_eq!(
+            extract_title(html),
+            Some("Tom & Jerry — 'Quote'".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_title_missing() {
+        assert_eq!(extract_title("<html><body></body></html>"), None);
+    }
+
+    #[test]
+    fn test_extract_title_empty() {
+        assert_eq!(extract_title("<title>   </title>"), None);
+    }
+
+    #[test]
+    fn test_decode_html_entities_basic() {
+        assert_eq!(decode_html_entities("&amp;"), "&");
+        assert_eq!(decode_html_entities("&lt;"), "<");
+        assert_eq!(decode_html_entities("&gt;"), ">");
+        assert_eq!(decode_html_entities("&quot;"), "\"");
+        assert_eq!(decode_html_entities("&apos;"), "'");
+        assert_eq!(decode_html_entities("&#123;"), "{");
+        assert_eq!(decode_html_entities("&#x7B;"), "{");
+    }
+
+    #[test]
+    fn test_decode_html_entities_unknown_preserved() {
+        assert_eq!(decode_html_entities("&unknown;"), "&unknown;");
+        assert_eq!(decode_html_entities("&amp"), "&amp");
     }
 }

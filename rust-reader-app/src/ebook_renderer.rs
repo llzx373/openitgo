@@ -380,21 +380,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_escape_html() {
-        fn escape_html(s: &str) -> String {
-            s.replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;")
-                .replace('"', "&quot;")
-        }
-        assert_eq!(
-            escape_html("<script>alert(\"x\");</script>"),
-            "&lt;script&gt;alert(&quot;x&quot;);&lt;/script&gt;"
-        );
-        assert_eq!(escape_html("a & b"), "a &amp; b");
-    }
-
-    #[test]
     fn test_reader_html_contains_required_functions() {
         let settings = EbookSettings::default();
         let html = reader_html(&settings);

@@ -9,7 +9,9 @@ fn test_parse_minimal_epub() {
     ));
     let ebook = parse_ebook(&path).unwrap();
     assert_eq!(ebook.title, "Minimal EPUB");
-    assert!(!ebook.chapters.is_empty());
+    assert_eq!(ebook.total_chapters(), 1);
+    assert!(!ebook.chapters[0].id.is_empty());
+    assert!(ebook.chapters[0].href.contains("chapter1.xhtml"));
     assert!(ebook
         .chapters
         .iter()
