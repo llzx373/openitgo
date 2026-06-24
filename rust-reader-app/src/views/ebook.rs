@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::ebook_renderer::EbookRenderer;
 use rust_reader_core::ebook::Ebook;
 use rust_reader_storage::models::EbookSettings;
@@ -12,12 +14,10 @@ pub struct OpenEbook {
     pub ebook: Ebook,
     pub renderer: EbookRenderer,
     pub current_chapter: usize,
-    #[allow(dead_code)]
     pub char_offset: usize,
 }
 
 impl EbookView {
-    #[allow(dead_code)]
     pub fn open(
         &mut self,
         parent: &(impl wry::raw_window_handle::HasWindowHandle
@@ -60,7 +60,6 @@ impl EbookView {
         }
     }
 
-    #[allow(dead_code)]
     pub fn goto_chapter(&mut self, chapter: usize) {
         if let Some(open) = self.open.as_mut() {
             open.current_chapter = chapter;

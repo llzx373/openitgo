@@ -4,6 +4,7 @@ use crate::shortcuts::is_shortcut_pressed;
 use crate::timing;
 use crate::views::settings::SettingsView;
 use crate::views::{
+    ebook::EbookView,
     library::{LibraryCallbacks, LibraryView},
     reader::ReaderView,
 };
@@ -25,6 +26,7 @@ pub struct ReaderApp {
     pub settings: Settings,
     pub library_view: LibraryView,
     pub reader_view: ReaderView,
+    pub ebook_view: EbookView,
     pub settings_view: SettingsView,
     pub store: JsonStore,
     pub history: History,
@@ -72,6 +74,7 @@ impl Default for ReaderApp {
             settings,
             library_view,
             reader_view: ReaderView::default(),
+            ebook_view: EbookView::default(),
             settings_view: SettingsView::default(),
             store,
             history,
@@ -140,6 +143,7 @@ impl eframe::App for ReaderApp {
         match self.current_view.clone() {
             View::Library => self.render_library(ctx),
             View::Reader => self.render_reader(ctx),
+            View::Ebook => self.render_ebook(ctx, _frame),
             View::Settings => self.render_settings(ctx),
             View::Loading(path) => self.render_loading(ctx, path),
         }
@@ -150,6 +154,7 @@ impl eframe::App for ReaderApp {
 pub enum View {
     Library,
     Reader,
+    Ebook,
     Settings,
     Loading(PathBuf),
 }
@@ -431,6 +436,76 @@ impl ReaderApp {
         });
     }
 
+    fn render_ebook(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.ebook_view.open.is_none() {
+            self.current_view = View::Library;
+            return;
+        }
+
+        let (fullscreen, mouse_pos, screen_size) = ctx.input(|i| {
+            (
+                i.viewport().fullscreen.unwrap_or(false),
+                i.pointer.latest_pos(),
+                i.screen_rect().size(),
+            )
+        });
+        if Self::should_show_bar(
+            self.settings.show_toolbar,
+            fullscreen,
+            mouse_pos,
+            screen_size,
+            BarEdge::Top,
+        ) {
+            self.render_ebook_toolbar(ctx);
+        }
+        if Self::should_show_bar(
+            self.settings.show_statusbar,
+            fullscreen,
+            mouse_pos,
+            screen_size,
+            BarEdge::Bottom,
+        ) {
+            self.render_ebook_statusbar(ctx);
+        }
+
+        let top_height = if Self::should_show_bar(
+            self.settings.show_toolbar,
+            fullscreen,
+            mouse_pos,
+            screen_size,
+            BarEdge::Top,
+        ) {
+            ctx.style().spacing.interact_size.y * 2.0
+        } else {
+            0.0
+        };
+        let bottom_height = if Self::should_show_bar(
+            self.settings.show_statusbar,
+            fullscreen,
+            mouse_pos,
+            screen_size,
+            BarEdge::Bottom,
+        ) {
+            ctx.style().spacing.interact_size.y * 1.5
+        } else {
+            0.0
+        };
+        let avail = ctx.screen_rect();
+        let bounds = wry::Rect {
+            position: wry::dpi::LogicalPosition::new(avail.min.x, avail.min.y + top_height).into(),
+            size: wry::dpi::LogicalSize::new(
+                avail.width(),
+                avail.height() - top_height - bottom_height,
+            )
+            .into(),
+        };
+        self.ebook_view.update_bounds(bounds);
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.ebook_view.ui(ctx, ui);
+        });
+    }
+
     fn render_reader_toolbar(
         &mut self,
         ctx: &egui::Context,
@@ -594,12 +669,18 @@ impl ReaderApp {
         (progress_rect, hovered_page)
     }
 
+    fn render_ebook_toolbar(&mut self, _ctx: &egui::Context) {}
+
+    fn render_ebook_statusbar(&mut self, _ctx: &egui::Context) {}
+
     fn render_settings(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("← 返回").clicked() {
                     self.current_view = if self.reader_view.open.is_some() {
                         View::Reader
+                    } else if self.ebook_view.open.is_some() {
+                        View::Ebook
                     } else {
                         View::Library
                     };
@@ -1489,6 +1570,7 @@ mod tests {
                 settings,
                 library_view,
                 reader_view: ReaderView::default(),
+                ebook_view: EbookView::default(),
                 settings_view: SettingsView::default(),
                 store,
                 history,
