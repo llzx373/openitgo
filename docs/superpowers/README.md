@@ -18,6 +18,8 @@
 | `plans/2026-06-22-thumbnail-first-rendering.md` | 已实现 | 缩略图优先渲染，部分 API 与计划有差异 |
 | `specs/2026-06-22-thumbnail-first-rendering-design.md` | 已实现 | 对应设计文档 |
 | `plans/2026-06-24-ebook-reader.md` | 已实现 | 电子书阅读完整功能已实现，包括目录面板、历史书签、书架混排与 reload 修复 |
+| `plans/2026-06-24-ebook-spread-pagination.md` | 已实现 | 电子书单页/双页 spread 分页改造，消除横向漏边，3D 翻页、预加载、设置/resize 重测 |
+| `specs/2026-06-24-ebook-spread-pagination-design.md` | 已实现 | 对应 spread 分页设计文档 |
 
 阅读建议：
 - 想了解当前功能与交互，请优先查看根目录 `README.md`、`CHANGELOG.md`、`TODO.md`。
