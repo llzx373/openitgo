@@ -168,6 +168,11 @@ impl EbookRenderer {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.total_spreads.max(1)
     }
+
+    pub fn current_spread(&self) -> usize {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.current_spread
+    }
 }
 
 fn handle_ipc_message(msg: JsToRust, state: &Arc<Mutex<RendererState>>) {
@@ -185,11 +190,14 @@ fn handle_ipc_message(msg: JsToRust, state: &Arc<Mutex<RendererState>>) {
             if let Some(total) = msg.total_pages {
                 state.total_pages = total.max(1);
             }
-            if let Some(spread) = msg.spread {
-                state.current_spread = spread;
-            }
             if let Some(total) = msg.total_spreads {
                 state.total_spreads = total.max(1);
+                state.current_spread = state
+                    .current_spread
+                    .min(state.total_spreads.saturating_sub(1));
+            }
+            if let Some(spread) = msg.spread {
+                state.current_spread = spread.min(state.total_spreads.saturating_sub(1));
             }
         }
     }
@@ -232,10 +240,15 @@ fn handle_ebook_protocol(
     }
 
     if path == "/reader" || path == "/" || path.is_empty() {
+        let chapter_count = state.ebook.total_chapters();
         return wry::http::Response::builder()
             .header("Content-Type", "text/html; charset=utf-8")
             .header("Cache-Control", "no-cache, no-store, must-revalidate")
-            .body(reader_html(&state.settings).into_bytes().into())
+            .body(
+                reader_html(&state.settings, chapter_count)
+                    .into_bytes()
+                    .into(),
+            )
             .unwrap();
     }
 
@@ -331,5 +344,121 @@ mod tests {
         assert_eq!(msg.spread, Some(3));
         assert_eq!(msg.char_offset, Some(120));
         assert_eq!(msg.total_spreads, Some(12));
+    }
+
+    #[test]
+    fn test_reader_html_contains_chapter_count() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 5);
+        assert!(html.contains("window.ebookChapterCount = 5"));
+    }
+
+    #[test]
+    fn test_handle_ipc_message_updates_spread_state() {
+        use rust_reader_core::ebook::Ebook;
+        use rust_reader_storage::models::EbookSettings;
+        use std::path::PathBuf;
+        use std::sync::{Arc, Mutex};
+
+        let state = Arc::new(Mutex::new(RendererState {
+            ebook: Ebook {
+                id: "test".to_string(),
+                title: "Test".to_string(),
+                path: PathBuf::from("/tmp/test.epub"),
+                authors: Vec::new(),
+                language: None,
+                resources: Vec::new(),
+                spine: Vec::new(),
+                chapters: Vec::new(),
+            },
+            current_chapter: 0,
+            char_offset: 0,
+            current_page: 0,
+            total_pages: 1,
+            current_spread: 0,
+            total_spreads: 1,
+            settings: EbookSettings::default(),
+        }));
+        let msg: JsToRust = serde_json::from_str(
+            r#"{"type":"position","chapter":2,"spread":5,"char_offset":120,"total_spreads":10}"#,
+        )
+        .unwrap();
+        handle_ipc_message(msg, &state);
+        let s = state.lock().unwrap();
+        assert_eq!(s.current_chapter, 2);
+        assert_eq!(s.current_spread, 5);
+        assert_eq!(s.total_spreads, 10);
+        assert_eq!(s.char_offset, 120);
+    }
+
+    #[test]
+    fn test_handle_ipc_message_clamps_spread_to_total() {
+        use rust_reader_core::ebook::Ebook;
+        use rust_reader_storage::models::EbookSettings;
+        use std::path::PathBuf;
+        use std::sync::{Arc, Mutex};
+
+        let state = Arc::new(Mutex::new(RendererState {
+            ebook: Ebook {
+                id: "test".to_string(),
+                title: "Test".to_string(),
+                path: PathBuf::from("/tmp/test.epub"),
+                authors: Vec::new(),
+                language: None,
+                resources: Vec::new(),
+                spine: Vec::new(),
+                chapters: Vec::new(),
+            },
+            current_chapter: 0,
+            char_offset: 0,
+            current_page: 0,
+            total_pages: 1,
+            current_spread: 0,
+            total_spreads: 1,
+            settings: EbookSettings::default(),
+        }));
+        let msg: JsToRust =
+            serde_json::from_str(r#"{"type":"position","spread":15,"total_spreads":10}"#).unwrap();
+        handle_ipc_message(msg, &state);
+        let s = state.lock().unwrap();
+        assert_eq!(s.current_spread, 9);
+        assert_eq!(s.total_spreads, 10);
+    }
+
+    #[test]
+    fn test_handle_ipc_message_clamps_spread_when_total_shrinks() {
+        use rust_reader_core::ebook::Ebook;
+        use rust_reader_storage::models::EbookSettings;
+        use std::path::PathBuf;
+        use std::sync::{Arc, Mutex};
+
+        let state = Arc::new(Mutex::new(RendererState {
+            ebook: Ebook {
+                id: "test".to_string(),
+                title: "Test".to_string(),
+                path: PathBuf::from("/tmp/test.epub"),
+                authors: Vec::new(),
+                language: None,
+                resources: Vec::new(),
+                spine: Vec::new(),
+                chapters: Vec::new(),
+            },
+            current_chapter: 0,
+            char_offset: 0,
+            current_page: 0,
+            total_pages: 1,
+            current_spread: 0,
+            total_spreads: 1,
+            settings: EbookSettings::default(),
+        }));
+        let msg: JsToRust =
+            serde_json::from_str(r#"{"type":"position","spread":5,"total_spreads":10}"#).unwrap();
+        handle_ipc_message(msg, &state);
+        let msg: JsToRust =
+            serde_json::from_str(r#"{"type":"position","total_spreads":3}"#).unwrap();
+        handle_ipc_message(msg, &state);
+        let s = state.lock().unwrap();
+        assert_eq!(s.current_spread, 2);
+        assert_eq!(s.total_spreads, 3);
     }
 }

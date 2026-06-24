@@ -3,7 +3,7 @@
 use super::JsSettings;
 use rust_reader_storage::models::EbookSettings;
 
-pub fn reader_html(settings: &EbookSettings) -> String {
+pub fn reader_html(settings: &EbookSettings, chapter_count: usize) -> String {
     let js = JsSettings::from(settings);
     format!(
         r#"<!DOCTYPE html>
@@ -124,6 +124,7 @@ const content = document.getElementById('content');
 const flipper = document.getElementById('flipper');
 let currentChapter = 0;
 let currentOffset = 0;
+window.ebookChapterCount = {chapter_count};
 let isFlipping = false;
 let currentSettings = {{
   mode: '{mode}',
@@ -432,6 +433,7 @@ sendIpc({{ type: 'ready' }});
         mode = js.mode,
         animate = js.animate,
         invert_scroll = js.invert_scroll,
+        chapter_count = chapter_count,
         settings_json = serde_json::to_string(&js).unwrap_or_default()
     )
 }
@@ -443,7 +445,7 @@ mod tests {
 
     #[test]
     fn test_reader_html_contains_spread_containers() {
-        let html = reader_html(&EbookSettings::default());
+        let html = reader_html(&EbookSettings::default(), 1);
         assert!(html.contains("id=\"measure\""));
         assert!(html.contains("id=\"spread\""));
         assert!(html.contains("function splitIntoSpreads"));
@@ -453,7 +455,7 @@ mod tests {
     #[test]
     fn test_reader_html_contains_required_functions() {
         let settings = EbookSettings::default();
-        let html = reader_html(&settings);
+        let html = reader_html(&settings, 1);
         assert!(!html.is_empty());
         assert!(html.contains("function loadChapter"));
         assert!(html.contains("function applySettings"));
@@ -470,7 +472,7 @@ mod tests {
     #[test]
     fn test_measure_and_spread_share_box_model() {
         let settings = EbookSettings::default();
-        let html = reader_html(&settings);
+        let html = reader_html(&settings, 1);
         let measure_rule = html
             .split("#measure {")
             .nth(1)
@@ -513,7 +515,7 @@ mod tests {
             margin_vertical: 40,
             ..Default::default()
         };
-        let html = reader_html(&settings);
+        let html = reader_html(&settings, 1);
         assert!(html.contains("--size: 20px"));
         assert!(html.contains("--line: 1.8"));
         assert!(html.contains("--margin-h: 32px"));

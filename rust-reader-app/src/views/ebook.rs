@@ -102,8 +102,7 @@ impl EbookView {
             let (chapter, _, page) = open.renderer.current_position();
             open.current_chapter = chapter;
             open.current_page = page;
-            // Placeholder: use current_spread_count() until Task 5 adds current_spread().
-            open.current_spread = open.renderer.current_spread_count();
+            open.current_spread = open.renderer.current_spread();
         }
     }
 
