@@ -4,7 +4,7 @@ use crate::timing;
 use crate::widgets::progress_bar::{comic_progress_bar, page_at_x, ProgressBarResponse};
 use crate::widgets::thumbnail_progress_bar::page_thumbnail_tooltip;
 use rust_reader_core::layout;
-use rust_reader_core::models::{Comic, FitMode, ReadingMode};
+use rust_reader_core::models::{Comic, FitMode, PageSource, ReadingMode};
 use rust_reader_core::state::{ReadingState, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -267,15 +267,16 @@ impl OpenReader {
     }
 
     fn apply_pending_fit(&mut self, _ctx: &egui::Context, available: egui::Vec2) {
-        let Some(fit) = self.pending_fit.take() else {
-            return;
-        };
         let Some(spread_size) = self.spread_size() else {
+            // 页面尺寸尚未可用（仍在加载），保留 pending_fit 等到下一帧再应用。
             return;
         };
         if spread_size.x <= 0.0 || spread_size.y <= 0.0 {
             return;
         }
+        let Some(fit) = self.pending_fit.take() else {
+            return;
+        };
 
         let scale = match fit {
             FitMode::Width => available.x / spread_size.x,
@@ -296,6 +297,35 @@ impl OpenReader {
         self.page_errors.clear();
         self.left_page = None;
         self.right_page = None;
+    }
+
+    /// Eagerly seed the page cache with the dimensions of the spread that will
+    /// be visible first. This lets `apply_pending_fit` compute the correct zoom
+    /// on the very first frame instead of waiting for the background decoder.
+    pub fn seed_spread_dimensions(&mut self) {
+        let total = self.total_pages();
+        if total == 0 {
+            return;
+        }
+        let current = self.state.current_page;
+        let mut indices = vec![current];
+        if self.is_double_page() && current > 0 && current + 1 < total {
+            // In double-page mode the cover is shown alone; subsequent spreads
+            // use the current anchor and the following page.
+            indices.push(current + 1);
+        }
+        for idx in indices {
+            if self.cache.get_original_size(idx).is_some() {
+                continue;
+            }
+            let Some(source) = self.comic.page_source(idx) else {
+                continue;
+            };
+            if let Some(dim) = sync_page_dimensions(source) {
+                timing::log(&format!("seeded dimensions for page {}: {:?}", idx, dim));
+                self.cache.insert_dimensions(idx, dim);
+            }
+        }
     }
 
     fn protected_page_indices(&self) -> HashSet<usize> {
@@ -463,6 +493,7 @@ impl ReaderView {
             enable_page_animation,
         };
         reader.bump_epoch(loader);
+        reader.seed_spread_dimensions();
         self.open = Some(reader);
     }
 
@@ -738,11 +769,10 @@ impl ReaderView {
                 .unwrap_or(FALLBACK_PAGE_SIZE),
         };
 
-        let any_loading = (left_idx.is_some() && left_texture.is_none())
-            || (right_idx.is_some() && right_texture.is_none());
-        if !any_loading {
-            reader.apply_pending_fit(ctx, available.size());
-        }
+        // Apply the pending fit as soon as the original dimensions are known,
+        // even if the GPU texture has not been uploaded yet. This prevents the
+        // first frames after opening a comic from showing an unscaled page.
+        reader.apply_pending_fit(ctx, available.size());
 
         let spread_size = egui::vec2(left_size.x + right_size.x, left_size.y.max(right_size.y));
         let scaled_spread = spread_size * reader.state.zoom;
@@ -1098,6 +1128,71 @@ fn request_page_thumbnail(loader: &PageLoader, reader: &mut OpenReader, page_ind
     }
 }
 
+/// Synchronously read the dimensions of a single page source without decoding
+/// the full image. This is used when opening a comic so the first frame can
+/// apply the correct fit zoom immediately. Only the image header is read,
+/// so this is much cheaper than a full decode.
+fn sync_page_dimensions(source: &PageSource) -> Option<[u32; 2]> {
+    fn dimensions_from_bytes(bytes: &[u8]) -> Option<[u32; 2]> {
+        image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .ok()?
+            .into_dimensions()
+            .ok()
+            .map(|(w, h)| [w, h])
+    }
+
+    match source {
+        PageSource::File(path) => image::image_dimensions(path).ok().map(|(w, h)| [w, h]),
+        PageSource::ZipEntry { archive, index, .. } => {
+            let file = std::fs::File::open(archive).ok()?;
+            let mut zip = zip::ZipArchive::new(file).ok()?;
+            let mut entry = zip.by_index(*index).ok()?;
+            // Read a bounded prefix; image headers are small, but keep the limit
+            // generous for formats with large metadata segments.
+            const LIMIT: usize = 256 * 1024;
+            let mut buf = Vec::with_capacity(LIMIT.min(entry.size() as usize));
+            let mut chunk = [0u8; 8192];
+            while buf.len() < LIMIT {
+                let to_read = (LIMIT - buf.len()).min(chunk.len());
+                match std::io::Read::read(&mut entry, &mut chunk[..to_read]) {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(_) => break,
+                }
+            }
+            dimensions_from_bytes(&buf)
+        }
+        PageSource::RarEntry {
+            archive,
+            name,
+            header_position,
+        } => {
+            let open_archive = unrar::Archive::new(archive).open_for_processing().ok()?;
+            let mut current = 0usize;
+            let mut archive = open_archive;
+            loop {
+                let maybe_entry = archive.read_header().ok()?;
+                let entry = maybe_entry?;
+                if current == *header_position {
+                    if entry.entry().filename.to_string_lossy() != *name {
+                        return None;
+                    }
+                    let (bytes, _archive) = entry.read().ok()?;
+                    return dimensions_from_bytes(&bytes);
+                }
+                archive = entry.skip().ok()?;
+                current += 1;
+            }
+        }
+        PageSource::PdfPage { .. } => {
+            // PDF dimensions depend on the render DPI; let the loader provide the
+            // size when it finishes rendering the first page.
+            None
+        }
+    }
+}
+
 fn error_retry_backoff(count: u32) -> Duration {
     let seconds = 2u32.pow(count.min(5)).min(30);
     Duration::from_secs(seconds as u64)
@@ -1374,5 +1469,20 @@ mod tests {
             since.elapsed() < Duration::from_secs(1),
             "pending timestamp should be fresh"
         );
+    }
+
+    #[test]
+    fn test_seed_spread_dimensions_reads_file_dimensions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("page.png");
+        let img = image::RgbaImage::from_pixel(100, 200, image::Rgba([255, 0, 0, 255]));
+        img.save(&path).unwrap();
+
+        let mut reader = dummy_reader();
+        reader.comic.volumes[0].pages[0].source = PageSource::File(path);
+        reader.state.set_double_page(false, 10);
+        reader.seed_spread_dimensions();
+
+        assert_eq!(reader.cache.get_original_size(0), Some([100, 200]));
     }
 }

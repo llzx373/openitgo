@@ -95,6 +95,17 @@ impl PageCache {
         self.textures.get(&page_index).map(|e| e.original_size)
     }
 
+    /// Seed the original dimensions for a page before any image data has been
+    /// decoded. This lets the reader compute the correct fit zoom on the first
+    /// frame after opening a comic.
+    pub fn insert_dimensions(&mut self, page_index: usize, dimensions: [u32; 2]) {
+        let entry = self
+            .textures
+            .entry(page_index)
+            .or_insert_with(|| CacheEntry::empty(dimensions));
+        entry.original_size = dimensions;
+    }
+
     /// Returns the full texture if available, otherwise the thumbnail texture.
     pub fn get_texture(&mut self, ctx: &Context, page_index: usize) -> Option<TextureHandle> {
         let entry = self.textures.get_mut(&page_index)?;
@@ -411,6 +422,15 @@ mod tests {
         assert!(cache.contains_thumbnail(0));
         assert_eq!(cache.get_original_size(0), Some([2, 2]));
         assert!(cache.get_texture(&ctx, 0).is_some());
+    }
+
+    #[test]
+    fn test_cache_insert_dimensions_seeds_original_size() {
+        let mut cache = PageCache::new();
+        cache.insert_dimensions(0, [123, 456]);
+        assert_eq!(cache.get_original_size(0), Some([123, 456]));
+        assert!(!cache.contains_full(0));
+        assert!(!cache.contains_thumbnail(0));
     }
 
     #[test]
