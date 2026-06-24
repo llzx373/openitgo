@@ -201,10 +201,23 @@ impl LibraryView {
                                                 cover_size,
                                                 egui::Sense::hover(),
                                             );
-                                            ui.painter().rect_filled(
-                                                rect,
-                                                0.0,
-                                                ui.visuals().widgets.inactive.bg_fill,
+                                            let placeholder_color =
+                                                if entry.media_type == MediaType::Ebook {
+                                                    egui::Color32::from_rgb(60, 80, 120)
+                                                } else {
+                                                    ui.visuals().widgets.inactive.bg_fill
+                                                };
+                                            ui.painter().rect_filled(rect, 0.0, placeholder_color);
+                                            let placeholder_label = match entry.media_type {
+                                                MediaType::Ebook => "电子书",
+                                                MediaType::Comic => "漫画",
+                                            };
+                                            ui.painter().text(
+                                                rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                placeholder_label,
+                                                egui::FontId::proportional(16.0),
+                                                egui::Color32::WHITE,
                                             );
                                             rect
                                         };
