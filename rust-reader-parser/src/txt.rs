@@ -51,22 +51,22 @@ impl TxtParser {
                     idx += 1;
                     current_lines.clear();
                 }
-                current_title = Some(line.trim().to_string());
+                let trimmed = line.trim();
+                let title = trimmed.trim_start_matches('#').trim().to_string();
+                current_title = Some(title);
             } else {
                 current_lines.push(line.to_string());
             }
         }
 
-        if !current_lines.is_empty() || chapters.is_empty() {
-            if !current_lines.is_empty() || current_title.is_some() {
-                let id = format!("chapter-{}", idx + 1);
-                chapters.push(EbookChapter {
-                    index: idx,
-                    id: id.clone(),
-                    href: format!("#{}", id),
-                    title: current_title,
-                });
-            }
+        if current_title.is_some() || !chapters.is_empty() {
+            let id = format!("chapter-{}", idx + 1);
+            chapters.push(EbookChapter {
+                index: idx,
+                id: id.clone(),
+                href: format!("#{}", id),
+                title: current_title,
+            });
         }
 
         if chapters.is_empty() {

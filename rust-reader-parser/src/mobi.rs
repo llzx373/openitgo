@@ -21,10 +21,15 @@ impl MobiParser {
         let book = mobi::Mobi::from_path(path)
             .map_err(|e| ParseError::InvalidArchive(format!("{}", e)))?;
 
-        let metadata = book.metadata();
-        let title = metadata.title().unwrap_or_default().to_string();
-        let author = metadata.author().unwrap_or_default().to_string();
-        let language = metadata.language().map(|s| s.to_string());
+        let title = book.title();
+        let author = book.author().unwrap_or_default();
+        let language = {
+            let lang = book.language();
+            match lang {
+                mobi::headers::Language::Neutral | mobi::headers::Language::Unknown => None,
+                _ => Some(format!("{:?}", lang)),
+            }
+        };
 
         let content = book
             .content_as_string()
@@ -35,11 +40,14 @@ impl MobiParser {
         let chapters: Vec<EbookChapter> = words
             .chunks(chunk_size)
             .enumerate()
-            .map(|(idx, chunk)| EbookChapter {
-                index: idx,
-                id: format!("chapter-{}", idx + 1),
-                href: format!("#chapter-{}", idx + 1),
-                title: Some(format!("第 {} 章", idx + 1)),
+            .map(|(idx, _chunk)| {
+                let id = format!("chapter-{}", idx + 1);
+                EbookChapter {
+                    index: idx,
+                    id: id.clone(),
+                    href: format!("#{}", id),
+                    title: Some(format!("第 {} 章", idx + 1)),
+                }
             })
             .collect();
 

@@ -14,50 +14,63 @@ impl EpubParser {
     }
 
     pub fn parse(path: &Path) -> Result<Ebook, ParseError> {
-        let mut doc =
+        let doc =
             epub::doc::EpubDoc::new(path).map_err(|e| ParseError::InvalidEpub(format!("{}", e)))?;
 
-        let title = doc.mdata("title").unwrap_or_default();
-        let language = doc.mdata("language");
+        let title = doc
+            .mdata("title")
+            .map(|m| m.value.clone())
+            .unwrap_or_default();
+        let language = doc.mdata("language").map(|m| m.value.clone());
         let authors: Vec<String> = doc
             .metadata
-            .get("creator")
-            .map(|v| v.iter().map(|s| s.to_string()).collect())
-            .unwrap_or_default();
+            .iter()
+            .filter(|m| m.property == "creator")
+            .map(|m| m.value.clone())
+            .collect();
 
         let resources: Vec<EbookResource> = doc
             .resources
             .iter()
-            .map(|(id, (href, mime_type))| EbookResource {
+            .map(|(id, item)| EbookResource {
                 id: id.clone(),
-                href: href.clone(),
-                mime_type: mime_type.clone(),
+                href: item.path.to_string_lossy().to_string(),
+                mime_type: item.mime.clone(),
             })
             .collect();
 
-        let spine: Vec<String> = doc.spine.clone();
+        let spine: Vec<String> = doc.spine.iter().map(|item| item.idref.clone()).collect();
 
-        let mut chapters: Vec<EbookChapter> = doc
-            .toc
-            .iter()
-            .enumerate()
-            .map(|(idx, toc)| EbookChapter {
-                index: idx,
-                id: toc.content.clone(),
-                href: toc.content.clone(),
-                title: Some(toc.label.clone()),
-            })
-            .collect();
+        fn collect_navpoints(
+            points: &[epub::doc::NavPoint],
+            base_idx: &mut usize,
+        ) -> Vec<EbookChapter> {
+            let mut chapters = Vec::new();
+            for point in points {
+                chapters.push(EbookChapter {
+                    index: *base_idx,
+                    id: point.content.to_string_lossy().to_string(),
+                    href: point.content.to_string_lossy().to_string(),
+                    title: Some(point.label.clone()),
+                });
+                *base_idx += 1;
+                chapters.extend(collect_navpoints(&point.children, base_idx));
+            }
+            chapters
+        }
+
+        let mut chapters: Vec<EbookChapter> = collect_navpoints(&doc.toc, &mut 0);
 
         if chapters.is_empty() {
-            chapters = spine
+            chapters = doc
+                .spine
                 .iter()
                 .enumerate()
-                .filter_map(|(idx, idref)| {
-                    doc.resources.get(idref).map(|(href, _)| EbookChapter {
+                .filter_map(|(idx, item)| {
+                    doc.resources.get(&item.idref).map(|resource| EbookChapter {
                         index: idx,
-                        id: idref.clone(),
-                        href: href.clone(),
+                        id: item.idref.clone(),
+                        href: resource.path.to_string_lossy().to_string(),
                         title: None,
                     })
                 })
