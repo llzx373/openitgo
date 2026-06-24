@@ -1,5 +1,5 @@
 use crate::loader::PageLoader;
-use crate::opener::{ComicOpener, OpenStatus};
+use crate::opener::{AsyncOpener, OpenStatus};
 use crate::shortcuts::is_shortcut_pressed;
 use crate::timing;
 use crate::views::settings::SettingsView;
@@ -9,7 +9,8 @@ use crate::views::{
     reader::ReaderView,
 };
 use egui_phosphor::regular;
-use rust_reader_core::models::{FitMode, PageSource, ReadingMode};
+use rust_reader_core::ebook::Ebook;
+use rust_reader_core::models::{Comic, FitMode, PageSource, ReadingMode};
 use rust_reader_core::state::ReadingState;
 use rust_reader_storage::{
     json_store::JsonStore,
@@ -21,6 +22,18 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+fn is_ebook_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "epub" | "mobi" | "azw" | "azw3" | "txt" | "md" | "markdown"
+            )
+        })
+        .unwrap_or(false)
+}
 
 pub struct ReaderApp {
     pub current_view: View,
@@ -36,7 +49,8 @@ pub struct ReaderApp {
     pub error_message: Option<String>,
     pub page_loader: PageLoader,
     pub cover_loader: PageLoader,
-    pub opener: Option<ComicOpener>,
+    pub opener: Option<AsyncOpener<Comic>>,
+    pub ebook_opener: Option<AsyncOpener<Ebook>>,
     /// Cover requests in flight: epoch -> (comic_id, comic_path).
     pub pending_covers: HashMap<crate::loader::Epoch, (String, PathBuf)>,
     /// Comic ids for which a cover generation has already been requested.
@@ -85,6 +99,7 @@ impl Default for ReaderApp {
             page_loader,
             cover_loader,
             opener: None,
+            ebook_opener: None,
             pending_covers: HashMap::new(),
             requested_cover_ids: HashSet::new(),
             current_theme: Theme::System,
@@ -102,7 +117,7 @@ impl eframe::App for ReaderApp {
         let _ = self.store.save_bookmarks(&self.bookmarks);
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if matches!(self.last_view, View::Reader) && !matches!(self.current_view, View::Reader) {
             self.record_reader_history();
             self.reader_view.clear_cache();
@@ -131,6 +146,7 @@ impl eframe::App for ReaderApp {
             self.handle_open_paths(dock_paths);
         }
         self.poll_opener(ctx);
+        self.poll_ebook_opener(ctx, frame);
 
         let cache_size_mb = self.settings.cache_size_mb as usize;
         self.page_loader.set_compress(self.settings.compress_images);
@@ -289,11 +305,11 @@ impl ReaderApp {
             }
             if let Some(idx) = open_idx {
                 if let Some(entry) = self.library_view.entry_at(idx).cloned() {
-                    self.open_comic(entry.path);
+                    self.open_path(entry.path);
                 }
             }
             if let Some(path) = open_path {
-                self.open_comic(path);
+                self.open_path(path);
             }
             if let Some(idx) = request_cover_idx {
                 self.request_cover_for_library_entry(idx);
@@ -756,6 +772,7 @@ impl ReaderApp {
                         ui.add_space(16.0);
                         if ui.button("取消").clicked() {
                             self.opener = None;
+                            self.ebook_opener = None;
                             self.current_view = View::Library;
                         }
                         if let Some(err) = &self.error_message {
@@ -793,7 +810,7 @@ impl ReaderApp {
                         } else {
                             for (title, path) in recent {
                                 if ui.button(&title).clicked() {
-                                    self.open_comic(path);
+                                    self.open_path(path);
                                     ui.close_menu();
                                 }
                             }
@@ -1010,11 +1027,11 @@ impl ReaderApp {
     }
 
     fn render_ebook_menu(&mut self, ui: &mut egui::Ui) {
-        if ui.button("上一章").clicked() {
+        if ui.button("上一页").clicked() {
             self.ebook_view.prev_page();
             ui.close_menu();
         }
-        if ui.button("下一章").clicked() {
+        if ui.button("下一页").clicked() {
             self.ebook_view.next_page();
             ui.close_menu();
         }
@@ -1448,11 +1465,70 @@ impl ReaderApp {
 
     fn open_comic(&mut self, path: std::path::PathBuf) {
         timing::log(&format!("open_comic {:?}", path));
-        self.opener = Some(ComicOpener::open(path.clone(), |p| {
+        self.opener = Some(AsyncOpener::open(path.clone(), |p| {
             rust_reader_parser::parse(p).map_err(|e| e.to_string())
         }));
         self.current_view = View::Loading(path);
         self.error_message = None;
+    }
+
+    fn open_ebook(&mut self, path: std::path::PathBuf) {
+        timing::log(&format!("open_ebook {:?}", path));
+        self.ebook_opener = Some(AsyncOpener::open(path.clone(), |p| {
+            rust_reader_parser::parse_ebook(p).map_err(|e| e.to_string())
+        }));
+        self.current_view = View::Loading(path);
+        self.error_message = None;
+    }
+
+    fn open_path(&mut self, path: std::path::PathBuf) {
+        if is_ebook_file(&path) {
+            self.open_ebook(path);
+        } else {
+            self.open_comic(path);
+        }
+    }
+
+    fn poll_ebook_opener(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let Some(mut opener) = self.ebook_opener.take() else {
+            return;
+        };
+        match opener.poll() {
+            OpenStatus::Loading => self.ebook_opener = Some(opener),
+            OpenStatus::Ready(result) => match result {
+                Ok(ebook) => {
+                    let screen = ctx.screen_rect();
+                    let toolbar_height = ctx.style().spacing.interact_size.y * 2.0;
+                    let statusbar_height = ctx.style().spacing.interact_size.y * 1.5;
+                    let bounds = wry::Rect {
+                        position: wry::dpi::LogicalPosition::new(
+                            screen.min.x,
+                            screen.min.y + toolbar_height,
+                        )
+                        .into(),
+                        size: wry::dpi::LogicalSize::new(
+                            screen.width(),
+                            screen.height() - toolbar_height - statusbar_height,
+                        )
+                        .into(),
+                    };
+                    match self
+                        .ebook_view
+                        .open(frame, bounds, ebook, &self.settings.ebook)
+                    {
+                        Ok(()) => {
+                            self.current_view = View::Ebook;
+                            self.error_message = None;
+                        }
+                        Err(e) => self.error_message = Some(format!("无法创建阅读器: {}", e)),
+                    }
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("无法打开电子书: {}", e));
+                    self.current_view = View::Library;
+                }
+            },
+        }
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
@@ -1469,8 +1545,8 @@ impl ReaderApp {
             self.add_folder_to_library(path.clone());
         }
         if let Some(path) = paths.first() {
-            if rust_reader_parser::parse(path).is_ok() {
-                self.open_comic(path.clone());
+            if is_ebook_file(path) || rust_reader_parser::parse(path).is_ok() {
+                self.open_path(path.clone());
             }
         }
     }
@@ -1676,6 +1752,7 @@ mod tests {
                 page_loader,
                 cover_loader,
                 opener: None,
+                ebook_opener: None,
                 pending_covers: HashMap::new(),
                 requested_cover_ids: HashSet::new(),
                 current_theme: Theme::System,
