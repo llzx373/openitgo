@@ -130,6 +130,7 @@ let spreads = [];
 let currentChapterHtml = '';
 window.ebookChapterCount = {chapter_count};
 let isFlipping = false;
+let pendingFlipTarget = null;
 let currentSettings = {{
   mode: '{mode}',
   animate: {animate},
@@ -245,12 +246,18 @@ function splitIntoSpreads(html) {{
 
 function goToSpread(index, animate) {{
   if (spreads.length === 0) return;
-  currentSpread = Math.max(0, Math.min(spreads.length - 1, index));
+  const target = Math.max(0, Math.min(spreads.length - 1, index));
+  if (target === currentSpread) {{
+    renderSpread(target);
+    return;
+  }}
   preloadAdjacent();
   if (animate && currentSettings.animate) {{
-    flipToSpread(currentSpread);
+    flipToSpread(target);
   }} else {{
+    currentSpread = target;
     renderSpread(currentSpread);
+    reportPosition();
   }}
 }}
 
@@ -323,9 +330,64 @@ function scrollToOffset(offset) {{
   }}
 }}
 
-// TODO(Task 10): implement 3D flip animation between spreads.
+function captureSpreadElement(index) {{
+  const el = getSpreadElement(index).cloneNode(true);
+  const container = document.createElement('div');
+  container.style.width = '100%';
+  container.style.height = '100%';
+  container.style.overflow = 'hidden';
+  container.appendChild(el);
+  return container;
+}}
+
 function flipToSpread(targetIndex) {{
+  if (isFlipping) {{
+    pendingFlipTarget = targetIndex;
+    return;
+  }}
+  isFlipping = true;
+  const chapterAtStart = currentChapter;
+  const direction = targetIndex > currentSpread ? 1 : -1;
+
+  const sheet = document.createElement('div');
+  sheet.className = 'sheet';
+  sheet.style.left = '0';
+  sheet.style.width = '100%';
+
+  const front = document.createElement('div');
+  front.className = 'front';
+  front.appendChild(captureSpreadElement(currentSpread));
+
+  const back = document.createElement('div');
+  back.className = 'back';
+  back.appendChild(captureSpreadElement(targetIndex));
+
+  sheet.appendChild(front);
+  sheet.appendChild(back);
+  flipper.innerHTML = '';
+  flipper.appendChild(sheet);
+  flipper.style.display = 'block';
+
   renderSpread(targetIndex);
+
+  requestAnimationFrame(() => {{
+    sheet.style.transform = direction > 0 ? 'rotateY(-180deg)' : 'rotateY(180deg)';
+  }});
+
+  setTimeout(() => {{
+    if (currentChapter === chapterAtStart) {{
+      currentSpread = targetIndex;
+      reportPosition();
+    }}
+    flipper.style.display = 'none';
+    flipper.innerHTML = '';
+    isFlipping = false;
+    if (pendingFlipTarget !== null && currentChapter === chapterAtStart) {{
+      const t = pendingFlipTarget;
+      pendingFlipTarget = null;
+      goToSpread(t, true);
+    }}
+  }}, 450);
 }}
 
 function isPaginated() {{
@@ -354,6 +416,7 @@ function applySettings(json) {{
 async function loadChapter(index, charOffset) {{
   index = index ?? 0;
   currentChapter = index;
+  pendingFlipTarget = null;
   spreadElementCache = {{}}; // clear stale cache
   try {{
     const res = await fetch('ebook://reader?chapter=' + currentChapter);
@@ -367,6 +430,7 @@ async function loadChapter(index, charOffset) {{
       }}
       spreads = [];
       currentSpread = 0;
+      reportPosition();
     }} else {{
       spreads = splitIntoSpreads(currentChapterHtml);
       if (typeof charOffset === 'number' && charOffset >= 0) {{
@@ -376,7 +440,6 @@ async function loadChapter(index, charOffset) {{
       }}
       goToSpread(currentSpread, false);
     }}
-    reportPosition();
   }} catch (e) {{
     spread.innerHTML = '<p>章节加载失败: ' + e + '</p>';
     spread.style.display = 'block';
@@ -645,5 +708,13 @@ mod tests {
         let html = reader_html(&EbookSettings::default(), 1);
         assert!(html.contains("function preloadAdjacent"));
         assert!(html.contains("spreadElementCache"));
+    }
+
+    #[test]
+    fn test_reader_html_contains_flipper_and_flip_function() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(html.contains("id=\"flipper\""));
+        assert!(html.contains("function flipToSpread"));
     }
 }
