@@ -45,9 +45,14 @@ pub fn render_chapter_html(ebook: &Ebook, chapter_index: usize) -> Result<String
     } else if is_epub_path(path) {
         let mut doc =
             epub::doc::EpubDoc::new(path).map_err(|e| ParseError::InvalidEpub(format!("{}", e)))?;
-        doc.set_current_chapter(chapter_index);
-        let (bytes, _mime) = doc.get_current().ok_or(ParseError::NoPages)?;
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        let chapter = ebook
+            .chapters
+            .get(chapter_index)
+            .ok_or(ParseError::NoPages)?;
+        let html = doc
+            .get_resource_str_by_path(&chapter.href)
+            .ok_or(ParseError::NoPages)?;
+        Ok(html)
     } else {
         Err(ParseError::Unsupported)
     }

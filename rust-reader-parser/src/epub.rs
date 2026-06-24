@@ -115,7 +115,7 @@ impl EpubParser {
                     index: *base_idx,
                     id: point.content.to_string_lossy().to_string(),
                     href: point.content.to_string_lossy().to_string(),
-                    title: Some(point.label.clone()),
+                    title: Some(point.label.trim().to_string()),
                 });
                 *base_idx += 1;
                 chapters.extend(collect_navpoints(&point.children, base_idx));
