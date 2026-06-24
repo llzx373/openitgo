@@ -1,5 +1,6 @@
+use rust_reader_core::ebook::EbookReadingMode;
 use rust_reader_core::models::{FitMode, ReadingMode};
-use rust_reader_storage::models::{Settings, Theme, ToolbarDisplayMode};
+use rust_reader_storage::models::{EbookTheme, Settings, Theme, ToolbarDisplayMode};
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -114,6 +115,50 @@ impl SettingsView {
             });
 
         ui.separator();
+        ui.heading("电子书");
+        ui.collapsing("阅读设置", |ui| {
+            ui.label("阅读模式");
+            egui::ComboBox::from_id_salt("ebook_mode")
+                .selected_text(ebook_mode_label(settings.ebook.reading_mode))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut settings.ebook.reading_mode,
+                        EbookReadingMode::SinglePage,
+                        "单页",
+                    );
+                    ui.selectable_value(
+                        &mut settings.ebook.reading_mode,
+                        EbookReadingMode::DoublePage,
+                        "双页",
+                    );
+                    ui.selectable_value(
+                        &mut settings.ebook.reading_mode,
+                        EbookReadingMode::Scroll,
+                        "连续滚动",
+                    );
+                });
+
+            ui.horizontal(|ui| {
+                ui.label("字体大小:");
+                ui.add(egui::Slider::new(&mut settings.ebook.font_size, 10..=72));
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("行间距:");
+                ui.add(egui::Slider::new(&mut settings.ebook.line_height, 1.0..=3.0).step_by(0.05));
+            });
+
+            ui.label("主题");
+            egui::ComboBox::from_id_salt("ebook_theme")
+                .selected_text(ebook_theme_label(settings.ebook.theme))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut settings.ebook.theme, EbookTheme::Light, "白天");
+                    ui.selectable_value(&mut settings.ebook.theme, EbookTheme::Dark, "夜晚");
+                    ui.selectable_value(&mut settings.ebook.theme, EbookTheme::Sepia, "Sepia");
+                });
+        });
+
+        ui.separator();
         ui.heading("快捷键");
         self.shortcut_editor(ui, &mut settings.shortcuts);
     }
@@ -188,5 +233,21 @@ fn toolbar_mode_label(mode: ToolbarDisplayMode) -> &'static str {
         ToolbarDisplayMode::IconAndText => "图标 + 文字",
         ToolbarDisplayMode::IconOnly => "仅图标",
         ToolbarDisplayMode::TextOnly => "仅文字",
+    }
+}
+
+fn ebook_mode_label(mode: EbookReadingMode) -> &'static str {
+    match mode {
+        EbookReadingMode::SinglePage => "单页",
+        EbookReadingMode::DoublePage => "双页",
+        EbookReadingMode::Scroll => "连续滚动",
+    }
+}
+
+fn ebook_theme_label(theme: EbookTheme) -> &'static str {
+    match theme {
+        EbookTheme::Light => "白天",
+        EbookTheme::Dark => "夜晚",
+        EbookTheme::Sepia => "Sepia",
     }
 }
