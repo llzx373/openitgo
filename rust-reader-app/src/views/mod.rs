@@ -1,3 +1,4 @@
+pub mod ebook;
 pub mod library;
 pub mod reader;
 pub mod settings;

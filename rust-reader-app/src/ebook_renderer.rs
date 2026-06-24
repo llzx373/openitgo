@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use rust_reader_core::ebook::{Ebook, EbookReadingMode};
 use rust_reader_storage::models::{EbookSettings, EbookTheme};
 use std::borrow::Cow;
