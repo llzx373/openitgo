@@ -115,8 +115,7 @@ impl SettingsView {
             });
 
         ui.separator();
-        ui.heading("电子书");
-        ui.collapsing("阅读设置", |ui| {
+        ui.collapsing("电子书", |ui| {
             ui.label("阅读模式");
             egui::ComboBox::from_id_salt("ebook_mode")
                 .selected_text(ebook_mode_label(settings.ebook.reading_mode))
@@ -154,7 +153,7 @@ impl SettingsView {
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut settings.ebook.theme, EbookTheme::Light, "白天");
                     ui.selectable_value(&mut settings.ebook.theme, EbookTheme::Dark, "夜晚");
-                    ui.selectable_value(&mut settings.ebook.theme, EbookTheme::Sepia, "Sepia");
+                    ui.selectable_value(&mut settings.ebook.theme, EbookTheme::Sepia, "羊皮纸");
                 });
         });
 
@@ -248,6 +247,6 @@ fn ebook_theme_label(theme: EbookTheme) -> &'static str {
     match theme {
         EbookTheme::Light => "白天",
         EbookTheme::Dark => "夜晚",
-        EbookTheme::Sepia => "Sepia",
+        EbookTheme::Sepia => "羊皮纸",
     }
 }
