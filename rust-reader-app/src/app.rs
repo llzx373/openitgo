@@ -1613,10 +1613,9 @@ impl ReaderApp {
                                 let chapter = h.page_index;
                                 let offset = h.char_offset.unwrap_or(0);
                                 self.ebook_view.goto_chapter(chapter);
-                                self.ebook_view
-                                    .open
-                                    .as_mut()
-                                    .map(|o| o.renderer.goto_chapter(chapter, offset));
+                                if let Some(o) = self.ebook_view.open.as_mut() {
+                                    o.renderer.goto_chapter(chapter, offset);
+                                }
                             }
                             self.current_view = View::Ebook;
                             self.error_message = None;
