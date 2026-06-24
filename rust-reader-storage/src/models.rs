@@ -99,6 +99,18 @@ impl Settings {
                 self.ebook.line_height
             ));
         }
+        if !(0..=200).contains(&self.ebook.margin_horizontal) {
+            return Err(format!(
+                "ebook.margin_horizontal must be between 0 and 200, got {}",
+                self.ebook.margin_horizontal
+            ));
+        }
+        if !(0..=200).contains(&self.ebook.margin_vertical) {
+            return Err(format!(
+                "ebook.margin_vertical must be between 0 and 200, got {}",
+                self.ebook.margin_vertical
+            ));
+        }
         Ok(())
     }
 
@@ -113,6 +125,8 @@ impl Settings {
         self.window_size.1 = self.window_size.1.max(100.0);
         self.ebook.font_size = self.ebook.font_size.clamp(10, 72);
         self.ebook.line_height = self.ebook.line_height.clamp(1.0, 3.0);
+        self.ebook.margin_horizontal = self.ebook.margin_horizontal.clamp(0, 200);
+        self.ebook.margin_vertical = self.ebook.margin_vertical.clamp(0, 200);
     }
 }
 
@@ -419,5 +433,25 @@ mod tests {
         let json = r#"{"comic_id":"id","volume_index":0,"page_index":1,"note":null}"#;
         let b: Bookmark = serde_json::from_str(json).unwrap();
         assert_eq!(b.char_offset, None);
+    }
+
+    #[test]
+    fn test_settings_validate_rejects_bad_ebook_margins() {
+        let mut s = Settings::default();
+        s.ebook.margin_horizontal = 250;
+        assert!(s.validate().is_err());
+        s.ebook.margin_horizontal = 24;
+        s.ebook.margin_vertical = 250;
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn test_settings_clamp_ebook_margins() {
+        let mut s = Settings::default();
+        s.ebook.margin_horizontal = 300;
+        s.ebook.margin_vertical = 400;
+        s.clamp();
+        assert_eq!(s.ebook.margin_horizontal, 200);
+        assert_eq!(s.ebook.margin_vertical, 200);
     }
 }
