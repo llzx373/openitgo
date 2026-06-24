@@ -131,6 +131,7 @@ let currentChapterHtml = '';
 window.ebookChapterCount = {chapter_count};
 let isFlipping = false;
 let pendingFlipTarget = null;
+const RESIZE_DEBOUNCE_MS = 200;
 let currentSettings = {{
   mode: '{mode}',
   animate: {animate},
@@ -249,6 +250,7 @@ function goToSpread(index, animate) {{
   const target = Math.max(0, Math.min(spreads.length - 1, index));
   if (target === currentSpread) {{
     renderSpread(target);
+    reportPosition();
     return;
   }}
   preloadAdjacent();
@@ -300,6 +302,14 @@ function renderSpread(index) {{
   spread.appendChild(getSpreadElement(index));
   spread.style.display = 'block';
   content.style.display = 'none';
+}}
+
+function currentSpreadCharOffset() {{
+  let offset = 0;
+  for (let i = 0; i < currentSpread && i < spreads.length; i++) {{
+    offset += textLength(spreads[i]);
+  }}
+  return offset;
 }}
 
 // Approximate: find the spread whose cumulative text length contains the offset.
@@ -390,6 +400,13 @@ function flipToSpread(targetIndex) {{
   }}, 450);
 }}
 
+function cancelFlip() {{
+  flipper.style.display = 'none';
+  flipper.innerHTML = '';
+  isFlipping = false;
+  pendingFlipTarget = null;
+}}
+
 function applySettings(json) {{
   const s = typeof json === 'string' ? JSON.parse(json) : json;
   currentSettings = s;
@@ -406,6 +423,14 @@ function applySettings(json) {{
     document.body.classList.remove('no-anim');
   }} else {{
     document.body.classList.add('no-anim');
+  }}
+  // 设置变化可能导致分页改变，重新切分
+  if (currentChapterHtml && !isScrollMode()) {{
+    cancelFlip();
+    const offset = currentSpreadCharOffset();
+    spreads = splitIntoSpreads(currentChapterHtml);
+    currentSpread = findSpreadForOffset(offset);
+    goToSpread(currentSpread, false);
   }}
 }}
 
@@ -542,7 +567,21 @@ function onClick(e) {{
 spread.addEventListener('wheel', onWheel, {{ passive: false }});
 spread.addEventListener('click', onClick);
 window.addEventListener('scroll', reportPosition, true);
-window.addEventListener('resize', reportPosition);
+
+let resizeTimeout = null;
+window.addEventListener('resize', () => {{
+  clearTimeout(resizeTimeout);
+  resizeTimeout = setTimeout(() => {{
+    if (currentChapterHtml && !isScrollMode()) {{
+      cancelFlip();
+      const offset = currentSpreadCharOffset();
+      spreads = splitIntoSpreads(currentChapterHtml);
+      currentSpread = findSpreadForOffset(offset);
+      goToSpread(currentSpread, false);
+    }}
+  }}, RESIZE_DEBOUNCE_MS);
+}});
+
 applySettings({settings_json});
 loadChapter(0, 0);
 sendIpc({{ type: 'ready' }});
@@ -716,5 +755,17 @@ mod tests {
         let html = reader_html(&EbookSettings::default(), 1);
         assert!(html.contains("id=\"flipper\""));
         assert!(html.contains("function flipToSpread"));
+    }
+
+    #[test]
+    fn test_reader_html_contains_resize_handler() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(html.contains("function applySettings"));
+        assert!(html.contains("clearTimeout(resizeTimeout)"));
+        assert!(html.contains("setTimeout"));
+        assert!(html.contains("!isScrollMode()"));
+        assert!(html.contains("splitIntoSpreads(currentChapterHtml)"));
+        assert!(html.contains("goToSpread(currentSpread, false)"));
     }
 }
