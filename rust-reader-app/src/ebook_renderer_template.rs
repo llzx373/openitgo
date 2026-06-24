@@ -125,7 +125,9 @@ const measure = document.getElementById('measure');
 const spread = document.getElementById('spread');
 const flipper = document.getElementById('flipper');
 let currentChapter = 0;
-let currentOffset = 0;
+let currentSpread = 0;
+let spreads = [];
+let currentChapterHtml = '';
 window.ebookChapterCount = {chapter_count};
 let isFlipping = false;
 let currentSettings = {{
@@ -195,10 +197,13 @@ function splitSinglePage(html) {{
 }}
 
 function splitDoublePage(html) {{
+  const originalWidth = measure.style.width;
+  measure.style.width = '50%';
   measure.innerHTML = html;
   const ph = pageHeight();
   if (!ph || ph <= 0) {{
     measure.innerHTML = '';
+    measure.style.width = originalWidth;
     return [html];
   }}
   const totalHeight = measure.scrollHeight;
@@ -219,16 +224,16 @@ function splitDoublePage(html) {{
       cell.style.position = 'relative';
       const clone = measure.cloneNode(true);
       clone.removeAttribute('id');
-      const inner = clone;
-      inner.style.position = 'absolute';
-      inner.style.top = -pageY + 'px';
-      inner.style.width = '100%';
-      cell.appendChild(inner);
+      clone.style.position = 'absolute';
+      clone.style.top = -pageY + 'px';
+      clone.style.width = '100%';
+      cell.appendChild(clone);
       wrapper.appendChild(cell);
     }}
     spreads.push(wrapper.outerHTML);
   }}
   measure.innerHTML = '';
+  measure.style.width = originalWidth;
   return spreads;
 }}
 
@@ -238,31 +243,61 @@ function splitIntoSpreads(html) {{
   return splitSinglePage(html);
 }}
 
-function goToSpread(index) {{
-  // TODO: wire spread navigation once rendering switches to #spread (Task 8).
+function goToSpread(index, animate) {{
+  if (spreads.length === 0) return;
+  currentSpread = Math.max(0, Math.min(spreads.length - 1, index));
+  preloadAdjacent();
+  if (animate && currentSettings.animate) {{
+    flipToSpread(currentSpread);
+  }} else {{
+    renderSpread(currentSpread);
+  }}
+}}
+
+function renderSpread(index) {{
+  spread.innerHTML = spreads[index];
+  spread.style.display = 'block';
+  content.style.display = 'none';
+}}
+
+// Approximate: find the spread whose cumulative text length contains the offset.
+function findSpreadForOffset(offset) {{
+  if (spreads.length === 0) return 0;
+  let count = 0;
+  for (let i = 0; i < spreads.length; i++) {{
+    count += textLength(spreads[i]);
+    if (count >= offset) return i;
+  }}
+  return spreads.length - 1;
+}}
+
+function scrollToOffset(offset) {{
+  const textNodes = [];
+  const walk = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, null);
+  while (walk.nextNode()) textNodes.push(walk.currentNode);
+  let count = 0;
+  for (const node of textNodes) {{
+    if (count + node.length >= offset) {{
+      const range = document.createRange();
+      range.setStart(node, offset - count);
+      const rect = range.getBoundingClientRect();
+      content.scrollTop = rect.top + content.scrollTop - content.getBoundingClientRect().top;
+      break;
+    }}
+    count += node.length;
+  }}
+}}
+
+// TODO(Task 9): implement preloading of adjacent spreads.
+function preloadAdjacent() {{}}
+
+// TODO(Task 10): implement 3D flip animation between spreads.
+function flipToSpread(targetIndex) {{
+  renderSpread(targetIndex);
 }}
 
 function isPaginated() {{
   return document.body.classList.contains('paginated') || document.body.classList.contains('double');
-}}
-
-function pageWidth() {{
-  if (document.body.classList.contains('double')) return content.clientWidth / 2;
-  return content.clientWidth;
-}}
-
-function totalPages() {{
-  if (!isPaginated()) return 1;
-  const pw = pageWidth();
-  if (pw <= 0) return 1;
-  return Math.max(1, Math.round(content.scrollWidth / pw));
-}}
-
-function currentPage() {{
-  if (!isPaginated()) return 0;
-  const pw = pageWidth();
-  if (pw <= 0) return 0;
-  return Math.max(0, Math.min(totalPages() - 1, Math.round(content.scrollLeft / pw)));
 }}
 
 function applySettings(json) {{
@@ -284,72 +319,53 @@ function applySettings(json) {{
   }}
 }}
 
-async function loadChapter(index, offset) {{
-  currentChapter = index || 0;
-  currentOffset = offset || 0;
+async function loadChapter(index, charOffset) {{
+  index = index ?? 0;
+  currentChapter = index;
   try {{
     const res = await fetch('ebook://reader?chapter=' + currentChapter);
-    const html = await res.text();
-    content.innerHTML = html;
-    if (offset) {{
-      scrollToOffset(offset);
+    currentChapterHtml = await res.text();
+    if (isScrollMode()) {{
+      content.innerHTML = currentChapterHtml;
+      content.style.display = 'block';
+      spread.style.display = 'none';
+      if (charOffset) {{
+        scrollToOffset(charOffset);
+      }}
+      spreads = [];
+      currentSpread = 0;
     }} else {{
-      content.scrollLeft = 0;
+      spreads = splitIntoSpreads(currentChapterHtml);
+      if (typeof charOffset === 'number' && charOffset >= 0) {{
+        currentSpread = findSpreadForOffset(charOffset);
+      }} else {{
+        currentSpread = 0;
+      }}
+      goToSpread(currentSpread, false);
     }}
     reportPosition();
   }} catch (e) {{
-    content.innerHTML = '<p>章节加载失败: ' + e + '</p>';
-  }}
-}}
-
-function scrollToOffset(offset) {{
-  const textNodes = [];
-  const walk = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, null);
-  while (walk.nextNode()) textNodes.push(walk.currentNode);
-  let count = 0;
-  for (const node of textNodes) {{
-    if (count + node.length >= offset) {{
-      const range = document.createRange();
-      range.setStart(node, offset - count);
-      const rect = range.getBoundingClientRect();
-      if (isPaginated()) {{
-        content.scrollLeft = rect.left + content.scrollLeft - content.getBoundingClientRect().left;
-      }} else {{
-        content.scrollTop = rect.top + content.scrollTop - content.getBoundingClientRect().top;
-      }}
-      break;
-    }}
-    count += node.length;
+    spread.innerHTML = '<p>章节加载失败: ' + e + '</p>';
+    spread.style.display = 'block';
   }}
 }}
 
 function reportPosition() {{
-  if (isPaginated()) {{
-    const page = currentPage();
-    const pw = pageWidth();
-    const rect = content.getBoundingClientRect();
-    const pageLeft = rect.left + page * pw;
-    let offset = 0;
-    const textNodes = [];
-    const walk = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, null);
-    while (walk.nextNode()) textNodes.push(walk.currentNode);
-    for (const node of textNodes) {{
-      const r = document.createRange();
-      r.selectNode(node);
-      const br = r.getBoundingClientRect();
-      if (br.left >= pageLeft && br.left < pageLeft + pw && br.top >= rect.top) {{
-        break;
-      }}
-      offset += node.length;
+  let offset = 0;
+  if (!isScrollMode() && spreads.length > 0 && currentSpread < spreads.length) {{
+    // Approximate character offset by summing text lengths of preceding spreads.
+    for (let i = 0; i < currentSpread; i++) {{
+      offset += textLength(spreads[i]);
     }}
     sendIpc({{
       type: 'position',
       chapter: currentChapter,
+      spread: currentSpread,
       char_offset: offset,
-      page: page,
-      total_pages: totalPages()
+      total_spreads: spreads.length
     }});
   }} else {{
+    // Scroll mode fallback: use #content's visible text start.
     const rect = content.getBoundingClientRect();
     let offset = 0;
     const textNodes = [];
@@ -367,102 +383,43 @@ function reportPosition() {{
     sendIpc({{
       type: 'position',
       chapter: currentChapter,
+      spread: 0,
       char_offset: offset,
-      page: 0,
-      total_pages: 1
+      total_spreads: 1
     }});
   }}
 }}
 
-function goToPage(page, animate) {{
-  if (!isPaginated()) return;
-  const total = totalPages();
-  page = Math.max(0, Math.min(total - 1, page));
-  if (page === currentPage()) return;
-  if (animate && currentSettings.animate) {{
-    flipToPage(page);
-  }} else {{
-    content.scrollTo({{ left: page * pageWidth(), behavior: animate ? 'smooth' : 'auto' }});
-  }}
+function textLength(html) {{
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  return div.textContent.length;
 }}
 
 function nextPage() {{
-  if (document.body.classList.contains('scroll')) {{
+  if (isScrollMode()) {{
     content.scrollTop += content.clientHeight * 0.9;
-  }} else {{
-    goToPage(currentPage() + 1, true);
+    return;
+  }}
+  if (currentSpread + 1 < spreads.length) {{
+    goToSpread(currentSpread + 1, true);
+  }} else if (currentChapter + 1 < window.ebookChapterCount) {{
+    loadChapter(currentChapter + 1, 0);
   }}
 }}
 
 function prevPage() {{
-  if (document.body.classList.contains('scroll')) {{
+  if (isScrollMode()) {{
     content.scrollTop -= content.clientHeight * 0.9;
-  }} else {{
-    goToPage(currentPage() - 1, true);
+    return;
   }}
-}}
-
-function capturePage(page) {{
-  const container = document.createElement('div');
-  container.className = 'page-capture';
-  container.style.width = '100%';
-  container.style.height = '100%';
-  container.style.position = 'relative';
-  container.style.overflow = 'hidden';
-
-  const clone = content.cloneNode(true);
-  const pw = pageWidth();
-  clone.style.position = 'absolute';
-  clone.style.left = -(page * pw) + 'px';
-  clone.style.top = '0';
-  clone.style.width = content.scrollWidth + 'px';
-  clone.style.height = content.clientHeight + 'px';
-  clone.style.padding = '0';
-  clone.style.margin = '0';
-  clone.style.overflow = 'visible';
-
-  container.appendChild(clone);
-  return container;
-}}
-
-function flipToPage(targetPage) {{
-  if (isFlipping) return;
-  const fromPage = currentPage();
-  const direction = targetPage > fromPage ? 1 : -1;
-  if (targetPage === fromPage) return;
-  isFlipping = true;
-
-  const sheet = document.createElement('div');
-  sheet.className = 'sheet';
-  const isDouble = document.body.classList.contains('double');
-  sheet.style.left = isDouble ? '50%' : '0';
-  sheet.style.width = isDouble ? '50%' : '100%';
-
-  const front = document.createElement('div');
-  front.className = 'front';
-  front.appendChild(capturePage(fromPage));
-  const back = document.createElement('div');
-  back.className = 'back';
-  back.appendChild(capturePage(targetPage));
-
-  sheet.appendChild(front);
-  sheet.appendChild(back);
-  flipper.innerHTML = '';
-  flipper.appendChild(sheet);
-  flipper.style.display = 'block';
-
-  content.scrollLeft = targetPage * pageWidth();
-
-  requestAnimationFrame(() => {{
-    sheet.style.transform = direction > 0 ? 'rotateY(-180deg)' : 'rotateY(180deg)';
-  }});
-
-  setTimeout(() => {{
-    flipper.style.display = 'none';
-    flipper.innerHTML = '';
-    isFlipping = false;
-    reportPosition();
-  }}, 450);
+  if (currentSpread > 0) {{
+    goToSpread(currentSpread - 1, true);
+  }} else if (currentChapter > 0) {{
+    loadChapter(currentChapter - 1, 0).then(() => {{
+      goToSpread(spreads.length - 1, true);
+    }});
+  }}
 }}
 
 function onWheel(e) {{
@@ -479,7 +436,7 @@ function onWheel(e) {{
 function onClick(e) {{
   if (!isPaginated()) return;
   if (window.getSelection().toString().length > 0) return;
-  const rect = content.getBoundingClientRect();
+  const rect = spread.getBoundingClientRect();
   const x = e.clientX - rect.left;
   if (x < rect.width / 2) {{
     prevPage();
@@ -488,8 +445,8 @@ function onClick(e) {{
   }}
 }}
 
-content.addEventListener('wheel', onWheel, {{ passive: false }});
-content.addEventListener('click', onClick);
+spread.addEventListener('wheel', onWheel, {{ passive: false }});
+spread.addEventListener('click', onClick);
 window.addEventListener('scroll', reportPosition, true);
 window.addEventListener('resize', reportPosition);
 applySettings({settings_json});
@@ -552,6 +509,31 @@ mod tests {
     }
 
     #[test]
+    fn test_reader_html_contains_chapter_navigation_functions() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(html.contains("function loadChapter"));
+        assert!(html.contains("function goToSpread"));
+        assert!(html.contains("window.ebookChapterCount"));
+    }
+
+    #[test]
+    fn test_reader_html_contains_render_spread_helpers() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(html.contains("function renderSpread"));
+        assert!(html.contains("function findSpreadForOffset"));
+    }
+
+    #[test]
+    fn test_reader_html_uses_find_spread_for_offset() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(html.contains("function findSpreadForOffset"));
+        assert!(html.contains("findSpreadForOffset(charOffset)"));
+    }
+
+    #[test]
     fn test_reader_html_contains_required_functions() {
         let settings = EbookSettings::default();
         let html = reader_html(&settings, 1);
@@ -560,7 +542,6 @@ mod tests {
         assert!(html.contains("function applySettings"));
         assert!(html.contains("function nextPage"));
         assert!(html.contains("function prevPage"));
-        assert!(html.contains("function goToPage"));
         assert!(html.contains("function reportPosition"));
         assert!(html.contains("function sendIpc"));
         assert!(html.contains("function onWheel"));
@@ -606,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reader_html_includes_pagination_css() {
+    fn test_reader_html_includes_spread_styles() {
         let settings = EbookSettings {
             font_size: 20,
             line_height: 1.8,
@@ -619,7 +600,9 @@ mod tests {
         assert!(html.contains("--line: 1.8"));
         assert!(html.contains("--margin-h: 32px"));
         assert!(html.contains("--margin-v: 40px"));
-        assert!(html.contains("scroll-snap-type: x mandatory"));
-        assert!(html.contains("break-inside: avoid"));
+        assert!(html.contains("#measure"));
+        assert!(html.contains("#spread"));
+        assert!(html.contains("function splitSinglePage"));
+        assert!(html.contains("function splitDoublePage"));
     }
 }

@@ -13,7 +13,6 @@ pub struct OpenEbook {
     pub ebook: Ebook,
     pub renderer: EbookRenderer,
     pub current_chapter: usize,
-    pub current_page: usize,
     pub current_spread: usize,
 }
 
@@ -33,7 +32,6 @@ impl EbookView {
             ebook,
             renderer,
             current_chapter: 0,
-            current_page: 0,
             current_spread: 0,
         });
         Ok(())
@@ -99,9 +97,8 @@ impl EbookView {
 
     pub fn sync_position(&mut self) {
         if let Some(open) = self.open.as_mut() {
-            let (chapter, _, page) = open.renderer.current_position();
+            let (chapter, _) = open.renderer.current_position();
             open.current_chapter = chapter;
-            open.current_page = page;
             open.current_spread = open.renderer.current_spread();
         }
     }
@@ -196,7 +193,6 @@ mod tests {
                 ebook,
                 renderer,
                 current_chapter: 0,
-                current_page: 0,
                 current_spread: 0,
             };
             open.current_spread = 7;

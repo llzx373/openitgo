@@ -17,8 +17,6 @@ struct RendererState {
     ebook: Ebook,
     current_chapter: usize,
     char_offset: usize,
-    current_page: usize,
-    total_pages: usize,
     current_spread: usize,
     total_spreads: usize,
     settings: EbookSettings,
@@ -30,8 +28,6 @@ struct JsToRust {
     kind: String,
     chapter: Option<usize>,
     char_offset: Option<usize>,
-    page: Option<usize>,
-    total_pages: Option<usize>,
     spread: Option<usize>,
     total_spreads: Option<usize>,
 }
@@ -89,8 +85,6 @@ impl EbookRenderer {
             ebook,
             current_chapter: 0,
             char_offset: 0,
-            current_page: 0,
-            total_pages: 1,
             current_spread: 0,
             total_spreads: 1,
             settings,
@@ -159,9 +153,9 @@ impl EbookRenderer {
         }
     }
 
-    pub fn current_position(&self) -> (usize, usize, usize) {
+    pub fn current_position(&self) -> (usize, usize) {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        (state.current_chapter, state.char_offset, state.current_page)
+        (state.current_chapter, state.char_offset)
     }
 
     pub fn current_spread_count(&self) -> usize {
@@ -183,12 +177,6 @@ fn handle_ipc_message(msg: JsToRust, state: &Arc<Mutex<RendererState>>) {
             }
             if let Some(offset) = msg.char_offset {
                 state.char_offset = offset;
-            }
-            if let Some(page) = msg.page {
-                state.current_page = page;
-            }
-            if let Some(total) = msg.total_pages {
-                state.total_pages = total.max(1);
             }
             if let Some(total) = msg.total_spreads {
                 state.total_spreads = total.max(1);
@@ -373,8 +361,6 @@ mod tests {
             },
             current_chapter: 0,
             char_offset: 0,
-            current_page: 0,
-            total_pages: 1,
             current_spread: 0,
             total_spreads: 1,
             settings: EbookSettings::default(),
@@ -411,8 +397,6 @@ mod tests {
             },
             current_chapter: 0,
             char_offset: 0,
-            current_page: 0,
-            total_pages: 1,
             current_spread: 0,
             total_spreads: 1,
             settings: EbookSettings::default(),
@@ -445,8 +429,6 @@ mod tests {
             },
             current_chapter: 0,
             char_offset: 0,
-            current_page: 0,
-            total_pages: 1,
             current_spread: 0,
             total_spreads: 1,
             settings: EbookSettings::default(),
