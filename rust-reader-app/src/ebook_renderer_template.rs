@@ -145,6 +145,16 @@ function pageHeight() {{
   return measure.clientHeight;
 }}
 
+function getMarginH() {{
+  return parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--margin-h')) || 0;
+}}
+
+function pageBreakBuffer() {{
+  const size = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--size')) || 16;
+  const line = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--line')) || 1.5;
+  return Math.max(1, (line - 1) * size * 0.5);
+}}
+
 function ancestorLi(node) {{
   let el = node.parentElement;
   while (el && el !== measure) {{
@@ -196,7 +206,7 @@ function collectLineBoxes(root) {{
   return boxes;
 }}
 
-function findSafeEnd(boxes, start, target) {{
+function findSafeEnd(boxes, start, target, buffer) {{
   let safeEnd = target;
   const n = boxes.length;
   let i = 0;
@@ -210,7 +220,10 @@ function findSafeEnd(boxes, start, target) {{
       if (liTop !== null && liTop > start && liTop <= target) {{
         candidate = liTop;
       }}
-      safeEnd = Math.min(safeEnd, candidate);
+      candidate = candidate - buffer;
+      if (candidate > start) {{
+        safeEnd = Math.min(safeEnd, candidate);
+      }}
     }}
     j++;
   }}
@@ -263,6 +276,7 @@ function splitSinglePage(html) {{
     measure.innerHTML = '';
     return [html];
   }}
+  const buffer = pageBreakBuffer();
   const boxes = collectLineBoxes(measure);
   if (boxes.length === 0) {{
     measure.innerHTML = '';
@@ -273,7 +287,7 @@ function splitSinglePage(html) {{
   let start = 0;
   while (start < maxBottom) {{
     const target = start + ph;
-    let end = findSafeEnd(boxes, start, target);
+    let end = findSafeEnd(boxes, start, target, buffer);
     if (end <= start) end = target;
     if (end > maxBottom) end = maxBottom;
     spreads.push(buildClonedSpread(start, end));
@@ -285,7 +299,8 @@ function splitSinglePage(html) {{
 
 function splitDoublePage(html) {{
   const originalWidth = measure.style.width;
-  measure.style.width = '50%';
+  const marginH = getMarginH();
+  measure.style.width = (document.body.clientWidth / 2 + marginH) + 'px';
   measure.innerHTML = html;
   const ph = pageHeight();
   if (!ph || ph <= 0) {{
@@ -293,6 +308,7 @@ function splitDoublePage(html) {{
     measure.style.width = originalWidth;
     return [html];
   }}
+  const buffer = pageBreakBuffer();
   const boxes = collectLineBoxes(measure);
   if (boxes.length === 0) {{
     measure.innerHTML = '';
@@ -303,8 +319,8 @@ function splitDoublePage(html) {{
   const spreads = [];
   let start = 0;
   while (start < maxBottom) {{
-    const leftEnd = findSafeEnd(boxes, start, start + ph);
-    let rightEnd = findSafeEnd(boxes, leftEnd, leftEnd + ph);
+    const leftEnd = findSafeEnd(boxes, start, start + ph, buffer);
+    let rightEnd = findSafeEnd(boxes, leftEnd, leftEnd + ph, buffer);
     if (rightEnd <= start) rightEnd = start + ph * 2;
     if (rightEnd > maxBottom) rightEnd = maxBottom;
     spreads.push(buildDoubleSpread(start, leftEnd, rightEnd, ph));
