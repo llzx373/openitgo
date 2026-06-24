@@ -1,15 +1,8 @@
-use rust_reader_core::ebook::{Ebook, EbookChapter, EbookReadingMode};
+use rust_reader_core::ebook::{Ebook, EbookReadingMode};
 use rust_reader_storage::models::{EbookSettings, EbookTheme};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 use wry::{Rect, WebView, WebViewBuilder};
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum EbookIpcMessage {
-    PositionReport { chapter: usize, char_offset: usize },
-    PageCount(usize),
-    Ready,
-}
 
 pub struct EbookRenderer {
     webview: WebView,
@@ -29,7 +22,6 @@ struct JsToRust {
     kind: String,
     chapter: Option<usize>,
     char_offset: Option<usize>,
-    page_count: Option<usize>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -105,7 +97,9 @@ impl EbookRenderer {
     }
 
     pub fn set_bounds(&self, bounds: Rect) {
-        let _ = self.webview.set_bounds(bounds);
+        if let Err(e) = self.webview.set_bounds(bounds) {
+            eprintln!("EbookRenderer::set_bounds failed: {e}");
+        }
     }
 
     pub fn apply_settings(&self, settings: &EbookSettings) {
@@ -116,7 +110,9 @@ impl EbookRenderer {
             "applySettings({});",
             serde_json::to_string(&JsSettings::from(settings)).unwrap_or_default()
         );
-        let _ = self.webview.evaluate_script(&js);
+        if let Err(e) = self.webview.evaluate_script(&js) {
+            eprintln!("EbookRenderer::apply_settings failed: {e}");
+        }
     }
 
     pub fn goto_chapter(&self, chapter: usize, offset: usize) {
@@ -125,31 +121,33 @@ impl EbookRenderer {
             state.char_offset = offset;
         }
         let js = format!("loadChapter({}, {});", chapter, offset);
-        let _ = self.webview.evaluate_script(&js);
+        if let Err(e) = self.webview.evaluate_script(&js) {
+            eprintln!("EbookRenderer::goto_chapter failed: {e}");
+        }
     }
 
     pub fn next_page(&self) {
-        let _ = self.webview.evaluate_script("nextPage();");
+        if let Err(e) = self.webview.evaluate_script("nextPage();") {
+            eprintln!("EbookRenderer::next_page failed: {e}");
+        }
     }
 
     pub fn prev_page(&self) {
-        let _ = self.webview.evaluate_script("prevPage();");
+        if let Err(e) = self.webview.evaluate_script("prevPage();") {
+            eprintln!("EbookRenderer::prev_page failed: {e}");
+        }
     }
 }
 
 fn handle_ipc_message(msg: JsToRust, state: &Arc<Mutex<RendererState>>) {
     if let Ok(mut state) = state.lock() {
-        match msg.kind.as_str() {
-            "position" => {
-                if let Some(chapter) = msg.chapter {
-                    state.current_chapter = chapter;
-                }
-                if let Some(offset) = msg.char_offset {
-                    state.char_offset = offset;
-                }
+        if msg.kind.as_str() == "position" {
+            if let Some(chapter) = msg.chapter {
+                state.current_chapter = chapter;
             }
-            "ready" | "pagecount" => {}
-            _ => {}
+            if let Some(offset) = msg.char_offset {
+                state.char_offset = offset;
+            }
         }
     }
 }
@@ -159,7 +157,17 @@ fn handle_ebook_protocol(
     request: wry::http::Request<Vec<u8>>,
 ) -> wry::http::Response<Cow<'static, [u8]>> {
     let path = request.uri().path();
-    let state = state.lock().unwrap();
+
+    let state = match state.lock() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("EbookRenderer: mutex poisoned in protocol handler: {e}");
+            return wry::http::Response::builder()
+                .status(500)
+                .body(Vec::new().into())
+                .unwrap();
+        }
+    };
 
     if path == "/reader" {
         return wry::http::Response::builder()
@@ -170,12 +178,15 @@ fn handle_ebook_protocol(
 
     if let Some(rest) = path.strip_prefix("/chapter/") {
         if let Ok(idx) = rest.parse::<usize>() {
-            if let Some(chapter) = state.ebook.chapter_source(idx) {
-                if let Some(html) = load_chapter_html(&state.ebook, chapter) {
+            match rust_reader_parser::html::render_chapter_html(&state.ebook, idx) {
+                Ok(html) => {
                     return wry::http::Response::builder()
                         .header("Content-Type", "application/xhtml+xml; charset=utf-8")
                         .body(html.into_bytes().into())
                         .unwrap();
+                }
+                Err(e) => {
+                    eprintln!("EbookRenderer: failed to render chapter {idx}: {e}");
                 }
             }
         }
@@ -185,155 +196,6 @@ fn handle_ebook_protocol(
         .status(404)
         .body(Vec::new().into())
         .unwrap()
-}
-
-fn load_chapter_html(ebook: &Ebook, chapter: &EbookChapter) -> Option<String> {
-    if is_text_like_path(&ebook.path) {
-        let text = std::fs::read_to_string(&ebook.path).ok()?;
-        let raw_chapters = if is_markdown_path(&ebook.path) {
-            split_markdown_chapters(&text)
-        } else {
-            txt_split_chapters(&text)
-        };
-        let (_, body) = raw_chapters.get(chapter.index)?.clone();
-        let html = if is_markdown_path(&ebook.path) {
-            markdown_to_html(&body)
-        } else {
-            plain_text_to_html(&body)
-        };
-        Some(format!("<div class=\"chapter\">{}</div>", html))
-    } else if is_mobi_path(&ebook.path) {
-        let mobi = mobi::Mobi::from_path(&ebook.path).ok()?;
-        let text = mobi.content_as_string_lossy();
-        let words: Vec<&str> = text.split_whitespace().collect();
-        let chunk = words.chunks(3000).nth(chapter.index)?;
-        Some(format!(
-            "<div class=\"chapter\">{}</div>",
-            plain_text_to_html(&chunk.join(" "))
-        ))
-    } else {
-        let mut doc = epub::doc::EpubDoc::new(&ebook.path).ok()?;
-        doc.set_current_chapter(chapter.index);
-        let (bytes, _mime) = doc.get_current()?;
-        Some(String::from_utf8_lossy(&bytes).into_owned())
-    }
-}
-
-fn plain_text_to_html(body: &str) -> String {
-    let escaped = escape_html(body);
-    escaped
-        .split("\n\n")
-        .map(|p| format!("<p>{}</p>", p.replace('\n', "<br>")))
-        .collect::<String>()
-}
-
-fn markdown_to_html(md: &str) -> String {
-    use pulldown_cmark::{html, Options, Parser};
-    let parser = Parser::new_ext(md, Options::all());
-    let mut output = String::new();
-    html::push_html(&mut output, parser);
-    output
-}
-
-fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-fn is_text_like_path(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| matches!(e.to_ascii_lowercase().as_str(), "txt" | "md"))
-        .unwrap_or(false)
-}
-
-fn is_markdown_path(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("md"))
-        .unwrap_or(false)
-}
-
-fn is_mobi_path(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| matches!(e.to_ascii_lowercase().as_str(), "mobi" | "azw" | "azw3"))
-        .unwrap_or(false)
-}
-
-fn split_markdown_chapters(text: &str) -> Vec<(Option<String>, String)> {
-    let mut chapters: Vec<(Option<String>, String)> = Vec::new();
-    let mut title: Option<String> = None;
-    let mut body: Vec<String> = Vec::new();
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("# ") || trimmed.starts_with("## ") {
-            if !body.is_empty() {
-                chapters.push((title.take(), body.join("\n")));
-                body.clear();
-            }
-            title = Some(trimmed.trim_start_matches('#').trim().to_string());
-        } else {
-            body.push(line.to_string());
-        }
-    }
-    if !body.is_empty() || title.is_some() {
-        chapters.push((title.take(), body.join("\n")));
-    }
-
-    if chapters.is_empty() {
-        const CHAPTER_WORDS: usize = 3000;
-        let words: Vec<&str> = text.split_whitespace().collect();
-        for (idx, chunk) in words.chunks(CHAPTER_WORDS).enumerate() {
-            chapters.push((Some(format!("第 {} 章", idx + 1)), chunk.join("")));
-        }
-    }
-    chapters
-}
-
-fn txt_split_chapters(text: &str) -> Vec<(Option<String>, String)> {
-    const DEFAULT_CHAPTER_WORDS: usize = 3000;
-    let lines: Vec<&str> = text.lines().collect();
-    let mut chapters: Vec<(Option<String>, String)> = Vec::new();
-    let mut title: Option<String> = None;
-    let mut body: Vec<String> = Vec::new();
-
-    let is_heading = |line: &str| {
-        if line.is_empty() {
-            return false;
-        }
-        if line.starts_with('#') {
-            return true;
-        }
-        let lower = line.to_ascii_lowercase();
-        lower.starts_with("chapter ") || (lower.starts_with('第') && lower.contains('章'))
-    };
-
-    for line in lines {
-        let trimmed = line.trim();
-        if is_heading(trimmed) {
-            if !body.is_empty() {
-                chapters.push((title.take(), body.join("\n")));
-                body.clear();
-            }
-            title = Some(trimmed.trim_start_matches('#').trim().to_string());
-        } else {
-            body.push(line.to_string());
-        }
-    }
-    if !body.is_empty() || title.is_some() {
-        chapters.push((title.take(), body.join("\n")));
-    }
-    if chapters.is_empty() {
-        let words: Vec<&str> = text.split_whitespace().collect();
-        for (idx, chunk) in words.chunks(DEFAULT_CHAPTER_WORDS).enumerate() {
-            chapters.push((Some(format!("第 {} 章", idx + 1)), chunk.join("")));
-        }
-    }
-    chapters
 }
 
 fn reader_html(settings: &EbookSettings) -> String {
@@ -509,36 +371,6 @@ window.ipc.postMessage(JSON.stringify({{ type: 'ready' }}));
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_escape_html() {
-        assert_eq!(
-            escape_html("<script>alert(\"x\");</script>"),
-            "&lt;script&gt;alert(&quot;x&quot;);&lt;/script&gt;"
-        );
-        assert_eq!(escape_html("a & b"), "a &amp; b");
-    }
-
-    #[test]
-    fn test_markdown_to_html() {
-        let html = markdown_to_html("# Hello\n\nworld");
-        assert!(html.contains("Hello"));
-        assert!(html.contains("world"));
-    }
-
-    #[test]
-    fn test_is_text_like_path() {
-        assert!(is_text_like_path(std::path::Path::new("book.txt")));
-        assert!(is_text_like_path(std::path::Path::new("notes.MD")));
-        assert!(!is_text_like_path(std::path::Path::new("book.epub")));
-    }
-
-    #[test]
-    fn test_is_mobi_path() {
-        assert!(is_mobi_path(std::path::Path::new("book.mobi")));
-        assert!(is_mobi_path(std::path::Path::new("book.AZW3")));
-        assert!(!is_mobi_path(std::path::Path::new("book.epub")));
-    }
 
     #[test]
     fn test_reader_html_contains_required_functions() {

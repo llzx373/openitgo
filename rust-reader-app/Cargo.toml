@@ -22,9 +22,6 @@ time = "0.3"
 wry = "0.55"
 serde = { workspace = true }
 serde_json = { workspace = true }
-pulldown-cmark = "0.13"
-mobi = "0.8"
-epub = "2.1"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 unrar = "0.5"
 
