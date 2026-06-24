@@ -1053,7 +1053,7 @@ impl ReaderApp {
         }
         ui.separator();
         if ui.button("增大字体").clicked() {
-            self.settings.ebook.font_size += 1;
+            self.settings.ebook.font_size = (self.settings.ebook.font_size + 1).min(72);
             self.ebook_view.apply_settings(&self.settings.ebook);
             ui.close_menu();
         }
