@@ -226,7 +226,14 @@ fn toolbar_selectable(
 
 impl ReaderApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        Self::default()
+        let mut app = Self::default();
+        if let Ok(path_str) = std::env::var("RUST_READER_OPEN") {
+            let path = std::path::PathBuf::from(path_str);
+            if path.exists() {
+                app.open_path(path);
+            }
+        }
+        app
     }
 
     fn poll_opener(&mut self, ctx: &egui::Context) {

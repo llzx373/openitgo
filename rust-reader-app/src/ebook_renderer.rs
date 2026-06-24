@@ -45,8 +45,8 @@ impl From<&EbookSettings> for JsSettings {
         };
         Self {
             mode: match s.reading_mode {
-                EbookReadingMode::SinglePage => "single".to_string(),
-                EbookReadingMode::DoublePage => "double".to_string(),
+                EbookReadingMode::SinglePage => "single paginated".to_string(),
+                EbookReadingMode::DoublePage => "double paginated".to_string(),
                 EbookReadingMode::Scroll => "scroll".to_string(),
             },
             bg,
@@ -87,13 +87,12 @@ impl EbookRenderer {
                 let body = request.body();
                 if let Ok(msg) = serde_json::from_str::<JsToRust>(body) {
                     handle_ipc_message(msg, &ipc_state);
-                } else {
-                    eprintln!("ebook ipc: malformed message: {}", body);
                 }
             })
             .with_url("ebook://reader")
             .build_as_child(parent)
             .map_err(|e| e.to_string())?;
+        eprintln!("EbookRenderer: webview created");
 
         Ok(Self { webview, state })
     }
@@ -176,19 +175,15 @@ fn handle_ebook_protocol(
         }
     };
 
-    if path == "/reader" {
-        return wry::http::Response::builder()
-            .header("Content-Type", "text/html; charset=utf-8")
-            .body(reader_html(&state.settings).into_bytes().into())
-            .unwrap();
-    }
-
-    if let Some(rest) = path.strip_prefix("/chapter/") {
-        if let Ok(idx) = rest.parse::<usize>() {
+    let query = request.uri().query().unwrap_or("");
+    if let Some(ch) = query.strip_prefix("chapter=") {
+        if let Ok(idx) = ch.parse::<usize>() {
+            eprintln!("EbookRenderer: serving chapter {idx}");
             match rust_reader_parser::html::render_chapter_html(&state.ebook, idx) {
                 Ok(html) => {
                     return wry::http::Response::builder()
                         .header("Content-Type", "application/xhtml+xml; charset=utf-8")
+                        .header("Cache-Control", "no-cache, no-store, must-revalidate")
                         .body(html.into_bytes().into())
                         .unwrap();
                 }
@@ -197,6 +192,14 @@ fn handle_ebook_protocol(
                 }
             }
         }
+    }
+
+    if path == "/reader" || path == "/" || path.is_empty() {
+        return wry::http::Response::builder()
+            .header("Content-Type", "text/html; charset=utf-8")
+            .header("Cache-Control", "no-cache, no-store, must-revalidate")
+            .body(reader_html(&state.settings).into_bytes().into())
+            .unwrap();
     }
 
     wry::http::Response::builder()
@@ -265,6 +268,15 @@ const content = document.getElementById('content');
 let currentChapter = 0;
 let currentOffset = 0;
 
+function sendIpc(obj) {{
+  const json = JSON.stringify(obj);
+  if (typeof window.ipc !== 'undefined' && window.ipc && window.ipc.postMessage) {{
+    window.ipc.postMessage(json);
+  }} else {{
+    setTimeout(() => sendIpc(obj), 10);
+  }}
+}}
+
 function applySettings(json) {{
   const s = typeof json === 'string' ? JSON.parse(json) : json;
   const root = document.documentElement;
@@ -282,7 +294,7 @@ async function loadChapter(index, offset) {{
   currentChapter = index || 0;
   currentOffset = offset || 0;
   try {{
-    const res = await fetch('ebook://chapter/' + currentChapter);
+    const res = await fetch('ebook://reader?chapter=' + currentChapter);
     const html = await res.text();
     content.innerHTML = html;
     if (offset) {{
@@ -290,7 +302,7 @@ async function loadChapter(index, offset) {{
     }}
     reportPosition();
   }} catch (e) {{
-    content.innerHTML = '<p>章节加载失败</p>';
+    content.innerHTML = '<p>章节加载失败: ' + e + '</p>';
   }}
 }}
 
@@ -330,11 +342,11 @@ function reportPosition() {{
     }}
     offset += node.length;
   }}
-  window.ipc.postMessage(JSON.stringify({{
+  sendIpc({{
     type: 'position',
     chapter: currentChapter,
     char_offset: offset
-  }}));
+  }});
 }}
 
 function pageDelta() {{
@@ -363,7 +375,7 @@ window.addEventListener('scroll', reportPosition, true);
 window.addEventListener('resize', reportPosition);
 applySettings({settings_json});
 loadChapter(0, 0);
-window.ipc.postMessage(JSON.stringify({{ type: 'ready' }}));
+sendIpc({{ type: 'ready' }});
 </script>
 </body>
 </html>"#,
