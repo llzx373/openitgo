@@ -35,7 +35,7 @@ html, body {{
   line-height: var(--line);
 }}
 p {{ margin: 0 0 1em 0; text-indent: 2em; }}
-img {{ max-width: 100%; height: auto; }}
+img {{ max-width: 100%; max-height: calc(100vh - var(--margin-v) * 2); height: auto; object-fit: contain; }}
 #flipper {{
   position: fixed;
   top: 0;
@@ -145,6 +145,15 @@ function pageHeight() {{
   return measure.clientHeight;
 }}
 
+function ancestorLi(node) {{
+  let el = node.parentElement;
+  while (el && el !== measure) {{
+    if (el.tagName === 'LI') return el;
+    el = el.parentElement;
+  }}
+  return null;
+}}
+
 function collectLineBoxes(root) {{
   const boxes = [];
   const rootRect = root.getBoundingClientRect();
@@ -154,6 +163,8 @@ function collectLineBoxes(root) {{
     const parent = node.parentElement;
     if (!parent || parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE') continue;
     if ((node.textContent || '').trim().length === 0) continue;
+    const li = ancestorLi(node);
+    const liTop = li ? li.getBoundingClientRect().top - rootRect.top : null;
     const range = document.createRange();
     range.selectNode(node);
     for (const r of range.getClientRects()) {{
@@ -162,19 +173,23 @@ function collectLineBoxes(root) {{
         top: r.top - rootRect.top,
         bottom: r.bottom - rootRect.top,
         left: r.left - rootRect.left,
-        right: r.right - rootRect.left
+        right: r.right - rootRect.left,
+        liTop: liTop
       }});
     }}
   }}
   for (const el of root.querySelectorAll('img, hr, svg, canvas')) {{
     const r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) continue;
+    const li = ancestorLi(el);
+    const liTop = li ? li.getBoundingClientRect().top - rootRect.top : null;
     boxes.push({{
       top: r.top - rootRect.top,
       bottom: r.bottom - rootRect.top,
       left: r.left - rootRect.left,
       right: r.right - rootRect.left,
-      atomic: true
+      atomic: true,
+      liTop: liTop
     }});
   }}
   boxes.sort((a, b) => a.top - b.top || a.left - b.left);
@@ -189,7 +204,13 @@ function findSafeEnd(boxes, start, target) {{
   let j = i;
   while (j < n && boxes[j].top <= target) {{
     if (boxes[j].bottom > target) {{
-      safeEnd = Math.min(safeEnd, boxes[j].top);
+      const lineTop = boxes[j].top;
+      const liTop = boxes[j].liTop;
+      let candidate = lineTop;
+      if (liTop !== null && liTop > start && liTop <= target) {{
+        candidate = liTop;
+      }}
+      safeEnd = Math.min(safeEnd, candidate);
     }}
     j++;
   }}
@@ -710,6 +731,8 @@ mod tests {
         assert!(html.contains("function buildClonedSpread"));
         assert!(html.contains("function buildDoubleSpread"));
         assert!(html.contains("getClientRects"));
+        assert!(html.contains("function ancestorLi"));
+        assert!(html.contains("liTop"));
     }
 
     #[test]
@@ -810,6 +833,8 @@ mod tests {
         assert!(html.contains("#spread"));
         assert!(html.contains("function splitSinglePage"));
         assert!(html.contains("function splitDoublePage"));
+        assert!(html.contains("object-fit: contain"));
+        assert!(html.contains("max-height: calc(100vh - var(--margin-v) * 2)"));
     }
 
     #[test]
