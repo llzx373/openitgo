@@ -1,6 +1,8 @@
 use rust_reader_storage::{
     json_store::JsonStore,
-    models::{Bookmark, Bookmarks, History, HistoryEntry, Library, LibraryEntry, Settings},
+    models::{
+        Bookmark, Bookmarks, History, HistoryEntry, Library, LibraryEntry, MediaType, Settings,
+    },
 };
 use std::path::PathBuf;
 
@@ -29,6 +31,7 @@ fn test_library_roundtrip() {
             path: PathBuf::from("/tmp/comic"),
             cover_path: Some(PathBuf::from("/tmp/cover.jpg")),
             added_at: 123,
+            media_type: MediaType::Comic,
         }],
     };
     store.save_library(&library).unwrap();

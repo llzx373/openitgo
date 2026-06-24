@@ -178,6 +178,14 @@ pub enum ToolbarDisplayMode {
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum MediaType {
+    #[default]
+    Comic,
+    Ebook,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum EbookTheme {
     #[default]
     Light,
@@ -219,6 +227,7 @@ pub struct LibraryEntry {
     pub path: PathBuf,
     pub cover_path: Option<PathBuf>,
     pub added_at: u64,
+    pub media_type: MediaType,
 }
 
 impl Default for LibraryEntry {
@@ -229,6 +238,7 @@ impl Default for LibraryEntry {
             path: PathBuf::new(),
             cover_path: None,
             added_at: 0,
+            media_type: MediaType::Comic,
         }
     }
 }
@@ -317,10 +327,25 @@ mod tests {
                 path: PathBuf::from("/tmp"),
                 cover_path: None,
                 added_at: 0,
+                media_type: MediaType::Comic,
             }],
         };
         let json = serde_json::to_string(&lib).unwrap();
         assert!(json.contains("Test"));
+    }
+
+    #[test]
+    fn test_library_entry_default_media_type_is_comic() {
+        let entry = LibraryEntry::default();
+        assert_eq!(entry.media_type, MediaType::Comic);
+    }
+
+    #[test]
+    fn test_library_entry_deserializes_missing_media_type_as_comic() {
+        let json =
+            r#"{"comic_id":"id","title":"Test","path":"/tmp","cover_path":null,"added_at":0}"#;
+        let entry: LibraryEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.media_type, MediaType::Comic);
     }
 
     #[test]
