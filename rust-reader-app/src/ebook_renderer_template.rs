@@ -121,6 +121,8 @@ img {{ max-width: 100%; height: auto; }}
 <div id="flipper"></div>
 <script>
 const content = document.getElementById('content');
+const measure = document.getElementById('measure');
+const spread = document.getElementById('spread');
 const flipper = document.getElementById('flipper');
 let currentChapter = 0;
 let currentOffset = 0;
@@ -158,13 +160,53 @@ function sendIpc(obj) {{
   }}
 }}
 
-// Scaffolding for spread pagination (Tasks 5+).
-function splitIntoSpreads() {{
-  return [];
+function isScrollMode() {{ return document.body.classList.contains('scroll'); }}
+function isDoubleMode() {{ return document.body.classList.contains('double'); }}
+
+function pageHeight() {{
+  return measure.clientHeight;
 }}
 
-// Scaffolding for spread pagination (Tasks 5+).
+function splitSinglePage(html) {{
+  measure.innerHTML = html;
+  const ph = pageHeight();
+  if (!ph || ph <= 0) {{
+    measure.innerHTML = '';
+    return [html];
+  }}
+  const totalHeight = measure.scrollHeight;
+  const spreads = [];
+  for (let y = 0; y < totalHeight; y += ph) {{
+    const clone = measure.cloneNode(true);
+    const wrapper = document.createElement('div');
+    wrapper.style.position = 'relative';
+    wrapper.style.overflow = 'hidden';
+    wrapper.style.height = ph + 'px';
+    const inner = clone.firstElementChild || clone;
+    inner.removeAttribute('id');
+    inner.style.position = 'absolute';
+    inner.style.top = -y + 'px';
+    inner.style.width = '100%';
+    wrapper.appendChild(inner);
+    spreads.push(wrapper.outerHTML);
+  }}
+  measure.innerHTML = '';
+  return spreads;
+}}
+
+function splitDoublePage(html) {{
+  // TODO: implement double-page spread splitting (Task 7).
+  return [html];
+}}
+
+function splitIntoSpreads(html) {{
+  if (isScrollMode()) return [html];
+  if (isDoubleMode()) return splitDoublePage(html);
+  return splitSinglePage(html);
+}}
+
 function goToSpread(index) {{
+  // TODO: wire spread navigation once rendering switches to #spread (Task 8).
 }}
 
 function isPaginated() {{
@@ -450,6 +492,18 @@ mod tests {
         assert!(html.contains("id=\"spread\""));
         assert!(html.contains("function splitIntoSpreads"));
         assert!(html.contains("function goToSpread"));
+    }
+
+    #[test]
+    fn test_reader_html_contains_single_page_split_logic() {
+        use rust_reader_storage::models::EbookSettings;
+        let settings = EbookSettings {
+            reading_mode: rust_reader_core::ebook::EbookReadingMode::SinglePage,
+            ..Default::default()
+        };
+        let html = reader_html(&settings, 1);
+        assert!(html.contains("pageHeight"));
+        assert!(html.contains("splitSinglePage"));
     }
 
     #[test]
