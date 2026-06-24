@@ -76,6 +76,23 @@ impl EbookView {
         }
     }
 
+    pub fn next_chapter(&mut self) {
+        if let Some(open) = self.open.as_mut() {
+            let chapter =
+                (open.current_chapter + 1).min(open.ebook.total_chapters().saturating_sub(1));
+            open.current_chapter = chapter;
+            open.renderer.goto_chapter(chapter, 0);
+        }
+    }
+
+    pub fn prev_chapter(&mut self) {
+        if let Some(open) = self.open.as_mut() {
+            let chapter = open.current_chapter.saturating_sub(1);
+            open.current_chapter = chapter;
+            open.renderer.goto_chapter(chapter, 0);
+        }
+    }
+
     pub fn sync_position(&mut self) {
         if let Some(open) = self.open.as_mut() {
             open.current_chapter = open.renderer.current_position().0;

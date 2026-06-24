@@ -715,6 +715,12 @@ impl ReaderApp {
                 if ui.button("目录").clicked() {
                     self.ebook_view.toggle_toc();
                 }
+                if ui.button("上一章").clicked() {
+                    self.ebook_view.prev_chapter();
+                }
+                if ui.button("下一章").clicked() {
+                    self.ebook_view.next_chapter();
+                }
                 if ui.button("上一页").clicked() {
                     self.ebook_view.prev_page();
                 }
@@ -725,7 +731,25 @@ impl ReaderApp {
                 if ui.button("添加书签").clicked() {
                     self.add_ebook_bookmark();
                 }
-                ui.label(format!("{} / {}", current + 1, total));
+                ui.separator();
+                if ui.button("A-").clicked() {
+                    self.settings.ebook.font_size =
+                        self.settings.ebook.font_size.saturating_sub(1).max(10);
+                    self.ebook_view.apply_settings(&self.settings.ebook);
+                }
+                if ui.button("A+").clicked() {
+                    self.settings.ebook.font_size = (self.settings.ebook.font_size + 1).min(72);
+                    self.ebook_view.apply_settings(&self.settings.ebook);
+                }
+                if ui.button("主题").clicked() {
+                    self.settings.ebook.theme = match self.settings.ebook.theme {
+                        EbookTheme::Light => EbookTheme::Dark,
+                        EbookTheme::Dark => EbookTheme::Sepia,
+                        EbookTheme::Sepia => EbookTheme::Light,
+                    };
+                    self.ebook_view.apply_settings(&self.settings.ebook);
+                }
+                ui.label(format!("第 {} / {} 章", current + 1, total));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("设置").clicked() {
@@ -783,6 +807,7 @@ impl ReaderApp {
     }
 
     fn render_settings(&mut self, ctx: &egui::Context) {
+        let from_ebook = self.ebook_view.open.is_some();
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("← 返回").clicked() {
@@ -796,8 +821,15 @@ impl ReaderApp {
                 }
             });
             ui.separator();
-            self.settings_view.ui(ui, &mut self.settings);
+            if from_ebook {
+                self.settings_view.ebook_ui(ui, &mut self.settings);
+            } else {
+                self.settings_view.ui(ui, &mut self.settings);
+            }
         });
+        if from_ebook {
+            self.ebook_view.apply_settings(&self.settings.ebook);
+        }
     }
 
     fn render_loading(&mut self, ctx: &egui::Context, path: PathBuf) {
@@ -1113,6 +1145,14 @@ impl ReaderApp {
     }
 
     fn render_ebook_menu(&mut self, ui: &mut egui::Ui) {
+        if ui.button("上一章").clicked() {
+            self.ebook_view.prev_chapter();
+            ui.close_menu();
+        }
+        if ui.button("下一章").clicked() {
+            self.ebook_view.next_chapter();
+            ui.close_menu();
+        }
         if ui.button("上一页").clicked() {
             self.ebook_view.prev_page();
             ui.close_menu();

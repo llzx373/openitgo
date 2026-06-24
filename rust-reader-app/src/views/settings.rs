@@ -116,50 +116,78 @@ impl SettingsView {
 
         ui.separator();
         ui.collapsing("电子书", |ui| {
-            ui.label("阅读模式");
-            egui::ComboBox::from_id_salt("ebook_mode")
-                .selected_text(ebook_mode_label(settings.ebook.reading_mode))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut settings.ebook.reading_mode,
-                        EbookReadingMode::SinglePage,
-                        "单页",
-                    );
-                    ui.selectable_value(
-                        &mut settings.ebook.reading_mode,
-                        EbookReadingMode::DoublePage,
-                        "双页",
-                    );
-                    ui.selectable_value(
-                        &mut settings.ebook.reading_mode,
-                        EbookReadingMode::Scroll,
-                        "连续滚动",
-                    );
-                });
-
-            ui.horizontal(|ui| {
-                ui.label("字体大小:");
-                ui.add(egui::Slider::new(&mut settings.ebook.font_size, 10..=72));
-            });
-
-            ui.horizontal(|ui| {
-                ui.label("行间距:");
-                ui.add(egui::Slider::new(&mut settings.ebook.line_height, 1.0..=3.0).step_by(0.05));
-            });
-
-            ui.label("主题");
-            egui::ComboBox::from_id_salt("ebook_theme")
-                .selected_text(ebook_theme_label(settings.ebook.theme))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut settings.ebook.theme, EbookTheme::Light, "白天");
-                    ui.selectable_value(&mut settings.ebook.theme, EbookTheme::Dark, "夜晚");
-                    ui.selectable_value(&mut settings.ebook.theme, EbookTheme::Sepia, "羊皮纸");
-                });
+            self.ebook_settings_ui(ui, settings);
         });
 
         ui.separator();
         ui.heading("快捷键");
         self.shortcut_editor(ui, &mut settings.shortcuts);
+    }
+
+    /// Renders only the ebook-related settings. Used when entering settings from
+    /// the ebook reader so the user sees relevant options immediately.
+    pub fn ebook_ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {
+        ui.heading("电子书设置");
+        ui.separator();
+        self.ebook_settings_ui(ui, settings);
+    }
+
+    fn ebook_settings_ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {
+        ui.label("阅读模式");
+        egui::ComboBox::from_id_salt("ebook_mode")
+            .selected_text(ebook_mode_label(settings.ebook.reading_mode))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut settings.ebook.reading_mode,
+                    EbookReadingMode::SinglePage,
+                    "单页",
+                );
+                ui.selectable_value(
+                    &mut settings.ebook.reading_mode,
+                    EbookReadingMode::DoublePage,
+                    "双页",
+                );
+                ui.selectable_value(
+                    &mut settings.ebook.reading_mode,
+                    EbookReadingMode::Scroll,
+                    "连续滚动",
+                );
+            });
+
+        ui.horizontal(|ui| {
+            ui.label("字体大小:");
+            ui.add(egui::Slider::new(&mut settings.ebook.font_size, 10..=72));
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("行间距:");
+            ui.add(egui::Slider::new(&mut settings.ebook.line_height, 1.0..=3.0).step_by(0.05));
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("页边距（水平）:");
+            ui.add(egui::Slider::new(
+                &mut settings.ebook.margin_horizontal,
+                0..=200,
+            ));
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("页边距（垂直）:");
+            ui.add(egui::Slider::new(
+                &mut settings.ebook.margin_vertical,
+                0..=200,
+            ));
+        });
+
+        ui.label("主题");
+        egui::ComboBox::from_id_salt("ebook_theme")
+            .selected_text(ebook_theme_label(settings.ebook.theme))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut settings.ebook.theme, EbookTheme::Light, "白天");
+                ui.selectable_value(&mut settings.ebook.theme, EbookTheme::Dark, "夜晚");
+                ui.selectable_value(&mut settings.ebook.theme, EbookTheme::Sepia, "羊皮纸");
+            });
     }
 
     fn shortcut_editor(
