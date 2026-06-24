@@ -82,18 +82,14 @@ impl EbookView {
         }
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+    pub fn ui(&mut self, _ctx: &egui::Context, ui: &mut egui::Ui) {
         // Reserve the central panel area; the webview is positioned over it.
         ui.allocate_space(ui.available_size());
-
-        if self.show_toc {
-            if let Some(jump_to) = self.render_toc(ctx) {
-                self.goto_chapter(jump_to);
-            }
-        }
     }
 
-    fn render_toc(&self, ctx: &egui::Context) -> Option<usize> {
+    /// Renders the table-of-contents side panel. Call this *before* the
+    /// central panel so the webview bounds can avoid the panel area.
+    pub fn render_toc(&self, ctx: &egui::Context) -> Option<usize> {
         let open = self.open.as_ref()?;
         let mut jump_to = None;
         egui::SidePanel::left("ebook_toc")
