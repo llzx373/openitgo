@@ -1,31 +1,30 @@
 use crate::timing;
-use rust_reader_core::models::Comic;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum OpenStatus {
+pub enum OpenStatus<T> {
     Loading,
-    Ready(Result<Comic, String>),
+    Ready(Result<T, String>),
 }
 
-pub struct ComicOpener {
-    receiver: Receiver<Result<Comic, String>>,
-    cached: Option<Result<Comic, String>>,
+pub struct AsyncOpener<T> {
+    receiver: Receiver<Result<T, String>>,
+    cached: Option<Result<T, String>>,
 }
 
-impl ComicOpener {
+impl<T: Send + Clone + 'static> AsyncOpener<T> {
     pub fn open<F>(path: PathBuf, parser: F) -> Self
     where
-        F: FnOnce(&Path) -> Result<Comic, String> + Send + 'static,
+        F: FnOnce(&Path) -> Result<T, String> + Send + 'static,
     {
         let (tx, rx) = channel();
         let path_clone = path.clone();
         std::thread::spawn(move || {
-            timing::log(&format!("ComicOpener parsing {:?}", path_clone));
-            let result = timing::time("ComicOpener parse", || parser(&path_clone));
+            timing::log(&format!("AsyncOpener parsing {:?}", path_clone));
+            let result = timing::time("AsyncOpener parse", || parser(&path_clone));
             timing::log(&format!(
-                "ComicOpener result: {:?}",
+                "AsyncOpener result: {:?}",
                 result.as_ref().map(|_| "Ok")
             ));
             let _ = tx.send(result);
@@ -36,7 +35,7 @@ impl ComicOpener {
         }
     }
 
-    pub fn poll(&mut self) -> OpenStatus {
+    pub fn poll(&mut self) -> OpenStatus<T> {
         if let Some(result) = &self.cached {
             return OpenStatus::Ready(result.clone());
         }
@@ -53,7 +52,7 @@ impl ComicOpener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_reader_core::models::{Page, PageSource, Volume};
+    use rust_reader_core::models::{Comic, Page, PageSource, Volume};
     use std::thread;
     use std::time::Duration;
 
@@ -74,7 +73,7 @@ mod tests {
 
     #[test]
     fn poll_returns_loading_immediately_for_slow_parser() {
-        let mut opener = ComicOpener::open(PathBuf::from("/tmp/test"), |_path| {
+        let mut opener = AsyncOpener::<Comic>::open(PathBuf::from("/tmp/test"), |_path| {
             thread::sleep(Duration::from_secs(60));
             Ok(dummy_comic())
         });
@@ -84,11 +83,9 @@ mod tests {
     #[test]
     fn poll_returns_comic_when_parser_succeeds() {
         let expected = dummy_comic();
-        let mut opener =
-            ComicOpener::open(
-                PathBuf::from("/tmp/test"),
-                move |_path| Ok(expected.clone()),
-            );
+        let mut opener = AsyncOpener::<Comic>::open(PathBuf::from("/tmp/test"), move |_path| {
+            Ok(expected.clone())
+        });
         thread::sleep(Duration::from_millis(50));
         let status = opener.poll();
         assert!(
@@ -100,7 +97,7 @@ mod tests {
 
     #[test]
     fn poll_returns_error_when_parser_fails() {
-        let mut opener = ComicOpener::open(PathBuf::from("/tmp/test"), |_path| {
+        let mut opener = AsyncOpener::<Comic>::open(PathBuf::from("/tmp/test"), |_path| {
             Err("parse failed".to_string())
         });
         thread::sleep(Duration::from_millis(50));
@@ -111,7 +108,7 @@ mod tests {
     #[test]
     fn repeated_poll_after_completion_returns_same_result() {
         let mut opener =
-            ComicOpener::open(PathBuf::from("/tmp/test"), move |_path| Ok(dummy_comic()));
+            AsyncOpener::<Comic>::open(PathBuf::from("/tmp/test"), move |_path| Ok(dummy_comic()));
         thread::sleep(Duration::from_millis(50));
         let first = opener.poll();
         let second = opener.poll();

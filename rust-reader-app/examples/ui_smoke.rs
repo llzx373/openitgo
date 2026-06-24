@@ -1,5 +1,6 @@
 use rust_reader_app::app::{ReaderApp, View};
-use rust_reader_app::opener::ComicOpener;
+use rust_reader_app::opener::AsyncOpener;
+use rust_reader_core::models::Comic;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -12,7 +13,7 @@ fn main() -> eframe::Result<()> {
         .expect("usage: cargo run --example ui_smoke -- <path-to-archive>");
 
     let app = ReaderApp {
-        opener: Some(ComicOpener::open(path.clone(), |p| {
+        opener: Some(AsyncOpener::<Comic>::open(path.clone(), |p| {
             rust_reader_parser::parse(p).map_err(|e| e.to_string())
         })),
         current_view: View::Loading(path),
