@@ -111,6 +111,8 @@ let currentSettings = {{
   animate: {animate},
   invert_scroll: {invert_scroll}
 }};
+const SPREAD_SAFETY_PX = 4;
+function spreadSafety() {{ return SPREAD_SAFETY_PX; }}
 
 // Prevent anchors and other navigation from reloading the shell.
 document.addEventListener('click', function(e) {{
@@ -253,12 +255,14 @@ function findSafeEnd(boxes, start, target) {{
 }}
 
 function buildClonedSpread(start, end) {{
+  const safety = spreadSafety();
+  const ph = end - start;
+  const cell = document.createElement('div');
+  cell.style.position = 'relative';
+  cell.style.overflow = 'hidden';
+  cell.style.height = ph + 'px';
   const clone = measure.cloneNode(true);
   clone.removeAttribute('id');
-  const wrapper = document.createElement('div');
-  wrapper.style.position = 'relative';
-  wrapper.style.overflow = 'hidden';
-  wrapper.style.height = (end - start) + 'px';
   clone.style.position = 'absolute';
   // measure 有顶部 padding，克隆节点没有；后续页需要把这段 padding 补回来，
   // 否则内容会向上偏移 margin-v，导致换页处的第一行被裁掉。
@@ -266,16 +270,26 @@ function buildClonedSpread(start, end) {{
   const offset = Math.max(0, start - marginV);
   clone.style.top = -offset + 'px';
   clone.style.width = '100%';
-  wrapper.appendChild(clone);
+  cell.appendChild(clone);
+  // 在页面四周留出一小条安全区，让轻微超出 line box 的字形也能显示出来。
+  const wrapper = document.createElement('div');
+  wrapper.style.height = (ph + 2 * safety) + 'px';
+  wrapper.style.paddingTop = safety + 'px';
+  wrapper.style.paddingBottom = safety + 'px';
+  wrapper.style.boxSizing = 'border-box';
+  wrapper.appendChild(cell);
   return wrapper.outerHTML;
 }}
 
 function buildDoubleSpread(leftStart, leftEnd, rightEnd, ph) {{
+  const safety = spreadSafety();
   const wrapper = document.createElement('div');
   wrapper.style.display = 'flex';
   wrapper.style.width = '100%';
-  wrapper.style.height = ph + 'px';
-  wrapper.style.overflow = 'hidden';
+  wrapper.style.height = (ph + 2 * safety) + 'px';
+  wrapper.style.paddingTop = safety + 'px';
+  wrapper.style.paddingBottom = safety + 'px';
+  wrapper.style.boxSizing = 'border-box';
   function makeCell(start, end) {{
     const cell = document.createElement('div');
     cell.style.flex = '1';
@@ -300,11 +314,13 @@ function buildDoubleSpread(leftStart, leftEnd, rightEnd, ph) {{
 
 function splitSinglePage(html) {{
   measure.innerHTML = html;
-  const ph = pageHeight();
-  if (!ph || ph <= 0) {{
+  const fullPh = pageHeight();
+  if (!fullPh || fullPh <= 0) {{
     measure.innerHTML = '';
     return [html];
   }}
+  const safety = spreadSafety();
+  const ph = Math.max(1, fullPh - 2 * safety);
   const boxes = collectLineBoxes(measure);
   if (boxes.length === 0) {{
     measure.innerHTML = '';
@@ -330,12 +346,14 @@ function splitDoublePage(html) {{
   const marginH = getMarginH();
   measure.style.width = (document.body.clientWidth / 2 + marginH) + 'px';
   measure.innerHTML = html;
-  const ph = pageHeight();
-  if (!ph || ph <= 0) {{
+  const fullPh = pageHeight();
+  if (!fullPh || fullPh <= 0) {{
     measure.innerHTML = '';
     measure.style.width = originalWidth;
     return [html];
   }}
+  const safety = spreadSafety();
+  const ph = Math.max(1, fullPh - 2 * safety);
   const boxes = collectLineBoxes(measure);
   if (boxes.length === 0) {{
     measure.innerHTML = '';
@@ -780,6 +798,9 @@ mod tests {
         assert!(html.contains("lineTop"));
         assert!(html.contains("lineBottom"));
         assert!(html.contains("function findSafeEnd(boxes, start, target)"));
+        assert!(html.contains("SPREAD_SAFETY_PX"));
+        assert!(html.contains("paddingTop = safety"));
+        assert!(html.contains("paddingBottom = safety"));
         assert!(
             !html.contains("candidate = candidate - buffer"),
             "line-box pagination should not subtract an extra buffer from the break point"
