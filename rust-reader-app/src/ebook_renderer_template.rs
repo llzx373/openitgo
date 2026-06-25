@@ -144,7 +144,8 @@ function isScrollMode() {{ return document.body.classList.contains('scroll'); }}
 function isDoubleMode() {{ return document.body.classList.contains('double'); }}
 
 function pageHeight() {{
-  return measure.clientHeight;
+  // measure.clientHeight 包含 padding，实际排版内容区要去掉上下 margin-v。
+  return Math.max(1, measure.clientHeight - 2 * getMarginV());
 }}
 
 function getMarginH() {{
@@ -264,10 +265,10 @@ function buildClonedSpread(start, end) {{
   const clone = measure.cloneNode(true);
   clone.removeAttribute('id');
   clone.style.position = 'absolute';
-  // measure 有顶部 padding，克隆节点没有；后续页需要把这段 padding 补回来，
-  // 否则内容会向上偏移 margin-v，导致换页处的第一行被裁掉。
+  // measure 有顶部 padding，克隆节点没有；需要按 start 在 measure 坐标系中的位置
+  // 进行偏移，使当前页第一行的 line box 顶部对齐到 cell 顶部。
   const marginV = getMarginV();
-  const offset = Math.max(0, start - marginV);
+  const offset = start - marginV;
   clone.style.top = -offset + 'px';
   clone.style.width = '100%';
   cell.appendChild(clone);
@@ -299,9 +300,9 @@ function buildDoubleSpread(leftStart, leftEnd, rightEnd, ph) {{
     const clone = measure.cloneNode(true);
     clone.removeAttribute('id');
     clone.style.position = 'absolute';
-    // 见 buildClonedSpread 中的说明：补偿 measure 顶部 padding。
+    // 见 buildClonedSpread 中的说明：按 measure 坐标系偏移。
     const marginV = getMarginV();
-    const offset = Math.max(0, start - marginV);
+    const offset = start - marginV;
     clone.style.top = -offset + 'px';
     clone.style.width = '100%';
     cell.appendChild(clone);
@@ -314,21 +315,20 @@ function buildDoubleSpread(leftStart, leftEnd, rightEnd, ph) {{
 
 function splitSinglePage(html) {{
   measure.innerHTML = html;
-  const fullPh = pageHeight();
-  if (!fullPh || fullPh <= 0) {{
+  const ph = Math.max(1, pageHeight() - 2 * spreadSafety());
+  if (ph <= 0) {{
     measure.innerHTML = '';
     return [html];
   }}
-  const safety = spreadSafety();
-  const ph = Math.max(1, fullPh - 2 * safety);
   const boxes = collectLineBoxes(measure);
   if (boxes.length === 0) {{
     measure.innerHTML = '';
     return [html];
   }}
   const maxBottom = boxes.reduce((m, b) => Math.max(m, b.lineBottom), 0);
+  const marginV = getMarginV();
   const spreads = [];
-  let start = 0;
+  let start = marginV;
   while (start < maxBottom) {{
     const target = start + ph;
     let end = findSafeEnd(boxes, start, target);
@@ -346,14 +346,12 @@ function splitDoublePage(html) {{
   const marginH = getMarginH();
   measure.style.width = (document.body.clientWidth / 2 + marginH) + 'px';
   measure.innerHTML = html;
-  const fullPh = pageHeight();
-  if (!fullPh || fullPh <= 0) {{
+  const ph = Math.max(1, pageHeight() - 2 * spreadSafety());
+  if (ph <= 0) {{
     measure.innerHTML = '';
     measure.style.width = originalWidth;
     return [html];
   }}
-  const safety = spreadSafety();
-  const ph = Math.max(1, fullPh - 2 * safety);
   const boxes = collectLineBoxes(measure);
   if (boxes.length === 0) {{
     measure.innerHTML = '';
@@ -361,8 +359,9 @@ function splitDoublePage(html) {{
     return [html];
   }}
   const maxBottom = boxes.reduce((m, b) => Math.max(m, b.lineBottom), 0);
+  const marginV = getMarginV();
   const spreads = [];
-  let start = 0;
+  let start = marginV;
   while (start < maxBottom) {{
     const leftEnd = findSafeEnd(boxes, start, start + ph);
     let rightEnd = findSafeEnd(boxes, leftEnd, leftEnd + ph);
