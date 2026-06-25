@@ -242,7 +242,14 @@ function findSafeEnd(boxes, start, target) {{
     if (boxes[j].lineBottom > target) {{
       const lineTop = boxes[j].lineTop;
       const liTop = boxes[j].liTop;
+      // 激进策略：如果最后一行有可能被截断，就连上一行一起放到下一页。
+      // 这里把切分点回退到跨越目标行的上一行的 lineTop。
       let candidate = lineTop;
+      let k = j - 1;
+      while (k >= i && boxes[k].lineTop === lineTop) k--;
+      if (k >= i) {{
+        candidate = boxes[k].lineTop;
+      }}
       if (liTop !== null && liTop > start && liTop <= target) {{
         candidate = liTop;
       }}
