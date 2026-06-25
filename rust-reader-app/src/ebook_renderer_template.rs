@@ -114,6 +114,28 @@ let currentSettings = {{
 const SPREAD_SAFETY_PX = 4;
 function spreadSafety() {{ return SPREAD_SAFETY_PX; }}
 
+function escapeHtml(s) {{
+  return String(s).replace(/[&<>"']/g, function(c) {{
+    return {{ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }}[c];
+  }});
+}}
+
+function showError(title, detail) {{
+  const spread = document.getElementById('spread');
+  if (!spread) return;
+  spread.style.display = 'block';
+  spread.innerHTML = '<div id="ebook-error" style="padding:2em; color:var(--fg); background:var(--bg); font-family:var(--font); font-size:var(--size);">' +
+    '<h2 style="margin-top:0">电子书渲染错误</h2>' +
+    '<p><strong>' + escapeHtml(title) + '</strong></p>' +
+    '<pre style="white-space:pre-wrap; word-break:break-all; opacity:0.8;">' + escapeHtml(detail) + '</pre>' +
+    '</div>';
+  try {{
+    if (typeof ipc !== 'undefined') {{
+      ipc.postMessage(JSON.stringify({{ type: 'error', error: title + ': ' + detail }}));
+    }}
+  }} catch (e) {{}}
+}}
+
 // Prevent anchors and other navigation from reloading the shell.
 document.addEventListener('click', function(e) {{
   let el = e.target;
@@ -372,7 +394,9 @@ function splitDoublePage(html) {{
   const spreads = [];
   let start = Math.floor(marginV);
   while (start < maxBottom) {{
-    const leftEnd = findSafeEnd(boxes, start, start + ph);
+    let leftEnd = findSafeEnd(boxes, start, start + ph);
+    // 激进策略可能把左页内容全部挤到右页，导致左页空白；至少要放满一页目标高度。
+    if (leftEnd <= start) leftEnd = Math.min(start + ph, Math.floor(maxBottom));
     let rightEnd = findSafeEnd(boxes, leftEnd, leftEnd + ph);
     if (rightEnd <= start) rightEnd = start + ph * 2;
     if (rightEnd > maxBottom) rightEnd = Math.floor(maxBottom);
@@ -385,9 +409,17 @@ function splitDoublePage(html) {{
 }}
 
 function splitIntoSpreads(html) {{
-  if (isScrollMode()) return [html];
-  if (isDoubleMode()) return splitDoublePage(html);
-  return splitSinglePage(html);
+  try {{
+    if (isScrollMode()) return [html];
+    const spreads = isDoubleMode() ? splitDoublePage(html) : splitSinglePage(html);
+    if (!Array.isArray(spreads) || spreads.length === 0) {{
+      throw new Error('分页结果为空');
+    }}
+    return spreads;
+  }} catch (err) {{
+    showError('章节分页失败', err.message);
+    return [html];
+  }}
 }}
 
 function goToSpread(index, animate) {{
@@ -806,6 +838,8 @@ mod tests {
         assert!(html.contains("lineTop"));
         assert!(html.contains("lineBottom"));
         assert!(html.contains("function findSafeEnd(boxes, start, target)"));
+        assert!(html.contains("function showError"));
+        assert!(html.contains("function splitIntoSpreads"));
         assert!(html.contains("SPREAD_SAFETY_PX"));
         assert!(html.contains("paddingTop = safety"));
         assert!(html.contains("paddingBottom = safety"));

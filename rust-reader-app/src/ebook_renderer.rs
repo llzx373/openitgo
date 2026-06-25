@@ -30,6 +30,7 @@ struct JsToRust {
     char_offset: Option<usize>,
     spread: Option<usize>,
     total_spreads: Option<usize>,
+    error: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -170,6 +171,12 @@ impl EbookRenderer {
 }
 
 fn handle_ipc_message(msg: JsToRust, state: &Arc<Mutex<RendererState>>) {
+    if msg.kind.as_str() == "error" {
+        if let Some(err) = msg.error {
+            eprintln!("EbookRenderer: JS error: {err}");
+        }
+        return;
+    }
     if let Ok(mut state) = state.lock() {
         if msg.kind.as_str() == "position" {
             if let Some(chapter) = msg.chapter {
