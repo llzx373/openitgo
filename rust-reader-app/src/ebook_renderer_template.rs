@@ -153,12 +153,6 @@ function getMarginV() {{
   return parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--margin-v')) || 0;
 }}
 
-function pageBreakBuffer() {{
-  const size = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--size')) || 16;
-  const line = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--line')) || 1.5;
-  return Math.max(1, (line - 1) * size * 0.5);
-}}
-
 function ancestorLi(node) {{
   let el = node.parentElement;
   while (el && el !== measure) {{
@@ -166,6 +160,24 @@ function ancestorLi(node) {{
     el = el.parentElement;
   }}
   return null;
+}}
+
+function blockAncestor(el) {{
+  while (el && el !== measure) {{
+    const display = window.getComputedStyle(el).display;
+    if (display.startsWith('block') || display === 'list-item' || display === 'table-cell' || display === 'flex' || display === 'grid') return el;
+    el = el.parentElement;
+  }}
+  return measure;
+}}
+
+function lineHeightForElement(el) {{
+  const style = window.getComputedStyle(el);
+  const lh = parseFloat(style.lineHeight);
+  if (lh > 0) return lh;
+  const size = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--size')) || 16;
+  const line = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--line')) || 1.5;
+  return line * size;
 }}
 
 function collectLineBoxes(root) {{
@@ -179,13 +191,18 @@ function collectLineBoxes(root) {{
     if ((node.textContent || '').trim().length === 0) continue;
     const li = ancestorLi(node);
     const liTop = li ? li.getBoundingClientRect().top - rootRect.top : null;
+    const block = blockAncestor(parent);
+    const lineHeight = lineHeightForElement(block);
     const range = document.createRange();
     range.selectNode(node);
     for (const r of range.getClientRects()) {{
       if (r.width <= 0 || r.height <= 0) continue;
+      const leading = Math.max(0, (lineHeight - r.height) * 0.5);
       boxes.push({{
         top: r.top - rootRect.top,
         bottom: r.bottom - rootRect.top,
+        lineTop: r.top - rootRect.top - leading,
+        lineBottom: r.bottom - rootRect.top + leading,
         left: r.left - rootRect.left,
         right: r.right - rootRect.left,
         liTop: liTop
@@ -200,31 +217,32 @@ function collectLineBoxes(root) {{
     boxes.push({{
       top: r.top - rootRect.top,
       bottom: r.bottom - rootRect.top,
+      lineTop: r.top - rootRect.top,
+      lineBottom: r.bottom - rootRect.top,
       left: r.left - rootRect.left,
       right: r.right - rootRect.left,
       atomic: true,
       liTop: liTop
     }});
   }}
-  boxes.sort((a, b) => a.top - b.top || a.left - b.left);
+  boxes.sort((a, b) => a.lineTop - b.lineTop || a.left - b.left);
   return boxes;
 }}
 
-function findSafeEnd(boxes, start, target, buffer) {{
+function findSafeEnd(boxes, start, target) {{
   let safeEnd = target;
   const n = boxes.length;
   let i = 0;
-  while (i < n && boxes[i].top <= start) i++;
+  while (i < n && boxes[i].lineTop <= start) i++;
   let j = i;
-  while (j < n && boxes[j].top <= target) {{
-    if (boxes[j].bottom > target) {{
-      const lineTop = boxes[j].top;
+  while (j < n && boxes[j].lineTop <= target) {{
+    if (boxes[j].lineBottom > target) {{
+      const lineTop = boxes[j].lineTop;
       const liTop = boxes[j].liTop;
       let candidate = lineTop;
       if (liTop !== null && liTop > start && liTop <= target) {{
         candidate = liTop;
       }}
-      candidate = candidate - buffer;
       if (candidate > start) {{
         safeEnd = Math.min(safeEnd, candidate);
       }}
@@ -287,18 +305,17 @@ function splitSinglePage(html) {{
     measure.innerHTML = '';
     return [html];
   }}
-  const buffer = pageBreakBuffer();
   const boxes = collectLineBoxes(measure);
   if (boxes.length === 0) {{
     measure.innerHTML = '';
     return [html];
   }}
-  const maxBottom = boxes.reduce((m, b) => Math.max(m, b.bottom), 0);
+  const maxBottom = boxes.reduce((m, b) => Math.max(m, b.lineBottom), 0);
   const spreads = [];
   let start = 0;
   while (start < maxBottom) {{
     const target = start + ph;
-    let end = findSafeEnd(boxes, start, target, buffer);
+    let end = findSafeEnd(boxes, start, target);
     if (end <= start) end = target;
     if (end > maxBottom) end = maxBottom;
     spreads.push(buildClonedSpread(start, end));
@@ -319,19 +336,18 @@ function splitDoublePage(html) {{
     measure.style.width = originalWidth;
     return [html];
   }}
-  const buffer = pageBreakBuffer();
   const boxes = collectLineBoxes(measure);
   if (boxes.length === 0) {{
     measure.innerHTML = '';
     measure.style.width = originalWidth;
     return [html];
   }}
-  const maxBottom = boxes.reduce((m, b) => Math.max(m, b.bottom), 0);
+  const maxBottom = boxes.reduce((m, b) => Math.max(m, b.lineBottom), 0);
   const spreads = [];
   let start = 0;
   while (start < maxBottom) {{
-    const leftEnd = findSafeEnd(boxes, start, start + ph, buffer);
-    let rightEnd = findSafeEnd(boxes, leftEnd, leftEnd + ph, buffer);
+    const leftEnd = findSafeEnd(boxes, start, start + ph);
+    let rightEnd = findSafeEnd(boxes, leftEnd, leftEnd + ph);
     if (rightEnd <= start) rightEnd = start + ph * 2;
     if (rightEnd > maxBottom) rightEnd = maxBottom;
     spreads.push(buildDoubleSpread(start, leftEnd, rightEnd, ph));
@@ -759,7 +775,15 @@ mod tests {
         assert!(html.contains("function buildDoubleSpread"));
         assert!(html.contains("getClientRects"));
         assert!(html.contains("function ancestorLi"));
+        assert!(html.contains("function blockAncestor"));
         assert!(html.contains("liTop"));
+        assert!(html.contains("lineTop"));
+        assert!(html.contains("lineBottom"));
+        assert!(html.contains("function findSafeEnd(boxes, start, target)"));
+        assert!(
+            !html.contains("candidate = candidate - buffer"),
+            "line-box pagination should not subtract an extra buffer from the break point"
+        );
     }
 
     #[test]
