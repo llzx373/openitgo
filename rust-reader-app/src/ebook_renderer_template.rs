@@ -149,6 +149,10 @@ function getMarginH() {{
   return parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--margin-h')) || 0;
 }}
 
+function getMarginV() {{
+  return parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--margin-v')) || 0;
+}}
+
 function pageBreakBuffer() {{
   const size = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--size')) || 16;
   const line = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--line')) || 1.5;
@@ -238,7 +242,11 @@ function buildClonedSpread(start, end) {{
   wrapper.style.overflow = 'hidden';
   wrapper.style.height = (end - start) + 'px';
   clone.style.position = 'absolute';
-  clone.style.top = -start + 'px';
+  // measure 有顶部 padding，克隆节点没有；后续页需要把这段 padding 补回来，
+  // 否则内容会向上偏移 margin-v，导致换页处的第一行被裁掉。
+  const marginV = getMarginV();
+  const offset = Math.max(0, start - marginV);
+  clone.style.top = -offset + 'px';
   clone.style.width = '100%';
   wrapper.appendChild(clone);
   return wrapper.outerHTML;
@@ -259,7 +267,10 @@ function buildDoubleSpread(leftStart, leftEnd, rightEnd, ph) {{
     const clone = measure.cloneNode(true);
     clone.removeAttribute('id');
     clone.style.position = 'absolute';
-    clone.style.top = -start + 'px';
+    // 见 buildClonedSpread 中的说明：补偿 measure 顶部 padding。
+    const marginV = getMarginV();
+    const offset = Math.max(0, start - marginV);
+    clone.style.top = -offset + 'px';
     clone.style.width = '100%';
     cell.appendChild(clone);
     return cell;
