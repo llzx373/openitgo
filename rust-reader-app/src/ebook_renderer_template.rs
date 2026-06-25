@@ -259,7 +259,9 @@ function findSafeEnd(boxes, start, target) {{
     }}
     j++;
   }}
-  return safeEnd;
+  // 切分点必须落在整数像素上，否则 CSS 对 cell 高度的取整会让下一页的第一行
+  // 在上一页底部露出一个像素条，造成同一行在相邻两页重复出现。
+  return Math.floor(safeEnd);
 }}
 
 function buildClonedSpread(start, end) {{
@@ -322,7 +324,7 @@ function buildDoubleSpread(leftStart, leftEnd, rightEnd, ph) {{
 
 function splitSinglePage(html) {{
   measure.innerHTML = html;
-  const ph = Math.max(1, pageHeight() - 2 * spreadSafety());
+  const ph = Math.max(1, Math.floor(pageHeight() - 2 * spreadSafety()));
   if (ph <= 0) {{
     measure.innerHTML = '';
     return [html];
@@ -335,12 +337,12 @@ function splitSinglePage(html) {{
   const maxBottom = boxes.reduce((m, b) => Math.max(m, b.lineBottom), 0);
   const marginV = getMarginV();
   const spreads = [];
-  let start = marginV;
+  let start = Math.floor(marginV);
   while (start < maxBottom) {{
     const target = start + ph;
     let end = findSafeEnd(boxes, start, target);
     if (end <= start) end = target;
-    if (end > maxBottom) end = maxBottom;
+    if (end > maxBottom) end = Math.floor(maxBottom);
     spreads.push(buildClonedSpread(start, end));
     start = end;
   }}
@@ -353,7 +355,7 @@ function splitDoublePage(html) {{
   const marginH = getMarginH();
   measure.style.width = (document.body.clientWidth / 2 + marginH) + 'px';
   measure.innerHTML = html;
-  const ph = Math.max(1, pageHeight() - 2 * spreadSafety());
+  const ph = Math.max(1, Math.floor(pageHeight() - 2 * spreadSafety()));
   if (ph <= 0) {{
     measure.innerHTML = '';
     measure.style.width = originalWidth;
@@ -368,12 +370,12 @@ function splitDoublePage(html) {{
   const maxBottom = boxes.reduce((m, b) => Math.max(m, b.lineBottom), 0);
   const marginV = getMarginV();
   const spreads = [];
-  let start = marginV;
+  let start = Math.floor(marginV);
   while (start < maxBottom) {{
     const leftEnd = findSafeEnd(boxes, start, start + ph);
     let rightEnd = findSafeEnd(boxes, leftEnd, leftEnd + ph);
     if (rightEnd <= start) rightEnd = start + ph * 2;
-    if (rightEnd > maxBottom) rightEnd = maxBottom;
+    if (rightEnd > maxBottom) rightEnd = Math.floor(maxBottom);
     spreads.push(buildDoubleSpread(start, leftEnd, rightEnd, ph));
     start = rightEnd;
   }}
