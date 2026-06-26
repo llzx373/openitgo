@@ -146,6 +146,44 @@
 | #24 项目文档与工程化 | P2-24 |
 | #25 增加非 GUI 集成测试 | P2-25 |
 
+## P2 — 电子书分页迁移到 CSS Columns（长期计划）
+
+详细计划见 `docs/superpowers/plans/2026-06-26-migrate-ebook-to-css-columns.md`。
+
+- [ ] 27. Phase 0：原型验证
+  - [ ] 27.1 创建 CSS columns 单页/双页原型（`target/tmp/ebook-columns-proto.html`）
+  - [ ] 27.2 用多段文本 + 图片 + 表格样本验证无跨页截断/重复
+  - [ ] 27.3 在 wry WebView 中验证 `column-fill`、`break-inside` 行为
+  - [ ] 27.4 输出原型结论，确定最终 CSS 策略
+- [ ] 28. Phase 1：新分页器骨架
+  - [ ] 28.1 在 `ebook_renderer_template.rs` 中新增 `columnPaginator` 模块
+  - [ ] 28.2 添加 feature flag `window.ebookUseColumns` 实现新旧方案并存
+  - [ ] 28.3 实现 column 容器渲染、单页/双页/滚动切换、IPC 位置上报
+  - [ ] 28.4 Rust 侧 `ebook_renderer.rs` 兼容新 IPC 消息
+- [ ] 29. Phase 2：功能对齐
+  - [ ] 29.1 单页模式完整可用
+  - [ ] 29.2 双页模式完整可用
+  - [ ] 29.3 滚动模式完整可用
+  - [ ] 29.4 翻页动画（先 transform 滑动，后续评估 3D 翻转）
+  - [ ] 29.5 进度保存/恢复（resize、设置变更后回到近似位置）
+  - [ ] 29.6 目录跳转、搜索高亮
+  - [ ] 29.7 字体/字号/行高/边距调整实时生效
+- [ ] 30. Phase 3：测试与边缘情况
+  - [ ] 30.1 收集 10~20 本不同类型 EPUB 作为测试集
+  - [ ] 30.2 单页/双页/滚动 + 字体放大 + 窗口缩放全面测试
+  - [ ] 30.3 处理图片溢出、表格截断、特殊 CSS 冲突
+  - [ ] 30.4 添加 column 分页相关模板测试
+- [ ] 31. Phase 4：清理旧代码
+  - [ ] 31.1 删除 `measure` 容器和行盒测量相关样式
+  - [ ] 31.2 删除 `collectLineBoxes`、`findSafeEnd`、`buildClonedSpread`、`buildDoubleSpread`
+  - [ ] 31.3 删除 `splitSinglePage`、`splitDoublePage`、`flipper`（如不再使用）
+  - [ ] 31.4 更新 Rust 测试与文档
+- [ ] 32. Phase 5：优化
+  - [ ] 32.1 相邻章节预加载
+  - [ ] 32.2 缓存页数计算结果
+  - [ ] 32.3 减少 resize 时重新布局开销
+  - [ ] 32.4 评估大章节分段加载
+
 ## 历史已完成项
 
 - [x] 修复双页模式下右页无右键/拖拽响应

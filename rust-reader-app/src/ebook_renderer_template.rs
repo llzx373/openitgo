@@ -112,6 +112,7 @@ let currentSettings = {{
   invert_scroll: {invert_scroll}
 }};
 const SPREAD_SAFETY_PX = 4;
+const MAX_SPREADS_PER_CHAPTER = 10000;
 function spreadSafety() {{ return SPREAD_SAFETY_PX; }}
 
 function escapeHtml(s) {{
@@ -162,12 +163,17 @@ function sendIpc(obj) {{
   }}
 }}
 
+function debugSplit(label, fullPh, maxBottom, count) {{
+  sendIpc({{ type: 'debug', label: label, pageHeight: fullPh, maxBottom: Math.round(maxBottom), spreads: count }});
+}}
+
 function isScrollMode() {{ return document.body.classList.contains('scroll'); }}
 function isDoubleMode() {{ return document.body.classList.contains('double'); }}
 
 function pageHeight() {{
   // measure.clientHeight 包含 padding，实际排版内容区要去掉上下 margin-v。
-  return Math.max(1, measure.clientHeight - 2 * getMarginV());
+  // 注意：document 还没完成 layout 时这个值可能是 0 或负数，需要调用方判断。
+  return measure.clientHeight - 2 * getMarginV();
 }}
 
 function getMarginH() {{
@@ -346,11 +352,12 @@ function buildDoubleSpread(leftStart, leftEnd, rightEnd, ph) {{
 
 function splitSinglePage(html) {{
   measure.innerHTML = html;
-  const ph = Math.max(1, Math.floor(pageHeight() - 2 * spreadSafety()));
-  if (ph <= 0) {{
+  const fullPh = pageHeight();
+  if (!fullPh || fullPh <= 0) {{
     measure.innerHTML = '';
     return [html];
   }}
+  const ph = Math.max(1, Math.floor(fullPh - 2 * spreadSafety()));
   const boxes = collectLineBoxes(measure);
   if (boxes.length === 0) {{
     measure.innerHTML = '';
@@ -365,7 +372,12 @@ function splitSinglePage(html) {{
     let end = findSafeEnd(boxes, start, target);
     if (end <= start) end = target;
     if (end > maxBottom) end = Math.floor(maxBottom);
+    if (end <= start) break;
     spreads.push(buildClonedSpread(start, end));
+    if (spreads.length > MAX_SPREADS_PER_CHAPTER) {{
+      measure.innerHTML = '';
+      throw new Error('分页数量异常：' + spreads.length + '，可能进入了死循环');
+    }}
     start = end;
   }}
   measure.innerHTML = '';
@@ -377,12 +389,13 @@ function splitDoublePage(html) {{
   const marginH = getMarginH();
   measure.style.width = (document.body.clientWidth / 2 + marginH) + 'px';
   measure.innerHTML = html;
-  const ph = Math.max(1, Math.floor(pageHeight() - 2 * spreadSafety()));
-  if (ph <= 0) {{
+  const fullPh = pageHeight();
+  if (!fullPh || fullPh <= 0) {{
     measure.innerHTML = '';
     measure.style.width = originalWidth;
     return [html];
   }}
+  const ph = Math.max(1, Math.floor(fullPh - 2 * spreadSafety()));
   const boxes = collectLineBoxes(measure);
   if (boxes.length === 0) {{
     measure.innerHTML = '';
@@ -398,9 +411,15 @@ function splitDoublePage(html) {{
     // 激进策略可能把左页内容全部挤到右页，导致左页空白；至少要放满一页目标高度。
     if (leftEnd <= start) leftEnd = Math.min(start + ph, Math.floor(maxBottom));
     let rightEnd = findSafeEnd(boxes, leftEnd, leftEnd + ph);
-    if (rightEnd <= start) rightEnd = start + ph * 2;
+    if (rightEnd <= start) rightEnd = Math.min(start + ph * 2, Math.floor(maxBottom));
     if (rightEnd > maxBottom) rightEnd = Math.floor(maxBottom);
+    if (rightEnd <= start) break;
     spreads.push(buildDoubleSpread(start, leftEnd, rightEnd, ph));
+    if (spreads.length > MAX_SPREADS_PER_CHAPTER) {{
+      measure.innerHTML = '';
+      measure.style.width = originalWidth;
+      throw new Error('分页数量异常：' + spreads.length + '，可能进入了死循环');
+    }}
     start = rightEnd;
   }}
   measure.innerHTML = '';
@@ -612,6 +631,7 @@ function applySettings(json) {{
       cancelFlip();
       const offset = currentSpreadCharOffset();
       spreads = splitIntoSpreads(currentChapterHtml);
+      debugSplit('applySettings', pageHeight(), measure.getBoundingClientRect().height, spreads.length);
       currentSpread = findSpreadForOffset(offset);
       goToSpread(currentSpread, false);
     }}
@@ -637,6 +657,7 @@ async function loadChapter(index, charOffset) {{
       reportPosition();
     }} else {{
       spreads = splitIntoSpreads(currentChapterHtml);
+      debugSplit('loadChapter', pageHeight(), measure.getBoundingClientRect().height, spreads.length);
       if (typeof charOffset === 'number' && charOffset >= 0) {{
         currentSpread = findSpreadForOffset(charOffset);
       }} else {{
@@ -998,5 +1019,53 @@ mod tests {
         assert!(html.contains("\"char_offset\":"));
         assert!(html.contains("\"total_spreads\":"));
         assert!(html.contains("\"type\": \"ready\""));
+    }
+
+    #[test]
+    fn test_reader_html_single_page_breaks_when_end_does_not_advance() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        // splitSinglePage must stop if clamping end to maxBottom yields no progress,
+        // otherwise chapters whose tail is smaller than one page can loop forever.
+        let fn_body = html
+            .split("function splitSinglePage(html)")
+            .nth(1)
+            .expect("splitSinglePage not found")
+            .split("function splitDoublePage")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body.contains("if (end > maxBottom) end = Math.floor(maxBottom);"),
+            "end should be clamped to maxBottom"
+        );
+        assert!(
+            fn_body.contains("if (end <= start) break;"),
+            "splitSinglePage must break when end cannot advance"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_double_page_breaks_when_right_end_does_not_advance() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function splitDoublePage(html)")
+            .nth(1)
+            .expect("splitDoublePage not found")
+            .split("function splitIntoSpreads")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body.contains("if (rightEnd > maxBottom) rightEnd = Math.floor(maxBottom);"),
+            "rightEnd should be clamped to maxBottom"
+        );
+        assert!(
+            fn_body.contains("if (rightEnd <= start) break;"),
+            "splitDoublePage must break when rightEnd cannot advance"
+        );
+        assert!(
+            fn_body.contains("if (rightEnd <= start) rightEnd = Math.min(start + ph * 2, Math.floor(maxBottom));"),
+            "rightEnd fallback should also be clamped to maxBottom"
+        );
     }
 }

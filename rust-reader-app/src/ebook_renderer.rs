@@ -177,6 +177,10 @@ fn handle_ipc_message(msg: JsToRust, state: &Arc<Mutex<RendererState>>) {
         }
         return;
     }
+    if msg.kind.as_str() == "debug" {
+        eprintln!("EbookRenderer: JS debug: {msg:?}");
+        return;
+    }
     if let Ok(mut state) = state.lock() {
         if msg.kind.as_str() == "position" {
             if let Some(chapter) = msg.chapter {
