@@ -214,7 +214,7 @@ function isDoubleMode() {{ return document.body.classList.contains('double'); }}
 function isColumnMode() {{ return window.ebookUseColumns === true; }}
 
 let columnState = {{
-  currentPage: 0,
+  currentSpread: 0,
   totalPages: 1,
   pageWidth: 0,
   viewShift: 0
@@ -245,7 +245,7 @@ function columnLayout() {{
     columnContent.style.columnGap = '0';
     columnView.style.transform = 'none';
     columnState.totalPages = 1;
-    columnState.currentPage = 0;
+    columnState.currentSpread = 0;
     columnReportPosition();
     return;
   }}
@@ -287,19 +287,33 @@ function columnLayout() {{
   // Navigation is explicit in callers; this function only measures layout.
 }}
 
-function columnGoToPage(n) {{
-  columnState.currentPage = Math.max(0, Math.min(n, columnGetPageCount() - 1));
+function columnApplyTransform() {{
   if (isScrollMode()) {{
     columnView.style.transform = 'none';
   }} else if (isDoubleMode()) {{
-    const offset = columnState.currentPage * columnState.viewShift;
+    const offset = columnState.currentSpread * columnState.viewShift;
     columnView.style.transform = `translateX(-${{offset}}px)`;
   }} else {{
     const marginH = getMarginH();
-    const offset = columnState.currentPage * columnState.pageWidth;
+    const offset = columnState.currentSpread * columnState.pageWidth;
     columnView.style.transform = `translateX(${{-offset + marginH}}px)`;
   }}
+}}
+
+function columnGoToSpread(n) {{
+  columnState.currentSpread = Math.max(0, Math.min(n, columnGetPageCount() - 1));
+  columnApplyTransform();
   columnReportPosition();
+}}
+
+function columnGoToPage(pageIndex) {{
+  if (isScrollMode()) {{
+    columnView.style.transform = 'none';
+    columnReportPosition();
+    return;
+  }}
+  const spread = isDoubleMode() ? Math.floor(pageIndex / 2) : pageIndex;
+  columnGoToSpread(spread);
 }}
 
 function columnNext() {{
@@ -307,8 +321,8 @@ function columnNext() {{
     columnView.scrollTop += columnView.clientHeight * 0.9;
     return;
   }}
-  if (columnState.currentPage + 1 < columnGetPageCount()) {{
-    columnGoToPage(columnState.currentPage + 1);
+  if (columnState.currentSpread + 1 < columnGetPageCount()) {{
+    columnGoToSpread(columnState.currentSpread + 1);
   }} else if (currentChapter + 1 < window.ebookChapterCount) {{
     loadChapter(currentChapter + 1, 0);
   }}
@@ -319,8 +333,8 @@ function columnPrev() {{
     columnView.scrollTop -= columnView.clientHeight * 0.9;
     return;
   }}
-  if (columnState.currentPage > 0) {{
-    columnGoToPage(columnState.currentPage - 1);
+  if (columnState.currentSpread > 0) {{
+    columnGoToSpread(columnState.currentSpread - 1);
   }} else if (currentChapter > 0) {{
     // Passing the maximum safe integer as charOffset makes loadChapter's ratio
     // clamp to 1, so we land directly on the last page of the previous chapter
@@ -336,7 +350,7 @@ function columnComputeCharOffset() {{
     const ratio = columnView.scrollTop / Math.max(1, columnView.scrollHeight - columnView.clientHeight);
     return Math.floor(total * Math.max(0, Math.min(1, ratio)));
   }}
-  const ratio = columnState.currentPage / Math.max(1, columnGetPageCount());
+  const ratio = columnState.currentSpread / Math.max(1, columnGetPageCount());
   return Math.floor(total * ratio);
 }}
 
@@ -344,7 +358,7 @@ function columnReportPosition() {{
   sendIpc({{
     "type": "position",
     "chapter": currentChapter,
-    "spread": columnState.currentPage,
+    "spread": columnState.currentSpread,
     "char_offset": columnComputeCharOffset(),
     "total_spreads": columnGetPageCount()
   }});
@@ -622,7 +636,10 @@ function splitIntoSpreads(html) {{
 }}
 
 function goToSpread(index, animate) {{
-  if (isColumnMode()) return columnGoToPage(index);
+  if (isColumnMode()) {{
+    const pageIndex = isDoubleMode() ? index * 2 : index;
+    return columnGoToPage(pageIndex);
+  }}
   if (spreads.length === 0) return;
   const target = Math.max(0, Math.min(spreads.length - 1, index));
   if (target === currentSpread) {{
@@ -831,7 +848,7 @@ function applySettings(json) {{
         const ratio = savedCharOffset / totalChars;
         targetPage = Math.floor(ratio * (columnGetPageCount() - 1));
       }}
-      columnGoToPage(targetPage);
+      columnGoToSpread(targetPage);
       return;
     }}
     if (isScrollMode()) {{
@@ -874,7 +891,7 @@ async function loadChapter(index, charOffset) {{
         const ratio = Math.min(1, charOffset / columnContent.textContent.length);
         targetPage = Math.floor(ratio * (columnGetPageCount() - 1));
       }}
-      columnGoToPage(targetPage);
+      columnGoToSpread(targetPage);
       return;
     }}
     if (isScrollMode()) {{
@@ -1019,7 +1036,7 @@ window.addEventListener('resize', () => {{
     if (!currentChapterHtml || isScrollMode()) return;
     if (isColumnMode()) {{
       columnLayout();
-      columnGoToPage(columnState.currentPage);
+      columnGoToSpread(columnState.currentSpread);
       return;
     }}
     cancelFlip();
@@ -1373,6 +1390,7 @@ mod tests {
         assert!(html.contains("function isColumnMode()"));
         assert!(html.contains("function columnLayout()"));
         assert!(html.contains("function columnGoToPage("));
+        assert!(html.contains("function columnGoToSpread("));
         assert!(html.contains("function columnNext()"));
         assert!(html.contains("function columnPrev()"));
         assert!(html.contains("function columnReportPosition()"));
@@ -1382,7 +1400,9 @@ mod tests {
         assert!(html.contains("if (isColumnMode()) return columnNext();"));
         assert!(html.contains("if (isColumnMode()) return columnPrev();"));
         assert!(html.contains("if (isColumnMode()) return columnReportPosition();"));
-        assert!(html.contains("if (isColumnMode()) return columnGoToPage("));
+        assert!(html.contains("return columnGoToPage(pageIndex);"));
+        // goToSpread converts a spread index to a page index before delegating.
+        assert!(html.contains("const pageIndex = isDoubleMode() ? index * 2 : index;"));
         // Internal reads should go through the getter for a consistent external API
         assert!(html.contains("columnGetPageCount()"));
     }
@@ -1413,15 +1433,15 @@ mod tests {
         use rust_reader_storage::models::EbookSettings;
         let html = reader_html(&EbookSettings::default(), 1);
         let fn_body = html
-            .split("function columnGoToPage(n)")
+            .split("function columnApplyTransform()")
             .nth(1)
-            .expect("columnGoToPage not found")
-            .split("function columnNext")
+            .expect("columnApplyTransform not found")
+            .split("function columnGoToSpread")
             .next()
             .unwrap();
         assert!(
             fn_body.contains("columnView.style.transform = `translateX(${-offset + marginH}px)`;"),
-            "single-page transform should follow prototype translateX(-currentPage * pageW + marginH)"
+            "single-page transform should follow prototype translateX(-currentSpread * pageW + marginH)"
         );
     }
 
@@ -1463,11 +1483,11 @@ mod tests {
         use rust_reader_storage::models::EbookSettings;
         let html = reader_html(&EbookSettings::default(), 1);
         assert!(
-            html.contains("function columnGoToPage(n) {"),
+            html.contains("function columnGoToPage(pageIndex) {"),
             "columnGoToPage should take only the page index"
         );
         assert!(
-            !html.contains("function columnGoToPage(n, animate)"),
+            !html.contains("function columnGoToPage(pageIndex, animate)"),
             "columnGoToPage should not have an unused animate parameter"
         );
         assert!(
@@ -1475,15 +1495,15 @@ mod tests {
             "columnGoToPage callers should not pass animate"
         );
         assert!(
-            !html.contains("columnGoToPage(columnState.currentPage, false)"),
+            !html.contains("columnGoToPage(columnState.currentSpread, false)"),
             "columnGoToPage callers should not pass animate"
         );
         assert!(
-            !html.contains("columnGoToPage(columnState.currentPage + 1, true)"),
+            !html.contains("columnGoToPage(columnState.currentSpread + 1, true)"),
             "columnGoToPage callers should not pass animate"
         );
         assert!(
-            !html.contains("columnGoToPage(columnState.currentPage - 1, true)"),
+            !html.contains("columnGoToPage(columnState.currentSpread - 1, true)"),
             "columnGoToPage callers should not pass animate"
         );
         assert!(
@@ -1498,6 +1518,11 @@ mod tests {
             !html.contains("columnGoToPage(index, animate || false)"),
             "goToSpread should not forward animate to columnGoToPage"
         );
+        // Internal spread navigation should use the spread helper, not page helper.
+        assert!(html.contains("function columnGoToSpread(n) {"));
+        assert!(html.contains("columnGoToSpread(columnState.currentSpread + 1)"));
+        assert!(html.contains("columnGoToSpread(columnState.currentSpread - 1)"));
+        assert!(html.contains("columnGoToSpread(targetPage)"));
     }
 
     #[test]
@@ -1512,12 +1537,12 @@ mod tests {
             .next()
             .unwrap();
         assert!(
-            fn_body.contains("columnGoToPage(columnState.currentPage + 1)"),
-            "columnNext should advance to the next page within a chapter"
+            fn_body.contains("columnGoToSpread(columnState.currentSpread + 1)"),
+            "columnNext should advance to the next spread within a chapter"
         );
         assert!(
             fn_body.contains("loadChapter(currentChapter + 1, 0)"),
-            "columnNext should load the next chapter when on the last page"
+            "columnNext should load the next chapter when on the last spread"
         );
     }
 
@@ -1533,12 +1558,12 @@ mod tests {
             .next()
             .unwrap();
         assert!(
-            fn_body.contains("columnGoToPage(columnState.currentPage - 1)"),
-            "columnPrev should go to the previous page within a chapter"
+            fn_body.contains("columnGoToSpread(columnState.currentSpread - 1)"),
+            "columnPrev should go to the previous spread within a chapter"
         );
         assert!(
             fn_body.contains("loadChapter(currentChapter - 1, Number.MAX_SAFE_INTEGER)"),
-            "columnPrev should load the previous chapter and clamp to the last page"
+            "columnPrev should load the previous chapter and clamp to the last spread"
         );
         assert!(
             !fn_body.contains("loadChapter(currentChapter - 1, 0)"),
@@ -1546,9 +1571,9 @@ mod tests {
         );
         assert!(
             !fn_body.contains(
-                ".then(() => {\n      columnGoToPage(columnGetPageCount() - 1);\n    });"
+                ".then(() => {\n      columnGoToSpread(columnGetPageCount() - 1);\n    });"
             ),
-            "columnPrev should not flash through page 0 before jumping to the last page"
+            "columnPrev should not flash through spread 0 before jumping to the last spread"
         );
     }
 
@@ -1737,6 +1762,219 @@ mod tests {
         assert!(
             layout_pos < target_pos,
             "loadChapter must call columnLayout before computing targetPage from columnGetPageCount()"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_double_page_layout_matches_prototype() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let layout_body = html
+            .split("function columnLayout()")
+            .nth(1)
+            .expect("columnLayout not found")
+            .split("function columnApplyTransform")
+            .next()
+            .unwrap();
+        // Isolate the double-page branch.
+        let double_branch = layout_body
+            .split("if (isDoubleMode()) {")
+            .nth(1)
+            .expect("double branch not found")
+            .split("\n  } else {{")
+            .next()
+            .expect("double branch end not found");
+        assert!(
+            double_branch
+                .contains("const pageW = Math.max(1, Math.floor((viewportW - gutter) / 2));"),
+            "double-page pageW should follow prototype floor((viewportW - gutter) / 2)"
+        );
+        assert!(
+            double_branch.contains("const colW = Math.max(1, pageW - 2 * marginH);"),
+            "double-page colW should be pageW - 2 * marginH"
+        );
+        assert!(
+            double_branch.contains("const cg = gutter + 2 * marginH;"),
+            "double-page column-gap should be gutter + 2 * marginH"
+        );
+        assert!(
+            double_branch.contains("columnContent.style.width = viewportW + 'px';"),
+            "double-page #column-content width should equal viewportW"
+        );
+        assert!(
+            double_branch.contains("columnContent.style.paddingLeft = marginH + 'px';"),
+            "double-page #column-content left padding should equal marginH"
+        );
+        assert!(
+            double_branch.contains("columnContent.style.paddingRight = marginH + 'px';"),
+            "double-page #column-content right padding should equal marginH"
+        );
+        assert!(
+            double_branch.contains("columnContent.style.columnCount = 'auto';"),
+            "double-page columnCount should be auto"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_double_page_transform_step() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let layout_body = html
+            .split("function columnLayout()")
+            .nth(1)
+            .expect("columnLayout not found")
+            .split("function columnApplyTransform")
+            .next()
+            .unwrap();
+        let double_branch = layout_body
+            .split("if (isDoubleMode()) {")
+            .nth(1)
+            .expect("double branch not found")
+            .split("\n  } else {{")
+            .next()
+            .expect("double branch end not found");
+        assert!(
+            double_branch.contains("const viewShift = viewportW + gutter;"),
+            "double-page transform step should be viewportW + gutter"
+        );
+        let transform_body = html
+            .split("function columnApplyTransform()")
+            .nth(1)
+            .expect("columnApplyTransform not found")
+            .split("function columnGoToSpread")
+            .next()
+            .unwrap();
+        let double_transform = transform_body
+            .split("} else if (isDoubleMode()) {")
+            .nth(1)
+            .expect("double transform branch not found")
+            .split("\n  }} else {{")
+            .next()
+            .expect("double transform branch end not found");
+        assert!(
+            double_transform.contains("columnState.currentSpread * columnState.viewShift"),
+            "double-page transform should use currentSpread * viewShift"
+        );
+        assert!(
+            double_transform.contains("columnView.style.transform = `translateX(-${offset}px)`;"),
+            "double-page transform should translateX by negative offset"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_double_page_total_spread_formula() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let layout_body = html
+            .split("function columnLayout()")
+            .nth(1)
+            .expect("columnLayout not found")
+            .split("function columnApplyTransform")
+            .next()
+            .unwrap();
+        let double_branch = layout_body
+            .split("if (isDoubleMode()) {")
+            .nth(1)
+            .expect("double branch not found")
+            .split("\n  } else {{")
+            .next()
+            .expect("double branch end not found");
+        assert!(
+            double_branch.contains("Math.ceil((scrollW - 2 * marginH) / viewShift)"),
+            "double-page total spreads should use ceil((scrollW - 2 * marginH) / viewShift)"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_goto_page_maps_page_index_to_spread() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function columnGoToPage(pageIndex)")
+            .nth(1)
+            .expect("columnGoToPage not found")
+            .split("function columnNext")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body
+                .contains("const spread = isDoubleMode() ? Math.floor(pageIndex / 2) : pageIndex;"),
+            "columnGoToPage should map a page index to the containing spread"
+        );
+        assert!(
+            fn_body.contains("columnGoToSpread(spread);"),
+            "columnGoToPage should delegate to columnGoToSpread"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_go_to_spread_converts_to_page_index() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function goToSpread(index, animate)")
+            .nth(1)
+            .expect("goToSpread not found")
+            .split("if (spreads.length === 0) return;")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body.contains("const pageIndex = isDoubleMode() ? index * 2 : index;"),
+            "goToSpread should convert a spread index to the first page index in double mode"
+        );
+        assert!(
+            fn_body.contains("return columnGoToPage(pageIndex);"),
+            "goToSpread should delegate the page index to columnGoToPage"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_report_position_uses_spread() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function columnReportPosition()")
+            .nth(1)
+            .expect("columnReportPosition not found")
+            .split("function pageHeight")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body.contains("\"spread\": columnState.currentSpread,"),
+            "columnReportPosition should report the current spread index"
+        );
+        assert!(
+            fn_body.contains("\"total_spreads\": columnGetPageCount()"),
+            "columnReportPosition should report the total spread count"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_layout_covers_single_and_double_branches() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function columnLayout()")
+            .nth(1)
+            .expect("columnLayout not found")
+            .split("function columnApplyTransform")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body.contains("if (isDoubleMode()) {"),
+            "columnLayout should branch for double-page mode"
+        );
+        assert!(
+            fn_body.contains("} else {"),
+            "columnLayout should have a fallback single-page branch"
+        );
+        assert!(
+            fn_body.contains("const pageW = Math.max(1, viewportW);"),
+            "single-page branch should use viewportW as pageW"
+        );
+        assert!(
+            fn_body.contains("Math.ceil(scrollW / pageW)"),
+            "single-page branch should compute total pages from scrollW / pageW"
         );
     }
 }
