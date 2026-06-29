@@ -257,19 +257,21 @@ function columnLayout() {{
   if (isDoubleMode()) {{
     const pageW = Math.max(1, Math.floor((viewportW - gutter) / 2));
     const colW = Math.max(1, pageW - 2 * marginH);
-    const cg = gutter + 2 * marginH;
+    const colGap = gutter + 2 * marginH;
     const viewShift = viewportW + gutter;
     columnContent.style.width = viewportW + 'px';
     columnContent.style.paddingLeft = marginH + 'px';
     columnContent.style.paddingRight = marginH + 'px';
     columnContent.style.columnWidth = colW + 'px';
-    columnContent.style.columnGap = cg + 'px';
+    columnContent.style.columnGap = colGap + 'px';
     columnContent.style.columnCount = 'auto';
     const scrollW = columnContent.scrollWidth;
     columnState.pageWidth = pageW;
     columnState.viewShift = viewShift;
     columnState.totalPages = Math.max(1, Math.ceil((scrollW - 2 * marginH) / viewShift));
   }} else {{
+    // 单页模式下内容宽度等于页宽，水平边距通过 transform 整体偏移实现；
+    // 双页模式需要把边距放在每栏内部，因此用 padding 控制，column-gap 只保留栏间距。
     const pageW = Math.max(1, viewportW);
     const colW = Math.max(1, pageW - 2 * marginH);
     columnContent.style.width = colW + 'px';
@@ -637,8 +639,8 @@ function splitIntoSpreads(html) {{
 
 function goToSpread(index, animate) {{
   if (isColumnMode()) {{
-    const pageIndex = isDoubleMode() ? index * 2 : index;
-    return columnGoToPage(pageIndex);
+    // columnGoToSpread 已经按 spread 索引工作，无需 spread -> page -> spread 转换。
+    return columnGoToSpread(index);
   }}
   if (spreads.length === 0) return;
   const target = Math.max(0, Math.min(spreads.length - 1, index));
@@ -843,12 +845,12 @@ function applySettings(json) {{
       // Measure first so columnGetPageCount() is valid before restoring progress.
       columnLayout();
       const totalChars = columnContent.textContent.length;
-      let targetPage = 0;
+      let targetSpread = 0;
       if (totalChars > 0 && savedCharOffset > 0) {{
         const ratio = savedCharOffset / totalChars;
-        targetPage = Math.floor(ratio * (columnGetPageCount() - 1));
+        targetSpread = Math.floor(ratio * (columnGetPageCount() - 1));
       }}
-      columnGoToSpread(targetPage);
+      columnGoToSpread(targetSpread);
       return;
     }}
     if (isScrollMode()) {{
@@ -886,12 +888,12 @@ async function loadChapter(index, charOffset) {{
       columnContent.innerHTML = currentChapterHtml;
       // Measure first so columnGetPageCount() is valid before restoring progress.
       columnLayout();
-      let targetPage = 0;
+      let targetSpread = 0;
       if (typeof charOffset === 'number' && charOffset >= 0 && columnContent.textContent.length > 0) {{
         const ratio = Math.min(1, charOffset / columnContent.textContent.length);
-        targetPage = Math.floor(ratio * (columnGetPageCount() - 1));
+        targetSpread = Math.floor(ratio * (columnGetPageCount() - 1));
       }}
-      columnGoToSpread(targetPage);
+      columnGoToSpread(targetSpread);
       return;
     }}
     if (isScrollMode()) {{
@@ -1400,9 +1402,8 @@ mod tests {
         assert!(html.contains("if (isColumnMode()) return columnNext();"));
         assert!(html.contains("if (isColumnMode()) return columnPrev();"));
         assert!(html.contains("if (isColumnMode()) return columnReportPosition();"));
-        assert!(html.contains("return columnGoToPage(pageIndex);"));
-        // goToSpread converts a spread index to a page index before delegating.
-        assert!(html.contains("const pageIndex = isDoubleMode() ? index * 2 : index;"));
+        // goToSpread delegates directly to columnGoToSpread without spread -> page -> spread conversion.
+        assert!(html.contains("return columnGoToSpread(index);"));
         // Internal reads should go through the getter for a consistent external API
         assert!(html.contains("columnGetPageCount()"));
     }
@@ -1511,7 +1512,7 @@ mod tests {
             "columnGoToPage callers should not pass animate"
         );
         assert!(
-            !html.contains("columnGoToPage(targetPage, false)"),
+            !html.contains("columnGoToPage(targetSpread, false)"),
             "columnGoToPage callers should not pass animate"
         );
         assert!(
@@ -1522,7 +1523,7 @@ mod tests {
         assert!(html.contains("function columnGoToSpread(n) {"));
         assert!(html.contains("columnGoToSpread(columnState.currentSpread + 1)"));
         assert!(html.contains("columnGoToSpread(columnState.currentSpread - 1)"));
-        assert!(html.contains("columnGoToSpread(targetPage)"));
+        assert!(html.contains("columnGoToSpread(targetSpread)"));
     }
 
     #[test]
@@ -1603,6 +1604,34 @@ mod tests {
         assert!(
             fn_body.contains("columnState.totalPages = Math.max(1,"),
             "totalPages should always be at least 1"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_double_branch_guards_narrow_viewport() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let layout_body = html
+            .split("function columnLayout()")
+            .nth(1)
+            .expect("columnLayout not found")
+            .split("function columnApplyTransform")
+            .next()
+            .unwrap();
+        let double_branch = layout_body
+            .split("if (isDoubleMode()) {")
+            .nth(1)
+            .expect("double branch not found")
+            .split("\n  } else {{")
+            .next()
+            .expect("double branch end not found");
+        assert!(
+            double_branch.contains("const pageW = Math.max(1, Math.floor((viewportW - gutter) / 2));"),
+            "double-page pageW must be guarded so a narrow viewport cannot produce 0 or negative width"
+        );
+        assert!(
+            double_branch.contains("const colW = Math.max(1, pageW - 2 * marginH);"),
+            "double-page colW must be guarded so large margins cannot produce 0 or negative width"
         );
     }
 
@@ -1727,11 +1756,11 @@ mod tests {
             .find("columnLayout(")
             .expect("columnLayout call not found in applySettings");
         let target_pos = column_branch
-            .find("targetPage = Math.floor(ratio * (columnGetPageCount() - 1));")
-            .expect("targetPage computation not found in applySettings");
+            .find("targetSpread = Math.floor(ratio * (columnGetPageCount() - 1));")
+            .expect("targetSpread computation not found in applySettings");
         assert!(
             layout_pos < target_pos,
-            "applySettings must call columnLayout before computing targetPage from columnGetPageCount()"
+            "applySettings must call columnLayout before computing targetSpread from columnGetPageCount()"
         );
     }
 
@@ -1757,11 +1786,11 @@ mod tests {
             .find("columnLayout(")
             .expect("columnLayout call not found in loadChapter");
         let target_pos = column_branch
-            .find("targetPage = Math.floor(ratio * (columnGetPageCount() - 1));")
-            .expect("targetPage computation not found in loadChapter");
+            .find("targetSpread = Math.floor(ratio * (columnGetPageCount() - 1));")
+            .expect("targetSpread computation not found in loadChapter");
         assert!(
             layout_pos < target_pos,
-            "loadChapter must call columnLayout before computing targetPage from columnGetPageCount()"
+            "loadChapter must call columnLayout before computing targetSpread from columnGetPageCount()"
         );
     }
 
@@ -1794,7 +1823,7 @@ mod tests {
             "double-page colW should be pageW - 2 * marginH"
         );
         assert!(
-            double_branch.contains("const cg = gutter + 2 * marginH;"),
+            double_branch.contains("const colGap = gutter + 2 * marginH;"),
             "double-page column-gap should be gutter + 2 * marginH"
         );
         assert!(
@@ -1908,7 +1937,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reader_html_column_go_to_spread_converts_to_page_index() {
+    fn test_reader_html_column_go_to_spread_delegates_directly() {
         use rust_reader_storage::models::EbookSettings;
         let html = reader_html(&EbookSettings::default(), 1);
         let fn_body = html
@@ -1919,12 +1948,16 @@ mod tests {
             .next()
             .unwrap();
         assert!(
-            fn_body.contains("const pageIndex = isDoubleMode() ? index * 2 : index;"),
-            "goToSpread should convert a spread index to the first page index in double mode"
+            fn_body.contains("return columnGoToSpread(index);"),
+            "goToSpread should delegate directly to columnGoToSpread in column mode"
         );
         assert!(
-            fn_body.contains("return columnGoToPage(pageIndex);"),
-            "goToSpread should delegate the page index to columnGoToPage"
+            !fn_body.contains("const pageIndex = isDoubleMode() ? index * 2 : index;"),
+            "goToSpread should not convert spread index to page index in column mode"
+        );
+        assert!(
+            !fn_body.contains("return columnGoToPage(pageIndex);"),
+            "goToSpread should not route through columnGoToPage in column mode"
         );
     }
 
