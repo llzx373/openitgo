@@ -1096,13 +1096,18 @@ if (columnView) {{
   columnView.addEventListener('click', onClick);
   columnView.addEventListener('scroll', columnReportPosition, {{ passive: true }});
 }}
-window.addEventListener('scroll', reportPosition, true);
+window.addEventListener('scroll', (e) => {{
+  // The column-view already has its own scroll listener; ignore its events
+  // at the window level to avoid duplicate position reports.
+  if (columnView && e.target === columnView) return;
+  reportPosition();
+}}, true);
 
 let resizeTimeout = null;
 window.addEventListener('resize', () => {{
   clearTimeout(resizeTimeout);
   resizeTimeout = setTimeout(() => {{
-    if (!currentChapterHtml || isScrollMode()) return;
+    if (!currentChapterHtml) return;
     if (isColumnMode()) {{
       let savedScrollRatio = 0;
       if (isScrollMode()) {{
@@ -1117,6 +1122,7 @@ window.addEventListener('resize', () => {{
       }}
       return;
     }}
+    if (isScrollMode()) return;
     cancelFlip();
     const offset = currentSpreadCharOffset();
     spreads = splitIntoSpreads(currentChapterHtml);
@@ -1334,9 +1340,55 @@ mod tests {
         assert!(html.contains("function applySettings"));
         assert!(html.contains("clearTimeout(resizeTimeout)"));
         assert!(html.contains("setTimeout"));
-        assert!(html.contains("!isScrollMode()"));
         assert!(html.contains("splitIntoSpreads(currentChapterHtml)"));
         assert!(html.contains("goToSpread(currentSpread, false)"));
+
+        let handler_body = html
+            .split("window.addEventListener('resize', () => {")
+            .nth(1)
+            .expect("resize handler not found")
+            .split("\n  }});")
+            .next()
+            .expect("resize handler end not found");
+        // Must not short-circuit scroll mode at the very top; otherwise the
+        // CSS-columns resize path can never preserve the scroll ratio.
+        assert!(
+            !handler_body.contains("if (!currentChapterHtml || isScrollMode()) return;"),
+            "resize handler should not return early for scroll mode at the top"
+        );
+        assert!(
+            handler_body.contains("if (!currentChapterHtml) return;"),
+            "resize handler should only guard on missing chapter content"
+        );
+        // Column paginator branch must preserve and restore scroll ratio in scroll mode.
+        let column_branch = handler_body
+            .split("if (isColumnMode()) {")
+            .nth(1)
+            .expect("resize handler column branch not found")
+            .split("\n      return;")
+            .next()
+            .expect("resize handler column branch end not found");
+        assert!(
+            column_branch.contains(
+                "savedScrollRatio = maxScroll > 0 ? columnView.scrollTop / maxScroll : 0;"
+            ),
+            "column resize should capture the scroll ratio in scroll mode"
+        );
+        assert!(
+            column_branch.contains(
+                "columnView.scrollTop = Math.floor(savedScrollRatio * columnMaxScroll());"
+            ),
+            "column resize should restore the scroll ratio in scroll mode"
+        );
+        assert!(
+            column_branch.contains("columnGoToSpread(columnState.currentSpread);"),
+            "column resize should re-navigate to the current spread in paginated mode"
+        );
+        // Old-paginator scroll mode reflows naturally, so it returns after the column branch.
+        assert!(
+            handler_body.contains("if (isScrollMode()) return;"),
+            "resize handler should skip old-paginator split/re-layout in scroll mode"
+        );
     }
 
     #[test]
@@ -2328,6 +2380,27 @@ mod tests {
                 "columnView.addEventListener('scroll', columnReportPosition, { passive: true });"
             ),
             "#column-view should report position while scrolling"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_window_scroll_listener_ignores_column_view() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let listener = html
+            .split("window.addEventListener('scroll', (e) => {")
+            .nth(1)
+            .expect("window scroll listener not found")
+            .split("\n}}, true);")
+            .next()
+            .expect("window scroll listener end not found");
+        assert!(
+            listener.contains("if (columnView && e.target === columnView) return;"),
+            "window scroll listener must ignore #column-view scroll events to avoid duplicate position reports"
+        );
+        assert!(
+            listener.contains("reportPosition();"),
+            "window scroll listener should still report position for other scroll targets"
         );
     }
 }
