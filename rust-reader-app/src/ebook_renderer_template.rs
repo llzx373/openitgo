@@ -219,12 +219,26 @@ function isDoubleMode() {{ return document.body.classList.contains('double'); }}
 // --- CSS columns paginator (Phase 1) ---
 function isColumnMode() {{ return window.ebookUseColumns === true; }}
 
+let columnAnimationTimer = null;
+
 function columnEnableAnimation() {{
   if (columnView) columnView.classList.add('column-animate');
 }}
 
 function columnDisableAnimation() {{
+  if (columnAnimationTimer) {{
+    clearTimeout(columnAnimationTimer);
+    columnAnimationTimer = null;
+  }}
   if (columnView) columnView.classList.remove('column-animate');
+}}
+
+function columnScheduleDisableAnimation() {{
+  if (columnAnimationTimer) clearTimeout(columnAnimationTimer);
+  columnAnimationTimer = setTimeout(() => {{
+    columnAnimationTimer = null;
+    columnDisableAnimation();
+  }}, 260);
 }}
 
 let columnState = {{
@@ -375,7 +389,7 @@ function columnNext() {{
     if (currentSettings.animate) columnEnableAnimation();
     columnGoToSpread(columnState.currentSpread + 1);
     if (currentSettings.animate) {{
-      setTimeout(columnDisableAnimation, 260);
+      columnScheduleDisableAnimation();
     }}
   }} else if (currentChapter + 1 < window.ebookChapterCount) {{
     loadChapter(currentChapter + 1, 0);
@@ -406,7 +420,7 @@ function columnPrev() {{
     if (currentSettings.animate) columnEnableAnimation();
     columnGoToSpread(columnState.currentSpread - 1);
     if (currentSettings.animate) {{
-      setTimeout(columnDisableAnimation, 260);
+      columnScheduleDisableAnimation();
     }}
   }} else if (currentChapter > 0) {{
     // Passing the maximum safe integer as charOffset makes loadChapter's ratio
@@ -2494,6 +2508,10 @@ mod tests {
             "column animation CSS should transition the transform property"
         );
         assert!(
+            html.contains("let columnAnimationTimer = null;"),
+            "column paginator should track a shared animation timer"
+        );
+        assert!(
             html.contains("function columnEnableAnimation()"),
             "column paginator should expose columnEnableAnimation"
         );
@@ -2502,12 +2520,24 @@ mod tests {
             "column paginator should expose columnDisableAnimation"
         );
         assert!(
+            html.contains("function columnScheduleDisableAnimation()"),
+            "column paginator should expose columnScheduleDisableAnimation"
+        );
+        assert!(
             html.contains("columnView.classList.add('column-animate')"),
             "columnEnableAnimation should add the animate class"
         );
         assert!(
             html.contains("columnView.classList.remove('column-animate')"),
             "columnDisableAnimation should remove the animate class"
+        );
+        assert!(
+            html.contains("columnAnimationTimer = setTimeout"),
+            "columnScheduleDisableAnimation should schedule a timer"
+        );
+        assert!(
+            html.contains("clearTimeout(columnAnimationTimer)"),
+            "column animation helpers should cancel any pending timer"
         );
     }
 
@@ -2545,8 +2575,8 @@ mod tests {
                 "columnNext should guard animation on currentSettings.animate"
             );
             assert!(
-                next_body.contains("setTimeout(columnDisableAnimation, 260);"),
-                "columnNext should disable animation after the transition duration"
+                next_body.contains("columnScheduleDisableAnimation();"),
+                "columnNext should schedule disabling animation after the transition duration"
             );
         }
     }
@@ -2571,8 +2601,8 @@ mod tests {
             "columnNext paginated branch should advance one spread"
         );
         assert!(
-            next_body.contains("setTimeout(columnDisableAnimation, 260);"),
-            "columnNext paginated branch should disable animation after the transition"
+            next_body.contains("columnScheduleDisableAnimation();"),
+            "columnNext paginated branch should schedule disabling animation after the transition"
         );
 
         let prev_body = html
@@ -2591,8 +2621,8 @@ mod tests {
             "columnPrev paginated branch should go back one spread"
         );
         assert!(
-            prev_body.contains("setTimeout(columnDisableAnimation, 260);"),
-            "columnPrev paginated branch should disable animation after the transition"
+            prev_body.contains("columnScheduleDisableAnimation();"),
+            "columnPrev paginated branch should schedule disabling animation after the transition"
         );
     }
 
