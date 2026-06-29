@@ -194,6 +194,10 @@ impl SettingsView {
             &mut settings.ebook.invert_scroll,
             "反转滚轮方向（适用于 macOS 自然滚动）",
         );
+        ui.checkbox(
+            &mut settings.ebook.use_columns,
+            "使用 CSS columns 分页（实验性）",
+        );
     }
 
     fn shortcut_editor(

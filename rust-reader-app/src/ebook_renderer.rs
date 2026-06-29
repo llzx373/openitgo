@@ -72,7 +72,7 @@ impl From<&EbookSettings> for JsSettings {
             margin_v: s.margin_vertical,
             animate: s.enable_page_animation,
             invert_scroll: s.invert_scroll,
-            use_columns: false,
+            use_columns: s.use_columns,
         }
     }
 }
@@ -509,5 +509,48 @@ mod tests {
         assert_eq!(s.current_spread, 4);
         assert_eq!(s.total_spreads, 12);
         assert_eq!(s.char_offset, 200);
+    }
+
+    #[test]
+    fn test_js_settings_use_columns_follows_settings() {
+        let settings = EbookSettings {
+            use_columns: true,
+            ..Default::default()
+        };
+        let js = JsSettings::from(&settings);
+        assert!(js.use_columns);
+        let json = serde_json::to_string(&js).unwrap();
+        assert!(json.contains("\"use_columns\":true"));
+    }
+
+    #[test]
+    fn test_reader_html_has_single_page_column_formulas() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 3);
+        // Single-page branch uses the column content width as the page box.
+        assert!(
+            html.contains("columnContent.style.width = colW + 'px'"),
+            "single-page column-content width should be colW"
+        );
+        assert!(
+            html.contains("columnContent.style.columnWidth = colW + 'px'"),
+            "single-page column-width should equal colW"
+        );
+        assert!(
+            html.contains("columnContent.style.columnGap = (2 * marginH) + 'px'"),
+            "single-page column-gap should be 2 * marginH"
+        );
+        assert!(
+            html.contains("columnContent.style.columnCount = 'auto'"),
+            "single-page column-count should be auto"
+        );
+        assert!(
+            html.contains("Math.max(1, Math.ceil(scrollW / pageW))"),
+            "single-page total pages should be ceil(scrollW / viewportW)"
+        );
+        assert!(
+            html.contains("translateX(${-offset + marginH}px)"),
+            "single-page transform should be translateX(-currentPage * viewportW + marginH)"
+        );
     }
 }

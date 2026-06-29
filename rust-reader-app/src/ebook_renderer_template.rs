@@ -308,11 +308,7 @@ function columnNext() {{
     columnView.scrollTop += columnView.clientHeight * 0.9;
     return;
   }}
-  if (columnState.currentPage + 1 < columnGetPageCount()) {{
-    columnGoToPage(columnState.currentPage + 1);
-  }} else if (currentChapter + 1 < window.ebookChapterCount) {{
-    loadChapter(currentChapter + 1, 0);
-  }}
+  columnGoToPage(columnState.currentPage + 1);
 }}
 
 function columnPrev() {{
@@ -320,13 +316,7 @@ function columnPrev() {{
     columnView.scrollTop -= columnView.clientHeight * 0.9;
     return;
   }}
-  if (columnState.currentPage > 0) {{
-    columnGoToPage(columnState.currentPage - 1);
-  }} else if (currentChapter > 0) {{
-    loadChapter(currentChapter - 1, 0).then(() => {{
-      columnGoToPage(columnGetPageCount() - 1);
-    }});
-  }}
+  columnGoToPage(columnState.currentPage - 1);
 }}
 
 function columnComputeCharOffset() {{
@@ -787,6 +777,15 @@ function cancelFlip() {{
 function applySettings(json) {{
   const s = typeof json === 'string' ? JSON.parse(json) : json;
   currentSettings = s;
+  // Capture the approximate character position before the paginator or
+  // layout changes, so we can restore the closest page afterwards.
+  const wasColumn = isColumnMode();
+  let savedCharOffset = 0;
+  if (wasColumn) {{
+    savedCharOffset = columnComputeCharOffset();
+  }} else if (!isScrollMode()) {{
+    savedCharOffset = currentSpreadCharOffset();
+  }}
   window.ebookUseColumns = !!s.use_columns;
   const root = document.documentElement;
   root.style.setProperty('--bg', s.bg);
@@ -801,12 +800,22 @@ function applySettings(json) {{
   if (currentChapterHtml) {{
     if (isColumnMode()) {{
       cancelFlip();
+      // Make sure the column paginator has content when switching to it.
+      columnContent.innerHTML = currentChapterHtml;
       columnLayout();
+      const totalChars = columnContent.textContent.length;
+      if (totalChars > 0 && savedCharOffset > 0) {{
+        const ratio = savedCharOffset / totalChars;
+        const targetPage = Math.floor(ratio * (columnGetPageCount() - 1));
+        columnGoToPage(targetPage);
+      }} else {{
+        columnGoToPage(0);
+      }}
       return;
     }}
     if (isScrollMode()) {{
       cancelFlip();
-      const offset = currentSpreadCharOffset();
+      const offset = savedCharOffset;
       spread.innerHTML = currentChapterHtml;
       spread.style.display = 'block';
       spreads = [];
@@ -817,7 +826,7 @@ function applySettings(json) {{
       reportPosition();
     }} else {{
       cancelFlip();
-      const offset = currentSpreadCharOffset();
+      const offset = savedCharOffset;
       spreads = splitIntoSpreads(currentChapterHtml);
       debugSplit('applySettings', pageHeight(), measure.getBoundingClientRect().height, spreads.length);
       currentSpread = findSpreadForOffset(offset);
