@@ -512,8 +512,8 @@ impl ReaderApp {
         // Render the TOC side panel before the central panel so that the
         // WebView bounds shrink to avoid covering the panel.
         if self.ebook_view.show_toc {
-            if let Some(jump_to) = self.ebook_view.render_toc(ctx) {
-                self.ebook_view.goto_chapter(jump_to);
+            if let Some((chapter, fragment)) = self.ebook_view.render_toc(ctx) {
+                self.ebook_view.goto_toc(chapter, fragment);
             }
         }
 

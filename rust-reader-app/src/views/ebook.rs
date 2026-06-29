@@ -69,12 +69,26 @@ impl EbookView {
         self.show_toc = !self.show_toc;
     }
 
+    fn toc_fragment(href: &str) -> Option<String> {
+        href.split_once('#')
+            .map(|(_, fragment)| fragment.to_string())
+    }
+
     /// Navigates to a chapter.
     pub fn goto_chapter(&mut self, chapter: usize) {
         if let Some(open) = self.open.as_mut() {
             let chapter = chapter.min(open.ebook.total_chapters().saturating_sub(1));
             open.current_chapter = chapter;
             open.renderer.goto_chapter(chapter, 0);
+        }
+    }
+
+    /// Navigates to a TOC entry, optionally jumping to a fragment within the chapter.
+    pub fn goto_toc(&mut self, chapter: usize, fragment: Option<String>) {
+        if let Some(open) = self.open.as_mut() {
+            let chapter = chapter.min(open.ebook.total_chapters().saturating_sub(1));
+            open.current_chapter = chapter;
+            open.renderer.jump_to_toc(chapter, fragment.as_deref());
         }
     }
 
@@ -110,9 +124,9 @@ impl EbookView {
 
     /// Renders the table-of-contents side panel. Call this *before* the
     /// central panel so the webview bounds can avoid the panel area.
-    pub fn render_toc(&self, ctx: &egui::Context) -> Option<usize> {
+    pub fn render_toc(&self, ctx: &egui::Context) -> Option<(usize, Option<String>)> {
         let open = self.open.as_ref()?;
-        let mut jump_to = None;
+        let mut jump_to: Option<(usize, Option<String>)> = None;
         egui::SidePanel::left("ebook_toc")
             .default_width(240.0)
             .resizable(true)
@@ -125,7 +139,8 @@ impl EbookView {
                         let label = chapter.title.as_deref().unwrap_or("无标题");
                         let response = ui.selectable_label(is_current, label);
                         if response.clicked() {
-                            jump_to = Some(chapter.index);
+                            let fragment = Self::toc_fragment(&chapter.href);
+                            jump_to = Some((chapter.index, fragment));
                         }
                     }
                 });

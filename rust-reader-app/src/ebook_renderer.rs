@@ -173,6 +173,52 @@ impl EbookRenderer {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.current_spread
     }
+
+    pub fn jump_to_toc(&self, chapter: usize, fragment: Option<&str>) {
+        let fragment = fragment.unwrap_or("");
+        let js = format!(
+            "jumpToTocItem({}, {});",
+            chapter,
+            serde_json::to_string(fragment).unwrap_or_default()
+        );
+        if let Err(e) = self.webview.evaluate_script(&js) {
+            eprintln!("EbookRenderer::jump_to_toc failed: {e}");
+        }
+    }
+
+    // Search helpers are public API surface for the future search UI; they are
+    // not yet wired to a toolbar in this phase.
+    #[allow(dead_code)]
+    pub fn find_text(&self, query: &str) {
+        let js = format!(
+            "findText({});",
+            serde_json::to_string(query).unwrap_or_default()
+        );
+        if let Err(e) = self.webview.evaluate_script(&js) {
+            eprintln!("EbookRenderer::find_text failed: {e}");
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn find_next(&self) {
+        if let Err(e) = self.webview.evaluate_script("findNext();") {
+            eprintln!("EbookRenderer::find_next failed: {e}");
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn find_prev(&self) {
+        if let Err(e) = self.webview.evaluate_script("findPrev();") {
+            eprintln!("EbookRenderer::find_prev failed: {e}");
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn clear_highlights(&self) {
+        if let Err(e) = self.webview.evaluate_script("clearHighlights();") {
+            eprintln!("EbookRenderer::clear_highlights failed: {e}");
+        }
+    }
 }
 
 fn handle_ipc_message(msg: JsToRust, state: &Arc<Mutex<RendererState>>) {

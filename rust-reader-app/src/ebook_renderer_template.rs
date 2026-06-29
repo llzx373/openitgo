@@ -130,6 +130,15 @@ body.scroll #column-content {{
 #column-view.column-animate {{
   transition: transform 0.25s ease;
 }}
+.ebook-search-highlight {{
+  background: rgba(255, 215, 0, 0.55);
+  color: inherit;
+  border-radius: 2px;
+}}
+.ebook-search-active {{
+  background: rgba(255, 140, 0, 0.85);
+  color: inherit;
+}}
 </style>
 </head>
 <body class="{mode}">
@@ -456,6 +465,181 @@ function columnReportPosition() {{
     "char_offset": columnComputeCharOffset(),
     "total_spreads": total
   }});
+}}
+
+let ebookSearchHighlights = [];
+let ebookSearchActiveIndex = -1;
+let ebookSearchQuery = '';
+
+function getActiveChapterRoot() {{
+  if (isColumnMode()) return columnContent;
+  return spread;
+}}
+
+function charOffsetOfElement(el) {{
+  const root = getActiveChapterRoot();
+  if (!root || !el) return 0;
+  try {{
+    const range = document.createRange();
+    range.selectNodeContents(root);
+    range.setEnd(el, 0);
+    return range.toString().length;
+  }} catch (e) {{
+    return 0;
+  }}
+}}
+
+function resolveTocTarget(target) {{
+  if (!target) return null;
+  let fragment = target;
+  const idx = target.indexOf('#');
+  if (idx !== -1) fragment = target.slice(idx + 1);
+  if (!fragment) return null;
+  let el = document.getElementById(fragment);
+  if (!el && columnContent) {{
+    try {{ el = columnContent.querySelector('[id=\"' + fragment.replace(/\"/g, '\\\\\"') + '\"]'); }} catch (e) {{}}
+  }}
+  if (!el && spread) {{
+    try {{ el = spread.querySelector('[id=\"' + fragment.replace(/\"/g, '\\\\\"') + '\"]'); }} catch (e) {{}}
+  }}
+  return el;
+}}
+
+function columnGoToCharOffset(offset) {{
+  const root = columnContent;
+  const totalChars = root ? root.textContent.length : 0;
+  if (totalChars === 0) return;
+  const ratio = Math.max(0, Math.min(1, offset / totalChars));
+  if (isScrollMode()) {{
+    columnView.scrollTop = Math.floor(ratio * columnMaxScroll());
+  }} else {{
+    const targetSpread = Math.floor(ratio * (columnGetPageCount() - 1));
+    columnGoToSpread(targetSpread);
+  }}
+}}
+
+async function jumpToTocItem(chapter, target) {{
+  if (typeof chapter !== 'number') return;
+  if (chapter !== currentChapter) {{
+    await loadChapter(chapter, 0);
+  }}
+  if (!target) return;
+  const el = resolveTocTarget(target);
+  if (!el) {{
+    const ratio = parseFloat(target);
+    if (!isNaN(ratio) && ratio >= 0 && ratio <= 1) {{
+      const root = getActiveChapterRoot();
+      const totalChars = root ? root.textContent.length : 0;
+      const offset = Math.floor(ratio * totalChars);
+      if (isColumnMode()) {{
+        columnGoToCharOffset(offset);
+      }} else if (isScrollMode()) {{
+        scrollToOffset(offset);
+      }} else {{
+        goToSpread(findSpreadForOffset(offset), false);
+      }}
+    }}
+    return;
+  }}
+  const offset = charOffsetOfElement(el);
+  if (isColumnMode()) {{
+    if (isScrollMode()) {{
+      el.scrollIntoView({{ behavior: currentSettings.animate ? 'smooth' : 'auto', block: 'start' }});
+    }} else {{
+      columnGoToCharOffset(offset);
+    }}
+  }} else if (isScrollMode()) {{
+    scrollToOffset(offset);
+  }} else {{
+    goToSpread(findSpreadForOffset(offset), false);
+  }}
+}}
+
+function clearHighlights() {{
+  for (const mark of ebookSearchHighlights) {{
+    if (mark && mark.parentNode) {{
+      mark.parentNode.replaceChild(document.createTextNode(mark.textContent), mark);
+    }}
+  }}
+  ebookSearchHighlights = [];
+  ebookSearchActiveIndex = -1;
+  ebookSearchQuery = '';
+}}
+
+function setSearchActiveIndex(index) {{
+  if (ebookSearchHighlights.length === 0) return;
+  if (ebookSearchActiveIndex >= 0 && ebookSearchActiveIndex < ebookSearchHighlights.length) {{
+    ebookSearchHighlights[ebookSearchActiveIndex].classList.remove('ebook-search-active');
+  }}
+  let idx = index % ebookSearchHighlights.length;
+  if (idx < 0) idx += ebookSearchHighlights.length;
+  ebookSearchActiveIndex = idx;
+  const mark = ebookSearchHighlights[idx];
+  mark.classList.add('ebook-search-active');
+  if (isColumnMode()) {{
+    if (isScrollMode()) {{
+      mark.scrollIntoView({{ behavior: currentSettings.animate ? 'smooth' : 'auto', block: 'center' }});
+    }} else {{
+      const offset = charOffsetOfElement(mark);
+      columnGoToCharOffset(offset);
+    }}
+  }} else {{
+    mark.scrollIntoView({{ behavior: currentSettings.animate ? 'smooth' : 'auto', block: 'center' }});
+  }}
+}}
+
+function findText(query) {{
+  clearHighlights();
+  ebookSearchQuery = query || '';
+  if (!query) return;
+  const root = getActiveChapterRoot();
+  if (!root) return;
+  const lowerQuery = query.toLowerCase();
+  while (true) {{
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    let found = false;
+    while (walker.nextNode()) {{
+      const node = walker.currentNode;
+      const parent = node.parentElement;
+      if (!parent || parent.classList.contains('ebook-search-highlight') || parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE') continue;
+      const text = node.textContent;
+      const lower = text.toLowerCase();
+      const pos = lower.indexOf(lowerQuery);
+      if (pos === -1) continue;
+      const before = text.slice(0, pos);
+      const matchText = text.slice(pos, pos + query.length);
+      const after = text.slice(pos + query.length);
+      const fragment = document.createDocumentFragment();
+      if (before) fragment.appendChild(document.createTextNode(before));
+      const mark = document.createElement('mark');
+      mark.className = 'ebook-search-highlight';
+      mark.textContent = matchText;
+      fragment.appendChild(mark);
+      let afterNode = null;
+      if (after) {{
+        afterNode = document.createTextNode(after);
+        fragment.appendChild(afterNode);
+      }}
+      parent.replaceChild(fragment, node);
+      ebookSearchHighlights.push(mark);
+      found = true;
+      break;
+    }}
+    if (!found) break;
+  }}
+  if (ebookSearchHighlights.length > 0) {{
+    setSearchActiveIndex(0);
+  }}
+}}
+
+function findNext() {{
+  if (ebookSearchHighlights.length === 0) return;
+  setSearchActiveIndex(ebookSearchActiveIndex + 1);
+}}
+
+function findPrev() {{
+  if (ebookSearchHighlights.length === 0) return;
+  setSearchActiveIndex(ebookSearchActiveIndex - 1);
 }}
 
 function pageHeight() {{
@@ -898,6 +1082,9 @@ function cancelFlip() {{
 function applySettings(json) {{
   const s = typeof json === 'string' ? JSON.parse(json) : json;
   currentSettings = s;
+  // NOTE: re-layout replaces the chapter DOM, so any search highlights are
+  // discarded. Callers that need persistent search results must re-issue
+  // findText after the layout settles.
   // Capture the approximate character position before the paginator or
   // layout changes, so we can restore the closest page afterwards.
   const wasColumn = isColumnMode();
@@ -2704,6 +2891,184 @@ mod tests {
         assert!(
             apply_body.contains("currentSpread = findSpreadForOffset(offset);"),
             "applySettings old-paginator branch should resume from the saved offset"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_contains_toc_jump_and_search_helpers() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(
+            html.contains("function jumpToTocItem"),
+            "jumpToTocItem should exist"
+        );
+        assert!(
+            html.contains("function resolveTocTarget"),
+            "resolveTocTarget should exist"
+        );
+        assert!(
+            html.contains("function columnGoToCharOffset"),
+            "columnGoToCharOffset should exist"
+        );
+        assert!(
+            html.contains("function charOffsetOfElement"),
+            "charOffsetOfElement should exist"
+        );
+        assert!(html.contains("function findText"), "findText should exist");
+        assert!(html.contains("function findNext"), "findNext should exist");
+        assert!(html.contains("function findPrev"), "findPrev should exist");
+        assert!(
+            html.contains("function clearHighlights"),
+            "clearHighlights should exist"
+        );
+        assert!(
+            html.contains("function setSearchActiveIndex"),
+            "setSearchActiveIndex should exist"
+        );
+        assert!(
+            html.contains(".ebook-search-highlight {"),
+            "search highlight CSS should exist"
+        );
+        assert!(
+            html.contains(".ebook-search-active {"),
+            "active search highlight CSS should exist"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_jump_to_toc_item_dispatches_by_mode() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("async function jumpToTocItem(chapter, target)")
+            .nth(1)
+            .expect("jumpToTocItem not found")
+            .split("function clearHighlights")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body.contains("if (isColumnMode()) {"),
+            "jumpToTocItem should branch for column mode"
+        );
+        assert!(
+            fn_body.contains("columnGoToCharOffset(offset)"),
+            "jumpToTocItem should use columnGoToCharOffset in column paginated mode"
+        );
+        assert!(
+            fn_body.contains(
+                "el.scrollIntoView({ behavior: currentSettings.animate ? 'smooth' : 'auto', block: 'start' })"
+            ),
+            "jumpToTocItem should scroll the element into view in column scroll mode"
+        );
+        assert!(
+            fn_body.contains("goToSpread(findSpreadForOffset(offset), false)"),
+            "jumpToTocItem should fall back to the old paginator for non-column modes"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_find_text_highlights_in_column_content() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function findText(query)")
+            .nth(1)
+            .expect("findText not found")
+            .split("function findNext")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body.contains("clearHighlights()"),
+            "findText should clear existing highlights first"
+        );
+        assert!(
+            fn_body.contains("getActiveChapterRoot()"),
+            "findText should search the active chapter root"
+        );
+        assert!(
+            fn_body.contains("ebook-search-highlight"),
+            "findText should create highlight marks"
+        );
+        assert!(
+            fn_body.contains("setSearchActiveIndex(0)"),
+            "findText should activate the first match"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_find_next_prev_cycles_active_highlight() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let next_body = html
+            .split("function findNext()")
+            .nth(1)
+            .expect("findNext not found")
+            .split("function findPrev")
+            .next()
+            .unwrap();
+        assert!(
+            next_body.contains("setSearchActiveIndex(ebookSearchActiveIndex + 1)"),
+            "findNext should advance the active highlight"
+        );
+        let prev_body = html
+            .split("function findPrev()")
+            .nth(1)
+            .expect("findPrev not found")
+            .split("function pageHeight")
+            .next()
+            .unwrap();
+        assert!(
+            prev_body.contains("setSearchActiveIndex(ebookSearchActiveIndex - 1)"),
+            "findPrev should move the active highlight backwards"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_search_navigation_uses_column_paginator() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function setSearchActiveIndex(index)")
+            .nth(1)
+            .expect("setSearchActiveIndex not found")
+            .split("function findText")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body.contains("if (isColumnMode()) {"),
+            "setSearchActiveIndex should branch for column mode"
+        );
+        assert!(
+            fn_body.contains("columnGoToCharOffset(offset)"),
+            "setSearchActiveIndex should jump to the match spread in column paginated mode"
+        );
+        assert!(
+            fn_body.contains(
+                "mark.scrollIntoView({ behavior: currentSettings.animate ? 'smooth' : 'auto', block: 'center' })"
+            ),
+            "setSearchActiveIndex should scroll matches into view in scroll mode"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_old_paginator_toc_search_helpers_remain() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(
+            html.contains("function findSpreadForOffset"),
+            "old paginator helper findSpreadForOffset should remain"
+        );
+        assert!(
+            html.contains("function scrollToOffset"),
+            "old paginator helper scrollToOffset should remain"
+        );
+        assert!(
+            html.contains("function goToSpread"),
+            "old paginator navigation function goToSpread should remain"
+        );
+        assert!(
+            html.contains("function renderSpread"),
+            "old paginator render function renderSpread should remain"
         );
     }
 }
