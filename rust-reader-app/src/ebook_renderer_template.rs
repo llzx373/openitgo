@@ -212,8 +212,6 @@ function isDoubleMode() {{ return document.body.classList.contains('double'); }}
 
 // --- CSS columns paginator (Phase 1) ---
 function isColumnMode() {{ return window.ebookUseColumns === true; }}
-function columnIsScrollMode() {{ return document.body.classList.contains('scroll'); }}
-function columnIsDoubleMode() {{ return document.body.classList.contains('double'); }}
 
 let columnState = {{
   currentPage: 0,
@@ -238,7 +236,7 @@ function columnHide() {{
 function columnLayout() {{
   if (!columnContent) return;
   columnShow();
-  if (columnIsScrollMode()) {{
+  if (isScrollMode()) {{
     columnContent.style.width = 'auto';
     columnContent.style.paddingLeft = '0';
     columnContent.style.paddingRight = '0';
@@ -256,7 +254,7 @@ function columnLayout() {{
   const marginH = getMarginH();
   const gutter = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--column-gutter')) || 40;
 
-  if (columnIsDoubleMode()) {{
+  if (isDoubleMode()) {{
     const pageW = Math.floor((viewportW - gutter) / 2);
     const colW = pageW - 2 * marginH;
     const cg = gutter + 2 * marginH;
@@ -266,7 +264,7 @@ function columnLayout() {{
     columnContent.style.paddingRight = marginH + 'px';
     columnContent.style.columnWidth = colW + 'px';
     columnContent.style.columnGap = cg + 'px';
-    columnContent.style.columns = 'auto';
+    columnContent.style.columnCount = 'auto';
     const scrollW = columnContent.scrollWidth;
     columnState.pageWidth = pageW;
     columnState.viewShift = viewShift;
@@ -279,7 +277,7 @@ function columnLayout() {{
     columnContent.style.paddingRight = '0';
     columnContent.style.columnWidth = colW + 'px';
     columnContent.style.columnGap = (2 * marginH) + 'px';
-    columnContent.style.columns = 'auto';
+    columnContent.style.columnCount = 'auto';
     const scrollW = columnContent.scrollWidth;
     columnState.pageWidth = pageW;
     columnState.viewShift = pageW;
@@ -287,46 +285,46 @@ function columnLayout() {{
   }}
 
   columnState.currentPage = Math.max(0, Math.min(columnState.currentPage, columnGetPageCount() - 1));
-  columnGoToPage(columnState.currentPage, false);
+  columnGoToPage(columnState.currentPage);
 }}
 
-function columnGoToPage(n, animate) {{
+function columnGoToPage(n) {{
   columnState.currentPage = Math.max(0, Math.min(n, columnGetPageCount() - 1));
-  if (columnIsScrollMode()) {{
+  if (isScrollMode()) {{
     columnView.style.transform = 'none';
-  }} else if (columnIsDoubleMode()) {{
+  }} else if (isDoubleMode()) {{
     const offset = columnState.currentPage * columnState.viewShift;
     columnView.style.transform = `translateX(-${{offset}}px)`;
   }} else {{
     const marginH = getMarginH();
-    const offset = columnState.currentPage * columnState.viewShift - marginH;
-    columnView.style.transform = `translateX(-${{offset}}px)`;
+    const offset = columnState.currentPage * columnState.pageWidth;
+    columnView.style.transform = `translateX(${{-offset + marginH}}px)`;
   }}
   columnReportPosition();
 }}
 
 function columnNext() {{
-  if (columnIsScrollMode()) {{
-    columnContent.scrollTop += columnContent.clientHeight * 0.9;
+  if (isScrollMode()) {{
+    columnView.scrollTop += columnView.clientHeight * 0.9;
     return;
   }}
   if (columnState.currentPage + 1 < columnGetPageCount()) {{
-    columnGoToPage(columnState.currentPage + 1, true);
+    columnGoToPage(columnState.currentPage + 1);
   }} else if (currentChapter + 1 < window.ebookChapterCount) {{
     loadChapter(currentChapter + 1, 0);
   }}
 }}
 
 function columnPrev() {{
-  if (columnIsScrollMode()) {{
-    columnContent.scrollTop -= columnContent.clientHeight * 0.9;
+  if (isScrollMode()) {{
+    columnView.scrollTop -= columnView.clientHeight * 0.9;
     return;
   }}
   if (columnState.currentPage > 0) {{
-    columnGoToPage(columnState.currentPage - 1, true);
+    columnGoToPage(columnState.currentPage - 1);
   }} else if (currentChapter > 0) {{
     loadChapter(currentChapter - 1, 0).then(() => {{
-      columnGoToPage(columnGetPageCount() - 1, true);
+      columnGoToPage(columnGetPageCount() - 1);
     }});
   }}
 }}
@@ -334,8 +332,8 @@ function columnPrev() {{
 function columnComputeCharOffset() {{
   const total = columnContent.textContent.length;
   if (total === 0) return 0;
-  if (columnIsScrollMode()) {{
-    const ratio = columnContent.scrollTop / Math.max(1, columnContent.scrollHeight - columnContent.clientHeight);
+  if (isScrollMode()) {{
+    const ratio = columnView.scrollTop / Math.max(1, columnView.scrollHeight - columnView.clientHeight);
     return Math.floor(total * Math.max(0, Math.min(1, ratio)));
   }}
   const ratio = columnState.currentPage / Math.max(1, columnGetPageCount());
@@ -624,7 +622,7 @@ function splitIntoSpreads(html) {{
 }}
 
 function goToSpread(index, animate) {{
-  if (isColumnMode()) return columnGoToPage(index, animate || false);
+  if (isColumnMode()) return columnGoToPage(index);
   if (spreads.length === 0) return;
   const target = Math.max(0, Math.min(spreads.length - 1, index));
   if (target === currentSpread) {{
@@ -842,9 +840,9 @@ async function loadChapter(index, charOffset) {{
       if (typeof charOffset === 'number' && charOffset >= 0 && columnContent.textContent.length > 0) {{
         const ratio = Math.min(1, charOffset / columnContent.textContent.length);
         const targetPage = Math.floor(ratio * (columnGetPageCount() - 1));
-        columnGoToPage(targetPage, false);
+        columnGoToPage(targetPage);
       }} else {{
-        columnGoToPage(0, false);
+        columnGoToPage(0);
       }}
       return;
     }}
@@ -1306,6 +1304,141 @@ mod tests {
         assert!(html.contains("if (isColumnMode()) return columnGoToPage("));
         // Internal reads should go through the getter for a consistent external API
         assert!(html.contains("columnGetPageCount()"));
+    }
+
+    #[test]
+    fn test_reader_html_column_layout_uses_column_count_longhand() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function columnLayout()")
+            .nth(1)
+            .expect("columnLayout not found")
+            .split("function columnGoToPage")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body.contains("columnContent.style.columnCount = 'auto';"),
+            "columnLayout should set columnCount longhand to keep columnWidth/columnGap"
+        );
+        assert!(
+            !fn_body.contains("columnContent.style.columns = 'auto';"),
+            "columnLayout should not use the columns shorthand which resets longhands"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_single_page_transform_matches_prototype() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function columnGoToPage(n)")
+            .nth(1)
+            .expect("columnGoToPage not found")
+            .split("function columnNext")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body.contains("columnView.style.transform = `translateX(${-offset + marginH}px)`;"),
+            "single-page transform should follow prototype translateX(-currentPage * pageW + marginH)"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_scroll_mode_uses_column_view() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(
+            html.contains("columnView.scrollTop += columnView.clientHeight * 0.9;"),
+            "columnNext scroll mode should scroll #column-view"
+        );
+        assert!(
+            html.contains("columnView.scrollTop -= columnView.clientHeight * 0.9;"),
+            "columnPrev scroll mode should scroll #column-view"
+        );
+        let compute_body = html
+            .split("function columnComputeCharOffset()")
+            .nth(1)
+            .expect("columnComputeCharOffset not found")
+            .split("function columnReportPosition")
+            .next()
+            .unwrap();
+        assert!(
+            compute_body.contains("columnView.scrollTop"),
+            "columnComputeCharOffset should read #column-view scroll position"
+        );
+        assert!(
+            compute_body.contains("columnView.scrollHeight"),
+            "columnComputeCharOffset should read #column-view scroll height"
+        );
+        assert!(
+            !compute_body.contains("columnContent.scrollTop"),
+            "columnComputeCharOffset should not read #column-content scroll position"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_goto_page_does_not_take_animate() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(
+            html.contains("function columnGoToPage(n) {"),
+            "columnGoToPage should take only the page index"
+        );
+        assert!(
+            !html.contains("function columnGoToPage(n, animate)"),
+            "columnGoToPage should not have an unused animate parameter"
+        );
+        assert!(
+            !html.contains("columnGoToPage(0, false)"),
+            "columnGoToPage callers should not pass animate"
+        );
+        assert!(
+            !html.contains("columnGoToPage(columnState.currentPage, false)"),
+            "columnGoToPage callers should not pass animate"
+        );
+        assert!(
+            !html.contains("columnGoToPage(columnState.currentPage + 1, true)"),
+            "columnGoToPage callers should not pass animate"
+        );
+        assert!(
+            !html.contains("columnGoToPage(columnState.currentPage - 1, true)"),
+            "columnGoToPage callers should not pass animate"
+        );
+        assert!(
+            !html.contains("columnGoToPage(columnGetPageCount() - 1, true)"),
+            "columnGoToPage callers should not pass animate"
+        );
+        assert!(
+            !html.contains("columnGoToPage(targetPage, false)"),
+            "columnGoToPage callers should not pass animate"
+        );
+        assert!(
+            !html.contains("columnGoToPage(index, animate || false)"),
+            "goToSpread should not forward animate to columnGoToPage"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_helpers_reuse_existing_scroll_double_helpers() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(
+            !html.contains("function columnIsScrollMode()"),
+            "should reuse existing isScrollMode helper"
+        );
+        assert!(
+            !html.contains("function columnIsDoubleMode()"),
+            "should reuse existing isDoubleMode helper"
+        );
+        assert!(
+            html.contains("if (isScrollMode()) {"),
+            "column paginator should call isScrollMode"
+        );
+        assert!(
+            html.contains("} else if (isDoubleMode()) {"),
+            "column paginator should call isDoubleMode"
+        );
     }
 
     #[test]
