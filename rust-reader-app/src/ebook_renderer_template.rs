@@ -115,10 +115,13 @@ body.scroll #spread {{
   max-height: calc(100% - 2 * var(--margin-v));
 }}
 body.scroll #column-view {{
+  overflow-x: hidden;
   overflow-y: scroll;
 }}
 body.scroll #column-content {{
-  columns: 1;
+  height: auto;
+  min-height: 100%;
+  column-count: 1;
   column-width: auto;
   column-gap: 0;
   width: auto;
@@ -221,7 +224,22 @@ let columnState = {{
 }};
 
 function columnGetPageCount() {{
+  if (isScrollMode()) {{
+    if (!columnView) return 1;
+    const ch = Math.max(1, columnView.clientHeight);
+    return Math.max(1, Math.ceil(columnView.scrollHeight / ch));
+  }}
   return (columnState && columnState.totalPages) || 0;
+}}
+
+function columnScrollStep() {{
+  if (!columnView) return 1;
+  return Math.max(1, columnView.clientHeight - 2 * getMarginV());
+}}
+
+function columnMaxScroll() {{
+  if (!columnView) return 0;
+  return Math.max(0, columnView.scrollHeight - columnView.clientHeight);
 }}
 
 function columnShow() {{
@@ -237,12 +255,15 @@ function columnLayout() {{
   if (!columnContent) return;
   columnShow();
   if (isScrollMode()) {{
+    columnShow();
     columnContent.style.width = 'auto';
-    columnContent.style.paddingLeft = '0';
-    columnContent.style.paddingRight = '0';
+    columnContent.style.paddingLeft = 'var(--margin-h)';
+    columnContent.style.paddingRight = 'var(--margin-h)';
     columnContent.style.columnWidth = 'auto';
-    columnContent.style.columns = '1';
+    columnContent.style.columnCount = '1';
     columnContent.style.columnGap = '0';
+    columnContent.style.height = 'auto';
+    columnContent.style.minHeight = '100%';
     columnView.style.transform = 'none';
     columnState.totalPages = 1;
     columnState.currentSpread = 0;
@@ -310,7 +331,10 @@ function columnGoToSpread(n) {{
 
 function columnGoToPage(pageIndex) {{
   if (isScrollMode()) {{
-    columnView.style.transform = 'none';
+    const total = columnGetPageCount();
+    const clamped = Math.max(0, Math.min(pageIndex, total - 1));
+    const ratio = total > 0 ? clamped / total : 0;
+    columnView.scrollTop = Math.floor(ratio * columnMaxScroll());
     columnReportPosition();
     return;
   }}
@@ -320,7 +344,15 @@ function columnGoToPage(pageIndex) {{
 
 function columnNext() {{
   if (isScrollMode()) {{
-    columnView.scrollTop += columnView.clientHeight * 0.9;
+    const maxScroll = columnMaxScroll();
+    if (columnView.scrollTop >= maxScroll - 1) {{
+      if (currentChapter + 1 < window.ebookChapterCount) {{
+        loadChapter(currentChapter + 1, 0);
+      }}
+    }} else {{
+      columnView.scrollTop = Math.min(maxScroll, columnView.scrollTop + columnScrollStep());
+      columnReportPosition();
+    }}
     return;
   }}
   if (columnState.currentSpread + 1 < columnGetPageCount()) {{
@@ -332,7 +364,17 @@ function columnNext() {{
 
 function columnPrev() {{
   if (isScrollMode()) {{
-    columnView.scrollTop -= columnView.clientHeight * 0.9;
+    if (columnView.scrollTop <= 0) {{
+      if (currentChapter > 0) {{
+        // Passing the maximum safe integer as charOffset makes loadChapter's ratio
+        // clamp to 1, so we land directly at the bottom of the previous chapter
+        // instead of flashing through the top.
+        loadChapter(currentChapter - 1, Number.MAX_SAFE_INTEGER);
+      }}
+    }} else {{
+      columnView.scrollTop = Math.max(0, columnView.scrollTop - columnScrollStep());
+      columnReportPosition();
+    }}
     return;
   }}
   if (columnState.currentSpread > 0) {{
@@ -357,12 +399,19 @@ function columnComputeCharOffset() {{
 }}
 
 function columnReportPosition() {{
+  let spread = columnState.currentSpread;
+  let total = columnGetPageCount();
+  if (isScrollMode()) {{
+    const ch = Math.max(1, columnView.clientHeight);
+    spread = Math.floor(columnView.scrollTop / ch);
+    total = columnGetPageCount();
+  }}
   sendIpc({{
     "type": "position",
     "chapter": currentChapter,
-    "spread": columnState.currentSpread,
+    "spread": spread,
     "char_offset": columnComputeCharOffset(),
-    "total_spreads": columnGetPageCount()
+    "total_spreads": total
   }});
 }}
 
@@ -845,12 +894,20 @@ function applySettings(json) {{
       // Measure first so columnGetPageCount() is valid before restoring progress.
       columnLayout();
       const totalChars = columnContent.textContent.length;
-      let targetSpread = 0;
-      if (totalChars > 0 && savedCharOffset > 0) {{
-        const ratio = savedCharOffset / totalChars;
-        targetSpread = Math.floor(ratio * (columnGetPageCount() - 1));
+      if (isScrollMode()) {{
+        if (totalChars > 0 && savedCharOffset > 0) {{
+          const ratio = savedCharOffset / totalChars;
+          columnView.scrollTop = Math.floor(ratio * columnMaxScroll());
+        }}
+        columnReportPosition();
+      }} else {{
+        let targetSpread = 0;
+        if (totalChars > 0 && savedCharOffset > 0) {{
+          const ratio = savedCharOffset / totalChars;
+          targetSpread = Math.floor(ratio * (columnGetPageCount() - 1));
+        }}
+        columnGoToSpread(targetSpread);
       }}
-      columnGoToSpread(targetSpread);
       return;
     }}
     if (isScrollMode()) {{
@@ -888,12 +945,21 @@ async function loadChapter(index, charOffset) {{
       columnContent.innerHTML = currentChapterHtml;
       // Measure first so columnGetPageCount() is valid before restoring progress.
       columnLayout();
-      let targetSpread = 0;
-      if (typeof charOffset === 'number' && charOffset >= 0 && columnContent.textContent.length > 0) {{
-        const ratio = Math.min(1, charOffset / columnContent.textContent.length);
-        targetSpread = Math.floor(ratio * (columnGetPageCount() - 1));
+      const totalChars = columnContent.textContent.length;
+      if (isScrollMode()) {{
+        if (typeof charOffset === 'number' && charOffset >= 0 && totalChars > 0) {{
+          const ratio = Math.min(1, charOffset / totalChars);
+          columnView.scrollTop = Math.floor(ratio * columnMaxScroll());
+        }}
+        columnReportPosition();
+      }} else {{
+        let targetSpread = 0;
+        if (typeof charOffset === 'number' && charOffset >= 0 && totalChars > 0) {{
+          const ratio = Math.min(1, charOffset / totalChars);
+          targetSpread = Math.floor(ratio * (columnGetPageCount() - 1));
+        }}
+        columnGoToSpread(targetSpread);
       }}
-      columnGoToSpread(targetSpread);
       return;
     }}
     if (isScrollMode()) {{
@@ -1028,6 +1094,7 @@ spread.addEventListener('click', onClick);
 if (columnView) {{
   columnView.addEventListener('wheel', onWheel, {{ passive: false }});
   columnView.addEventListener('click', onClick);
+  columnView.addEventListener('scroll', columnReportPosition, {{ passive: true }});
 }}
 window.addEventListener('scroll', reportPosition, true);
 
@@ -1037,8 +1104,17 @@ window.addEventListener('resize', () => {{
   resizeTimeout = setTimeout(() => {{
     if (!currentChapterHtml || isScrollMode()) return;
     if (isColumnMode()) {{
+      let savedScrollRatio = 0;
+      if (isScrollMode()) {{
+        const maxScroll = columnMaxScroll();
+        savedScrollRatio = maxScroll > 0 ? columnView.scrollTop / maxScroll : 0;
+      }}
       columnLayout();
-      columnGoToSpread(columnState.currentSpread);
+      if (isScrollMode()) {{
+        columnView.scrollTop = Math.floor(savedScrollRatio * columnMaxScroll());
+      }} else {{
+        columnGoToSpread(columnState.currentSpread);
+      }}
       return;
     }}
     cancelFlip();
@@ -1286,14 +1362,14 @@ mod tests {
             .unwrap();
         let scroll_branch = fn_body
             .split("if (isScrollMode()) {")
-            .nth(1)
-            .expect("applySettings scroll branch not found")
+            .nth(2)
+            .expect("applySettings old-paginator scroll branch not found")
             .split("\n    } else {{")
             .next()
             .expect("applySettings scroll branch end not found");
         assert!(
             scroll_branch.contains("columnHide();"),
-            "applySettings scroll branch must hide the column view so #spread is visible"
+            "applySettings old-paginator scroll branch must hide the column view so #spread is visible"
         );
     }
 
@@ -1310,14 +1386,14 @@ mod tests {
             .unwrap();
         let scroll_branch = fn_body
             .split("if (isScrollMode()) {")
-            .nth(1)
-            .expect("loadChapter scroll branch not found")
+            .nth(2)
+            .expect("loadChapter old-paginator scroll branch not found")
             .split("\n    } else {{")
             .next()
             .expect("loadChapter scroll branch end not found");
         assert!(
             scroll_branch.contains("columnHide();"),
-            "loadChapter scroll branch must hide the column view so #spread is visible"
+            "loadChapter old-paginator scroll branch must hide the column view so #spread is visible"
         );
     }
 
@@ -1451,12 +1527,22 @@ mod tests {
         use rust_reader_storage::models::EbookSettings;
         let html = reader_html(&EbookSettings::default(), 1);
         assert!(
-            html.contains("columnView.scrollTop += columnView.clientHeight * 0.9;"),
-            "columnNext scroll mode should scroll #column-view"
+            html.contains("function columnScrollStep()"),
+            "column scroll mode should expose a scroll-step helper"
         );
         assert!(
-            html.contains("columnView.scrollTop -= columnView.clientHeight * 0.9;"),
-            "columnPrev scroll mode should scroll #column-view"
+            html.contains("columnView.clientHeight - 2 * getMarginV()"),
+            "columnScrollStep should derive the step from the viewport height"
+        );
+        assert!(
+            html.contains("columnView.scrollTop = Math.min(maxScroll, columnView.scrollTop + columnScrollStep());"),
+            "columnNext scroll mode should scroll #column-view down by one step"
+        );
+        assert!(
+            html.contains(
+                "columnView.scrollTop = Math.max(0, columnView.scrollTop - columnScrollStep());"
+            ),
+            "columnPrev scroll mode should scroll #column-view up by one step"
         );
         let compute_body = html
             .split("function columnComputeCharOffset()")
@@ -1973,12 +2059,24 @@ mod tests {
             .next()
             .unwrap();
         assert!(
-            fn_body.contains("\"spread\": columnState.currentSpread,"),
-            "columnReportPosition should report the current spread index"
+            fn_body.contains("let total = columnGetPageCount();"),
+            "columnReportPosition should resolve the total spread count"
         );
         assert!(
-            fn_body.contains("\"total_spreads\": columnGetPageCount()"),
-            "columnReportPosition should report the total spread count"
+            fn_body.contains("\"total_spreads\": total"),
+            "columnReportPosition should report the resolved total spread count"
+        );
+        assert!(
+            fn_body.contains("let spread = columnState.currentSpread;"),
+            "columnReportPosition should start from the current spread index"
+        );
+        assert!(
+            fn_body.contains("columnView.scrollTop / ch"),
+            "columnReportPosition should derive the scroll page from #column-view in scroll mode"
+        );
+        assert!(
+            fn_body.contains("\"spread\": spread,"),
+            "columnReportPosition should report the resolved spread index"
         );
     }
 
@@ -2008,6 +2106,228 @@ mod tests {
         assert!(
             fn_body.contains("Math.ceil(scrollW / pageW)"),
             "single-page branch should compute total pages from scrollW / pageW"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_scroll_mode_css_rules() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let css = html
+            .split("body.scroll #column-content {")
+            .nth(1)
+            .expect("scroll column-content rule not found")
+            .split('}')
+            .next()
+            .unwrap();
+        assert!(
+            css.contains("column-count: 1") || css.contains("columns: 1"),
+            "scroll mode must disable CSS columns"
+        );
+        assert!(
+            css.contains("height: auto"),
+            "scroll mode column-content should grow with content"
+        );
+        let view_css = html
+            .split("body.scroll #column-view {")
+            .nth(1)
+            .expect("scroll column-view rule not found")
+            .split('}')
+            .next()
+            .unwrap();
+        assert!(
+            view_css.contains("overflow-y: scroll"),
+            "scroll mode #column-view must be the scroll container"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_scroll_next_clamps_and_crosses_chapter() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 2);
+        let fn_body = html
+            .split("function columnNext()")
+            .nth(1)
+            .expect("columnNext not found")
+            .split("function columnPrev")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body.contains("columnMaxScroll()"),
+            "columnNext scroll mode should clamp against the maximum scroll"
+        );
+        assert!(
+            fn_body.contains("columnView.scrollTop = Math.min(maxScroll, columnView.scrollTop + columnScrollStep());"),
+            "columnNext scroll mode should scroll down by one step and clamp"
+        );
+        assert!(
+            fn_body.contains("loadChapter(currentChapter + 1, 0)"),
+            "columnNext scroll mode should load the next chapter at the bottom"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_scroll_prev_clamps_and_crosses_chapter() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 2);
+        let fn_body = html
+            .split("function columnPrev()")
+            .nth(1)
+            .expect("columnPrev not found")
+            .split("function columnComputeCharOffset")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body.contains(
+                "columnView.scrollTop = Math.max(0, columnView.scrollTop - columnScrollStep());"
+            ),
+            "columnPrev scroll mode should scroll up by one step and clamp"
+        );
+        assert!(
+            fn_body.contains("loadChapter(currentChapter - 1, Number.MAX_SAFE_INTEGER)"),
+            "columnPrev scroll mode should load the previous chapter at the top"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_scroll_goto_page_maps_index_to_ratio() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function columnGoToPage(pageIndex)")
+            .nth(1)
+            .expect("columnGoToPage not found")
+            .split("function columnNext")
+            .next()
+            .unwrap();
+        let scroll_branch = fn_body
+            .split("if (isScrollMode()) {")
+            .nth(1)
+            .expect("columnGoToPage scroll branch not found")
+            .split("\n  }} else {{")
+            .next()
+            .expect("columnGoToPage scroll branch end not found");
+        assert!(
+            scroll_branch.contains("columnGetPageCount()"),
+            "columnGoToPage scroll mode should read total scroll pages"
+        );
+        assert!(
+            scroll_branch.contains("columnView.scrollTop = Math.floor(ratio * columnMaxScroll());"),
+            "columnGoToPage scroll mode should set scrollTop from the page ratio"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_scroll_position_reporting_uses_column_view() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function columnReportPosition()")
+            .nth(1)
+            .expect("columnReportPosition not found")
+            .split("function pageHeight")
+            .next()
+            .unwrap();
+        let scroll_branch = fn_body
+            .split("if (isScrollMode()) {")
+            .nth(1)
+            .expect("columnReportPosition scroll branch not found")
+            .split("\n  }}")
+            .next()
+            .expect("columnReportPosition scroll branch end not found");
+        assert!(
+            scroll_branch.contains("columnView.clientHeight"),
+            "scroll position reporting should use #column-view viewport height"
+        );
+        assert!(
+            scroll_branch.contains("columnView.scrollTop"),
+            "scroll position reporting should use #column-view scroll position"
+        );
+        assert!(
+            scroll_branch.contains("Math.floor(columnView.scrollTop / ch)"),
+            "scroll position reporting should derive the scroll page from #column-view"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_scroll_apply_settings_restores_ratio() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function applySettings(json)")
+            .nth(1)
+            .expect("applySettings not found")
+            .split("function loadChapter")
+            .next()
+            .unwrap();
+        let column_branch = fn_body
+            .split("if (isColumnMode()) {")
+            .nth(1)
+            .expect("applySettings column branch not found")
+            .split("\n      return;")
+            .next()
+            .expect("applySettings column branch end not found");
+        let scroll_branch = column_branch
+            .split("if (isScrollMode()) {")
+            .nth(1)
+            .expect("applySettings column scroll branch not found")
+            .split("\n      } else {")
+            .next()
+            .expect("applySettings column scroll branch end not found");
+        assert!(
+            scroll_branch.contains("columnView.scrollTop = Math.floor(ratio * columnMaxScroll());"),
+            "applySettings scroll mode should restore #column-view scroll position from saved ratio"
+        );
+        assert!(
+            scroll_branch.contains("columnReportPosition();"),
+            "applySettings scroll mode should report position after restoring scroll"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_scroll_load_chapter_restores_offset() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("async function loadChapter(index, charOffset)")
+            .nth(1)
+            .expect("loadChapter not found")
+            .split("function reportPosition()")
+            .next()
+            .unwrap();
+        let column_branch = fn_body
+            .split("if (isColumnMode()) {")
+            .nth(1)
+            .expect("loadChapter column branch not found")
+            .split("\n      return;")
+            .next()
+            .unwrap();
+        let scroll_branch = column_branch
+            .split("if (isScrollMode()) {")
+            .nth(1)
+            .expect("loadChapter column scroll branch not found")
+            .split("\n      } else {")
+            .next()
+            .expect("loadChapter column scroll branch end not found");
+        assert!(
+            scroll_branch.contains("columnView.scrollTop = Math.floor(ratio * columnMaxScroll());"),
+            "loadChapter scroll mode should scroll #column-view to the approximate offset"
+        );
+        assert!(
+            scroll_branch.contains("columnReportPosition();"),
+            "loadChapter scroll mode should report position after scrolling"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_view_has_scroll_listener() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(
+            html.contains(
+                "columnView.addEventListener('scroll', columnReportPosition, { passive: true });"
+            ),
+            "#column-view should report position while scrolling"
         );
     }
 }
