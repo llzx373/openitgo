@@ -127,6 +127,9 @@ body.scroll #column-content {{
   width: auto;
   padding: var(--margin-v) var(--margin-h);
 }}
+#column-view.column-animate {{
+  transition: transform 0.25s ease;
+}}
 </style>
 </head>
 <body class="{mode}">
@@ -215,6 +218,14 @@ function isDoubleMode() {{ return document.body.classList.contains('double'); }}
 
 // --- CSS columns paginator (Phase 1) ---
 function isColumnMode() {{ return window.ebookUseColumns === true; }}
+
+function columnEnableAnimation() {{
+  if (columnView) columnView.classList.add('column-animate');
+}}
+
+function columnDisableAnimation() {{
+  if (columnView) columnView.classList.remove('column-animate');
+}}
 
 let columnState = {{
   currentSpread: 0,
@@ -350,13 +361,22 @@ function columnNext() {{
         loadChapter(currentChapter + 1, 0);
       }}
     }} else {{
-      columnView.scrollTop = Math.min(maxScroll, columnView.scrollTop + columnScrollStep());
+      const target = Math.min(maxScroll, columnView.scrollTop + columnScrollStep());
+      if (currentSettings.animate) {{
+        columnView.scrollTo({{ top: target, behavior: 'smooth' }});
+      }} else {{
+        columnView.scrollTop = target;
+      }}
       columnReportPosition();
     }}
     return;
   }}
   if (columnState.currentSpread + 1 < columnGetPageCount()) {{
+    if (currentSettings.animate) columnEnableAnimation();
     columnGoToSpread(columnState.currentSpread + 1);
+    if (currentSettings.animate) {{
+      setTimeout(columnDisableAnimation, 260);
+    }}
   }} else if (currentChapter + 1 < window.ebookChapterCount) {{
     loadChapter(currentChapter + 1, 0);
   }}
@@ -372,13 +392,22 @@ function columnPrev() {{
         loadChapter(currentChapter - 1, Number.MAX_SAFE_INTEGER);
       }}
     }} else {{
-      columnView.scrollTop = Math.max(0, columnView.scrollTop - columnScrollStep());
+      const target = Math.max(0, columnView.scrollTop - columnScrollStep());
+      if (currentSettings.animate) {{
+        columnView.scrollTo({{ top: target, behavior: 'smooth' }});
+      }} else {{
+        columnView.scrollTop = target;
+      }}
       columnReportPosition();
     }}
     return;
   }}
   if (columnState.currentSpread > 0) {{
+    if (currentSettings.animate) columnEnableAnimation();
     columnGoToSpread(columnState.currentSpread - 1);
+    if (currentSettings.animate) {{
+      setTimeout(columnDisableAnimation, 260);
+    }}
   }} else if (currentChapter > 0) {{
     // Passing the maximum safe integer as charOffset makes loadChapter's ratio
     // clamp to 1, so we land directly on the last page of the previous chapter
@@ -1586,15 +1615,46 @@ mod tests {
             html.contains("columnView.clientHeight - 2 * getMarginV()"),
             "columnScrollStep should derive the step from the viewport height"
         );
+        let next_body = html
+            .split("function columnNext()")
+            .nth(1)
+            .expect("columnNext not found")
+            .split("function columnPrev")
+            .next()
+            .unwrap();
         assert!(
-            html.contains("columnView.scrollTop = Math.min(maxScroll, columnView.scrollTop + columnScrollStep());"),
-            "columnNext scroll mode should scroll #column-view down by one step"
+            next_body.contains(
+                "const target = Math.min(maxScroll, columnView.scrollTop + columnScrollStep());"
+            ),
+            "columnNext scroll mode should compute a clamped downward scroll target"
         );
         assert!(
-            html.contains(
-                "columnView.scrollTop = Math.max(0, columnView.scrollTop - columnScrollStep());"
-            ),
-            "columnPrev scroll mode should scroll #column-view up by one step"
+            next_body.contains("columnView.scrollTo({ top: target, behavior: 'smooth' });"),
+            "columnNext scroll mode should support smooth scrolling"
+        );
+        assert!(
+            next_body.contains("columnView.scrollTop = target;"),
+            "columnNext scroll mode should fall back to direct scrollTop assignment"
+        );
+        let prev_body = html
+            .split("function columnPrev()")
+            .nth(1)
+            .expect("columnPrev not found")
+            .split("function columnComputeCharOffset")
+            .next()
+            .unwrap();
+        assert!(
+            prev_body
+                .contains("const target = Math.max(0, columnView.scrollTop - columnScrollStep());"),
+            "columnPrev scroll mode should compute a clamped upward scroll target"
+        );
+        assert!(
+            prev_body.contains("columnView.scrollTo({ top: target, behavior: 'smooth' });"),
+            "columnPrev scroll mode should support smooth scrolling"
+        );
+        assert!(
+            prev_body.contains("columnView.scrollTop = target;"),
+            "columnPrev scroll mode should fall back to direct scrollTop assignment"
         );
         let compute_body = html
             .split("function columnComputeCharOffset()")
@@ -2209,8 +2269,18 @@ mod tests {
             "columnNext scroll mode should clamp against the maximum scroll"
         );
         assert!(
-            fn_body.contains("columnView.scrollTop = Math.min(maxScroll, columnView.scrollTop + columnScrollStep());"),
-            "columnNext scroll mode should scroll down by one step and clamp"
+            fn_body.contains(
+                "const target = Math.min(maxScroll, columnView.scrollTop + columnScrollStep());"
+            ),
+            "columnNext scroll mode should compute a clamped target scroll position"
+        );
+        assert!(
+            fn_body.contains("columnView.scrollTo({ top: target, behavior: 'smooth' });"),
+            "columnNext scroll mode should smooth-scroll when animation is enabled"
+        );
+        assert!(
+            fn_body.contains("columnView.scrollTop = target;"),
+            "columnNext scroll mode should set scrollTop directly when animation is disabled"
         );
         assert!(
             fn_body.contains("loadChapter(currentChapter + 1, 0)"),
@@ -2230,10 +2300,17 @@ mod tests {
             .next()
             .unwrap();
         assert!(
-            fn_body.contains(
-                "columnView.scrollTop = Math.max(0, columnView.scrollTop - columnScrollStep());"
-            ),
-            "columnPrev scroll mode should scroll up by one step and clamp"
+            fn_body
+                .contains("const target = Math.max(0, columnView.scrollTop - columnScrollStep());"),
+            "columnPrev scroll mode should compute a clamped target scroll position"
+        );
+        assert!(
+            fn_body.contains("columnView.scrollTo({ top: target, behavior: 'smooth' });"),
+            "columnPrev scroll mode should smooth-scroll when animation is enabled"
+        );
+        assert!(
+            fn_body.contains("columnView.scrollTop = target;"),
+            "columnPrev scroll mode should set scrollTop directly when animation is disabled"
         );
         assert!(
             fn_body.contains("loadChapter(currentChapter - 1, Number.MAX_SAFE_INTEGER)"),
@@ -2401,6 +2478,202 @@ mod tests {
         assert!(
             listener.contains("reportPosition();"),
             "window scroll listener should still report position for other scroll targets"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_animation_helpers_present() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(
+            html.contains("#column-view.column-animate {"),
+            "column paginator should define a CSS class for animated transforms"
+        );
+        assert!(
+            html.contains("transition: transform 0.25s ease"),
+            "column animation CSS should transition the transform property"
+        );
+        assert!(
+            html.contains("function columnEnableAnimation()"),
+            "column paginator should expose columnEnableAnimation"
+        );
+        assert!(
+            html.contains("function columnDisableAnimation()"),
+            "column paginator should expose columnDisableAnimation"
+        );
+        assert!(
+            html.contains("columnView.classList.add('column-animate')"),
+            "columnEnableAnimation should add the animate class"
+        );
+        assert!(
+            html.contains("columnView.classList.remove('column-animate')"),
+            "columnDisableAnimation should remove the animate class"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_animation_toggled_by_settings() {
+        use rust_reader_storage::models::EbookSettings;
+        let on = EbookSettings {
+            enable_page_animation: true,
+            ..Default::default()
+        };
+        let off = EbookSettings {
+            enable_page_animation: false,
+            ..Default::default()
+        };
+        let html_on = reader_html(&on, 1);
+        let html_off = reader_html(&off, 1);
+        assert!(
+            html_on.contains("animate: true"),
+            "enabled setting should render animate: true"
+        );
+        assert!(
+            html_off.contains("animate: false"),
+            "disabled setting should render animate: false"
+        );
+        for html in &[html_on, html_off] {
+            let next_body = html
+                .split("function columnNext()")
+                .nth(1)
+                .expect("columnNext not found")
+                .split("function columnPrev")
+                .next()
+                .unwrap();
+            assert!(
+                next_body.contains("if (currentSettings.animate) columnEnableAnimation();"),
+                "columnNext should guard animation on currentSettings.animate"
+            );
+            assert!(
+                next_body.contains("setTimeout(columnDisableAnimation, 260);"),
+                "columnNext should disable animation after the transition duration"
+            );
+        }
+    }
+
+    #[test]
+    fn test_reader_html_column_paginated_animation_branches() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 2);
+        let next_body = html
+            .split("function columnNext()")
+            .nth(1)
+            .expect("columnNext not found")
+            .split("function columnPrev")
+            .next()
+            .unwrap();
+        assert!(
+            next_body.contains("if (currentSettings.animate) columnEnableAnimation();"),
+            "columnNext paginated branch should enable animation before moving"
+        );
+        assert!(
+            next_body.contains("columnGoToSpread(columnState.currentSpread + 1);"),
+            "columnNext paginated branch should advance one spread"
+        );
+        assert!(
+            next_body.contains("setTimeout(columnDisableAnimation, 260);"),
+            "columnNext paginated branch should disable animation after the transition"
+        );
+
+        let prev_body = html
+            .split("function columnPrev()")
+            .nth(1)
+            .expect("columnPrev not found")
+            .split("function columnComputeCharOffset")
+            .next()
+            .unwrap();
+        assert!(
+            prev_body.contains("if (currentSettings.animate) columnEnableAnimation();"),
+            "columnPrev paginated branch should enable animation before moving"
+        );
+        assert!(
+            prev_body.contains("columnGoToSpread(columnState.currentSpread - 1);"),
+            "columnPrev paginated branch should go back one spread"
+        );
+        assert!(
+            prev_body.contains("setTimeout(columnDisableAnimation, 260);"),
+            "columnPrev paginated branch should disable animation after the transition"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_load_chapter_column_uses_text_content_length_for_ratio() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let load_body = html
+            .split("async function loadChapter(index, charOffset)")
+            .nth(1)
+            .expect("loadChapter not found")
+            .split("function reportPosition()")
+            .next()
+            .unwrap();
+        let column_branch = load_body
+            .split("if (isColumnMode()) {")
+            .nth(1)
+            .expect("loadChapter column branch not found")
+            .split("\n      return;")
+            .next()
+            .expect("loadChapter column branch end not found");
+        assert!(
+            column_branch.contains("const totalChars = columnContent.textContent.length;"),
+            "loadChapter column mode should measure total characters from columnContent"
+        );
+        assert!(
+            column_branch.contains("const ratio = Math.min(1, charOffset / totalChars);"),
+            "loadChapter column mode should compute the character ratio"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_apply_settings_preserves_old_paginator_offset_when_enabling_columns() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let apply_body = html
+            .split("function applySettings(json)")
+            .nth(1)
+            .expect("applySettings not found")
+            .split("function loadChapter")
+            .next()
+            .unwrap();
+        // When leaving the old paginator (not column, not scroll), the saved offset is the
+        // current spread's cumulative character offset.
+        assert!(
+            apply_body.contains("savedCharOffset = currentSpreadCharOffset();"),
+            "applySettings should capture the old paginator's char offset"
+        );
+        let column_branch = apply_body
+            .split("if (isColumnMode()) {")
+            .nth(1)
+            .expect("applySettings column branch not found")
+            .split("\n      return;")
+            .next()
+            .expect("applySettings column branch end not found");
+        assert!(
+            column_branch.contains("const ratio = savedCharOffset / totalChars;"),
+            "applySettings column mode should restore position from the saved ratio"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_apply_settings_preserves_column_offset_when_disabling_columns() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let apply_body = html
+            .split("function applySettings(json)")
+            .nth(1)
+            .expect("applySettings not found")
+            .split("function loadChapter")
+            .next()
+            .unwrap();
+        // When leaving column mode (but not scroll mode), save the column-computed offset.
+        assert!(
+            apply_body.contains("savedCharOffset = columnComputeCharOffset();"),
+            "applySettings should capture the column paginator's char offset"
+        );
+        // The old paginator then resumes from that offset.
+        assert!(
+            apply_body.contains("currentSpread = findSpreadForOffset(offset);"),
+            "applySettings old-paginator branch should resume from the saved offset"
         );
     }
 }
