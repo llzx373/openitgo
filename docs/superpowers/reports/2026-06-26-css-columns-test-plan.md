@@ -1,19 +1,13 @@
-# 电子书 CSS Columns 分页器 Phase 3 手动测试计划
+# 电子书 CSS Columns 分页器手动测试计划
 
 > 对应迁移计划：`docs/superpowers/plans/2026-06-26-migrate-ebook-to-css-columns.md`  
-> 状态：Phase 3 测试与边缘情况处理
+> 状态：Phase 4 已完成，CSS Columns 现在是唯一的分页器
 
 ---
 
-## 1. 如何启用 `use_columns`
+## 1. 分页器说明
 
-CSS Columns 分页器目前通过运行时功能开关 `window.ebookUseColumns` 控制，**默认关闭**，旧的行盒分页器保持完整。
-
-1. 打开任意 EPUB / TXT / MOBI / Markdown 电子书。
-2. 通过阅读器设置或 Rust 调试入口将 `use_columns` 设为 `true`：
-   - 在 `ebook_renderer.rs` 发送给 WebView 的设置 JSON 中设置 `"use_columns": true`。
-   - 或在 DevTools 控制台执行 `applySettings(JSON.stringify({...currentSettings, use_columns: true}))`。
-3. 重新加载章节后，JS 会使用 `#column-view` / `#column-content` 进行 CSS Columns 分页，旧的 `#spread` / `#measure` 容器保留但隐藏。
+CSS Columns 分页器已取代旧的行盒分页器，成为电子书的唯一渲染路径。打开任意 EPUB / TXT / MOBI / Markdown 电子书后，JS 直接使用 `#column-view` / `#column-content` 进行 CSS Columns 分页，不再需要功能开关。
 
 ---
 
@@ -56,9 +50,9 @@ CSS Columns 分页器目前通过运行时功能开关 `window.ebookUseColumns` 
 1. **收集样本**：至少准备 10~20 本不同类型的 EPUB，覆盖小说、技术书、图文书、漫画、儿童绘本、杂志等。
 2. **建立测试记录**：为每本书记录书名、来源、内容类型、测试结果、异常截图/录屏、触发步骤。
 3. **最小复现步骤**：遇到 bug 时，先确认：
-   - 是否仅在 `use_columns = true` 时出现；
    - 是否仅在特定模式（单页/双页/滚动）下出现；
-   - 是否在旧分页器（`use_columns = false`）下同样出现。
+   - 是否仅在特定字体、字号或窗口尺寸下出现；
+   - 是否在重新加载章节后仍然复现。
 4. **提交 issue 时提供**：
    - 书籍文件名或匿名化章节 HTML 片段；
    - 触发步骤与预期/实际结果；
@@ -72,5 +66,4 @@ CSS Columns 分页器目前通过运行时功能开关 `window.ebookUseColumns` 
 - [ ] 测试矩阵中所有勾选项通过，无崩溃、无白页、无进度丢失。
 - [ ] 单页/双页/滚动三种模式切换后位置可恢复。
 - [ ] 窗口 resize、字号调整后 500ms 内完成重新分页并回到近似位置。
-- [ ] `cargo test --workspace` 全部通过，包括 Phase 3 新增的模板测试。
-- [ ] 旧分页器在 `use_columns = false` 时行为与迁移前一致。
+- [ ] `cargo test --workspace` 全部通过，包括 CSS Columns 分页器相关的模板测试。
