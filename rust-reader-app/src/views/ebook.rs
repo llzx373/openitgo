@@ -215,4 +215,28 @@ mod tests {
         }
         let _ = assert_field_exists;
     }
+
+    #[test]
+    fn test_toc_fragment_extracts_fragment() {
+        assert_eq!(
+            EbookView::toc_fragment("chapter.xhtml#section1"),
+            Some("section1".to_string())
+        );
+        assert_eq!(
+            EbookView::toc_fragment("chapter.xhtml#top"),
+            Some("top".to_string())
+        );
+    }
+
+    #[test]
+    fn test_toc_fragment_returns_none_without_fragment() {
+        assert_eq!(EbookView::toc_fragment("chapter.xhtml"), None);
+        assert_eq!(EbookView::toc_fragment("path/to/chapter.xhtml"), None);
+    }
+
+    #[test]
+    fn test_toc_fragment_handles_empty_and_hash_only() {
+        assert_eq!(EbookView::toc_fragment(""), None);
+        assert_eq!(EbookView::toc_fragment("#"), Some("".to_string()));
+    }
 }

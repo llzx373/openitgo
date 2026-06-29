@@ -493,7 +493,13 @@ function resolveTocTarget(target) {{
   if (!target) return null;
   let fragment = target;
   const idx = target.indexOf('#');
-  if (idx !== -1) fragment = target.slice(idx + 1);
+  if (idx !== -1) {{
+    fragment = target.slice(idx + 1);
+  }} else if (/[\/\\.]/.test(target)) {{
+    // A fragment-less path/URL (e.g. "chapter.xhtml") means chapter start,
+    // not an element id, so don't try to resolve it as a fragment.
+    return null;
+  }}
   if (!fragment) return null;
   let el = document.getElementById(fragment);
   if (!el && columnContent) {{
@@ -2963,6 +2969,35 @@ mod tests {
         assert!(
             fn_body.contains("goToSpread(findSpreadForOffset(offset), false)"),
             "jumpToTocItem should fall back to the old paginator for non-column modes"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_resolve_toc_target_rejects_fragmentless_href() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function resolveTocTarget(target)")
+            .nth(1)
+            .expect("resolveTocTarget not found")
+            .split("function columnGoToCharOffset")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body.contains("idx !== -1"),
+            "resolveTocTarget should detect inputs with a fragment"
+        );
+        assert!(
+            fn_body.contains("fragment-less path/URL"),
+            "resolveTocTarget should document fragment-less href behavior"
+        );
+        assert!(
+            fn_body.contains("return null;"),
+            "resolveTocTarget should bail out for non-fragment targets"
+        );
+        assert!(
+            fn_body.contains("if (!fragment) return null;"),
+            "resolveTocTarget should return null for empty fragments"
         );
     }
 
