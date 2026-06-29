@@ -107,6 +107,49 @@ let currentSettings = {{
   invert_scroll: {invert_scroll}
 }};
 
+// Cache layout results so identical chapter + viewport + setting combinations
+// do not trigger a full reflow. The key is derived from everything that
+// influences CSS columns sizing.
+let layoutCache = {{
+  key: null,
+  totalPages: 1,
+  pageWidth: 0,
+  viewShift: 0
+}};
+let lastLayoutParams = {{ width: 0, height: 0, mode: '' }};
+
+function hashString(s) {{
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) {{
+    h = ((h << 5) + h) + s.charCodeAt(i);
+  }}
+  return h >>> 0;
+}}
+
+function makeLayoutKey() {{
+  const viewportW = document.body.clientWidth;
+  const viewportH = columnView ? columnView.clientHeight : 0;
+  const marginH = getMarginH();
+  const marginV = getMarginV();
+  const root = document.documentElement;
+  const fontSize = parseFloat(getComputedStyle(root).getPropertyValue('--size')) || 16;
+  const lineHeight = parseFloat(getComputedStyle(root).getPropertyValue('--line')) || 1.6;
+  const gutter = parseFloat(getComputedStyle(root).getPropertyValue('--column-gutter')) || 40;
+  const mode = isScrollMode() ? 'scroll' : (isDoubleMode() ? 'double' : 'single');
+  return [
+    currentChapter,
+    hashString(currentChapterHtml || ''),
+    viewportW,
+    viewportH,
+    marginH,
+    marginV,
+    fontSize,
+    lineHeight,
+    mode,
+    gutter
+  ].join('|');
+}}
+
 function escapeHtml(s) {{
   return String(s).replace(/[&<>"']/g, function(c) {{
     return {{ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }}[c];
@@ -209,14 +252,27 @@ function layout() {{
   if (!columnView) return;
   const viewportW = document.body.clientWidth;
   const viewportH = columnView.clientHeight;
+  const layoutMode = isScrollMode() ? 'scroll' : (isDoubleMode() ? 'double' : 'single');
+  lastLayoutParams = {{ width: viewportW, height: viewportH, mode: layoutMode }};
+
+  const cacheKey = makeLayoutKey();
+  if (layoutCache.key === cacheKey) {{
+    paginatorState.totalPages = layoutCache.totalPages;
+    paginatorState.pageWidth = layoutCache.pageWidth;
+    paginatorState.viewShift = layoutCache.viewShift;
+    return;
+  }}
+
   if (viewportW === 0 || viewportH === 0) {{
     paginatorState.totalPages = 1;
     paginatorState.currentSpread = 0;
     paginatorState.pageWidth = 0;
     paginatorState.viewShift = 0;
+    layoutCache = {{ key: cacheKey, totalPages: 1, pageWidth: 0, viewShift: 0 }};
     reportPosition();
     return;
   }}
+
   if (isScrollMode()) {{
     columnContent.style.width = 'auto';
     columnContent.style.paddingLeft = 'var(--margin-h)';
@@ -229,6 +285,9 @@ function layout() {{
     columnView.style.transform = 'none';
     paginatorState.totalPages = 1;
     paginatorState.currentSpread = 0;
+    paginatorState.pageWidth = 0;
+    paginatorState.viewShift = 0;
+    layoutCache = {{ key: cacheKey, totalPages: 1, pageWidth: 0, viewShift: 0 }};
     reportPosition();
     return;
   }}
@@ -268,7 +327,27 @@ function layout() {{
     paginatorState.totalPages = Math.max(1, Math.ceil(scrollW / pageW));
   }}
 
+  layoutCache = {{
+    key: cacheKey,
+    totalPages: paginatorState.totalPages,
+    pageWidth: paginatorState.pageWidth,
+    viewShift: paginatorState.viewShift
+  }};
+
   // Navigation is explicit in callers; this function only measures layout.
+}}
+
+// Recompute total pages from the existing layout geometry without forcing a
+// full reflow. Used by the resize handler when only the viewport height changed.
+function recomputeTotalPages() {{
+  if (isScrollMode() || !columnContent) return;
+  const scrollW = columnContent.scrollWidth;
+  if (isDoubleMode()) {{
+    const marginH = getMarginH();
+    paginatorState.totalPages = Math.max(1, Math.ceil((scrollW - 2 * marginH) / paginatorState.viewShift));
+  }} else {{
+    paginatorState.totalPages = Math.max(1, Math.ceil(scrollW / paginatorState.pageWidth));
+  }}
 }}
 
 function applyTransform() {{
@@ -567,6 +646,9 @@ function getMarginV() {{
 function applySettings(json) {{
   const s = typeof json === 'string' ? JSON.parse(json) : json;
   currentSettings = s;
+  // Settings that affect CSS columns changed; force a fresh layout even if the
+  // computed key happens to collide.
+  layoutCache.key = null;
   // NOTE: re-layout replaces the chapter DOM, so any search highlights are
   // discarded. Callers that need persistent search results must re-issue
   // findText after the layout settles.
@@ -613,9 +695,31 @@ function applySettings(json) {{
   }}
 }}
 
+// Lightweight adjacent-chapter preload. The fetched HTML is parsed into an
+// inert <template> so it warms the Rust EPUB parser / HTML parse cache without
+// affecting the visible column layout.
+async function preloadChapter(index) {{
+  if (typeof index !== 'number') return;
+  if (index < 0 || index >= window.ebookChapterCount) return;
+  const id = 'preload-chapter-' + index;
+  if (document.getElementById(id)) return;
+  try {{
+    const res = await fetch('ebook://reader?chapter=' + index);
+    const html = await res.text();
+    const template = document.createElement('template');
+    template.id = id;
+    template.innerHTML = html;
+    document.body.appendChild(template);
+  }} catch (e) {{
+    // Preloading is best-effort; failures should not affect the current chapter.
+  }}
+}}
+
 async function loadChapter(index, charOffset) {{
   index = index ?? 0;
   currentChapter = index;
+  // A new chapter always needs a fresh layout.
+  layoutCache.key = null;
   try {{
     const res = await fetch('ebook://reader?chapter=' + currentChapter);
     currentChapterHtml = await res.text();
@@ -637,6 +741,8 @@ async function loadChapter(index, charOffset) {{
       }}
       goToSpread(targetSpread);
     }}
+    preloadChapter(currentChapter - 1);
+    preloadChapter(currentChapter + 1);
   }} catch (e) {{
     columnContent.innerHTML = '<p>章节加载失败: ' + e + '</p>';
   }}
@@ -678,6 +784,23 @@ window.addEventListener('resize', () => {{
   clearTimeout(resizeTimeout);
   resizeTimeout = setTimeout(() => {{
     if (!currentChapterHtml) return;
+    const viewportW = document.body.clientWidth;
+    const viewportH = columnView ? columnView.clientHeight : 0;
+    const mode = isScrollMode() ? 'scroll' : (isDoubleMode() ? 'double' : 'single');
+    const sameWidth = viewportW === lastLayoutParams.width;
+    const sameMode = mode === lastLayoutParams.mode;
+
+    // If width and mode are unchanged, the existing layout geometry is still
+    // valid. In scroll mode the browser handles height changes itself; in
+    // paginated mode only the total page count can change with height.
+    if (sameWidth && sameMode) {{
+      if (mode === 'scroll') return;
+      if (viewportH === lastLayoutParams.height) return;
+      recomputeTotalPages();
+      goToSpread(paginatorState.currentSpread);
+      return;
+    }}
+
     let savedScrollRatio = 0;
     if (isScrollMode()) {{
       const maxScrollVal = maxScroll();
@@ -1990,6 +2113,228 @@ mod tests {
         assert!(
             handler_body.contains("goToSpread(paginatorState.currentSpread);"),
             "resize handler should re-navigate to the current spread in paginated mode"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_layout_cache_exists() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(
+            html.contains("let layoutCache ="),
+            "template should declare a layout cache"
+        );
+        assert!(
+            html.contains("function makeLayoutKey()"),
+            "template should expose a cache key builder"
+        );
+        assert!(
+            html.contains("function hashString(s)"),
+            "template should hash the chapter HTML for the cache key"
+        );
+        assert!(
+            html.contains("let lastLayoutParams ="),
+            "template should track the last layout dimensions and mode"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_layout_uses_cache_hit() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function layout()")
+            .nth(1)
+            .expect("layout not found")
+            .split("function recomputeTotalPages")
+            .next()
+            .expect("layout end not found");
+        assert!(
+            fn_body.contains("const cacheKey = makeLayoutKey();"),
+            "layout should compute a cache key"
+        );
+        assert!(
+            fn_body.contains("if (layoutCache.key === cacheKey)"),
+            "layout should check the cache before reflowing"
+        );
+        assert!(
+            fn_body.contains("paginatorState.totalPages = layoutCache.totalPages;"),
+            "layout should restore cached totalPages on a hit"
+        );
+        assert!(
+            fn_body.contains("paginatorState.pageWidth = layoutCache.pageWidth;"),
+            "layout should restore cached pageWidth on a hit"
+        );
+        assert!(
+            fn_body.contains("paginatorState.viewShift = layoutCache.viewShift;"),
+            "layout should restore cached viewShift on a hit"
+        );
+        assert!(
+            fn_body.contains("layoutCache = {"),
+            "layout should store results in the cache after measuring"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_apply_settings_invalidates_layout_cache() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function applySettings(json)")
+            .nth(1)
+            .expect("applySettings not found")
+            .split("function loadChapter")
+            .next()
+            .expect("applySettings end not found");
+        assert!(
+            fn_body.contains("layoutCache.key = null;"),
+            "applySettings should invalidate the layout cache when settings change"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_load_chapter_invalidates_layout_cache() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("async function loadChapter(index, charOffset)")
+            .nth(1)
+            .expect("loadChapter not found")
+            .split("function onWheel")
+            .next()
+            .expect("loadChapter end not found");
+        assert!(
+            fn_body.contains("layoutCache.key = null;"),
+            "loadChapter should invalidate the layout cache for a new chapter"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_resize_handler_skips_unchanged_layout() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let handler_body = html
+            .split("window.addEventListener('resize', () => {")
+            .nth(1)
+            .expect("resize handler not found")
+            .split("\n  }});")
+            .next()
+            .expect("resize handler end not found");
+        assert!(
+            handler_body.contains("const sameWidth = viewportW === lastLayoutParams.width;"),
+            "resize handler should compare width to the last layout"
+        );
+        assert!(
+            handler_body.contains("const sameMode = mode === lastLayoutParams.mode;"),
+            "resize handler should compare mode to the last layout"
+        );
+        assert!(
+            handler_body.contains("if (sameWidth && sameMode)"),
+            "resize handler should skip layout when width and mode are unchanged"
+        );
+        assert!(
+            handler_body.contains("if (mode === 'scroll') return;"),
+            "resize handler should skip layout for height-only changes in scroll mode"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_resize_handler_recomputes_pages_on_height_change() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let handler_body = html
+            .split("window.addEventListener('resize', () => {")
+            .nth(1)
+            .expect("resize handler not found")
+            .split("\n  }});")
+            .next()
+            .expect("resize handler end not found");
+        assert!(
+            handler_body.contains("if (viewportH === lastLayoutParams.height) return;"),
+            "resize handler should detect height-only changes"
+        );
+        assert!(
+            handler_body.contains("recomputeTotalPages();"),
+            "resize handler should recompute total pages without a full reflow"
+        );
+        assert!(
+            handler_body.contains("goToSpread(paginatorState.currentSpread);"),
+            "resize handler should preserve the current spread after recomputing pages"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_recompute_total_pages_preserves_geometry() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function recomputeTotalPages()")
+            .nth(1)
+            .expect("recomputeTotalPages not found")
+            .split("function applyTransform")
+            .next()
+            .expect("recomputeTotalPages end not found");
+        assert!(
+            fn_body.contains("const scrollW = columnContent.scrollWidth;"),
+            "recomputeTotalPages should read the current scroll width"
+        );
+        assert!(
+            fn_body.contains("paginatorState.viewShift"),
+            "recomputeTotalPages should reuse the cached viewShift"
+        );
+        assert!(
+            fn_body.contains("paginatorState.pageWidth"),
+            "recomputeTotalPages should reuse the cached pageWidth"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_has_preload_chapter() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 3);
+        assert!(
+            html.contains("async function preloadChapter(index)"),
+            "template should expose preloadChapter"
+        );
+        let load_body = html
+            .split("async function loadChapter(index, charOffset)")
+            .nth(1)
+            .expect("loadChapter not found")
+            .split("function onWheel")
+            .next()
+            .expect("loadChapter end not found");
+        assert!(
+            load_body.contains("preloadChapter(currentChapter - 1);"),
+            "loadChapter should preload the previous chapter"
+        );
+        assert!(
+            load_body.contains("preloadChapter(currentChapter + 1);"),
+            "loadChapter should preload the next chapter"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_preload_chapter_uses_inert_template() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("async function preloadChapter(index)")
+            .nth(1)
+            .expect("preloadChapter not found")
+            .split("async function loadChapter")
+            .next()
+            .expect("preloadChapter end not found");
+        assert!(
+            fn_body.contains("document.createElement('template')"),
+            "preloadChapter should parse into an inert template"
+        );
+        assert!(
+            fn_body.contains("ebook://reader?chapter="),
+            "preloadChapter should fetch from the ebook protocol"
+        );
+        assert!(
+            !fn_body.contains("columnContent.innerHTML = html"),
+            "preloadChapter must not replace the visible chapter content"
         );
     }
 }

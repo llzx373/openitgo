@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 电子书目录面板：工具栏/菜单栏"目录"打开左侧章节列表，点击跳转。
 - 电子书 CSS Columns 分页器：实现单页/双页/滚动三种模式的 CSS `columns` 布局、`goToPage`/`nextPage`/`prevPage`/`getPageCount` 接口以及与 Rust 侧兼容的 `position` IPC。
 - 电子书 CSS Columns 分页器（Phase 4）：移除旧 `measure` + 行盒测量 + `cloneNode` spread 分页器、3D `flipper` 翻页动画与 `window.ebookUseColumns` 功能开关；CSS columns 成为唯一分页路径，相关设置、模板与测试同步清理。
+- 电子书 CSS Columns 分页器（Phase 5 部分）：新增布局结果缓存，避免相同章节与视口设置重复回流；resize 时若宽度与模式未变则跳过布局，仅高度变化时滚动模式直接跳过、分页模式仅重算总页数；新增相邻章节轻量预加载，JS 在章节加载后解析前后章到 inert `<template>`，Rust 侧暴露 `preload_chapter` 并在 `goto_chapter` 时触发。
 - 电子书交互：支持滚轮（含水平方向与滚轮反转）、点击左右半边翻页；跨章节边界自动切换章节。
 - 电子书设置/窗口自适应：字号、字体、边距变化或窗口 resize 后重新测量并保留当前字符偏移。
 - 电子书连续滚动模式：完整章节渲染在 `#column-view` / `#column-content` 中并显示竖直滚动条。

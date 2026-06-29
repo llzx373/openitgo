@@ -140,6 +140,22 @@ impl EbookRenderer {
         if let Err(e) = self.webview.evaluate_script(&js) {
             eprintln!("EbookRenderer::goto_chapter failed: {e}");
         }
+        // Warm the parser cache for the chapters the user is most likely to
+        // open next. The JS side also preloads on its own navigation paths;
+        // these calls are idempotent and cheap if already done.
+        if chapter > 0 {
+            self.preload_chapter(chapter - 1);
+        }
+        self.preload_chapter(chapter + 1);
+    }
+
+    /// Ask the webview to fetch and parse a chapter into an inert template.
+    /// This is best-effort and does not change the visible page.
+    pub fn preload_chapter(&self, chapter: usize) {
+        let js = format!("preloadChapter({});", chapter);
+        if let Err(e) = self.webview.evaluate_script(&js) {
+            eprintln!("EbookRenderer::preload_chapter failed: {e}");
+        }
     }
 
     pub fn next_page(&self) {
