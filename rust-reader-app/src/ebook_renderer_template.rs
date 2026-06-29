@@ -36,6 +36,9 @@ html, body {{
   line-height: var(--line);
 }}
 p {{ margin: 0 0 1em 0; text-indent: 2em; }}
+h1, h2, h3, h4, h5, h6 {{ margin: 0.8em 0 0.4em; line-height: 1.3; }}
+ul, ol {{ margin: 0 0 1em 0; padding-left: 2em; }}
+li {{ margin: 0.25em 0; }}
 img {{ max-width: 100%; max-height: calc(100vh - var(--margin-v) * 2); height: auto; object-fit: contain; }}
 #flipper {{
   position: fixed;
@@ -287,7 +290,18 @@ function columnHide() {{
 
 function columnLayout() {{
   if (!columnContent) return;
+  if (!columnView) return;
   columnShow();
+  const viewportW = document.body.clientWidth;
+  const viewportH = columnView.clientHeight;
+  if (viewportW === 0 || viewportH === 0) {{
+    columnState.totalPages = 1;
+    columnState.currentSpread = 0;
+    columnState.pageWidth = 0;
+    columnState.viewShift = 0;
+    columnReportPosition();
+    return;
+  }}
   if (isScrollMode()) {{
     columnShow();
     columnContent.style.width = 'auto';
@@ -440,7 +454,8 @@ function columnPrev() {{
 }}
 
 function columnComputeCharOffset() {{
-  const total = columnContent.textContent.length;
+  const root = columnContent;
+  const total = root ? root.textContent.length : 0;
   if (total === 0) return 0;
   if (isScrollMode()) {{
     const ratio = columnView.scrollTop / Math.max(1, columnView.scrollHeight - columnView.clientHeight);
@@ -514,7 +529,7 @@ function resolveTocTarget(target) {{
 function columnGoToCharOffset(offset) {{
   const root = columnContent;
   const totalChars = root ? root.textContent.length : 0;
-  if (totalChars === 0) return;
+  if (totalChars === 0 || !Number.isFinite(offset)) return;
   const ratio = Math.max(0, Math.min(1, offset / totalChars));
   if (isScrollMode()) {{
     columnView.scrollTop = Math.floor(ratio * columnMaxScroll());
@@ -3104,6 +3119,189 @@ mod tests {
         assert!(
             html.contains("function renderSpread"),
             "old paginator render function renderSpread should remain"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_break_inside_avoid_on_elements() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(
+            html.contains("#column-content img, #column-content table, #column-content figure, #column-content pre, #column-content blockquote"),
+            "column content should target images, tables, figures, pre and blockquotes"
+        );
+        assert!(
+            html.contains("break-inside: avoid"),
+            "column content should prevent breaks inside figures, tables and blocks"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_headings_lists_paragraphs_styled_consistently() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let css = html
+            .split("<style>")
+            .nth(1)
+            .expect("style block not found")
+            .split("</style>")
+            .next()
+            .expect("style block end not found");
+        assert!(
+            css.contains("h1, h2, h3, h4, h5, h6"),
+            "headings should share a common rule"
+        );
+        assert!(css.contains("ul, ol"), "lists should share a common rule");
+        assert!(
+            css.contains("p {"),
+            "paragraphs should be explicitly styled"
+        );
+        assert!(
+            css.contains("text-indent: 2em"),
+            "paragraphs should have consistent indentation"
+        );
+        assert!(
+            css.contains("margin: 0.25em 0"),
+            "list items should have consistent vertical spacing"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_image_constraints() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        // Global image rule keeps images inside the viewport.
+        let global_img = html
+            .split("img {")
+            .nth(1)
+            .expect("global img rule not found")
+            .split('}')
+            .next()
+            .expect("global img rule end not found");
+        assert!(
+            global_img.contains("max-width: 100%"),
+            "global img should constrain width"
+        );
+        assert!(
+            global_img.contains("max-height:"),
+            "global img should constrain height"
+        );
+        // Column-specific rule keeps images inside a column.
+        let column_img = html
+            .split("#column-content img,")
+            .nth(1)
+            .expect("column img rule not found")
+            .split('}')
+            .next()
+            .expect("column img rule end not found");
+        assert!(
+            column_img.contains("max-width: 100%"),
+            "column img should constrain width"
+        );
+        assert!(
+            column_img.contains("max-height:"),
+            "column img should constrain height inside the column"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_container_and_old_spread_both_present() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(
+            html.contains("id=\"column-view\""),
+            "column view container must be present"
+        );
+        assert!(
+            html.contains("id=\"column-content\""),
+            "column content container must be present"
+        );
+        assert!(
+            html.contains("id=\"spread\""),
+            "old spread container must remain for dual-mode fallback"
+        );
+        assert!(
+            html.contains("id=\"measure\""),
+            "old measure container must remain for dual-mode fallback"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_layout_guards_zero_viewport() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function columnLayout()")
+            .nth(1)
+            .expect("columnLayout not found")
+            .split("function columnApplyTransform")
+            .next()
+            .expect("columnLayout end not found");
+        assert!(
+            fn_body.contains("const viewportW = document.body.clientWidth;"),
+            "columnLayout should read the viewport width"
+        );
+        assert!(
+            fn_body.contains("const viewportH = columnView.clientHeight;"),
+            "columnLayout should read the viewport height"
+        );
+        assert!(
+            fn_body.contains("if (viewportW === 0 || viewportH === 0)"),
+            "columnLayout should guard against a zero-size viewport"
+        );
+        assert!(
+            fn_body.contains("columnState.totalPages = 1;"),
+            "columnLayout should keep totalPages valid when the viewport is zero"
+        );
+        assert!(
+            fn_body.contains("columnReportPosition();"),
+            "columnLayout should report position even when the viewport is zero"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_compute_char_offset_returns_zero_for_empty_chapter() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function columnComputeCharOffset()")
+            .nth(1)
+            .expect("columnComputeCharOffset not found")
+            .split("function columnReportPosition")
+            .next()
+            .expect("columnComputeCharOffset end not found");
+        assert!(
+            fn_body.contains("const root = columnContent;"),
+            "columnComputeCharOffset should read from columnContent safely"
+        );
+        assert!(
+            fn_body.contains("const total = root ? root.textContent.length : 0;"),
+            "columnComputeCharOffset should treat a missing root as zero-length"
+        );
+        assert!(
+            fn_body.contains("if (total === 0) return 0;"),
+            "columnComputeCharOffset should return 0 for empty chapters"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_go_to_char_offset_clamps_ratio() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function columnGoToCharOffset(offset)")
+            .nth(1)
+            .expect("columnGoToCharOffset not found")
+            .split("async function jumpToTocItem")
+            .next()
+            .expect("columnGoToCharOffset end not found");
+        assert!(
+            fn_body.contains("const ratio = Math.max(0, Math.min(1, offset / totalChars));"),
+            "columnGoToCharOffset should clamp the ratio to [0, 1]"
+        );
+        assert!(
+            fn_body.contains("!Number.isFinite(offset)"),
+            "columnGoToCharOffset should reject non-finite offsets"
         );
     }
 }
