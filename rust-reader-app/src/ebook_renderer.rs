@@ -46,7 +46,8 @@ struct JsSettings {
     animate: bool,
     invert_scroll: bool,
     /// Feature flag for the new CSS columns paginator.
-    /// Default false in Phase 1 so the existing line-box paginator keeps running.
+    /// Mirrors `EbookSettings.use_columns`; default false so the existing
+    /// line-box paginator keeps running.
     use_columns: bool,
 }
 

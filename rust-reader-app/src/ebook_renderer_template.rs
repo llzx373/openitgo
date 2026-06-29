@@ -233,7 +233,7 @@ function columnHide() {{
   if (columnView) columnView.style.display = 'none';
 }}
 
-function columnLayout() {{
+function columnLayout(targetPage) {{
   if (!columnContent) return;
   columnShow();
   if (isScrollMode()) {{
@@ -255,8 +255,8 @@ function columnLayout() {{
   const gutter = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--column-gutter')) || 40;
 
   if (isDoubleMode()) {{
-    const pageW = Math.floor((viewportW - gutter) / 2);
-    const colW = pageW - 2 * marginH;
+    const pageW = Math.max(1, Math.floor((viewportW - gutter) / 2));
+    const colW = Math.max(1, pageW - 2 * marginH);
     const cg = gutter + 2 * marginH;
     const viewShift = viewportW + gutter;
     columnContent.style.width = viewportW + 'px';
@@ -270,8 +270,8 @@ function columnLayout() {{
     columnState.viewShift = viewShift;
     columnState.totalPages = Math.max(1, Math.ceil((scrollW - 2 * marginH) / viewShift));
   }} else {{
-    const pageW = viewportW;
-    const colW = pageW - 2 * marginH;
+    const pageW = Math.max(1, viewportW);
+    const colW = Math.max(1, pageW - 2 * marginH);
     columnContent.style.width = colW + 'px';
     columnContent.style.paddingLeft = '0';
     columnContent.style.paddingRight = '0';
@@ -284,8 +284,11 @@ function columnLayout() {{
     columnState.totalPages = Math.max(1, Math.ceil(scrollW / pageW));
   }}
 
-  columnState.currentPage = Math.max(0, Math.min(columnState.currentPage, columnGetPageCount() - 1));
-  columnGoToPage(columnState.currentPage);
+  if (typeof targetPage === 'number') {{
+    columnGoToPage(targetPage);
+  }} else {{
+    columnGoToPage(columnState.currentPage);
+  }}
 }}
 
 function columnGoToPage(n) {{
@@ -308,7 +311,11 @@ function columnNext() {{
     columnView.scrollTop += columnView.clientHeight * 0.9;
     return;
   }}
-  columnGoToPage(columnState.currentPage + 1);
+  if (columnState.currentPage + 1 < columnGetPageCount()) {{
+    columnGoToPage(columnState.currentPage + 1);
+  }} else if (currentChapter + 1 < window.ebookChapterCount) {{
+    loadChapter(currentChapter + 1, 0);
+  }}
 }}
 
 function columnPrev() {{
@@ -316,7 +323,13 @@ function columnPrev() {{
     columnView.scrollTop -= columnView.clientHeight * 0.9;
     return;
   }}
-  columnGoToPage(columnState.currentPage - 1);
+  if (columnState.currentPage > 0) {{
+    columnGoToPage(columnState.currentPage - 1);
+  }} else if (currentChapter > 0) {{
+    loadChapter(currentChapter - 1, 0).then(() => {{
+      columnGoToPage(columnGetPageCount() - 1);
+    }});
+  }}
 }}
 
 function columnComputeCharOffset() {{
@@ -780,10 +793,21 @@ function applySettings(json) {{
   // Capture the approximate character position before the paginator or
   // layout changes, so we can restore the closest page afterwards.
   const wasColumn = isColumnMode();
+  const wasScroll = isScrollMode();
   let savedCharOffset = 0;
-  if (wasColumn) {{
+  // When leaving scroll mode, approximate the character offset from the
+  // scroll ratio so the paginated layout can land on the closest page.
+  if (wasScroll) {{
+    const scrollEl = wasColumn ? columnView : spread;
+    const textEl = wasColumn ? columnContent : spread;
+    const totalChars = textEl.textContent.length;
+    if (totalChars > 0 && scrollEl.scrollHeight > 0) {{
+      const ratio = scrollEl.scrollTop / scrollEl.scrollHeight;
+      savedCharOffset = Math.floor(totalChars * Math.max(0, Math.min(1, ratio)));
+    }}
+  }} else if (wasColumn) {{
     savedCharOffset = columnComputeCharOffset();
-  }} else if (!isScrollMode()) {{
+  }} else {{
     savedCharOffset = currentSpreadCharOffset();
   }}
   window.ebookUseColumns = !!s.use_columns;
@@ -802,15 +826,13 @@ function applySettings(json) {{
       cancelFlip();
       // Make sure the column paginator has content when switching to it.
       columnContent.innerHTML = currentChapterHtml;
-      columnLayout();
       const totalChars = columnContent.textContent.length;
+      let targetPage = 0;
       if (totalChars > 0 && savedCharOffset > 0) {{
         const ratio = savedCharOffset / totalChars;
-        const targetPage = Math.floor(ratio * (columnGetPageCount() - 1));
-        columnGoToPage(targetPage);
-      }} else {{
-        columnGoToPage(0);
+        targetPage = Math.floor(ratio * (columnGetPageCount() - 1));
       }}
+      columnLayout(targetPage);
       return;
     }}
     if (isScrollMode()) {{
@@ -845,14 +867,12 @@ async function loadChapter(index, charOffset) {{
     currentChapterHtml = await res.text();
     if (isColumnMode()) {{
       columnContent.innerHTML = currentChapterHtml;
-      columnLayout();
+      let targetPage = 0;
       if (typeof charOffset === 'number' && charOffset >= 0 && columnContent.textContent.length > 0) {{
         const ratio = Math.min(1, charOffset / columnContent.textContent.length);
-        const targetPage = Math.floor(ratio * (columnGetPageCount() - 1));
-        columnGoToPage(targetPage);
-      }} else {{
-        columnGoToPage(0);
+        targetPage = Math.floor(ratio * (columnGetPageCount() - 1));
       }}
+      columnLayout(targetPage);
       return;
     }}
     if (isScrollMode()) {{
@@ -1299,7 +1319,7 @@ mod tests {
         assert!(html.contains("id=\"column-content\""));
         // Core paginator functions
         assert!(html.contains("function isColumnMode()"));
-        assert!(html.contains("function columnLayout()"));
+        assert!(html.contains("function columnLayout(targetPage)"));
         assert!(html.contains("function columnGoToPage("));
         assert!(html.contains("function columnNext()"));
         assert!(html.contains("function columnPrev()"));
@@ -1320,7 +1340,7 @@ mod tests {
         use rust_reader_storage::models::EbookSettings;
         let html = reader_html(&EbookSettings::default(), 1);
         let fn_body = html
-            .split("function columnLayout()")
+            .split("function columnLayout(targetPage)")
             .nth(1)
             .expect("columnLayout not found")
             .split("function columnGoToPage")
@@ -1425,6 +1445,102 @@ mod tests {
         assert!(
             !html.contains("columnGoToPage(index, animate || false)"),
             "goToSpread should not forward animate to columnGoToPage"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_next_crosses_chapter_boundary() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 2);
+        let fn_body = html
+            .split("function columnNext()")
+            .nth(1)
+            .expect("columnNext not found")
+            .split("function columnPrev")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body.contains("columnGoToPage(columnState.currentPage + 1)"),
+            "columnNext should advance to the next page within a chapter"
+        );
+        assert!(
+            fn_body.contains("loadChapter(currentChapter + 1, 0)"),
+            "columnNext should load the next chapter when on the last page"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_prev_crosses_chapter_boundary() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 2);
+        let fn_body = html
+            .split("function columnPrev()")
+            .nth(1)
+            .expect("columnPrev not found")
+            .split("function columnComputeCharOffset")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body.contains("columnGoToPage(columnState.currentPage - 1)"),
+            "columnPrev should go to the previous page within a chapter"
+        );
+        assert!(
+            fn_body.contains("loadChapter(currentChapter - 1, 0)"),
+            "columnPrev should load the previous chapter when on the first page"
+        );
+        assert!(
+            fn_body.contains("columnGoToPage(columnGetPageCount() - 1)"),
+            "columnPrev should jump to the last page of the previous chapter"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_column_layout_guards_non_positive_widths() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function columnLayout(targetPage)")
+            .nth(1)
+            .expect("columnLayout not found")
+            .split("function columnGoToPage")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body.contains("Math.max(1, Math.floor((viewportW - gutter) / 2))"),
+            "double-page page width should be guarded against non-positive values"
+        );
+        assert!(
+            fn_body.contains("Math.max(1, pageW - 2 * marginH)"),
+            "column width should be guarded against non-positive values"
+        );
+        assert!(
+            fn_body.contains("Math.max(1, viewportW)"),
+            "single-page viewport width should be guarded against non-positive values"
+        );
+        assert!(
+            fn_body.contains("columnState.totalPages = Math.max(1,"),
+            "totalPages should always be at least 1"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_apply_settings_preserves_scroll_offset() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function applySettings(json)")
+            .nth(1)
+            .expect("applySettings not found")
+            .split("function loadChapter")
+            .next()
+            .unwrap();
+        assert!(
+            fn_body.contains("scrollEl.scrollTop / scrollEl.scrollHeight"),
+            "applySettings should compute scroll ratio from the active scroll container"
+        );
+        assert!(
+            fn_body.contains("Math.floor(totalChars * Math.max(0, Math.min(1, ratio)))"),
+            "applySettings should convert scroll ratio to a character offset"
         );
     }
 
