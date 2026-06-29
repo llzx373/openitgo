@@ -233,7 +233,7 @@ function columnHide() {{
   if (columnView) columnView.style.display = 'none';
 }}
 
-function columnLayout(targetPage) {{
+function columnLayout() {{
   if (!columnContent) return;
   columnShow();
   if (isScrollMode()) {{
@@ -322,9 +322,10 @@ function columnPrev() {{
   if (columnState.currentPage > 0) {{
     columnGoToPage(columnState.currentPage - 1);
   }} else if (currentChapter > 0) {{
-    loadChapter(currentChapter - 1, 0).then(() => {{
-      columnGoToPage(columnGetPageCount() - 1);
-    }});
+    // Passing the maximum safe integer as charOffset makes loadChapter's ratio
+    // clamp to 1, so we land directly on the last page of the previous chapter
+    // instead of flashing through page 0.
+    loadChapter(currentChapter - 1, Number.MAX_SAFE_INTEGER);
   }}
 }}
 
@@ -835,6 +836,7 @@ function applySettings(json) {{
     }}
     if (isScrollMode()) {{
       cancelFlip();
+      columnHide();
       const offset = savedCharOffset;
       spread.innerHTML = currentChapterHtml;
       spread.style.display = 'block';
@@ -876,6 +878,7 @@ async function loadChapter(index, charOffset) {{
       return;
     }}
     if (isScrollMode()) {{
+      columnHide();
       spread.innerHTML = currentChapterHtml;
       spread.style.display = 'block';
       if (charOffset) {{
@@ -1252,6 +1255,54 @@ mod tests {
     }
 
     #[test]
+    fn test_reader_html_scroll_mode_hides_column_view_in_apply_settings() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function applySettings(json)")
+            .nth(1)
+            .expect("applySettings not found")
+            .split("function loadChapter")
+            .next()
+            .unwrap();
+        let scroll_branch = fn_body
+            .split("if (isScrollMode()) {")
+            .nth(1)
+            .expect("applySettings scroll branch not found")
+            .split("\n    } else {{")
+            .next()
+            .expect("applySettings scroll branch end not found");
+        assert!(
+            scroll_branch.contains("columnHide();"),
+            "applySettings scroll branch must hide the column view so #spread is visible"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_scroll_mode_hides_column_view_in_load_chapter() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("async function loadChapter(index, charOffset)")
+            .nth(1)
+            .expect("loadChapter not found")
+            .split("function reportPosition()")
+            .next()
+            .unwrap();
+        let scroll_branch = fn_body
+            .split("if (isScrollMode()) {")
+            .nth(1)
+            .expect("loadChapter scroll branch not found")
+            .split("\n    } else {{")
+            .next()
+            .expect("loadChapter scroll branch end not found");
+        assert!(
+            scroll_branch.contains("columnHide();"),
+            "loadChapter scroll branch must hide the column view so #spread is visible"
+        );
+    }
+
+    #[test]
     fn test_reader_html_reports_spread_position() {
         let html = reader_html(&EbookSettings::default(), 1);
         assert!(html.contains("\"type\": \"position\""));
@@ -1320,7 +1371,7 @@ mod tests {
         assert!(html.contains("id=\"column-content\""));
         // Core paginator functions
         assert!(html.contains("function isColumnMode()"));
-        assert!(html.contains("function columnLayout(targetPage)"));
+        assert!(html.contains("function columnLayout()"));
         assert!(html.contains("function columnGoToPage("));
         assert!(html.contains("function columnNext()"));
         assert!(html.contains("function columnPrev()"));
@@ -1341,7 +1392,7 @@ mod tests {
         use rust_reader_storage::models::EbookSettings;
         let html = reader_html(&EbookSettings::default(), 1);
         let fn_body = html
-            .split("function columnLayout(targetPage)")
+            .split("function columnLayout()")
             .nth(1)
             .expect("columnLayout not found")
             .split("function columnGoToPage")
@@ -1486,12 +1537,18 @@ mod tests {
             "columnPrev should go to the previous page within a chapter"
         );
         assert!(
-            fn_body.contains("loadChapter(currentChapter - 1, 0)"),
-            "columnPrev should load the previous chapter when on the first page"
+            fn_body.contains("loadChapter(currentChapter - 1, Number.MAX_SAFE_INTEGER)"),
+            "columnPrev should load the previous chapter and clamp to the last page"
         );
         assert!(
-            fn_body.contains("columnGoToPage(columnGetPageCount() - 1)"),
-            "columnPrev should jump to the last page of the previous chapter"
+            !fn_body.contains("loadChapter(currentChapter - 1, 0)"),
+            "columnPrev should not load the previous chapter at offset 0"
+        );
+        assert!(
+            !fn_body.contains(
+                ".then(() => {\n      columnGoToPage(columnGetPageCount() - 1);\n    });"
+            ),
+            "columnPrev should not flash through page 0 before jumping to the last page"
         );
     }
 
@@ -1500,7 +1557,7 @@ mod tests {
         use rust_reader_storage::models::EbookSettings;
         let html = reader_html(&EbookSettings::default(), 1);
         let fn_body = html
-            .split("function columnLayout(targetPage)")
+            .split("function columnLayout()")
             .nth(1)
             .expect("columnLayout not found")
             .split("function columnGoToPage")
@@ -1611,7 +1668,7 @@ mod tests {
         use rust_reader_storage::models::EbookSettings;
         let html = reader_html(&EbookSettings::default(), 1);
         let fn_body = html
-            .split("function columnLayout(targetPage)")
+            .split("function columnLayout()")
             .nth(1)
             .expect("columnLayout not found")
             .split("function columnGoToPage")
