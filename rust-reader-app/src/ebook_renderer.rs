@@ -45,10 +45,6 @@ struct JsSettings {
     margin_v: u32,
     animate: bool,
     invert_scroll: bool,
-    /// Feature flag for the new CSS columns paginator.
-    /// Mirrors `EbookSettings.use_columns`; default false so the existing
-    /// line-box paginator keeps running.
-    use_columns: bool,
 }
 
 impl From<&EbookSettings> for JsSettings {
@@ -73,7 +69,6 @@ impl From<&EbookSettings> for JsSettings {
             margin_v: s.margin_vertical,
             animate: s.enable_page_animation,
             invert_scroll: s.invert_scroll,
-            use_columns: s.use_columns,
         }
     }
 }
@@ -507,21 +502,6 @@ mod tests {
     }
 
     #[test]
-    fn test_js_settings_use_columns_defaults_to_false() {
-        let settings = EbookSettings::default();
-        let js = JsSettings::from(&settings);
-        assert!(!js.use_columns);
-    }
-
-    #[test]
-    fn test_js_settings_json_includes_use_columns_flag() {
-        let settings = EbookSettings::default();
-        let js = JsSettings::from(&settings);
-        let json = serde_json::to_string(&js).unwrap();
-        assert!(json.contains("\"use_columns\":false"));
-    }
-
-    #[test]
     fn test_handle_ipc_message_accepts_column_paginator_position() {
         use rust_reader_core::ebook::Ebook;
         use rust_reader_storage::models::EbookSettings;
@@ -556,18 +536,6 @@ mod tests {
         assert_eq!(s.current_spread, 4);
         assert_eq!(s.total_spreads, 12);
         assert_eq!(s.char_offset, 200);
-    }
-
-    #[test]
-    fn test_js_settings_use_columns_follows_settings() {
-        let settings = EbookSettings {
-            use_columns: true,
-            ..Default::default()
-        };
-        let js = JsSettings::from(&settings);
-        assert!(js.use_columns);
-        let json = serde_json::to_string(&js).unwrap();
-        assert!(json.contains("\"use_columns\":true"));
     }
 
     #[test]

@@ -219,7 +219,6 @@ pub struct EbookSettings {
     pub theme: EbookTheme,
     pub enable_page_animation: bool,
     pub invert_scroll: bool,
-    pub use_columns: bool,
 }
 
 impl Default for EbookSettings {
@@ -234,7 +233,6 @@ impl Default for EbookSettings {
             theme: EbookTheme::Light,
             enable_page_animation: false,
             invert_scroll: false,
-            use_columns: false,
         }
     }
 }
@@ -441,22 +439,6 @@ mod tests {
         let json = r#"{"comic_id":"id","volume_index":0,"page_index":1,"note":null}"#;
         let b: Bookmark = serde_json::from_str(json).unwrap();
         assert_eq!(b.char_offset, None);
-    }
-
-    #[test]
-    fn test_ebook_settings_roundtrip_use_columns() {
-        let s = EbookSettings {
-            use_columns: true,
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&s).unwrap();
-        assert!(json.contains("\"use_columns\":true"));
-        let loaded: EbookSettings = serde_json::from_str(&json).unwrap();
-        assert!(loaded.use_columns);
-        assert_eq!(s, loaded);
-
-        let default_json = serde_json::to_string(&EbookSettings::default()).unwrap();
-        assert!(default_json.contains("\"use_columns\":false"));
     }
 
     #[test]

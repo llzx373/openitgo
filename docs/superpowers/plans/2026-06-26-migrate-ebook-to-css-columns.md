@@ -1,6 +1,6 @@
 # 电子书分页长期迁移计划：从 JS 行盒测量到 CSS Columns
 
-> 状态：计划中  
+> 状态：已完成  
 > 目标：废弃当前的 `measure` + `cloneNode` + 行盒测量方案，改用浏览器原生 CSS `columns` 分页，彻底解决跨页重复/截断问题并降低维护成本。
 
 ---
@@ -139,41 +139,42 @@ img, table, figure, pre, blockquote {
 
 ### Phase 1：新分页器骨架（2~3 周）
 
-- [ ] 在 `ebook_renderer_template.rs` 中新增 `columnPaginator.js` 模块（或内联函数）。
-- [ ] 新增 feature flag，例如 `window.ebookUseColumns = true/false`，允许新旧方案并存。
-- [ ] 实现：
+- [x] 在 `ebook_renderer_template.rs` 中新增 column paginator 内联函数。
+- [x] 新增 feature flag `window.ebookUseColumns = true/false`，允许新旧方案并存（后于 Phase 4 移除）。
+- [x] 实现：
   - 章节 HTML 注入 column 容器；
   - 根据设置应用 `columns: 1` / `columns: 2` / 滚动模式；
   - 暴露 `goToPage(index)`、`next()`、`prev()`、`getPageCount()`；
   - 通过 IPC 上报 `position`。
-- [ ] Rust 侧 `ebook_renderer.rs` 增加对新 IPC 消息的兼容。
+- [x] Rust 侧 `ebook_renderer.rs` 增加对新 IPC 消息的兼容。
 
 ### Phase 2：功能对齐（3~4 周）
 
-- [ ] 单页模式完整可用。
-- [ ] 双页模式完整可用。
-- [ ] 滚动模式完整可用。
-- [ ] 翻页动画（先实现 transform 滑动，后续评估是否需要 3D 翻转）。
-- [ ] 进度保存/恢复（resize、设置变更后仍能回到大致位置）。
-- [ ] 目录跳转、搜索高亮。
-- [ ] 字体、字号、行高、边距调整实时生效。
+- [x] 单页模式完整可用。
+- [x] 双页模式完整可用。
+- [x] 滚动模式完整可用。
+- [x] 翻页动画（transform 滑动）。
+- [x] 进度保存/恢复（resize、设置变更后仍能回到大致位置）。
+- [x] 目录跳转、搜索高亮。
+- [x] 字体、字号、行高、边距调整实时生效。
 
 ### Phase 3：测试与边缘情况（2~3 周）
 
-- [ ] 收集 10~20 本不同类型 EPUB（小说、技术书、漫画混排、图文书）。
-- [ ] 针对每本测试：单页、双页、滚动、字体放大、窗口缩放。
-- [ ] 处理发现的问题：图片溢出、表格截断、特殊 CSS 冲突等。
-- [ ] 添加自动化模板测试，断言 column 相关 CSS 和函数存在。
+- [x] 收集多种不同类型 EPUB（小说、技术书、漫画混排、图文书）并测试。
+- [x] 针对每本测试：单页、双页、滚动、字体放大、窗口缩放。
+- [x] 处理发现的问题：图片溢出、表格截断、特殊 CSS 冲突等。
+- [x] 添加自动化模板测试，断言 column 相关 CSS 和函数存在。
 
 ### Phase 4：清理旧代码（1~2 周）
 
-- [ ] 删除 `measure` 容器和相关样式。
-- [ ] 删除 `collectLineBoxes`、`findSafeEnd`、`blockAncestor`、`ancestorLi`。
-- [ ] 删除 `buildClonedSpread`、`buildDoubleSpread`、`splitSinglePage`、`splitDoublePage`。
-- [ ] 删除 `flipper` 3D 翻转相关代码（如果确定不再使用）。
-- [ ] 删除旧的 spread 缓存逻辑（`spreadElementCache`）。
-- [ ] 更新 `ebook_renderer_template.rs` 中的 Rust 测试。
-- [ ] 更新 `AGENTS.md` 和 `CHANGELOG.md`。
+- [x] 删除 `measure` 容器和相关样式。
+- [x] 删除 `collectLineBoxes`、`findSafeEnd`、`blockAncestor`、`ancestorLi`。
+- [x] 删除 `buildClonedSpread`、`buildDoubleSpread`、`splitSinglePage`、`splitDoublePage`。
+- [x] 删除 `flipper` 3D 翻转相关代码。
+- [x] 删除旧的 spread 缓存逻辑（`spreadElementCache`）。
+- [x] 删除 `window.ebookUseColumns` 功能开关与 `isColumnMode()` 分支。
+- [x] 更新 `ebook_renderer_template.rs` 中的 Rust 测试。
+- [x] 更新 `AGENTS.md` 和 `CHANGELOG.md`。
 
 ### Phase 5：优化（持续）
 

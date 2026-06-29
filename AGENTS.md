@@ -56,8 +56,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 - **EbookRenderer** hosts a `wry` child webview and serves a small HTML reader
   shell over the custom `ebook://` protocol. Chapter content is fetched via
   `ebook://reader?chapter=N` and rendered by `rust_reader_parser::html::render_chapter_html`.
-  The JS side uses a `sendIpc` helper that retries if the `window.ipc` bridge is
-  not yet injected.
+  Pagination is handled by the embedded CSS `columns` paginator; the JS side uses
+  a `sendIpc` helper that retries if the `window.ipc` bridge is not yet injected.
 
 ## Commits
 
