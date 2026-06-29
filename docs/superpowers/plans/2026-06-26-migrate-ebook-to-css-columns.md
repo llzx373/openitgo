@@ -224,19 +224,23 @@ img, table, figure, pre, blockquote {
 
 ---
 
-## 9. 废弃 方案A 后的当前代码状态
+## 9. Phase 4 完成后的最终状态
 
-- `findSafeEnd` 已恢复为原始激进策略（待后续整个模块被删除）。
-- 通用稳定性修复保留：
-  - `MAX_SPREADS_PER_CHAPTER` 防止死循环；
-  - `splitSinglePage` / `splitDoublePage` 的 `end <= start` 保护；
-  - `debugSplit` 调试辅助；
-  - `pageHeight()` 提前返回 0/负数的保护。
-- 新增测试保留：
-  - `test_reader_html_single_page_breaks_when_end_does_not_advance`
-  - `test_reader_html_double_page_breaks_when_right_end_does_not_advance`
+- 旧 `measure` + 行盒测量 + `cloneNode` spread 分页器已彻底删除：
+  - 移除了 `measure` 容器与相关样式；
+  - 移除了 `collectLineBoxes`、`findSafeEnd`、`blockAncestor`、`ancestorLi`；
+  - 移除了 `buildClonedSpread`、`buildDoubleSpread`、`splitSinglePage`、`splitDoublePage`；
+  - 移除了 3D `flipper` 翻页动画与 `spreadElementCache`；
+  - 移除了 `window.ebookUseColumns` 功能开关与 `isColumnMode()` 分支。
+- CSS `columns` 分页器成为唯一路径：
+  - 单页/双页模式通过 CSS `columns` 自动分栏，配合 `transform: translateX` 移动视口；
+  - 滚动模式在 `#column-view` / `#column-content` 中使用竖直滚动，不再依赖 `#spread`；
+  - 进度上报、目录跳转、设置调整、窗口 resize 均围绕 CSS columns 实现。
+- 模板与测试已同步清理：
+  - `ebook_renderer_template.rs` 中不再包含旧分页器代码；
+  - 测试用例已更新为断言 CSS columns 相关结构、函数与行为。
 
-这些修复与分页引擎无关，迁移过程中仍可复用或参考。
+至此，本迁移计划的所有目标与 Phase 4 清理任务已全部完成。
 
 ---
 

@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 电子书 CSS Columns 分页器（Phase 4）：移除旧 `measure` + 行盒测量 + `cloneNode` spread 分页器、3D `flipper` 翻页动画与 `window.ebookUseColumns` 功能开关；CSS columns 成为唯一分页路径，相关设置、模板与测试同步清理。
 - 电子书交互：支持滚轮（含水平方向与滚轮反转）、点击左右半边翻页；跨章节边界自动切换章节。
 - 电子书设置/窗口自适应：字号、字体、边距变化或窗口 resize 后重新测量并保留当前字符偏移。
-- 电子书连续滚动模式：完整章节渲染在 `#spread` 中并显示竖直滚动条。
+- 电子书连续滚动模式：完整章节渲染在 `#column-view` / `#column-content` 中并显示竖直滚动条。
 - 电子书历史与书签：复用现有 `History` / `Bookmarks`，保存/恢复章节索引与字符偏移；支持添加/删除/跳转电子书书签。
 - 书架混排电子书：`LibraryEntry` 增加 `media_type`，可按"全部 / 漫画 / 电子书"过滤，点击电子书条目进入 `View::Ebook`。
 - 电子书打开流程测试：`is_ebook_file` 扩展名识别与 `open_path` 分发测试。
@@ -40,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 电子书：修复 spread 分页时跨页首行顶部被截断的问题；根因是克隆节点丢失了 `measure` 的顶部 padding，导致非首页内容向上偏移 `margin-v`，把换页处的那一行藏到了可视区上方。
 - 电子书：修复 spread 分页时页面底部文字被截断的问题；根因是旧算法用固定 buffer 从内容区顶部向上切分，对于字形较大的字体（如中文）会切到上一行的内容区。新算法按完整行盒（line box）边界切分，确保上一行整行进入当前页，下一行整行进入下一页。
 - 电子书：在单页/双页 spread 渲染区域四周增加 4px 安全空白区，并让分页目标高度减少对应尺寸，使轻微超出 line box 的字形或亚像素渲染仍能被看到，进一步避免截断。
-- 电子书：修正 `pageHeight()` 把 `measure` 的 padding 算进页面高度的问题，并将第一页起点对齐到内容区顶部，使页面四周的 `#spread` 边距真正对称显示。
+- 电子书（旧 spread 分页器已移除的历史修复）：修正 `pageHeight()` 把 `measure` 的 padding 算进页面高度的问题，并将第一页起点对齐到内容区顶部，使页面四周的 `#spread` 边距真正对称显示。
 - 电子书：分页算法改为激进策略——只要目标页的最后一行有可能被截断，就连上一行一起放到下一页，进一步避免偶发的底部截断。
 - 电子书：将分页切分点取整到整数像素，避免 CSS 高度取整后导致下一页首行在上一页底部露出一个像素条，从而消除相邻页重复行的问题。
 - 电子书：为分页逻辑增加 `showError` 错误展示与 `try/catch` 保护，避免分页异常时直接变成白页；同时修复双页模式下左页可能为空的 fallback。

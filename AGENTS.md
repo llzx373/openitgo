@@ -58,6 +58,10 @@ cargo clippy --workspace --all-targets -- -D warnings
   `ebook://reader?chapter=N` and rendered by `rust_reader_parser::html::render_chapter_html`.
   Pagination is handled by the embedded CSS `columns` paginator; the JS side uses
   a `sendIpc` helper that retries if the `window.ipc` bridge is not yet injected.
+- **EbookRenderer position preservation** distinguishes settings changes from window
+  resize: font/size/margin/theme changes re-layout and preserve the approximate
+  character offset, while window resize debounces and preserves the scroll ratio
+  in scroll mode or the current spread in paginated modes.
 
 ## Commits
 
