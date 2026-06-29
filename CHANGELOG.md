@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 电子书阅读布局：单页、双页、连续滚动，可设置字体、字号、行间距、页边距与主题（白天 / 夜晚 / 羊皮纸）。
 - 自动按 EPUB 目录或 TXT/Markdown 标题分章；无章节标记时按字数切分虚拟章节。
 - 电子书目录面板：工具栏/菜单栏"目录"打开左侧章节列表，点击跳转。
-- 电子书 CSS Columns 分页器（Phase 1）：新增 `columnPaginator` 模块与 `window.ebookUseColumns` 功能开关，默认关闭；实现单页/双页/滚动三种模式的 CSS `columns` 布局、`goToPage`/`next`/`prev`/`getPageCount` 接口以及与 Rust 侧兼容的 `position` IPC；旧行盒分页器保持完整可回退。
+- 电子书 CSS Columns 分页器（Phase 1）：新增 `columnPaginator` 模块与 `window.ebookUseColumns` 功能开关，默认关闭；实现单页/双页/滚动三种模式的 CSS `columns` 布局、`columnGoToPage`/`columnNext`/`columnPrev`/`columnGetPageCount` 接口以及与 Rust 侧兼容的 `position` IPC；旧行盒分页器保持完整可回退。
 - 电子书 spread 分页：单页/双页模式改为 JS 真实排版后切分 spread，每次只渲染当前 spread，配合 ±1 预加载与 3D 翻页动画，消除横向 column 布局的漏边问题。
 - 电子书交互：支持滚轮（含水平方向与滚轮反转）、点击左右半边翻页；跨章节边界自动切换章节。
 - 电子书设置/窗口自适应：字号、字体、边距变化或窗口 resize 后重新测量并保留当前字符偏移。

@@ -222,6 +222,10 @@ let columnState = {{
   viewShift: 0
 }};
 
+function columnGetPageCount() {{
+  return (columnState && columnState.totalPages) || 0;
+}}
+
 function columnShow() {{
   spread.style.display = 'none';
   columnView.style.display = 'block';
@@ -282,12 +286,12 @@ function columnLayout() {{
     columnState.totalPages = Math.max(1, Math.ceil(scrollW / pageW));
   }}
 
-  columnState.currentPage = Math.max(0, Math.min(columnState.currentPage, columnState.totalPages - 1));
+  columnState.currentPage = Math.max(0, Math.min(columnState.currentPage, columnGetPageCount() - 1));
   columnGoToPage(columnState.currentPage, false);
 }}
 
 function columnGoToPage(n, animate) {{
-  columnState.currentPage = Math.max(0, Math.min(n, columnState.totalPages - 1));
+  columnState.currentPage = Math.max(0, Math.min(n, columnGetPageCount() - 1));
   if (columnIsScrollMode()) {{
     columnView.style.transform = 'none';
   }} else if (columnIsDoubleMode()) {{
@@ -306,7 +310,7 @@ function columnNext() {{
     columnContent.scrollTop += columnContent.clientHeight * 0.9;
     return;
   }}
-  if (columnState.currentPage + 1 < columnState.totalPages) {{
+  if (columnState.currentPage + 1 < columnGetPageCount()) {{
     columnGoToPage(columnState.currentPage + 1, true);
   }} else if (currentChapter + 1 < window.ebookChapterCount) {{
     loadChapter(currentChapter + 1, 0);
@@ -322,7 +326,7 @@ function columnPrev() {{
     columnGoToPage(columnState.currentPage - 1, true);
   }} else if (currentChapter > 0) {{
     loadChapter(currentChapter - 1, 0).then(() => {{
-      columnGoToPage(columnState.totalPages - 1, true);
+      columnGoToPage(columnGetPageCount() - 1, true);
     }});
   }}
 }}
@@ -334,7 +338,7 @@ function columnComputeCharOffset() {{
     const ratio = columnContent.scrollTop / Math.max(1, columnContent.scrollHeight - columnContent.clientHeight);
     return Math.floor(total * Math.max(0, Math.min(1, ratio)));
   }}
-  const ratio = columnState.currentPage / Math.max(1, columnState.totalPages);
+  const ratio = columnState.currentPage / Math.max(1, columnGetPageCount());
   return Math.floor(total * ratio);
 }}
 
@@ -344,7 +348,7 @@ function columnReportPosition() {{
     "chapter": currentChapter,
     "spread": columnState.currentPage,
     "char_offset": columnComputeCharOffset(),
-    "total_spreads": columnState.totalPages
+    "total_spreads": columnGetPageCount()
   }});
 }}
 
@@ -837,7 +841,7 @@ async function loadChapter(index, charOffset) {{
       columnLayout();
       if (typeof charOffset === 'number' && charOffset >= 0 && columnContent.textContent.length > 0) {{
         const ratio = Math.min(1, charOffset / columnContent.textContent.length);
-        const targetPage = Math.floor(ratio * (columnState.totalPages - 1));
+        const targetPage = Math.floor(ratio * (columnGetPageCount() - 1));
         columnGoToPage(targetPage, false);
       }} else {{
         columnGoToPage(0, false);
@@ -1294,11 +1298,14 @@ mod tests {
         assert!(html.contains("function columnPrev()"));
         assert!(html.contains("function columnReportPosition()"));
         assert!(html.contains("function columnComputeCharOffset()"));
+        assert!(html.contains("function columnGetPageCount()"));
         // Dispatch hooks in existing functions
         assert!(html.contains("if (isColumnMode()) return columnNext();"));
         assert!(html.contains("if (isColumnMode()) return columnPrev();"));
         assert!(html.contains("if (isColumnMode()) return columnReportPosition();"));
         assert!(html.contains("if (isColumnMode()) return columnGoToPage("));
+        // Internal reads should go through the getter for a consistent external API
+        assert!(html.contains("columnGetPageCount()"));
     }
 
     #[test]
