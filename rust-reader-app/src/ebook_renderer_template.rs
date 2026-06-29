@@ -20,6 +20,7 @@ pub fn reader_html(settings: &EbookSettings, chapter_count: usize) -> String {
   --line: {line};
   --margin-h: {margin_h}px;
   --margin-v: {margin_v}px;
+  --column-gutter: 40px;
 }}
 * {{ box-sizing: border-box; }}
 html, body {{
@@ -88,16 +89,55 @@ img {{ max-width: 100%; max-height: calc(100vh - var(--margin-v) * 2); height: a
 body.scroll #spread {{
   overflow-y: scroll;
 }}
+#column-view {{
+  display: none;
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+}}
+#column-content {{
+  height: 100%;
+  padding: var(--margin-v) 0;
+  column-fill: auto;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: var(--size);
+  line-height: var(--line);
+}}
+#column-content img, #column-content table, #column-content figure, #column-content pre, #column-content blockquote {{
+  break-inside: avoid;
+  max-width: 100%;
+  max-height: calc(100% - 2 * var(--margin-v));
+}}
+body.scroll #column-view {{
+  overflow-y: scroll;
+}}
+body.scroll #column-content {{
+  columns: 1;
+  column-width: auto;
+  column-gap: 0;
+  width: auto;
+  padding: var(--margin-v) var(--margin-h);
+}}
 </style>
 </head>
 <body class="{mode}">
 <div id="measure"></div>
 <div id="spread"></div>
+<div id="column-view"><div id="column-content"></div></div>
 <div id="flipper"></div>
 <script>
 const measure = document.getElementById('measure');
 const spread = document.getElementById('spread');
 const flipper = document.getElementById('flipper');
+const columnView = document.getElementById('column-view');
+const columnContent = document.getElementById('column-content');
+window.ebookUseColumns = false;
 let currentChapter = 0;
 let currentSpread = 0;
 let spreads = [];
@@ -169,6 +209,144 @@ function debugSplit(label, fullPh, maxBottom, count) {{
 
 function isScrollMode() {{ return document.body.classList.contains('scroll'); }}
 function isDoubleMode() {{ return document.body.classList.contains('double'); }}
+
+// --- CSS columns paginator (Phase 1) ---
+function isColumnMode() {{ return window.ebookUseColumns === true; }}
+function columnIsScrollMode() {{ return document.body.classList.contains('scroll'); }}
+function columnIsDoubleMode() {{ return document.body.classList.contains('double'); }}
+
+let columnState = {{
+  currentPage: 0,
+  totalPages: 1,
+  pageWidth: 0,
+  viewShift: 0
+}};
+
+function columnShow() {{
+  spread.style.display = 'none';
+  columnView.style.display = 'block';
+}}
+
+function columnHide() {{
+  if (columnView) columnView.style.display = 'none';
+}}
+
+function columnLayout() {{
+  if (!columnContent) return;
+  columnShow();
+  if (columnIsScrollMode()) {{
+    columnContent.style.width = 'auto';
+    columnContent.style.paddingLeft = '0';
+    columnContent.style.paddingRight = '0';
+    columnContent.style.columnWidth = 'auto';
+    columnContent.style.columns = '1';
+    columnContent.style.columnGap = '0';
+    columnView.style.transform = 'none';
+    columnState.totalPages = 1;
+    columnState.currentPage = 0;
+    columnReportPosition();
+    return;
+  }}
+
+  const viewportW = document.body.clientWidth;
+  const marginH = getMarginH();
+  const gutter = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--column-gutter')) || 40;
+
+  if (columnIsDoubleMode()) {{
+    const pageW = Math.floor((viewportW - gutter) / 2);
+    const colW = pageW - 2 * marginH;
+    const cg = gutter + 2 * marginH;
+    const viewShift = viewportW + gutter;
+    columnContent.style.width = viewportW + 'px';
+    columnContent.style.paddingLeft = marginH + 'px';
+    columnContent.style.paddingRight = marginH + 'px';
+    columnContent.style.columnWidth = colW + 'px';
+    columnContent.style.columnGap = cg + 'px';
+    columnContent.style.columns = 'auto';
+    const scrollW = columnContent.scrollWidth;
+    columnState.pageWidth = pageW;
+    columnState.viewShift = viewShift;
+    columnState.totalPages = Math.max(1, Math.ceil((scrollW - 2 * marginH) / viewShift));
+  }} else {{
+    const pageW = viewportW;
+    const colW = pageW - 2 * marginH;
+    columnContent.style.width = colW + 'px';
+    columnContent.style.paddingLeft = '0';
+    columnContent.style.paddingRight = '0';
+    columnContent.style.columnWidth = colW + 'px';
+    columnContent.style.columnGap = (2 * marginH) + 'px';
+    columnContent.style.columns = 'auto';
+    const scrollW = columnContent.scrollWidth;
+    columnState.pageWidth = pageW;
+    columnState.viewShift = pageW;
+    columnState.totalPages = Math.max(1, Math.ceil(scrollW / pageW));
+  }}
+
+  columnState.currentPage = Math.max(0, Math.min(columnState.currentPage, columnState.totalPages - 1));
+  columnGoToPage(columnState.currentPage, false);
+}}
+
+function columnGoToPage(n, animate) {{
+  columnState.currentPage = Math.max(0, Math.min(n, columnState.totalPages - 1));
+  if (columnIsScrollMode()) {{
+    columnView.style.transform = 'none';
+  }} else if (columnIsDoubleMode()) {{
+    const offset = columnState.currentPage * columnState.viewShift;
+    columnView.style.transform = `translateX(-${{offset}}px)`;
+  }} else {{
+    const marginH = getMarginH();
+    const offset = columnState.currentPage * columnState.viewShift - marginH;
+    columnView.style.transform = `translateX(-${{offset}}px)`;
+  }}
+  columnReportPosition();
+}}
+
+function columnNext() {{
+  if (columnIsScrollMode()) {{
+    columnContent.scrollTop += columnContent.clientHeight * 0.9;
+    return;
+  }}
+  if (columnState.currentPage + 1 < columnState.totalPages) {{
+    columnGoToPage(columnState.currentPage + 1, true);
+  }} else if (currentChapter + 1 < window.ebookChapterCount) {{
+    loadChapter(currentChapter + 1, 0);
+  }}
+}}
+
+function columnPrev() {{
+  if (columnIsScrollMode()) {{
+    columnContent.scrollTop -= columnContent.clientHeight * 0.9;
+    return;
+  }}
+  if (columnState.currentPage > 0) {{
+    columnGoToPage(columnState.currentPage - 1, true);
+  }} else if (currentChapter > 0) {{
+    loadChapter(currentChapter - 1, 0).then(() => {{
+      columnGoToPage(columnState.totalPages - 1, true);
+    }});
+  }}
+}}
+
+function columnComputeCharOffset() {{
+  const total = columnContent.textContent.length;
+  if (total === 0) return 0;
+  if (columnIsScrollMode()) {{
+    const ratio = columnContent.scrollTop / Math.max(1, columnContent.scrollHeight - columnContent.clientHeight);
+    return Math.floor(total * Math.max(0, Math.min(1, ratio)));
+  }}
+  const ratio = columnState.currentPage / Math.max(1, columnState.totalPages);
+  return Math.floor(total * ratio);
+}}
+
+function columnReportPosition() {{
+  sendIpc({{
+    "type": "position",
+    "chapter": currentChapter,
+    "spread": columnState.currentPage,
+    "char_offset": columnComputeCharOffset(),
+    "total_spreads": columnState.totalPages
+  }});
+}}
 
 function pageHeight() {{
   // measure.clientHeight 包含 padding，实际排版内容区要去掉上下 margin-v。
@@ -442,6 +620,7 @@ function splitIntoSpreads(html) {{
 }}
 
 function goToSpread(index, animate) {{
+  if (isColumnMode()) return columnGoToPage(index, animate || false);
   if (spreads.length === 0) return;
   const target = Math.max(0, Math.min(spreads.length - 1, index));
   if (target === currentSpread) {{
@@ -497,6 +676,7 @@ function renderSpread(index) {{
   spread.innerHTML = '';
   spread.appendChild(getSpreadElement(index));
   spread.style.display = 'block';
+  columnHide();
 }}
 
 function currentSpreadCharOffset() {{
@@ -605,6 +785,7 @@ function cancelFlip() {{
 function applySettings(json) {{
   const s = typeof json === 'string' ? JSON.parse(json) : json;
   currentSettings = s;
+  window.ebookUseColumns = !!s.use_columns;
   const root = document.documentElement;
   root.style.setProperty('--bg', s.bg);
   root.style.setProperty('--fg', s.fg);
@@ -616,6 +797,11 @@ function applySettings(json) {{
   document.body.className = s.mode;
   // 设置变化可能导致分页改变，重新切分
   if (currentChapterHtml) {{
+    if (isColumnMode()) {{
+      cancelFlip();
+      columnLayout();
+      return;
+    }}
     if (isScrollMode()) {{
       cancelFlip();
       const offset = currentSpreadCharOffset();
@@ -646,6 +832,18 @@ async function loadChapter(index, charOffset) {{
   try {{
     const res = await fetch('ebook://reader?chapter=' + currentChapter);
     currentChapterHtml = await res.text();
+    if (isColumnMode()) {{
+      columnContent.innerHTML = currentChapterHtml;
+      columnLayout();
+      if (typeof charOffset === 'number' && charOffset >= 0 && columnContent.textContent.length > 0) {{
+        const ratio = Math.min(1, charOffset / columnContent.textContent.length);
+        const targetPage = Math.floor(ratio * (columnState.totalPages - 1));
+        columnGoToPage(targetPage, false);
+      }} else {{
+        columnGoToPage(0, false);
+      }}
+      return;
+    }}
     if (isScrollMode()) {{
       spread.innerHTML = currentChapterHtml;
       spread.style.display = 'block';
@@ -672,6 +870,7 @@ async function loadChapter(index, charOffset) {{
 }}
 
 function reportPosition() {{
+  if (isColumnMode()) return columnReportPosition();
   let offset = 0;
   if (!isScrollMode() && spreads.length > 0 && currentSpread < spreads.length) {{
     // Approximate character offset by summing text lengths of preceding spreads.
@@ -718,6 +917,7 @@ function textLength(html) {{
 }}
 
 function nextPage() {{
+  if (isColumnMode()) return columnNext();
   if (isScrollMode()) {{
     spread.scrollTop += spread.clientHeight * 0.9;
     return;
@@ -730,6 +930,7 @@ function nextPage() {{
 }}
 
 function prevPage() {{
+  if (isColumnMode()) return columnPrev();
   if (isScrollMode()) {{
     spread.scrollTop -= spread.clientHeight * 0.9;
     return;
@@ -759,7 +960,8 @@ function onClick(e) {{
   if (isScrollMode()) return;
   const sel = window.getSelection();
   if (sel && sel.toString().length > 0) return;
-  const rect = spread.getBoundingClientRect();
+  const container = isColumnMode() ? columnView : spread;
+  const rect = container.getBoundingClientRect();
   const x = e.clientX - rect.left;
   if (x < rect.width / 2) {{
     prevPage();
@@ -770,19 +972,26 @@ function onClick(e) {{
 
 spread.addEventListener('wheel', onWheel, {{ passive: false }});
 spread.addEventListener('click', onClick);
+if (columnView) {{
+  columnView.addEventListener('wheel', onWheel, {{ passive: false }});
+  columnView.addEventListener('click', onClick);
+}}
 window.addEventListener('scroll', reportPosition, true);
 
 let resizeTimeout = null;
 window.addEventListener('resize', () => {{
   clearTimeout(resizeTimeout);
   resizeTimeout = setTimeout(() => {{
-    if (currentChapterHtml && !isScrollMode()) {{
-      cancelFlip();
-      const offset = currentSpreadCharOffset();
-      spreads = splitIntoSpreads(currentChapterHtml);
-      currentSpread = findSpreadForOffset(offset);
-      goToSpread(currentSpread, false);
+    if (!currentChapterHtml || isScrollMode()) return;
+    if (isColumnMode()) {{
+      columnLayout();
+      return;
     }}
+    cancelFlip();
+    const offset = currentSpreadCharOffset();
+    spreads = splitIntoSpreads(currentChapterHtml);
+    currentSpread = findSpreadForOffset(offset);
+    goToSpread(currentSpread, false);
   }}, RESIZE_DEBOUNCE_MS);
 }});
 
@@ -1067,5 +1276,67 @@ mod tests {
             fn_body.contains("if (rightEnd <= start) rightEnd = Math.min(start + ph * 2, Math.floor(maxBottom));"),
             "rightEnd fallback should also be clamped to maxBottom"
         );
+    }
+
+    #[test]
+    fn test_reader_html_contains_column_paginator_skeleton() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        // Feature flag and container
+        assert!(html.contains("window.ebookUseColumns"));
+        assert!(html.contains("id=\"column-view\""));
+        assert!(html.contains("id=\"column-content\""));
+        // Core paginator functions
+        assert!(html.contains("function isColumnMode()"));
+        assert!(html.contains("function columnLayout()"));
+        assert!(html.contains("function columnGoToPage("));
+        assert!(html.contains("function columnNext()"));
+        assert!(html.contains("function columnPrev()"));
+        assert!(html.contains("function columnReportPosition()"));
+        assert!(html.contains("function columnComputeCharOffset()"));
+        // Dispatch hooks in existing functions
+        assert!(html.contains("if (isColumnMode()) return columnNext();"));
+        assert!(html.contains("if (isColumnMode()) return columnPrev();"));
+        assert!(html.contains("if (isColumnMode()) return columnReportPosition();"));
+        assert!(html.contains("if (isColumnMode()) return columnGoToPage("));
+    }
+
+    #[test]
+    fn test_reader_html_contains_column_css_rules() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(html.contains("--column-gutter:"));
+        assert!(html.contains("#column-view {"));
+        assert!(html.contains("#column-content {"));
+        assert!(html.contains("column-fill: auto"));
+        assert!(html.contains("break-inside: avoid"));
+        assert!(html.contains("body.scroll #column-view"));
+        assert!(html.contains("body.scroll #column-content"));
+    }
+
+    #[test]
+    fn test_reader_html_column_flag_defaults_to_false() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        // The flag is initialized false and is only flipped by applySettings when
+        // the Rust side sends use_columns: true.
+        assert!(html.contains("window.ebookUseColumns = false;"));
+        assert!(html.contains("window.ebookUseColumns = !!s.use_columns;"));
+    }
+
+    #[test]
+    fn test_reader_html_old_paginator_still_present_when_columns_disabled() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        // Default HTML must keep all existing line-box pagination code intact.
+        assert!(html.contains("function collectLineBoxes"));
+        assert!(html.contains("function findSafeEnd"));
+        assert!(html.contains("function buildClonedSpread"));
+        assert!(html.contains("function buildDoubleSpread"));
+        assert!(html.contains("function splitSinglePage"));
+        assert!(html.contains("function splitDoublePage"));
+        assert!(html.contains("function splitIntoSpreads"));
+        assert!(html.contains("function goToSpread"));
+        assert!(html.contains("getClientRects"));
     }
 }

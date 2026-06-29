@@ -45,6 +45,9 @@ struct JsSettings {
     margin_v: u32,
     animate: bool,
     invert_scroll: bool,
+    /// Feature flag for the new CSS columns paginator.
+    /// Default false in Phase 1 so the existing line-box paginator keeps running.
+    use_columns: bool,
 }
 
 impl From<&EbookSettings> for JsSettings {
@@ -69,6 +72,7 @@ impl From<&EbookSettings> for JsSettings {
             margin_v: s.margin_vertical,
             animate: s.enable_page_animation,
             invert_scroll: s.invert_scroll,
+            use_columns: false,
         }
     }
 }
@@ -453,5 +457,57 @@ mod tests {
         let s = state.lock().unwrap();
         assert_eq!(s.current_spread, 2);
         assert_eq!(s.total_spreads, 3);
+    }
+
+    #[test]
+    fn test_js_settings_use_columns_defaults_to_false() {
+        let settings = EbookSettings::default();
+        let js = JsSettings::from(&settings);
+        assert!(!js.use_columns);
+    }
+
+    #[test]
+    fn test_js_settings_json_includes_use_columns_flag() {
+        let settings = EbookSettings::default();
+        let js = JsSettings::from(&settings);
+        let json = serde_json::to_string(&js).unwrap();
+        assert!(json.contains("\"use_columns\":false"));
+    }
+
+    #[test]
+    fn test_handle_ipc_message_accepts_column_paginator_position() {
+        use rust_reader_core::ebook::Ebook;
+        use rust_reader_storage::models::EbookSettings;
+        use std::path::PathBuf;
+        use std::sync::{Arc, Mutex};
+
+        let state = Arc::new(Mutex::new(RendererState {
+            ebook: Ebook {
+                id: "test".to_string(),
+                title: "Test".to_string(),
+                path: PathBuf::from("/tmp/test.epub"),
+                authors: Vec::new(),
+                language: None,
+                resources: Vec::new(),
+                spine: Vec::new(),
+                chapters: Vec::new(),
+            },
+            current_chapter: 0,
+            char_offset: 0,
+            current_spread: 0,
+            total_spreads: 1,
+            settings: EbookSettings::default(),
+        }));
+        // The column paginator sends the same position shape as the old paginator.
+        let msg: JsToRust = serde_json::from_str(
+            r#"{"type":"position","chapter":1,"spread":4,"char_offset":200,"total_spreads":12}"#,
+        )
+        .unwrap();
+        handle_ipc_message(msg, &state);
+        let s = state.lock().unwrap();
+        assert_eq!(s.current_chapter, 1);
+        assert_eq!(s.current_spread, 4);
+        assert_eq!(s.total_spreads, 12);
+        assert_eq!(s.char_offset, 200);
     }
 }
