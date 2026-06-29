@@ -319,7 +319,6 @@ function columnLayout() {{
     return;
   }}
 
-  const viewportW = document.body.clientWidth;
   const marginH = getMarginH();
   const gutter = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--column-gutter')) || 40;
 
