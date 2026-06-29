@@ -284,11 +284,7 @@ function columnLayout(targetPage) {{
     columnState.totalPages = Math.max(1, Math.ceil(scrollW / pageW));
   }}
 
-  if (typeof targetPage === 'number') {{
-    columnGoToPage(targetPage);
-  }} else {{
-    columnGoToPage(columnState.currentPage);
-  }}
+  // Navigation is explicit in callers; this function only measures layout.
 }}
 
 function columnGoToPage(n) {{
@@ -826,13 +822,15 @@ function applySettings(json) {{
       cancelFlip();
       // Make sure the column paginator has content when switching to it.
       columnContent.innerHTML = currentChapterHtml;
+      // Measure first so columnGetPageCount() is valid before restoring progress.
+      columnLayout();
       const totalChars = columnContent.textContent.length;
       let targetPage = 0;
       if (totalChars > 0 && savedCharOffset > 0) {{
         const ratio = savedCharOffset / totalChars;
         targetPage = Math.floor(ratio * (columnGetPageCount() - 1));
       }}
-      columnLayout(targetPage);
+      columnGoToPage(targetPage);
       return;
     }}
     if (isScrollMode()) {{
@@ -867,12 +865,14 @@ async function loadChapter(index, charOffset) {{
     currentChapterHtml = await res.text();
     if (isColumnMode()) {{
       columnContent.innerHTML = currentChapterHtml;
+      // Measure first so columnGetPageCount() is valid before restoring progress.
+      columnLayout();
       let targetPage = 0;
       if (typeof charOffset === 'number' && charOffset >= 0 && columnContent.textContent.length > 0) {{
         const ratio = Math.min(1, charOffset / columnContent.textContent.length);
         targetPage = Math.floor(ratio * (columnGetPageCount() - 1));
       }}
-      columnLayout(targetPage);
+      columnGoToPage(targetPage);
       return;
     }}
     if (isScrollMode()) {{
@@ -1016,6 +1016,7 @@ window.addEventListener('resize', () => {{
     if (!currentChapterHtml || isScrollMode()) return;
     if (isColumnMode()) {{
       columnLayout();
+      columnGoToPage(columnState.currentPage);
       return;
     }}
     cancelFlip();
@@ -1603,5 +1604,82 @@ mod tests {
         assert!(html.contains("function splitIntoSpreads"));
         assert!(html.contains("function goToSpread"));
         assert!(html.contains("getClientRects"));
+    }
+
+    #[test]
+    fn test_reader_html_column_layout_does_not_auto_navigate() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function columnLayout(targetPage)")
+            .nth(1)
+            .expect("columnLayout not found")
+            .split("function columnGoToPage")
+            .next()
+            .unwrap();
+        assert!(
+            !fn_body.contains("columnGoToPage("),
+            "columnLayout should only measure layout, not navigate"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_apply_settings_layout_before_target_page() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let apply_body = html
+            .split("function applySettings(json)")
+            .nth(1)
+            .expect("applySettings not found")
+            .split("function loadChapter")
+            .next()
+            .unwrap();
+        let column_branch = apply_body
+            .split("if (isColumnMode()) {")
+            .nth(1)
+            .expect("applySettings column branch not found")
+            .split("\n      return;")
+            .next()
+            .expect("applySettings column branch end not found");
+        let layout_pos = column_branch
+            .find("columnLayout(")
+            .expect("columnLayout call not found in applySettings");
+        let target_pos = column_branch
+            .find("targetPage = Math.floor(ratio * (columnGetPageCount() - 1));")
+            .expect("targetPage computation not found in applySettings");
+        assert!(
+            layout_pos < target_pos,
+            "applySettings must call columnLayout before computing targetPage from columnGetPageCount()"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_load_chapter_layout_before_target_page() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let load_body = html
+            .split("async function loadChapter(index, charOffset)")
+            .nth(1)
+            .expect("loadChapter not found")
+            .split("function reportPosition()")
+            .next()
+            .unwrap();
+        let column_branch = load_body
+            .split("if (isColumnMode()) {")
+            .nth(1)
+            .expect("loadChapter column branch not found")
+            .split("\n      return;")
+            .next()
+            .expect("loadChapter column branch end not found");
+        let layout_pos = column_branch
+            .find("columnLayout(")
+            .expect("columnLayout call not found in loadChapter");
+        let target_pos = column_branch
+            .find("targetPage = Math.floor(ratio * (columnGetPageCount() - 1));")
+            .expect("targetPage computation not found in loadChapter");
+        assert!(
+            layout_pos < target_pos,
+            "loadChapter must call columnLayout before computing targetPage from columnGetPageCount()"
+        );
     }
 }
