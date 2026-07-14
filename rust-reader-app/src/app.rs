@@ -1939,6 +1939,10 @@ impl ReaderApp {
             std::fs::remove_file(&tmp_png).ok();
             if ok {
                 let _ = tx.send((id, out));
+            } else {
+                // 生成或缩放失败时清除可能残缺的 .jpg，
+                // 避免回填分支把坏文件当成有效封面。
+                std::fs::remove_file(&out).ok();
             }
         });
     }

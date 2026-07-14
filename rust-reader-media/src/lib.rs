@@ -8,7 +8,7 @@ pub mod cover {
     use std::time::Duration;
 
     pub fn cover_output_path(covers_dir: &Path, id: &str) -> PathBuf {
-        covers_dir.join(format!("{id}.png"))
+        covers_dir.join(format!("{id}.jpg"))
     }
 
     pub fn generate_cover(
