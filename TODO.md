@@ -178,10 +178,10 @@
   - [x] 31.2 删除 `collectLineBoxes`、`findSafeEnd`、`buildClonedSpread`、`buildDoubleSpread`
   - [x] 31.3 删除 `splitSinglePage`、`splitDoublePage`、`flipper`（如不再使用）
   - [x] 31.4 更新 Rust 测试与文档
-- [ ] 32. Phase 5：优化
-  - [ ] 32.1 相邻章节预加载
-  - [ ] 32.2 缓存页数计算结果
-  - [ ] 32.3 减少 resize 时重新布局开销
+- [x] 32. Phase 5：优化
+  - [x] 32.1 相邻章节预加载
+  - [x] 32.2 缓存页数计算结果
+  - [x] 32.3 减少 resize 时重新布局开销
   - [ ] 32.4 评估大章节分段加载
 
 ## 历史已完成项

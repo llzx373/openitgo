@@ -4548,6 +4548,7 @@ dependencies = [
  "image",
  "objc",
  "pdf-render",
+ "percent-encoding",
  "rfd",
  "rust-reader-core",
  "rust-reader-parser",

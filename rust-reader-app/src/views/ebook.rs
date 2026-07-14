@@ -70,8 +70,13 @@ impl EbookView {
     }
 
     fn toc_fragment(href: &str) -> Option<String> {
-        href.split_once('#')
-            .map(|(_, fragment)| fragment.to_string())
+        href.split_once('#').map(|(_, fragment)| {
+            let raw = fragment.to_string();
+            match percent_encoding::percent_decode_str(&raw).decode_utf8() {
+                Ok(decoded) => decoded.into_owned(),
+                Err(_) => raw,
+            }
+        })
     }
 
     /// Navigates to a chapter.
@@ -235,8 +240,23 @@ mod tests {
     }
 
     #[test]
-    fn test_toc_fragment_handles_empty_and_hash_only() {
-        assert_eq!(EbookView::toc_fragment(""), None);
-        assert_eq!(EbookView::toc_fragment("#"), Some("".to_string()));
+    fn test_toc_fragment_url_decodes_fragment() {
+        assert_eq!(
+            EbookView::toc_fragment("chapter.xhtml#section%201"),
+            Some("section 1".to_string())
+        );
+        assert_eq!(
+            EbookView::toc_fragment("chapter.xhtml#section%C3%A9"),
+            Some("sectioné".to_string())
+        );
+    }
+
+    #[test]
+    fn test_toc_fragment_decode_failure_fallback() {
+        // A lone percent sign is not a valid percent-encoding sequence.
+        assert_eq!(
+            EbookView::toc_fragment("chapter.xhtml#section%"),
+            Some("section%".to_string())
+        );
     }
 }

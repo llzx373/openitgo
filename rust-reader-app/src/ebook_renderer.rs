@@ -186,6 +186,9 @@ impl EbookRenderer {
     }
 
     pub fn jump_to_toc(&self, chapter: usize, fragment: Option<&str>) {
+        if let Ok(mut state) = self.state.lock() {
+            state.current_chapter = chapter;
+        }
         let fragment = fragment.unwrap_or("");
         let js = format!(
             "jumpToTocItem({}, {});",

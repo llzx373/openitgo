@@ -94,9 +94,11 @@ body.scroll #column-content {{
 </head>
 <body class="{mode}">
 <div id="column-view"><div id="column-content"></div></div>
+<div id="ebook-error-layer" style="display:none; position:absolute; top:0; left:0; width:100%; height:100%; z-index:10; background:var(--bg); color:var(--fg); padding:2em; overflow:auto;"></div>
 <script>
 const columnView = document.getElementById('column-view');
 const columnContent = document.getElementById('column-content');
+const errorLayer = document.getElementById('ebook-error-layer');
 let currentChapter = 0;
 let currentChapterHtml = '';
 window.ebookChapterCount = {chapter_count};
@@ -159,8 +161,9 @@ function escapeHtml(s) {{
 }}
 
 function showError(title, detail) {{
-  if (!columnView) return;
-  columnView.innerHTML = '<div id="ebook-error" style="padding:2em; color:var(--fg); background:var(--bg); font-family:var(--font); font-size:var(--size);">' +
+  if (!errorLayer) return;
+  errorLayer.style.display = 'block';
+  errorLayer.innerHTML = '<div id="ebook-error" style="max-width:60em; margin:0 auto;">' +
     '<h2 style="margin-top:0">电子书渲染错误</h2>' +
     '<p><strong>' + escapeHtml(title) + '</strong></p>' +
     '<pre style="white-space:pre-wrap; word-break:break-all; opacity:0.8;">' + escapeHtml(detail) + '</pre>' +
@@ -170,6 +173,12 @@ function showError(title, detail) {{
       ipc.postMessage(JSON.stringify({{ type: 'error', error: title + ': ' + detail }}));
     }}
   }} catch (e) {{}}
+}}
+
+function hideError() {{
+  if (!errorLayer) return;
+  errorLayer.style.display = 'none';
+  errorLayer.innerHTML = '';
 }}
 
 // Prevent anchors and other navigation from reloading the shell.
@@ -503,15 +512,21 @@ function resolveTocTarget(target) {{
   const idx = target.indexOf('#');
   if (idx !== -1) {{
     fragment = target.slice(idx + 1);
-  }} else if (/[\/\\.]/.test(target)) {{
+  }} else if (
+    target.indexOf('/') !== -1 ||
+    target.indexOf('\\') !== -1 ||
+    /\.(xhtml|html|htm)$/i.test(target)
+  ) {{
     // A fragment-less path/URL (e.g. "chapter.xhtml") means chapter start,
     // not an element id, so don't try to resolve it as a fragment.
     return null;
   }}
   if (!fragment) return null;
   let el = document.getElementById(fragment);
-  if (!el && columnContent) {{
-    try {{ el = columnContent.querySelector('[id="' + fragment.replace(/"/g, '\\\\"') + '"]'); }} catch (e) {{}}
+  if (!el && columnContent && typeof CSS !== 'undefined' && CSS.escape) {{
+    // document.getElementById handles valid XML ids; CSS.escape covers the
+    // rare edge cases (leading digits, special characters) when falling back.
+    try {{ el = columnContent.querySelector('#' + CSS.escape(fragment)); }} catch (e) {{}}
   }}
   return el;
 }}
@@ -659,8 +674,9 @@ function applySettings(json) {{
   let savedCharOffset = 0;
   if (isScrollMode()) {{
     const totalChars = columnContent.textContent.length;
-    if (totalChars > 0 && columnView.scrollHeight > 0) {{
-      const ratio = columnView.scrollTop / columnView.scrollHeight;
+    const maxScrollVal = maxScroll();
+    if (totalChars > 0 && maxScrollVal > 0) {{
+      const ratio = columnView.scrollTop / maxScrollVal;
       savedCharOffset = Math.floor(totalChars * Math.max(0, Math.min(1, ratio)));
     }}
   }} else {{
@@ -678,6 +694,7 @@ function applySettings(json) {{
   // 设置变化可能导致分页改变，重新布局并恢复进度
   if (currentChapterHtml) {{
     columnContent.innerHTML = currentChapterHtml;
+    hideError();
     layout();
     const totalChars = columnContent.textContent.length;
     if (isScrollMode()) {{
@@ -744,6 +761,7 @@ async function loadChapter(index, charOffset) {{
     const res = await fetch('ebook://reader?chapter=' + currentChapter);
     currentChapterHtml = await res.text();
     columnContent.innerHTML = currentChapterHtml;
+    hideError();
     // Measure first so getPageCount() is valid before restoring progress.
     layout();
     const totalChars = columnContent.textContent.length;
@@ -1078,8 +1096,8 @@ mod tests {
             .next()
             .unwrap();
         assert!(
-            fn_body.contains("columnView.scrollTop / columnView.scrollHeight"),
-            "applySettings should compute scroll ratio from the column view"
+            fn_body.contains("columnView.scrollTop / maxScrollVal"),
+            "applySettings should compute scroll ratio using maxScroll as the denominator"
         );
         assert!(
             fn_body.contains("Math.floor(totalChars * Math.max(0, Math.min(1, ratio)))"),
@@ -2444,6 +2462,152 @@ mod tests {
         assert!(
             assign_pos < cleanup_pos,
             "loadChapter must set currentChapter before calling cleanupPreloaded"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_show_error_uses_overlay() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function showError(title, detail)")
+            .nth(1)
+            .expect("showError not found")
+            .split("function hideError")
+            .next()
+            .expect("showError end not found");
+        assert!(
+            html.contains("id=\"ebook-error-layer\""),
+            "reader shell should declare a dedicated error overlay"
+        );
+        assert!(
+            fn_body.contains("errorLayer.style.display = 'block';"),
+            "showError should make the overlay visible"
+        );
+        assert!(
+            fn_body.contains("errorLayer.innerHTML ="),
+            "showError should write into the overlay"
+        );
+        assert!(
+            !fn_body.contains("columnView.innerHTML"),
+            "showError must not replace the column view content"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_hide_error_defined() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(
+            html.contains("function hideError()"),
+            "template should expose a hideError helper"
+        );
+        let fn_body = html
+            .split("function hideError()")
+            .nth(1)
+            .expect("hideError not found")
+            .split("// Prevent anchors")
+            .next()
+            .expect("hideError end not found");
+        assert!(
+            fn_body.contains("errorLayer.style.display = 'none';"),
+            "hideError should hide the overlay"
+        );
+        assert!(
+            fn_body.contains("errorLayer.innerHTML = '';"),
+            "hideError should clear the overlay content"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_load_chapter_hides_error() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("async function loadChapter(index, charOffset)")
+            .nth(1)
+            .expect("loadChapter not found")
+            .split("function onWheel")
+            .next()
+            .expect("loadChapter end not found");
+        assert!(
+            fn_body.contains("columnContent.innerHTML = currentChapterHtml;"),
+            "loadChapter should set the chapter content"
+        );
+        let content_pos = fn_body
+            .find("columnContent.innerHTML = currentChapterHtml;")
+            .expect("content assignment not found");
+        let hide_pos = fn_body
+            .find("hideError();")
+            .expect("hideError call not found in loadChapter");
+        assert!(
+            content_pos < hide_pos,
+            "loadChapter should hide the error overlay after a successful render"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_apply_settings_hides_error() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function applySettings(json)")
+            .nth(1)
+            .expect("applySettings not found")
+            .split("function loadChapter")
+            .next()
+            .expect("applySettings end not found");
+        let content_pos = fn_body
+            .find("columnContent.innerHTML = currentChapterHtml;")
+            .expect("content assignment not found in applySettings");
+        let hide_pos = fn_body
+            .find("hideError();")
+            .expect("hideError call not found in applySettings");
+        assert!(
+            content_pos < hide_pos,
+            "applySettings should hide the error overlay after a successful render"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_resolve_toc_target_keeps_fragment_with_dot() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function resolveTocTarget(target)")
+            .nth(1)
+            .expect("resolveTocTarget not found")
+            .split("function goToCharOffset")
+            .next()
+            .expect("resolveTocTarget end not found");
+        assert!(
+            !fn_body.contains("/[\\\\/\\\\.]/"),
+            "resolveTocTarget must not treat every dot as a path separator"
+        );
+        assert!(
+            fn_body.contains("getElementById(fragment)"),
+            "resolveTocTarget should look up the fragment as an element id"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_resolve_toc_target_uses_css_escape() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function resolveTocTarget(target)")
+            .nth(1)
+            .expect("resolveTocTarget not found")
+            .split("function goToCharOffset")
+            .next()
+            .expect("resolveTocTarget end not found");
+        assert!(
+            fn_body.contains("CSS.escape(fragment)"),
+            "resolveTocTarget should escape the fallback selector with CSS.escape"
+        );
+        assert!(
+            fn_body.contains("querySelector('#' + CSS.escape(fragment))"),
+            "resolveTocTarget should build a safe id selector"
         );
     }
 }
