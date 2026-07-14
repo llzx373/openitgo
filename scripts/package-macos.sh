@@ -111,6 +111,34 @@ bundle_mpv() {
                 ;;
         esac
     done
+
+    # Fail the packaging if any Homebrew reference survived the rewrite, or if
+    # a referenced @rpath dylib is missing from Contents/Frameworks. The
+    # -change calls above are best-effort, so verify the result explicitly
+    # instead of letting a broken bundle ship.
+    local check_failed=0 file dep
+    for file in "${macos_dir}/${app_name}" "${frameworks_dir}"/*.dylib; do
+        while read -r dep; do
+            case "${dep}" in
+                /opt/homebrew/*|/usr/local/*)
+                    echo "Error: ${file} still references ${dep}" >&2
+                    check_failed=1
+                    ;;
+                @rpath/*)
+                    name="${dep#@rpath/}"
+                    if [[ ! -f "${frameworks_dir}/${name}" ]]; then
+                        echo "Error: ${file} references ${dep}, missing from Contents/Frameworks" >&2
+                        check_failed=1
+                    fi
+                    ;;
+            esac
+        done < <(otool -L "${file}" | awk 'NR>1 {print $1}')
+    done
+    if [[ "${check_failed}" -ne 0 ]]; then
+        echo "Error: libmpv bundling verification failed." >&2
+        exit 1
+    fi
+    echo "Verified libmpv bundle: no Homebrew references remain, all @rpath dylibs are bundled."
 }
 
 bundle_mpv
