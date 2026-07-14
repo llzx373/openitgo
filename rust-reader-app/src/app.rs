@@ -36,9 +36,39 @@ fn is_ebook_file(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+fn is_media_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                // 视频
+                "mp4" | "m4v" | "mkv" | "webm" | "avi" | "mov" | "wmv" | "flv" | "ts" | "m2ts"
+                | "mpg" | "mpeg" | "3gp"
+                // 音频
+                | "mp3" | "flac" | "aac" | "m4a" | "ogg" | "oga" | "opus" | "wav" | "aiff"
+                | "ape" | "wma"
+            )
+        })
+        .unwrap_or(false)
+}
+
 fn media_type_for_path(path: &std::path::Path) -> MediaType {
     if is_ebook_file(path) {
         MediaType::Ebook
+    } else if is_media_file(path) {
+        match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some(
+                "mp3" | "flac" | "aac" | "m4a" | "ogg" | "oga" | "opus" | "wav" | "aiff" | "ape"
+                | "wma",
+            ) => MediaType::Audio,
+            _ => MediaType::Video,
+        }
     } else {
         MediaType::Comic
     }
@@ -1626,9 +1656,44 @@ impl ReaderApp {
         }
     }
 
+    fn add_media_to_library(&mut self, path: std::path::PathBuf) {
+        if self
+            .library_view
+            .library
+            .entries
+            .iter()
+            .any(|e| e.path == path)
+        {
+            return;
+        }
+        let added_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let title = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("未知媒体")
+            .to_string();
+        let media_type = media_type_for_path(&path);
+        self.library_view
+            .library
+            .entries
+            .push(rust_reader_storage::models::LibraryEntry {
+                comic_id: rust_reader_parser::stable_comic_id(&path),
+                title,
+                path,
+                cover_path: None,
+                added_at,
+                media_type,
+            });
+    }
+
     fn add_file_to_library(&mut self, path: std::path::PathBuf) {
         if is_ebook_file(&path) {
             self.add_ebook_to_library(path);
+        } else if is_media_file(&path) {
+            self.add_media_to_library(path);
         } else if let Ok(comic) = rust_reader_parser::parse(&path) {
             self.add_comic_to_library(comic, &path);
         }
@@ -1838,7 +1903,7 @@ fn history_matches(entry: &HistoryEntry, comic_id: &str, path: &std::path::Path)
 }
 
 /// Recursively walk `root` and return paths that look like supported comic
-/// files, ebook files, or folders containing images.
+/// files, ebook files, media files, or folders containing images.
 fn walk_supported_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut result = Vec::new();
     let mut dirs = vec![root.to_path_buf()];
@@ -1850,7 +1915,8 @@ fn walk_supported_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 dirs.push(path);
-            } else if is_supported_comic_file(&path) || is_ebook_file(&path) {
+            } else if is_supported_comic_file(&path) || is_ebook_file(&path) || is_media_file(&path)
+            {
                 result.push(path);
             }
         }
@@ -2143,6 +2209,41 @@ mod tests {
         assert!(is_ebook_file(Path::new("book.TXT")));
         assert!(!is_ebook_file(Path::new("book.pdf")));
         assert!(!is_ebook_file(Path::new("book")));
+    }
+
+    #[test]
+    fn test_is_media_file_recognizes_video_and_audio() {
+        assert!(is_media_file(Path::new("a.mp4")));
+        assert!(is_media_file(Path::new("a.MKV")));
+        assert!(is_media_file(Path::new("a.webm")));
+        assert!(is_media_file(Path::new("a.mp3")));
+        assert!(is_media_file(Path::new("a.flac")));
+        assert!(!is_media_file(Path::new("a.epub")));
+        assert!(!is_media_file(Path::new("a.cbz")));
+        assert!(!is_media_file(Path::new("a")));
+    }
+
+    #[test]
+    fn test_media_type_for_path_classifies_media() {
+        assert_eq!(media_type_for_path(Path::new("a.mp4")), MediaType::Video);
+        assert_eq!(media_type_for_path(Path::new("a.mkv")), MediaType::Video);
+        assert_eq!(media_type_for_path(Path::new("a.mp3")), MediaType::Audio);
+        assert_eq!(media_type_for_path(Path::new("a.flac")), MediaType::Audio);
+        assert_eq!(media_type_for_path(Path::new("a.epub")), MediaType::Ebook);
+        assert_eq!(media_type_for_path(Path::new("a.cbz")), MediaType::Comic);
+    }
+
+    #[test]
+    fn test_add_media_to_library_uses_stable_id_and_media_type() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let video = tmp_dir.path().join("clip.mp4");
+        std::fs::write(&video, b"fake").unwrap();
+        let (mut app, _tmp) = app_with_temp_store();
+        app.add_media_to_library(video.clone());
+        let entry = &app.library_view.library.entries[0];
+        assert_eq!(entry.media_type, MediaType::Video);
+        assert_eq!(entry.title, "clip");
+        assert_eq!(entry.comic_id, rust_reader_parser::stable_comic_id(&video));
     }
 
     #[test]

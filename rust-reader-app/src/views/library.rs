@@ -347,7 +347,10 @@ impl LibraryView {
             .filter(|(_, e)| {
                 let media_ok = match self.mode {
                     LibraryMode::Ebooks => e.media_type == MediaType::Ebook,
-                    LibraryMode::Library => e.media_type == MediaType::Comic,
+                    LibraryMode::Library => matches!(
+                        e.media_type,
+                        MediaType::Comic | MediaType::Video | MediaType::Audio
+                    ),
                     _ => true,
                 };
                 media_ok && (query.is_empty() || e.title.to_lowercase().contains(&query))
@@ -780,5 +783,33 @@ mod tests {
         let ebooks = view.filtered_entries(&History::default(), LibrarySort::Title);
         assert_eq!(ebooks.len(), 1);
         assert_eq!(ebooks[0].1.media_type, MediaType::Ebook);
+    }
+
+    #[test]
+    fn test_library_mode_includes_media_entries() {
+        let entry = |id: &str, media_type: MediaType| LibraryEntry {
+            comic_id: id.to_string(),
+            title: id.to_string(),
+            path: PathBuf::from(format!("/{id}")),
+            cover_path: None,
+            added_at: 0,
+            media_type,
+        };
+        let library = Library {
+            entries: vec![
+                entry("comic", MediaType::Comic),
+                entry("video", MediaType::Video),
+                entry("audio", MediaType::Audio),
+                entry("ebook", MediaType::Ebook),
+            ],
+        };
+        let view = LibraryView {
+            library,
+            mode: LibraryMode::Library,
+            ..Default::default()
+        };
+        let filtered = view.filtered_entries(&History::default(), LibrarySort::Title);
+        let ids: Vec<&str> = filtered.iter().map(|(_, e)| e.comic_id.as_str()).collect();
+        assert_eq!(ids, ["audio", "comic", "video"]);
     }
 }
