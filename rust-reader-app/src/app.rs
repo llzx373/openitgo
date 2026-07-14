@@ -36,19 +36,32 @@ fn is_ebook_file(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+const AUDIO_EXTS: &[&str] = &[
+    "mp3", "flac", "aac", "m4a", "ogg", "oga", "opus", "wav", "aiff", "ape", "wma",
+];
+
 fn is_media_file(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| {
+            let ext = e.to_ascii_lowercase();
             matches!(
-                e.to_ascii_lowercase().as_str(),
+                ext.as_str(),
                 // 视频
-                "mp4" | "m4v" | "mkv" | "webm" | "avi" | "mov" | "wmv" | "flv" | "ts" | "m2ts"
-                | "mpg" | "mpeg" | "3gp"
-                // 音频
-                | "mp3" | "flac" | "aac" | "m4a" | "ogg" | "oga" | "opus" | "wav" | "aiff"
-                | "ape" | "wma"
-            )
+                "mp4"
+                    | "m4v"
+                    | "mkv"
+                    | "webm"
+                    | "avi"
+                    | "mov"
+                    | "wmv"
+                    | "flv"
+                    | "ts"
+                    | "m2ts"
+                    | "mpg"
+                    | "mpeg"
+                    | "3gp"
+            ) || AUDIO_EXTS.contains(&ext.as_str())
         })
         .unwrap_or(false)
 }
@@ -63,10 +76,7 @@ fn media_type_for_path(path: &std::path::Path) -> MediaType {
             .map(|e| e.to_ascii_lowercase())
             .as_deref()
         {
-            Some(
-                "mp3" | "flac" | "aac" | "m4a" | "ogg" | "oga" | "opus" | "wav" | "aiff" | "ape"
-                | "wma",
-            ) => MediaType::Audio,
+            Some(ext) if AUDIO_EXTS.contains(&ext) => MediaType::Audio,
             _ => MediaType::Video,
         }
     } else {
