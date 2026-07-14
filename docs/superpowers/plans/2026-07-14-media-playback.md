@@ -225,6 +225,7 @@ git commit -m "feat(storage): add Video/Audio variants to MediaType"
 - Modify: `rust-reader-app/src/app.rs:27-45`（`is_ebook_file` 旁新增 `is_media_file`，扩展 `media_type_for_path`）
 - Modify: `rust-reader-app/src/app.rs:1629-1635`（`add_file_to_library` 增加媒体分支）
 - Modify: `rust-reader-app/src/app.rs:1842-1860`（`walk_supported_files` 纳入媒体扩展名）
+- Modify: `rust-reader-app/src/views/library.rs:348-352`（`Library` 模式筛选放行 Video/Audio）
 
 **Interfaces:**
 - Consumes: `MediaType::Video/Audio`（Task 2）、`rust_reader_parser::stable_comic_id(&Path) -> String`
@@ -391,17 +392,67 @@ fn test_add_media_to_library_uses_stable_id_and_media_type() {
 
 （`test_app()` 用 tests 模块里既有的构造方式；若不存在同名 helper，照搬 `app.rs:2011` 附近的构造代码。）
 
-- [ ] **Step 8: 运行测试确认通过 + 全量流水线**
+- [ ] **Step 8: 书库筛选纳入媒体条目（`rust-reader-app/src/views/library.rs:348-352`）**
+
+设计文档假设"筛选逻辑自然生效无需改动"，但实际代码 `LibraryMode::Library`
+只放行 `MediaType::Comic`，媒体条目会在默认书库模式不可见。把
+`filtered_entries` 中的筛选改为：
+
+```rust
+let media_ok = match self.mode {
+    LibraryMode::Ebooks => e.media_type == MediaType::Ebook,
+    LibraryMode::Library => matches!(
+        e.media_type,
+        MediaType::Comic | MediaType::Video | MediaType::Audio
+    ),
+    _ => true,
+};
+```
+
+先写失败测试（追加到 `library.rs` 的 `mod tests`，参照 `test_search_filters_by_title`
+的 `LibraryView { ..Default::default() }` 构造方式）：
+
+```rust
+#[test]
+fn test_library_mode_includes_media_entries() {
+    let entry = |id: &str, media_type: MediaType| LibraryEntry {
+        comic_id: id.to_string(),
+        title: id.to_string(),
+        path: PathBuf::from(format!("/{id}")),
+        cover_path: None,
+        added_at: 0,
+        media_type,
+    };
+    let library = Library {
+        entries: vec![
+            entry("comic", MediaType::Comic),
+            entry("video", MediaType::Video),
+            entry("audio", MediaType::Audio),
+            entry("ebook", MediaType::Ebook),
+        ],
+    };
+    let view = LibraryView {
+        library,
+        mode: LibraryMode::Library,
+        ..Default::default()
+    };
+    let filtered = view.filtered_entries(&History::default(), LibrarySort::Title);
+    let ids: Vec<&str> = filtered.iter().map(|(_, e)| e.comic_id.as_str()).collect();
+    assert_eq!(ids, ["audio", "comic", "video"]);
+}
+```
+
+- [ ] **Step 9: 运行测试确认通过 + 全量流水线**
 
 Run: `cargo test -p rust-reader-app media`
 Expected: PASS
 Run: `cargo fmt --all && cargo check --workspace && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings`
 Expected: 全绿。
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
-git add rust-reader-app/src/app.rs
+git add rust-reader-app/src/app.rs rust-reader-app/src/views/library.rs
 git commit -m "feat(app): recognize media files and import them into the library"
 ```
 
