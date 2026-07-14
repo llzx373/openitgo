@@ -211,6 +211,8 @@ impl LibraryView {
                                             let placeholder_label = match entry.media_type {
                                                 MediaType::Ebook => "电子书",
                                                 MediaType::Comic => "漫画",
+                                                MediaType::Video => "视频",
+                                                MediaType::Audio => "音频",
                                             };
                                             ui.painter().text(
                                                 rect.center(),

@@ -196,6 +196,8 @@ pub enum MediaType {
     #[default]
     Comic,
     Ebook,
+    Video,
+    Audio,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -369,6 +371,29 @@ mod tests {
             r#"{"comic_id":"id","title":"Test","path":"/tmp","cover_path":null,"added_at":0}"#;
         let entry: LibraryEntry = serde_json::from_str(json).unwrap();
         assert_eq!(entry.media_type, MediaType::Comic);
+    }
+
+    #[test]
+    fn test_media_type_video_audio_roundtrip() {
+        let v = serde_json::to_string(&MediaType::Video).unwrap();
+        let a = serde_json::to_string(&MediaType::Audio).unwrap();
+        assert_eq!(v, "\"video\"");
+        assert_eq!(a, "\"audio\"");
+        assert_eq!(
+            serde_json::from_str::<MediaType>(&v).unwrap(),
+            MediaType::Video
+        );
+        assert_eq!(
+            serde_json::from_str::<MediaType>(&a).unwrap(),
+            MediaType::Audio
+        );
+    }
+
+    #[test]
+    fn test_library_entry_deserializes_media_type_video() {
+        let json = r#"{"comic_id":"id","title":"T","path":"/tmp/v.mp4","cover_path":null,"added_at":0,"media_type":"video"}"#;
+        let entry: LibraryEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.media_type, MediaType::Video);
     }
 
     #[test]
