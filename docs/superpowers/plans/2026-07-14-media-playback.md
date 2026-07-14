@@ -2487,17 +2487,28 @@ View::Media => {
 }
 ```
 
-- [ ] **Step 6: 编译 + 既有测试 + 流水线**
+- [ ] **Step 6: 移除临时 `dead_code` allow + 编译 + 既有测试 + 流水线**
+
+Task 6 在 `rust-reader-app/src/platform/macos/mpv_view.rs` 顶部留下了
+`#![allow(dead_code)]`（bin target 未消费时的临时措施）。本任务接通调用后必须
+**删除该 allow**，否则它会永久遮蔽真正的 dead code。删除后若有零星未用项，
+以实际使用为准（本任务接线后应全部被消费）；确属保留 API 的再单独评估，
+不得重新加回整模块 allow。
 
 Run: `cargo test -p rust-reader-app media`
 Expected: `should_resume` 测试 PASS，既有测试全过。
 Run: `cargo fmt --all && cargo check --workspace && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings`
-Expected: 全绿。
+Expected: 全绿（无 dead_code 警告）。
 
 - [ ] **Step 7: 手动验证（出画面里程碑）**
 
 Run: `cargo run -p rust-reader-app`，打开一个 mp4（拖入或从库打开）。
 Expected: 视频画面 + 声音；`Space` 暂停/继续；`←/→` 跳转；`Esc` 回书架；切到其他视图再回来不崩溃。音频文件（mp3）能出声（画面为黑）。
+
+环境注意（Task 6 复审实测）：本机若接有 USB 声卡（如 AG06/AG03），mpv 的
+CoreAudio AO 可能挂起（stock mpv CLI 同样复现，与代码无关）。验证声音前先用
+`mpv --ao=coreaudio 文件` 确认本机 AO 可用；若挂起，用无音频流文件验证画面链路，
+声音链路换内置扬声器环境复验。
 
 - [ ] **Step 8: Commit**
 
