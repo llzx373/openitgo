@@ -9,8 +9,6 @@ pub struct MediaView {
 }
 
 pub struct OpenMedia {
-    // `path` is part of the planned interface: Task 9 records history from it.
-    #[allow(dead_code)]
     pub path: PathBuf,
     pub title: String,
     // Field order matters for drop: `native` frees the mpv render context,

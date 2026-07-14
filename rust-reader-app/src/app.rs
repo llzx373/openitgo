@@ -107,6 +107,9 @@ pub struct ReaderApp {
     pub pending_covers: HashMap<crate::loader::Epoch, (String, PathBuf)>,
     /// Comic ids for which a cover generation has already been requested.
     pub requested_cover_ids: HashSet<String>,
+    /// Media cover results from worker threads: (comic_id, cover_path).
+    pub media_cover_tx: crossbeam_channel::Sender<(String, PathBuf)>,
+    pub media_cover_rx: crossbeam_channel::Receiver<(String, PathBuf)>,
     /// The theme currently applied to egui, used to avoid redundant updates.
     pub current_theme: Theme,
 }
@@ -136,6 +139,7 @@ impl Default for ReaderApp {
             settings.decode_threads as usize,
         );
         let cover_loader = PageLoader::new_with_compress(false, 1);
+        let (media_cover_tx, media_cover_rx) = crossbeam_channel::unbounded();
         Self {
             current_view: View::Library,
             last_view: View::Library,
@@ -156,6 +160,8 @@ impl Default for ReaderApp {
             pending_media_open: None,
             pending_covers: HashMap::new(),
             requested_cover_ids: HashSet::new(),
+            media_cover_tx,
+            media_cover_rx,
             current_theme: Theme::System,
         }
     }
@@ -165,6 +171,7 @@ impl eframe::App for ReaderApp {
     fn on_exit(&mut self) {
         self.record_reader_history();
         self.record_ebook_history();
+        self.record_media_history();
         self.reader_view.close();
         let _ = self.store.save_settings(&self.settings);
         let _ = self.store.save_library(&self.library_view.library);
@@ -182,6 +189,7 @@ impl eframe::App for ReaderApp {
             self.ebook_view.close();
         }
         if matches!(self.last_view, View::Media) && !matches!(self.current_view, View::Media) {
+            self.record_media_history();
             self.media_view.close();
         }
         self.last_view = self.current_view.clone();
@@ -218,6 +226,7 @@ impl eframe::App for ReaderApp {
             self.settings.real_image_cache_pages as usize,
         );
         self.poll_cover_results();
+        self.poll_media_covers();
 
         self.render_menu_bar(ctx);
 
@@ -1791,6 +1800,41 @@ impl ReaderApp {
         self.store.dir().join("covers")
     }
 
+    /// Media playback progress: `char_offset` holds the position in
+    /// milliseconds and `page_index` stays 0 (mirrors the ebook pattern).
+    fn record_media_history(&mut self) {
+        if let Some(open) = self.media_view.open.as_ref() {
+            let media_id = rust_reader_parser::stable_comic_id(&open.path);
+            let path = open.path.clone();
+            let position_ms = open.last.position_ms;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if let Some(entry) = self
+                .history
+                .entries
+                .iter_mut()
+                .find(|h| history_matches(h, &media_id, &path))
+            {
+                entry.comic_id = media_id;
+                entry.path = path;
+                entry.page_index = 0;
+                entry.char_offset = Some(position_ms as usize);
+                entry.last_read_at = now;
+            } else {
+                self.history.entries.push(HistoryEntry {
+                    comic_id: media_id,
+                    path,
+                    volume_index: 0,
+                    page_index: 0,
+                    char_offset: Some(position_ms as usize),
+                    last_read_at: now,
+                });
+            }
+        }
+    }
+
     fn request_cover(&mut self, comic_id: &str, path: &Path, source: PageSource) {
         if !self.requested_cover_ids.insert(comic_id.to_string()) {
             return;
@@ -1830,6 +1874,58 @@ impl ReaderApp {
                 }
             }
         }
+    }
+
+    fn poll_media_covers(&mut self) {
+        while let Ok((id, path)) = self.media_cover_rx.try_recv() {
+            if let Some(entry) = self
+                .library_view
+                .library
+                .entries
+                .iter_mut()
+                .find(|e| e.comic_id == id)
+            {
+                entry.cover_path = Some(path);
+            }
+        }
+    }
+
+    fn request_media_cover(&mut self, idx: usize) {
+        let Some(entry) = self.library_view.library.entries.get(idx) else {
+            return;
+        };
+        let input = entry.path.clone();
+        let id = entry.comic_id.clone();
+        if !input.exists() {
+            return;
+        }
+        // The id stays in the set even when generation fails, so the library
+        // view's per-frame cover requests do not retry in a loop.
+        if !self.requested_cover_ids.insert(id.clone()) {
+            return;
+        }
+        let covers_dir = self.covers_dir();
+        std::fs::create_dir_all(&covers_dir).ok();
+        let out = rust_reader_media::cover::cover_output_path(&covers_dir, &id);
+        if out.exists() {
+            // 封面已在磁盘上（上次生成过）：直接回填路径，无需重新生成。
+            if let Some(entry) = self.library_view.library.entries.get_mut(idx) {
+                entry.cover_path = Some(out);
+            }
+            return;
+        }
+        let tx = self.media_cover_tx.clone();
+        std::thread::spawn(move || {
+            if rust_reader_media::cover::generate_cover(
+                &input,
+                &out,
+                std::time::Duration::from_secs(15),
+            )
+            .is_ok()
+            {
+                let _ = tx.send((id, out));
+            }
+        });
     }
 
     fn add_folder_to_library(&mut self, path: std::path::PathBuf) {
@@ -2009,6 +2105,10 @@ impl ReaderApp {
         let Some(entry) = self.library_view.library.entries.get(idx) else {
             return;
         };
+        if matches!(entry.media_type, MediaType::Video | MediaType::Audio) {
+            self.request_media_cover(idx);
+            return;
+        }
         if !entry.path.exists() {
             return;
         }
@@ -2092,7 +2192,14 @@ impl ReaderApp {
             position: wry::dpi::LogicalPosition::new(screen.min.x, screen.min.y).into(),
             size: wry::dpi::LogicalSize::new(screen.width(), screen.height()).into(),
         };
-        match self.media_view.open(ctx, frame, bounds, path, None) {
+        let media_id = rust_reader_parser::stable_comic_id(&path);
+        let resume_ms = self
+            .history
+            .entries
+            .iter()
+            .find(|h| history_matches(h, &media_id, &path))
+            .and_then(|h| h.char_offset.map(|ms| ms as u64));
+        match self.media_view.open(ctx, frame, bounds, path, resume_ms) {
             Ok(()) => {
                 self.current_view = View::Media;
                 self.error_message = None;
@@ -2363,6 +2470,7 @@ mod tests {
                 settings.decode_threads as usize,
             );
             let cover_loader = PageLoader::new_with_compress(false, 1);
+            let (media_cover_tx, media_cover_rx) = crossbeam_channel::unbounded();
             Self {
                 current_view: View::Library,
                 last_view: View::Library,
@@ -2383,6 +2491,8 @@ mod tests {
                 pending_media_open: None,
                 pending_covers: HashMap::new(),
                 requested_cover_ids: HashSet::new(),
+                media_cover_tx,
+                media_cover_rx,
                 current_theme: Theme::System,
             }
         }
@@ -2616,6 +2726,85 @@ mod tests {
             ..Default::default()
         };
         assert!(!history_matches(&h, "def", Path::new("/book.epub")));
+    }
+
+    #[test]
+    fn test_media_history_entry_contract() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let video = tmp_dir.path().join("clip.mp4");
+        std::fs::write(&video, b"fake").unwrap();
+        let (mut app, _tmp) = app_with_temp_store();
+        let media_id = rust_reader_parser::stable_comic_id(&video);
+        app.history.entries.push(HistoryEntry {
+            comic_id: media_id.clone(),
+            path: video.clone(),
+            volume_index: 0,
+            page_index: 0,
+            char_offset: Some(42_000),
+            last_read_at: 1,
+        });
+        let entry = app
+            .history
+            .entries
+            .iter()
+            .find(|h| history_matches(h, &media_id, &video))
+            .unwrap();
+        assert_eq!(entry.char_offset, Some(42_000));
+        assert_eq!(entry.page_index, 0);
+    }
+
+    #[test]
+    fn test_poll_media_covers_sets_cover_path() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let video = PathBuf::from("/tmp/clip.mp4");
+        let id = rust_reader_parser::stable_comic_id(&video);
+        app.library_view
+            .library
+            .entries
+            .push(rust_reader_storage::models::LibraryEntry {
+                comic_id: id.clone(),
+                title: "clip".to_string(),
+                path: video,
+                cover_path: None,
+                added_at: 0,
+                media_type: MediaType::Video,
+            });
+        let cover = PathBuf::from("/tmp/covers/clip.png");
+        app.media_cover_tx.send((id, cover.clone())).unwrap();
+        app.poll_media_covers();
+        assert_eq!(
+            app.library_view.library.entries[0].cover_path.as_deref(),
+            Some(cover.as_path())
+        );
+    }
+
+    #[test]
+    fn test_request_media_cover_backfills_existing_cover() {
+        let (mut app, tmp) = app_with_temp_store();
+        let video = tmp.path().join("clip.mp4");
+        std::fs::write(&video, b"fake").unwrap();
+        let id = rust_reader_parser::stable_comic_id(&video);
+        app.library_view
+            .library
+            .entries
+            .push(rust_reader_storage::models::LibraryEntry {
+                comic_id: id.clone(),
+                title: "clip".to_string(),
+                path: video,
+                cover_path: None,
+                added_at: 0,
+                media_type: MediaType::Video,
+            });
+        let covers_dir = tmp.path().join("covers");
+        std::fs::create_dir_all(&covers_dir).unwrap();
+        let cover = rust_reader_media::cover::cover_output_path(&covers_dir, &id);
+        std::fs::write(&cover, b"png").unwrap();
+        app.request_media_cover(0);
+        assert_eq!(
+            app.library_view.library.entries[0].cover_path.as_deref(),
+            Some(cover.as_path())
+        );
+        assert!(app.requested_cover_ids.contains(&id));
     }
 
     fn should_show_bar(
