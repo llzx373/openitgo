@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug rust-reader-app",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["run", "-p", "rust-reader-app"]
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {}
+    },
+    {
+      "name": "Debug rust-reader-app (release)",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["run", "--release", "-p", "rust-reader-app"]
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {}
+    },
+    {
+      "name": "Attach to rust-reader-app",
+      "type": "lldb",
+      "request": "attach",
+      "pid": "${command:pickMyProcess}"
+    }
+  ]
+}

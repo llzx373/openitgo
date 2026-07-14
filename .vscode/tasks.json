@@ -1,0 +1,115 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run app",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["run", "-p", "rust-reader-app"],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": "$rustc"
+    },
+    {
+      "label": "Test workspace",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["test", "--workspace"],
+      "group": "test",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": "$rustc"
+    },
+    {
+      "label": "Check workspace",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["check", "--workspace"],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": "$rustc"
+    },
+    {
+      "label": "Clippy",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": "$rustc"
+    },
+    {
+      "label": "Format check",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["fmt", "--all", "--", "--check"],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": "$rustc"
+    },
+    {
+      "label": "Format code",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["fmt", "--all"],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": "$rustc"
+    },
+    {
+      "label": "Build release",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["build", "--release", "-p", "rust-reader-app"],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": "$rustc"
+    },
+    {
+      "label": "Clean build artifacts",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["clean"],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": "$rustc"
+    },
+    {
+      "label": "Package macOS app",
+      "type": "shell",
+      "command": "scripts/package-macos.sh",
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
