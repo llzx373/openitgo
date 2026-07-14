@@ -585,14 +585,192 @@ impl ReaderApp {
             return;
         }
         self.media_view.sync_state();
+
+        let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        let mouse_pos = ctx.input(|i| i.pointer.hover_pos());
+        let screen_size = ctx.screen_rect().size();
+        let show_toolbar = Self::should_show_bar(
+            self.settings.show_toolbar,
+            fullscreen,
+            mouse_pos,
+            screen_size,
+            BarEdge::Top,
+        );
+        let show_seekbar = Self::should_show_bar(
+            self.settings.show_statusbar,
+            fullscreen,
+            mouse_pos,
+            screen_size,
+            BarEdge::Bottom,
+        );
+        if show_toolbar {
+            self.render_media_toolbar(ctx);
+        }
+        if show_seekbar {
+            self.render_media_seekbar(ctx);
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             let rect = ui.max_rect();
-            let bounds = wry::Rect {
-                position: wry::dpi::LogicalPosition::new(rect.min.x, rect.min.y).into(),
-                size: wry::dpi::LogicalSize::new(rect.width(), rect.height()).into(),
+            let has_video = self
+                .media_view
+                .open
+                .as_ref()
+                .map(|o| o.last.has_video)
+                .unwrap_or(true);
+            // Audio-only: park the native overlay at zero size so it cannot
+            // cover the egui placeholder painted by MediaView::ui.
+            let bounds = if has_video {
+                wry::Rect {
+                    position: wry::dpi::LogicalPosition::new(rect.min.x, rect.min.y).into(),
+                    size: wry::dpi::LogicalSize::new(rect.width(), rect.height()).into(),
+                }
+            } else {
+                wry::Rect {
+                    position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+                    size: wry::dpi::LogicalSize::new(0.0, 0.0).into(),
+                }
             };
             self.media_view.update_bounds(bounds);
             self.media_view.ui(ctx, ui);
+        });
+    }
+
+    fn render_media_toolbar(&mut self, ctx: &egui::Context) {
+        let (title, tracks, current_sub, current_audio, speed, paused) = self
+            .media_view
+            .open
+            .as_ref()
+            .map(|o| {
+                (
+                    o.title.clone(),
+                    o.last.tracks.clone(),
+                    o.last.current_sub,
+                    o.last.current_audio,
+                    o.last.speed,
+                    o.last.paused,
+                )
+            })
+            .unwrap_or_default();
+        egui::TopBottomPanel::top("media_toolbar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("书架").clicked() {
+                    self.current_view = View::Library;
+                }
+                ui.separator();
+                if ui.button(if paused { "播放" } else { "暂停" }).clicked() {
+                    self.media_view.toggle_pause();
+                }
+                if ui.button("-10s").clicked() {
+                    self.media_view.seek_rel(-10.0);
+                }
+                if ui.button("+10s").clicked() {
+                    self.media_view.seek_rel(10.0);
+                }
+                ui.separator();
+                if ui.button(format!("{:.1}x", speed)).clicked() {
+                    self.media_view.cycle_speed();
+                }
+                ui.separator();
+                let subs: Vec<(i64, String)> = tracks
+                    .iter()
+                    .filter(|t| t.kind == rust_reader_media::TrackKind::Sub)
+                    .enumerate()
+                    .map(|(i, t)| (t.id, crate::views::media::track_label(t, i)))
+                    .collect();
+                egui::ComboBox::from_label("字幕")
+                    .selected_text(
+                        current_sub
+                            .and_then(|id| subs.iter().find(|(sid, _)| *sid == id))
+                            .map(|(_, l)| l.clone())
+                            .unwrap_or_else(|| "关闭".to_string()),
+                    )
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(current_sub.is_none(), "关闭").clicked() {
+                            self.media_view.set_sub(None);
+                        }
+                        for (id, label) in &subs {
+                            if ui
+                                .selectable_label(current_sub == Some(*id), label)
+                                .clicked()
+                            {
+                                self.media_view.set_sub(Some(*id));
+                            }
+                        }
+                    });
+                let audios: Vec<(i64, String)> = tracks
+                    .iter()
+                    .filter(|t| t.kind == rust_reader_media::TrackKind::Audio)
+                    .enumerate()
+                    .map(|(i, t)| (t.id, crate::views::media::track_label(t, i)))
+                    .collect();
+                if audios.len() > 1 {
+                    egui::ComboBox::from_label("音轨")
+                        .selected_text(
+                            current_audio
+                                .and_then(|id| audios.iter().find(|(aid, _)| *aid == id))
+                                .map(|(_, l)| l.clone())
+                                .unwrap_or_else(|| "-".to_string()),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (id, label) in &audios {
+                                if ui
+                                    .selectable_label(current_audio == Some(*id), label)
+                                    .clicked()
+                                {
+                                    self.media_view.set_audio(*id);
+                                }
+                            }
+                        });
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("全屏").clicked() {
+                        self.toggle_fullscreen(ctx);
+                    }
+                    ui.label(title);
+                });
+            });
+        });
+    }
+
+    fn render_media_seekbar(&mut self, ctx: &egui::Context) {
+        let (pos, dur, volume) = self
+            .media_view
+            .open
+            .as_ref()
+            .map(|o| (o.last.position_ms, o.last.duration_ms, o.last.volume))
+            .unwrap_or((0, None, 100.0));
+        egui::TopBottomPanel::bottom("media_seekbar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(rust_reader_media::time::format_time_ms(pos));
+                match dur {
+                    Some(dur) if dur > 0 => {
+                        let mut ratio = pos as f32 / dur as f32;
+                        let slider = egui::Slider::new(&mut ratio, 0.0..=1.0).show_value(false);
+                        let width = (ui.available_width() - 220.0).max(60.0);
+                        if ui.add_sized([width, 16.0], slider).changed() {
+                            self.media_view.seek_to_ratio(ratio as f64);
+                        }
+                    }
+                    _ => {
+                        ui.label("--:--");
+                    }
+                }
+                ui.label(
+                    dur.map(rust_reader_media::time::format_time_ms)
+                        .unwrap_or_else(|| "--:--".to_string()),
+                );
+                let mut vol = volume as f32;
+                if ui
+                    .add_sized(
+                        [100.0, 16.0],
+                        egui::Slider::new(&mut vol, 0.0..=100.0).show_value(false),
+                    )
+                    .changed()
+                {
+                    self.media_view.set_volume(vol as f64);
+                }
+            });
         });
     }
 
@@ -1454,8 +1632,41 @@ impl ReaderApp {
                 if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
                     self.media_view.seek_rel(-5.0);
                 }
+                if ctx.input(|i| i.key_pressed(egui::Key::J)) {
+                    self.media_view.seek_rel(-10.0);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::L)) {
+                    self.media_view.seek_rel(10.0);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                    self.media_view.adjust_volume(5.0);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                    self.media_view.adjust_volume(-5.0);
+                }
+                for (key, speed) in [
+                    (egui::Key::Num1, 0.5),
+                    (egui::Key::Num2, 1.0),
+                    (egui::Key::Num3, 1.5),
+                    (egui::Key::Num4, 2.0),
+                ] {
+                    if ctx.input(|i| i.key_pressed(key)) {
+                        self.media_view.set_speed(speed);
+                    }
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::V)) {
+                    self.media_view.cycle_sub();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::F)) {
+                    self.toggle_fullscreen(ctx);
+                }
                 if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    self.current_view = View::Library;
+                    let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                    if fullscreen {
+                        self.toggle_fullscreen(ctx);
+                    } else {
+                        self.current_view = View::Library;
+                    }
                 }
             }
             _ => {}
