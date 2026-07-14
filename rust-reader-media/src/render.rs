@@ -60,6 +60,13 @@ impl RenderContext {
             extra_exts: std::ptr::null(),
         };
         let api = c_api_type();
+        // Advanced control ON: it makes mpv_render_context_update() a hard
+        // requirement after each update callback, but it also makes
+        // BLOCK_FOR_TARGET_TIME=0 + report_swap timing effective and enables
+        // direct rendering. The app guarantees sustained update() calls via
+        // the layer's main-thread drive selector (see mpv_view.rs); letting
+        // callbacks go unanswered wedges the vo core, after which free,
+        // commands and terminate_destroy all hang.
         let advanced: i32 = 1;
         let mut params = [
             mpv::mpv_render_param {
@@ -118,14 +125,15 @@ impl RenderContext {
         self.update_cb = Some(unsafe { Box::from_raw(ptr) });
     }
 
-    /// Must be called on the render thread after each update callback fired
-    /// (a hard requirement because we create the context with
-    /// MPV_RENDER_PARAM_ADVANCED_CONTROL=1; skipping it can stall the core).
-    /// Returns the raw mpv_render_update_flag bitset.
+    /// Must be called once after each update callback fired, on a thread with
+    /// the GL context current (a hard requirement because we create the
+    /// context with MPV_RENDER_PARAM_ADVANCED_CONTROL=1 — letting callbacks
+    /// go unanswered wedges the vo core, and free/commands/terminate then
+    /// hang). Returns the raw mpv_render_update_flag bitset.
     pub fn update(&self) -> u64 {
-        // SAFETY: self.ctx is valid; the caller guarantees this runs on the
-        // render thread with a current GL context and not inside the update
-        // callback itself.
+        // SAFETY: self.ctx is valid; the caller guarantees a current GL
+        // context on this thread and serialization with other mpv_render_*
+        // calls (MpvNativeView's mutex).
         unsafe { mpv::mpv_render_context_update(self.ctx) }
     }
 

@@ -67,7 +67,11 @@ impl MpvPlayer {
         // SAFETY: handle is initialized; all property names are valid
         // NUL-terminated static strings that outlive each call.
         unsafe {
-            let level = cstring("warn");
+            let level = if std::env::var_os("RUST_READER_MPV_LOG").is_some() {
+                cstring("debug")
+            } else {
+                cstring("warn")
+            };
             mpv::mpv_request_log_messages(handle, level.as_ptr());
             // Property observation: reply_userdata doubles as the property id.
             mpv::mpv_observe_property(
@@ -164,6 +168,12 @@ impl MpvPlayer {
         self.command(&["loadfile", s])
     }
 
+    /// Stops playback and unloads the file; the vo core leaves its render
+    /// wait, which lets a following mpv_render_context_free return promptly.
+    pub fn stop(&self) -> Result<(), MediaError> {
+        self.command(&["stop"])
+    }
+
     pub fn cycle_pause(&self) -> Result<(), MediaError> {
         self.command(&["cycle", "pause"])
     }
@@ -240,6 +250,25 @@ fn event_loop(
         let event_id = unsafe { (*event).event_id };
         match event_id {
             mpv::mpv_event_id_MPV_EVENT_SHUTDOWN => break,
+            mpv::mpv_event_id_MPV_EVENT_LOG_MESSAGE => {
+                // Temporary diagnostics for the render-context free hang.
+                if std::env::var_os("RUST_READER_MPV_LOG").is_some() {
+                    // SAFETY: for MPV_EVENT_LOG_MESSAGE, data points to a
+                    // valid mpv_event_log_message owned by mpv.
+                    unsafe {
+                        let m = (*event).data as *mut mpv::mpv_event_log_message;
+                        if !m.is_null() {
+                            let text = (*m).text;
+                            if !text.is_null() {
+                                eprint!(
+                                    "[mpv] {}",
+                                    std::ffi::CStr::from_ptr(text).to_string_lossy()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
             mpv::mpv_event_id_MPV_EVENT_FILE_LOADED => {
                 if let Ok(mut s) = state.lock() {
                     s.loaded = true;

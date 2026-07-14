@@ -20,6 +20,10 @@ impl MpvPlayer {
         Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
     }
 
+    pub fn stop(&self) -> Result<(), MediaError> {
+        Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
+    }
+
     pub fn cycle_pause(&self) -> Result<(), MediaError> {
         Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
     }
