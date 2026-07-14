@@ -4572,6 +4572,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-reader-media"
+version = "0.1.0"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "rust-reader-parser"
 version = "0.1.0"
 dependencies = [

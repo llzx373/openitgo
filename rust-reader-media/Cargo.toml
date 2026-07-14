@@ -1,0 +1,9 @@
+[package]
+name = "rust-reader-media"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "libmpv playback core for rustReader"
+
+[dependencies]
+thiserror = { workspace = true }
