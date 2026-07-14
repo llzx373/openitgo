@@ -293,7 +293,7 @@ function layout() {{
     columnContent.style.columnGap = '0';
     columnContent.style.height = 'auto';
     columnContent.style.minHeight = '100%';
-    columnView.style.transform = 'none';
+    columnContent.style.transform = 'none';
     paginatorState.totalPages = 1;
     paginatorState.currentSpread = 0;
     paginatorState.pageWidth = 0;
@@ -363,14 +363,14 @@ function recomputeTotalPages() {{
 
 function applyTransform() {{
   if (isScrollMode()) {{
-    columnView.style.transform = 'none';
+    columnContent.style.transform = 'none';
   }} else if (isDoubleMode()) {{
     const offset = paginatorState.currentSpread * paginatorState.viewShift;
-    columnView.style.transform = `translateX(-${{offset}}px)`;
+    columnContent.style.transform = `translateX(-${{offset}}px)`;
   }} else {{
     const marginH = getMarginH();
     const offset = paginatorState.currentSpread * paginatorState.pageWidth;
-    columnView.style.transform = `translateX(${{-offset + marginH}}px)`;
+    columnContent.style.transform = `translateX(${{-offset + marginH}}px)`;
   }}
 }}
 
@@ -1262,8 +1262,34 @@ mod tests {
             "double-page transform should use currentSpread * viewShift"
         );
         assert!(
-            double_transform.contains("columnView.style.transform = `translateX(-${offset}px)`;"),
+            double_transform
+                .contains("columnContent.style.transform = `translateX(-${offset}px)`;"),
             "double-page transform should translateX by negative offset"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_transform_targets_content_not_view() {
+        // #column-view 是 click/wheel 事件监听容器（onClick 还依赖它的
+        // getBoundingClientRect 划分左右翻页区）。对它做 translateX 会把事件
+        // 接收区域整体移出视口，表现为每章第二页起无法翻页；位移必须作用于
+        // 内层 #column-content。
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(
+            !html.contains("columnView.style.transform"),
+            "transform must never be applied to #column-view (the click/wheel event container)"
+        );
+        let transform_body = html
+            .split("function applyTransform()")
+            .nth(1)
+            .expect("applyTransform not found")
+            .split("function goToSpread")
+            .next()
+            .unwrap();
+        assert!(
+            transform_body.contains("columnContent.style.transform"),
+            "applyTransform should translate the inner #column-content"
         );
     }
 
