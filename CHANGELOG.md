@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Colorful macOS-style app icon and runtime window icon.
 - Phosphor icon font for the reader toolbar.
 - Toolbar display mode setting: icon + text, icon only, or text only.
+- VS Code 调试/任务配置：新增 `.vscode/launch.json`（Debug / Release / Attach）与 `.vscode/tasks.json`，与 Zed 配置对齐，方便在 VS Code 中运行、调试与打包。
 
 ### Changed
 
@@ -50,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 电子书：修复单页/双页 CSS 模式类名，使 `body.paginated` / `body.double` 选择器正确生效。
 - 电子书：修复打开 EPUB 后 WebView 重复 reload 的问题。清理 EPUB 章节 HTML 中的 `<base>` / `<script>` / `<link>` 并禁用 `<a>` 导航；JS 拦截点击与 `beforeunload`；对未知 `ebook://` 资源请求返回空 200 而非 404。
 - 电子书：修复单页/双页模式下横向翻页逐渐出现的左侧漏边问题，彻底移除 `column-width` 横向列布局。
+- 电子书：分页位移 `transform` 改作用于内层 `#column-content`，不再移动作为 click/wheel 事件监听容器的 `#column-view`，修复每章第一页之后无法点击/滚轮翻页的问题。
+- 电子书：布局缓存 key 增加 `--font` 变量，避免字体变更后仍使用旧排版结果。
+- 电子书：加载章节时清理超出相邻窗口的预加载 `<template>` 节点，避免 DOM 无限增长。
+- 电子书：CSS columns 分页 review 修复——`showError` 使用独立 `#ebook-error-layer` 覆盖层并在渲染成功后隐藏；连续滚动模式在 `applySettings` 中以 `maxScroll()` 作为分母保留滚动比例；目录目标解析区分 fragment/path，对特殊 id 使用 `CSS.escape()`，Rust 侧对 fragment 做 URL 解码；`jump_to_toc` 在注入 JS 前同步 `current_chapter`。
 - macOS: 修复应用未运行时通过 Finder / Dock 打开压缩包报 “rustReader cannot open files in the “Comic Archive” format” 的错误。通过 swizzle `-[NSApplication setDelegate:]` 在 winit 设置 delegate 前注入 `application:openURLs:` / `application:openFiles:` / `application:openFile:` 实现。
 - macOS: 修复应用图标在 Dock/Finder 中显示为带白色方角的问题。`generate_icons.py` 现在会使用 macOS 圆角遮罩生成带透明四角的 PNG 与 `.icns`。
 
