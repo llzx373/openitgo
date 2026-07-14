@@ -16,6 +16,7 @@ texpresso = "2.0"
 pdf-render = "1.0.0-beta.9"
 rfd = "0.15"
 rust-reader-core = { path = "../rust-reader-core" }
+rust-reader-media = { path = "../rust-reader-media" }
 rust-reader-parser = { path = "../rust-reader-parser" }
 rust-reader-storage = { path = "../rust-reader-storage" }
 time = "0.3"
@@ -31,6 +32,8 @@ core-foundation = "0.10"
 core-graphics = "0.24"
 foreign-types = "0.5"
 objc = "0.2" # NSApplication delegate for Dock open-file events
+libc = "0.2"
+cgl = "0.3"
 
 [dev-dependencies]
 tempfile = "3.14"

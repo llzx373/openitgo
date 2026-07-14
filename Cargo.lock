@@ -924,6 +924,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "cgl"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ced0551234e87afee12411d535648dd89d2e7f34c78b753395567aff3d447ff"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4544,6 +4553,7 @@ name = "rust-reader-app"
 version = "0.1.0"
 dependencies = [
  "bcdec_rs",
+ "cgl",
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
  "crossbeam-channel",
@@ -4552,11 +4562,13 @@ dependencies = [
  "egui-phosphor",
  "foreign-types",
  "image",
+ "libc",
  "objc",
  "pdf-render",
  "percent-encoding",
  "rfd",
  "rust-reader-core",
+ "rust-reader-media",
  "rust-reader-parser",
  "rust-reader-storage",
  "serde",
@@ -4581,6 +4593,8 @@ dependencies = [
 name = "rust-reader-media"
 version = "0.1.0"
 dependencies = [
+ "cgl",
+ "libc",
  "libmpv-sys",
  "thiserror 1.0.69",
 ]
