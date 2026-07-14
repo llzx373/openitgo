@@ -40,10 +40,14 @@
 ```bash
 brew install mpv
 ls "$(brew --prefix mpv)/lib/" | grep libmpv        # 期望看到 libmpv.2.dylib
-PKG_CONFIG_PATH="$(brew --prefix mpv)/lib/pkgconfig" pkg-config --modversion libmpv
+otool -D "$(brew --prefix mpv)/lib/libmpv.2.dylib"  # install name 应为绝对路径
 ```
 
-Expected: 输出 mpv 的 client API 版本（如 `2.3`）。若 `libmpv.pc` 不存在，停下并与用户确认 mpv 安装方式。
+Expected: `libmpv.2.dylib` 存在，install name 为绝对路径（开发期可直接加载）。
+
+注意：brew 的 mpv formula（实测 0.41.0_6）**不提供 `libmpv.pc`**，不要用 pkg-config 验证。
+同时 `/opt/homebrew/lib` 不在 Rust 默认链接搜索路径，`ld` 直接 `-lmpv` 会报
+`library 'mpv' not found`——Task 5 用 build.rs 注入 link-search 解决。
 
 - [ ] **Step 2: workspace 加入新成员**
 
@@ -591,6 +595,7 @@ git commit -m "feat(media): add track parsing and PlayerState types"
 
 **Files:**
 - Modify: `rust-reader-media/Cargo.toml`
+- Create: `rust-reader-media/build.rs`
 - Create: `rust-reader-media/src/player.rs`
 - Create: `rust-reader-media/examples/probe.rs`
 - Modify: `rust-reader-media/src/lib.rs`
@@ -610,14 +615,41 @@ git commit -m "feat(media): add track parsing and PlayerState types"
     `pub(crate) fn handle(&self) -> *mut libmpv_sys::mpv_handle`
   - `PlayerState` 由事件泵线程持续更新；`time-pos`/`duration` 变化时调用 `repaint` 回调
 
-- [ ] **Step 1: `rust-reader-media/Cargo.toml` 追加依赖**
+- [ ] **Step 1: `rust-reader-media/Cargo.toml` 追加依赖 + 新建 `rust-reader-media/build.rs`**
 
 ```toml
 [target.'cfg(target_os = "macos")'.dependencies]
 libmpv-sys = "3.1"
 ```
 
-（libmpv-sys 走 pkg-config；Task 1 已验证 `libmpv.pc` 存在。非 macOS 下不链接 libmpv，player 模块整体 `#[cfg(target_os = "macos")]`。）
+libmpv-sys 3.1 使用预生成的 bindings + `cargo:rustc-link-lib=mpv`，**不走 pkg-config**
+（bindgen feature 才需要头文件与 pkg-config，本项目不开）。但 macOS 上
+`/opt/homebrew/lib` 不在默认链接搜索路径，直接链接会报 `ld: library 'mpv' not found`，
+因此新建 `rust-reader-media/build.rs`：
+
+```rust
+//! Inject the Homebrew libmpv link search path on macOS.
+//!
+//! libmpv-sys emits `cargo:rustc-link-lib=mpv` but Homebrew's /opt/homebrew/lib
+//! (or /usr/local/lib on Intel) is not in the default linker search path.
+
+fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+    for dir in ["/opt/homebrew/lib", "/usr/local/lib"] {
+        if std::path::Path::new(dir).join("libmpv.dylib").exists() {
+            println!("cargo:rustc-link-search=native={dir}");
+            return;
+        }
+    }
+    println!(
+        "cargo:warning=libmpv.dylib not found in /opt/homebrew/lib or /usr/local/lib; install mpv via Homebrew"
+    );
+}
+```
+
+（非 macOS 下不链接 libmpv，player 模块整体 `#[cfg(target_os = "macos")]`。）
 
 - [ ] **Step 2: 实现 `rust-reader-media/src/player.rs`**
 
