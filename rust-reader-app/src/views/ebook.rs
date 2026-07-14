@@ -21,13 +21,14 @@ impl EbookView {
     #[allow(dead_code)]
     pub fn open(
         &mut self,
+        ctx: &egui::Context,
         parent: &(impl wry::raw_window_handle::HasWindowHandle
               + wry::raw_window_handle::HasDisplayHandle),
         bounds: Rect,
         ebook: Ebook,
         settings: &EbookSettings,
     ) -> Result<(), String> {
-        let renderer = EbookRenderer::new(parent, bounds, ebook.clone(), settings.clone())?;
+        let renderer = EbookRenderer::new(parent, bounds, ebook.clone(), settings.clone(), ctx)?;
         self.open = Some(OpenEbook {
             ebook,
             renderer,

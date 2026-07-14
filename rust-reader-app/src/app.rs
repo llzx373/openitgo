@@ -1761,10 +1761,13 @@ impl ReaderApp {
                         position: wry::dpi::LogicalPosition::new(screen.min.x, screen.min.y).into(),
                         size: wry::dpi::LogicalSize::new(screen.width(), screen.height()).into(),
                     };
-                    match self
-                        .ebook_view
-                        .open(frame, bounds, ebook.clone(), &self.settings.ebook)
-                    {
+                    match self.ebook_view.open(
+                        ctx,
+                        frame,
+                        bounds,
+                        ebook.clone(),
+                        &self.settings.ebook,
+                    ) {
                         Ok(()) => {
                             if let Some(h) = self
                                 .history

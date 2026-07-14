@@ -81,6 +81,7 @@ impl EbookRenderer {
         bounds: Rect,
         ebook: Ebook,
         settings: EbookSettings,
+        ctx: &egui::Context,
     ) -> Result<Self, String> {
         let state = Arc::new(Mutex::new(RendererState {
             ebook,
@@ -92,6 +93,7 @@ impl EbookRenderer {
         }));
 
         let ipc_state = state.clone();
+        let repaint = ctx.clone();
         let webview = WebViewBuilder::new()
             .with_bounds(bounds)
             .with_custom_protocol("ebook".to_string(), {
@@ -101,7 +103,7 @@ impl EbookRenderer {
             .with_ipc_handler(move |request| {
                 let body = request.body();
                 if let Ok(msg) = serde_json::from_str::<JsToRust>(body) {
-                    handle_ipc_message(msg, &ipc_state);
+                    handle_ipc_message(msg, &ipc_state, &repaint);
                 }
             })
             .with_url("ebook://reader")
@@ -235,7 +237,7 @@ impl EbookRenderer {
     }
 }
 
-fn handle_ipc_message(msg: JsToRust, state: &Arc<Mutex<RendererState>>) {
+fn handle_ipc_message(msg: JsToRust, state: &Arc<Mutex<RendererState>>, repaint: &egui::Context) {
     if msg.kind.as_str() == "error" {
         if let Some(err) = msg.error {
             eprintln!("EbookRenderer: JS error: {err}");
@@ -263,6 +265,10 @@ fn handle_ipc_message(msg: JsToRust, state: &Arc<Mutex<RendererState>>) {
             if let Some(spread) = msg.spread {
                 state.current_spread = spread.min(state.total_spreads.saturating_sub(1));
             }
+            // The webview's position updates arrive asynchronously; the egui
+            // event loop is otherwise idle (ControlFlow::Wait), so ask it to
+            // repaint so the toolbar/statusbar see the new values immediately.
+            repaint.request_repaint();
         }
     }
 }
@@ -445,7 +451,7 @@ mod tests {
             r#"{"type":"position","chapter":2,"spread":5,"char_offset":120,"total_spreads":10}"#,
         )
         .unwrap();
-        handle_ipc_message(msg, &state);
+        handle_ipc_message(msg, &state, &egui::Context::default());
         let s = state.lock().unwrap();
         assert_eq!(s.current_chapter, 2);
         assert_eq!(s.current_spread, 5);
@@ -479,7 +485,7 @@ mod tests {
         }));
         let msg: JsToRust =
             serde_json::from_str(r#"{"type":"position","spread":15,"total_spreads":10}"#).unwrap();
-        handle_ipc_message(msg, &state);
+        handle_ipc_message(msg, &state, &egui::Context::default());
         let s = state.lock().unwrap();
         assert_eq!(s.current_spread, 9);
         assert_eq!(s.total_spreads, 10);
@@ -511,10 +517,10 @@ mod tests {
         }));
         let msg: JsToRust =
             serde_json::from_str(r#"{"type":"position","spread":5,"total_spreads":10}"#).unwrap();
-        handle_ipc_message(msg, &state);
+        handle_ipc_message(msg, &state, &egui::Context::default());
         let msg: JsToRust =
             serde_json::from_str(r#"{"type":"position","total_spreads":3}"#).unwrap();
-        handle_ipc_message(msg, &state);
+        handle_ipc_message(msg, &state, &egui::Context::default());
         let s = state.lock().unwrap();
         assert_eq!(s.current_spread, 2);
         assert_eq!(s.total_spreads, 3);
@@ -549,7 +555,7 @@ mod tests {
             r#"{"type":"position","chapter":1,"spread":4,"char_offset":200,"total_spreads":12}"#,
         )
         .unwrap();
-        handle_ipc_message(msg, &state);
+        handle_ipc_message(msg, &state, &egui::Context::default());
         let s = state.lock().unwrap();
         assert_eq!(s.current_chapter, 1);
         assert_eq!(s.current_spread, 4);
