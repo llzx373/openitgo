@@ -78,7 +78,7 @@ body.scroll #column-content {{
   width: auto;
   padding: var(--margin-v) var(--margin-h);
 }}
-#column-view.column-animate {{
+#column-content.column-animate {{
   transition: transform 0.25s ease;
 }}
 .ebook-search-highlight {{
@@ -213,7 +213,7 @@ function isDoubleMode() {{ return document.body.classList.contains('double'); }}
 let animationTimer = null;
 
 function enableAnimation() {{
-  if (columnView) columnView.classList.add('column-animate');
+  if (columnContent) columnContent.classList.add('column-animate');
 }}
 
 function disableAnimation() {{
@@ -221,7 +221,7 @@ function disableAnimation() {{
     clearTimeout(animationTimer);
     animationTimer = null;
   }}
-  if (columnView) columnView.classList.remove('column-animate');
+  if (columnContent) columnContent.classList.remove('column-animate');
 }}
 
 function scheduleDisableAnimation() {{
@@ -1280,6 +1280,10 @@ mod tests {
             !html.contains("columnView.style.transform"),
             "transform must never be applied to #column-view (the click/wheel event container)"
         );
+        assert!(
+            !html.contains("columnView.classList"),
+            "the column-animate class must be toggled on #column-content, not #column-view"
+        );
         let transform_body = html
             .split("function applyTransform()")
             .nth(1)
@@ -1609,7 +1613,7 @@ mod tests {
         use rust_reader_storage::models::EbookSettings;
         let html = reader_html(&EbookSettings::default(), 1);
         assert!(
-            html.contains("#column-view.column-animate {"),
+            html.contains("#column-content.column-animate {"),
             "column paginator should define a CSS class for animated transforms"
         );
         assert!(
@@ -1633,12 +1637,12 @@ mod tests {
             "paginator should expose scheduleDisableAnimation"
         );
         assert!(
-            html.contains("columnView.classList.add('column-animate')"),
-            "enableAnimation should add the animate class"
+            html.contains("columnContent.classList.add('column-animate')"),
+            "enableAnimation should add the animate class to #column-content (the transformed element)"
         );
         assert!(
-            html.contains("columnView.classList.remove('column-animate')"),
-            "disableAnimation should remove the animate class"
+            html.contains("columnContent.classList.remove('column-animate')"),
+            "disableAnimation should remove the animate class from #column-content"
         );
         assert!(
             html.contains("animationTimer = setTimeout"),
