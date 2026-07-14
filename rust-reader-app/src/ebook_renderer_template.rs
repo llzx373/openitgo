@@ -135,6 +135,7 @@ function makeLayoutKey() {{
   const fontSize = parseFloat(getComputedStyle(root).getPropertyValue('--size')) || 16;
   const lineHeight = parseFloat(getComputedStyle(root).getPropertyValue('--line')) || 1.6;
   const gutter = parseFloat(getComputedStyle(root).getPropertyValue('--column-gutter')) || 40;
+  const font = getComputedStyle(root).getPropertyValue('--font').trim();
   const mode = isScrollMode() ? 'scroll' : (isDoubleMode() ? 'double' : 'single');
   return [
     currentChapter,
@@ -145,6 +146,7 @@ function makeLayoutKey() {{
     marginV,
     fontSize,
     lineHeight,
+    font,
     mode,
     gutter
   ].join('|');
@@ -715,9 +717,27 @@ async function preloadChapter(index) {{
   }}
 }}
 
+// Remove stale preloaded chapter templates, keeping only the adjacent chapters
+// around keepCenter so the DOM does not grow unbounded.
+function cleanupPreloaded(keepCenter) {{
+  if (!Number.isFinite(keepCenter)) return;
+  const minIndex = Math.max(0, keepCenter - 1);
+  const maxIndex = Math.min(window.ebookChapterCount - 1, keepCenter + 1);
+  const templates = document.querySelectorAll('template[id^="preload-chapter-"]');
+  for (const template of templates) {{
+    const match = template.id.match(/^preload-chapter-(\d+)$/);
+    if (!match) continue;
+    const index = parseInt(match[1], 10);
+    if (index < minIndex || index > maxIndex) {{
+      template.remove();
+    }}
+  }}
+}}
+
 async function loadChapter(index, charOffset) {{
   index = index ?? 0;
   currentChapter = index;
+  cleanupPreloaded(currentChapter);
   // A new chapter always needs a fresh layout.
   layoutCache.key = null;
   try {{
@@ -2335,6 +2355,95 @@ mod tests {
         assert!(
             !fn_body.contains("columnContent.innerHTML = html"),
             "preloadChapter must not replace the visible chapter content"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_layout_key_includes_font() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("function makeLayoutKey()")
+            .nth(1)
+            .expect("makeLayoutKey not found")
+            .split("function escapeHtml")
+            .next()
+            .expect("makeLayoutKey end not found");
+        assert!(
+            fn_body.contains("getPropertyValue('--font')"),
+            "makeLayoutKey should read the --font CSS variable"
+        );
+        assert!(
+            fn_body.contains("const font"),
+            "makeLayoutKey should store the font value"
+        );
+        assert!(
+            fn_body.contains("font,"),
+            "makeLayoutKey should include the font in the returned key array"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_preload_cleanup_exists() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 5);
+        assert!(
+            html.contains("function cleanupPreloaded(keepCenter)"),
+            "template should expose cleanupPreloaded"
+        );
+        let fn_body = html
+            .split("function cleanupPreloaded(keepCenter)")
+            .nth(1)
+            .expect("cleanupPreloaded not found")
+            .split("async function loadChapter")
+            .next()
+            .expect("cleanupPreloaded end not found");
+        assert!(
+            fn_body.contains("template[id^=\"preload-chapter-\"]"),
+            "cleanupPreloaded should select preloaded chapter templates"
+        );
+        assert!(
+            fn_body.contains("keepCenter - 1"),
+            "cleanupPreloaded should keep the previous chapter"
+        );
+        assert!(
+            fn_body.contains("keepCenter + 1"),
+            "cleanupPreloaded should keep the next chapter"
+        );
+        assert!(
+            fn_body.contains("template.remove();"),
+            "cleanupPreloaded should remove stale templates"
+        );
+        assert!(
+            fn_body.contains("Number.isFinite(keepCenter)"),
+            "cleanupPreloaded should guard keepCenter as a finite number"
+        );
+        assert!(
+            fn_body.contains("window.ebookChapterCount - 1"),
+            "cleanupPreloaded should respect the chapter count bounds"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_load_chapter_calls_cleanup() {
+        use rust_reader_storage::models::EbookSettings;
+        let html = reader_html(&EbookSettings::default(), 1);
+        let fn_body = html
+            .split("async function loadChapter(index, charOffset)")
+            .nth(1)
+            .expect("loadChapter not found")
+            .split("function onWheel")
+            .next()
+            .expect("loadChapter end not found");
+        let assign_pos = fn_body
+            .find("currentChapter = index;")
+            .expect("currentChapter assignment not found in loadChapter");
+        let cleanup_pos = fn_body
+            .find("cleanupPreloaded(currentChapter);")
+            .expect("cleanupPreloaded call not found in loadChapter");
+        assert!(
+            assign_pos < cleanup_pos,
+            "loadChapter must set currentChapter before calling cleanupPreloaded"
         );
     }
 }
