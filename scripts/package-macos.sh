@@ -2,6 +2,10 @@
 #
 # Package rustReader as a macOS .app bundle.
 #
+# Requires libmpv from Homebrew (`brew install mpv`); the library and its
+# dependencies are bundled into Contents/Frameworks, so the resulting .app
+# does not need a Homebrew mpv installation.
+#
 # Usage:
 #   scripts/package-macos.sh [output_dir]
 #
@@ -22,6 +26,7 @@ app_bundle="${output_dir}/${app_name}.app"
 contents_dir="${app_bundle}/Contents"
 macos_dir="${contents_dir}/MacOS"
 resources_dir="${contents_dir}/Resources"
+frameworks_dir="${contents_dir}/Frameworks"
 
 echo "Building release binary..."
 cd "${project_root}"
@@ -51,7 +56,69 @@ sed \
 
 plutil -lint "${info_plist}" >/dev/null
 
-echo "Signing app bundle with ad-hoc signature..."
+# Bundle libmpv and its Homebrew dependencies into Contents/Frameworks and
+# rewrite their install names to @rpath, so the app runs on machines without
+# a Homebrew mpv installation.
+bundle_mpv() {
+    mkdir -p "${frameworks_dir}"
+
+    echo "Bundling libmpv and its Homebrew dependencies..."
+    local mpv_prefix libmpv
+    mpv_prefix="$(brew --prefix mpv)"
+    libmpv="$(ls "${mpv_prefix}"/lib/libmpv.*.dylib 2>/dev/null | head -1 || true)"
+    if [[ -z "${libmpv}" ]]; then
+        echo "Error: libmpv not found. Run: brew install mpv" >&2
+        exit 1
+    fi
+
+    # Recursively collect Homebrew dylib dependencies (excluding system libs).
+    collect_deps() {
+        local lib="$1"
+        otool -L "${lib}" | awk 'NR>1 {print $1}' | while read -r dep; do
+            case "${dep}" in
+                /opt/homebrew/*|/usr/local/*)
+                    if [[ ! -f "${frameworks_dir}/$(basename "${dep}")" ]]; then
+                        cp "${dep}" "${frameworks_dir}/"
+                        collect_deps "${dep}"
+                    fi
+                    ;;
+            esac
+        done
+    }
+
+    cp "${libmpv}" "${frameworks_dir}/"
+    collect_deps "${libmpv}"
+
+    # Rewrite install names to @rpath and add rpath to the executable.
+    local dylib name
+    for dylib in "${frameworks_dir}"/*.dylib; do
+        name="$(basename "${dylib}")"
+        install_name_tool -id "@rpath/${name}" "${dylib}" 2>/dev/null || true
+        otool -L "${dylib}" | awk 'NR>1 {print $1}' | while read -r dep; do
+            case "${dep}" in
+                /opt/homebrew/*|/usr/local/*)
+                    install_name_tool -change "${dep}" "@rpath/$(basename "${dep}")" "${dylib}" || true
+                    ;;
+            esac
+        done
+    done
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "${macos_dir}/${app_name}"
+    # The main binary links libmpv directly; rewrite that reference too.
+    otool -L "${macos_dir}/${app_name}" | awk 'NR>1 {print $1}' | while read -r dep; do
+        case "${dep}" in
+            /opt/homebrew/*|/usr/local/*)
+                install_name_tool -change "${dep}" "@rpath/$(basename "${dep}")" "${macos_dir}/${app_name}" || true
+                ;;
+        esac
+    done
+}
+
+bundle_mpv
+
+echo "Signing bundled dylibs and app bundle..."
+for dylib in "${frameworks_dir}"/*.dylib; do
+    codesign --force --sign - "${dylib}" >/dev/null
+done
 codesign --force --deep --sign - "${app_bundle}" >/dev/null
 
 echo "Done: ${app_bundle}"

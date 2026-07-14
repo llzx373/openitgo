@@ -4,13 +4,16 @@
 
 `rustReader` is a desktop comic/manga reader built with Rust, `eframe`, `egui`, and `wgpu`.
 It supports ZIP/CBZ, RAR/CBR, PDF, and folders of images, plus EPUB, TXT, MOBI/AZW3, and
-Markdown ebooks through an embedded `wry` webview renderer.
+Markdown ebooks through an embedded `wry` webview renderer, and plays video/audio files
+through an embedded `libmpv` backend.
 
 ## Repository Layout
 
 - `rust-reader-core/` — shared models, reading-state machine, and layout math.
 - `rust-reader-parser/` — archive/folder/PDF parsers and comic ID generation.
 - `rust-reader-storage/` — JSON persistence for settings, library, history, and bookmarks.
+- `rust-reader-media/` — libmpv wrapper: commands, event pump, property observation,
+  OpenGL render context, and headless cover generation.
 - `rust-reader-app/` — egui application, cache, loader, and UI views.
 - `docs/` — audit reports, bug notes, and implementation plans.
 
@@ -24,6 +27,10 @@ cargo check --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+Media playback requires libmpv from Homebrew (`brew install mpv`) to build
+`rust-reader-media` and to run the app from source; packaged `.app` bundles
+already embed it.
 
 ## Coding Conventions
 
@@ -64,6 +71,14 @@ cargo clippy --workspace --all-targets -- -D warnings
   resize: font/size/margin/theme changes re-layout and preserve the approximate
   character offset, while window resize debounces and preserves the scroll ratio
   in scroll mode or the current spread in paginated modes.
+- **Media playback** renders mpv video through a native `CAOpenGLLayer` overlay
+  (`rust-reader-app/src/platform/macos/mpv_view.rs`); the egui control bars are
+  repainted by the mpv event-pump thread calling `egui::Context::request_repaint()`.
+  Playback progress is persisted in `HistoryEntry.char_offset` (milliseconds).
+- **Packaging**: `scripts/package-macos.sh` runs `bundle_mpv` before signing,
+  copying libmpv and its Homebrew dependencies into `Contents/Frameworks` and
+  rewriting their install names to `@rpath`, so the bundled app runs without a
+  Homebrew mpv installation.
 
 ## Commits
 

@@ -18,6 +18,7 @@
 - `.cbr` / `.rar`
 - `.pdf`
 - `.epub`、`.txt`、`.mobi` / `.azw3`、`.md`（电子书）
+- 视频/音频播放（内嵌 libmpv）：`.mp4` / `.mkv` / `.webm` / `.avi` / `.mov` 等视频格式，`.mp3` / `.flac` / `.aac` / `.m4a` / `.ogg` / `.wav` / `.opus` 等音频格式
 
 ### 电子书阅读
 - 基于 `wry` 内嵌 WebView 渲染，支持单页、双页、连续滚动三种布局
@@ -82,6 +83,17 @@
 | Esc | 退出全屏，或返回书架 |
 
 > 以上快捷键可在设置中自定义。
+
+## 前置依赖
+
+媒体播放功能依赖 libmpv，通过 Homebrew 安装：
+
+```bash
+brew install mpv
+```
+
+- 从源码构建与运行的机器需要安装，否则 `rust-reader-media` 无法链接。
+- `scripts/package-macos.sh` 打包出的 `.app` 已内嵌 libmpv 及其依赖，终端用户无需安装 mpv。
 
 ## 运行
 
