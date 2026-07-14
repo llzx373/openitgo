@@ -698,7 +698,6 @@ pub mod macos {
                 Err("媒体播放暂仅支持 macOS".to_string())
             }
             pub fn set_bounds(&self, _bounds: wry::Rect) {}
-            pub fn remove_from_superview(&self) {}
         }
     }
 }

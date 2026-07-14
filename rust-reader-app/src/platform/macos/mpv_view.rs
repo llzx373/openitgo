@@ -28,9 +28,6 @@
 // objc 0.2's sel_impl macro carries a stale `cfg(feature = "cargo-clippy")`;
 // same allow as platform.rs's dock_open module.
 #![allow(unexpected_cfgs)]
-// The MediaView consumer lands in Task 7; until then the bin target (main.rs)
-// sees this API as unused (the lib target exposes it via `pub mod platform`).
-#![allow(dead_code)]
 
 // `msg_send![this, bounds]` returns CGRect through plain objc_msgSend; the
 // arm64 ABI handles struct returns uniformly, x86_64 would need
@@ -416,13 +413,6 @@ impl MpvNativeView {
         // setter that copies the rect.
         unsafe {
             let () = msg_send![self.view, setFrame: make_frame(&bounds)];
-        }
-    }
-
-    pub fn remove_from_superview(&self) {
-        // SAFETY: self.view is a live NSView owned by us.
-        unsafe {
-            let () = msg_send![self.view, removeFromSuperview];
         }
     }
 }

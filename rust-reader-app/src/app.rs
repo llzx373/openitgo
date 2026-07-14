@@ -6,6 +6,7 @@ use crate::views::settings::SettingsView;
 use crate::views::{
     ebook::EbookView,
     library::{LibraryCallbacks, LibraryView},
+    media::MediaView,
     reader::ReaderView,
 };
 use egui_phosphor::regular;
@@ -91,6 +92,7 @@ pub struct ReaderApp {
     pub library_view: LibraryView,
     pub reader_view: ReaderView,
     pub ebook_view: EbookView,
+    pub media_view: MediaView,
     pub settings_view: SettingsView,
     pub store: JsonStore,
     pub history: History,
@@ -100,6 +102,7 @@ pub struct ReaderApp {
     pub cover_loader: PageLoader,
     pub opener: Option<AsyncOpener<Comic>>,
     pub ebook_opener: Option<AsyncOpener<Ebook>>,
+    pub pending_media_open: Option<PathBuf>,
     /// Cover requests in flight: epoch -> (comic_id, comic_path).
     pub pending_covers: HashMap<crate::loader::Epoch, (String, PathBuf)>,
     /// Comic ids for which a cover generation has already been requested.
@@ -140,6 +143,7 @@ impl Default for ReaderApp {
             library_view,
             reader_view: ReaderView::default(),
             ebook_view: EbookView::default(),
+            media_view: MediaView::default(),
             settings_view: SettingsView::default(),
             store,
             history,
@@ -149,6 +153,7 @@ impl Default for ReaderApp {
             cover_loader,
             opener: None,
             ebook_opener: None,
+            pending_media_open: None,
             pending_covers: HashMap::new(),
             requested_cover_ids: HashSet::new(),
             current_theme: Theme::System,
@@ -176,6 +181,9 @@ impl eframe::App for ReaderApp {
             self.record_ebook_history();
             self.ebook_view.close();
         }
+        if matches!(self.last_view, View::Media) && !matches!(self.current_view, View::Media) {
+            self.media_view.close();
+        }
         self.last_view = self.current_view.clone();
 
         if self.settings.theme != self.current_theme {
@@ -198,6 +206,7 @@ impl eframe::App for ReaderApp {
         }
         self.poll_opener(ctx);
         self.poll_ebook_opener(ctx, frame);
+        self.poll_media_open(ctx, frame);
 
         let cache_size_mb = self.settings.cache_size_mb as usize;
         self.page_loader.set_compress(self.settings.compress_images);
@@ -216,6 +225,7 @@ impl eframe::App for ReaderApp {
             View::Library => self.render_library(ctx),
             View::Reader => self.render_reader(ctx),
             View::Ebook => self.render_ebook(ctx),
+            View::Media => self.render_media(ctx),
             View::Settings => self.render_settings(ctx),
             View::Loading(path) => self.render_loading(ctx, path),
         }
@@ -227,6 +237,7 @@ pub enum View {
     Library,
     Reader,
     Ebook,
+    Media,
     Settings,
     Loading(PathBuf),
 }
@@ -565,6 +576,23 @@ impl ReaderApp {
             };
             self.ebook_view.update_bounds(bounds);
             self.ebook_view.ui(ctx, ui);
+        });
+    }
+
+    fn render_media(&mut self, ctx: &egui::Context) {
+        if self.media_view.open.is_none() {
+            self.current_view = View::Library;
+            return;
+        }
+        self.media_view.sync_state();
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let rect = ui.max_rect();
+            let bounds = wry::Rect {
+                position: wry::dpi::LogicalPosition::new(rect.min.x, rect.min.y).into(),
+                size: wry::dpi::LogicalSize::new(rect.width(), rect.height()).into(),
+            };
+            self.media_view.update_bounds(bounds);
+            self.media_view.ui(ctx, ui);
         });
     }
 
@@ -1416,6 +1444,20 @@ impl ReaderApp {
                     self.ebook_view.prev_page();
                 }
             }
+            View::Media => {
+                if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+                    self.media_view.toggle_pause();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                    self.media_view.seek_rel(5.0);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                    self.media_view.seek_rel(-5.0);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.current_view = View::Library;
+                }
+            }
             _ => {}
         }
     }
@@ -1818,8 +1860,36 @@ impl ReaderApp {
     fn open_path(&mut self, path: std::path::PathBuf) {
         if is_ebook_file(&path) {
             self.open_ebook(path);
+        } else if is_media_file(&path) {
+            self.open_media(path);
         } else {
             self.open_comic(path);
+        }
+    }
+
+    fn open_media(&mut self, path: std::path::PathBuf) {
+        timing::log(&format!("open_media {:?}", path));
+        self.pending_media_open = Some(path);
+    }
+
+    fn poll_media_open(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let Some(path) = self.pending_media_open.take() else {
+            return;
+        };
+        let screen = ctx.screen_rect();
+        let bounds = wry::Rect {
+            position: wry::dpi::LogicalPosition::new(screen.min.x, screen.min.y).into(),
+            size: wry::dpi::LogicalSize::new(screen.width(), screen.height()).into(),
+        };
+        match self.media_view.open(ctx, frame, bounds, path, None) {
+            Ok(()) => {
+                self.current_view = View::Media;
+                self.error_message = None;
+            }
+            Err(e) => {
+                self.error_message = Some(format!("无法打开媒体文件: {}", e));
+                self.current_view = View::Library;
+            }
         }
     }
 
@@ -1888,7 +1958,8 @@ impl ReaderApp {
             self.add_folder_to_library(path.clone());
         }
         if let Some(path) = paths.first() {
-            if is_ebook_file(path) || rust_reader_parser::parse(path).is_ok() {
+            if is_ebook_file(path) || is_media_file(path) || rust_reader_parser::parse(path).is_ok()
+            {
                 self.open_path(path.clone());
             }
         }
@@ -2088,6 +2159,7 @@ mod tests {
                 library_view,
                 reader_view: ReaderView::default(),
                 ebook_view: EbookView::default(),
+                media_view: MediaView::default(),
                 settings_view: SettingsView::default(),
                 store,
                 history,
@@ -2097,6 +2169,7 @@ mod tests {
                 cover_loader,
                 opener: None,
                 ebook_opener: None,
+                pending_media_open: None,
                 pending_covers: HashMap::new(),
                 requested_cover_ids: HashSet::new(),
                 current_theme: Theme::System,
