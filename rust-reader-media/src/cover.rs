@@ -7,8 +7,11 @@ use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+/// Final on-disk cover path. Covers are stored as JPEG thumbnails (same as
+/// comic covers), so this uses the `.jpg` extension even though mpv's image
+/// VO produces an intermediate full-size PNG.
 pub fn cover_output_path(covers_dir: &Path, id: &str) -> PathBuf {
-    covers_dir.join(format!("{id}.png"))
+    covers_dir.join(format!("{id}.jpg"))
 }
 
 fn cstring(s: &str) -> CString {
@@ -158,7 +161,7 @@ mod tests {
     #[test]
     fn cover_output_path_uses_covers_dir_and_id() {
         let p = cover_output_path(&PathBuf::from("/data/covers"), "abc123");
-        assert_eq!(p, PathBuf::from("/data/covers/abc123.png"));
+        assert_eq!(p, PathBuf::from("/data/covers/abc123.jpg"));
     }
 
     #[test]

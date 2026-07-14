@@ -74,7 +74,7 @@ impl MediaView {
             if let Some(ms) = open.pending_resume_ms {
                 if let Some(dur) = open.last.duration_ms {
                     if should_resume(ms, dur) {
-                        let _ = open.player.seek_abs_ms(ms);
+                        let _ = open.player.seek_abs_ms(ms, true);
                     }
                     open.pending_resume_ms = None;
                 }
@@ -85,25 +85,26 @@ impl MediaView {
     pub fn ui(&mut self, _ctx: &egui::Context, ui: &mut egui::Ui) {
         let rect = ui.max_rect();
         ui.allocate_space(ui.available_size());
-        let has_video = self.open.as_ref().map(|o| o.last.has_video).unwrap_or(true);
-        if !has_video {
-            // Audio-only file: the native view is parked at zero size (see
-            // render_media), so paint a placeholder here.
-            let painter = ui.painter();
-            painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
-            let title = self
-                .open
-                .as_ref()
-                .map(|o| o.title.clone())
-                .unwrap_or_default();
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                title,
-                egui::FontId::proportional(24.0),
-                egui::Color32::WHITE,
-            );
-        }
+        let Some(open) = self.open.as_ref() else {
+            return;
+        };
+        let overlay = media_overlay(&open.last);
+        let text = match &overlay {
+            MediaOverlay::None => return,
+            // Decode error or audio-only file: the native view is parked at
+            // zero size (see render_media), so paint the layer here.
+            MediaOverlay::Error(msg) => msg.clone(),
+            MediaOverlay::AudioOnly => open.title.clone(),
+        };
+        let painter = ui.painter();
+        painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::FontId::proportional(24.0),
+            egui::Color32::WHITE,
+        );
     }
 
     pub fn toggle_pause(&mut self) {
@@ -122,7 +123,9 @@ impl MediaView {
         if let Some(open) = self.open.as_ref() {
             if let Some(dur) = open.last.duration_ms {
                 let target = clamp_seek((dur as f64 * ratio.clamp(0.0, 1.0)) as i64, dur);
-                let _ = open.player.seek_abs_ms(target);
+                // Interactive slider drags fire this every frame, so use mpv's
+                // keyframe-aligned seek; resume uses an exact seek instead.
+                let _ = open.player.seek_abs_ms(target, false);
             }
         }
     }
@@ -192,6 +195,29 @@ impl MediaView {
     }
 }
 
+/// What the egui central panel paints over the native mpv view. Whenever
+/// this is not `None`, render_media parks the native view at zero size so
+/// the layer painted by `MediaView::ui` stays visible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaOverlay {
+    /// Normal video playback: the native view covers the panel.
+    None,
+    /// Audio-only file: show the title placeholder.
+    AudioOnly,
+    /// Unrecoverable decode error: show the message instead of a black frame.
+    Error(String),
+}
+
+pub fn media_overlay(last: &PlayerState) -> MediaOverlay {
+    if let Some(err) = &last.error {
+        MediaOverlay::Error(err.clone())
+    } else if !last.has_video {
+        MediaOverlay::AudioOnly
+    } else {
+        MediaOverlay::None
+    }
+}
+
 /// Only resume when the saved position is not within the last 3 seconds,
 /// so "reopen at the end" does not flash-finish the file.
 pub fn should_resume(position_ms: u64, duration_ms: u64) -> bool {
@@ -227,6 +253,20 @@ pub fn track_label(t: &TrackInfo, index: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_overlay_prefers_error_over_audio_placeholder() {
+        let mut last = PlayerState::default();
+        assert_eq!(media_overlay(&last), MediaOverlay::AudioOnly);
+        last.has_video = true;
+        assert_eq!(media_overlay(&last), MediaOverlay::None);
+        last.has_video = false;
+        last.error = Some("无法播放该文件".to_string());
+        assert_eq!(
+            media_overlay(&last),
+            MediaOverlay::Error("无法播放该文件".to_string())
+        );
+    }
 
     #[test]
     fn should_resume_skips_positions_near_the_end() {

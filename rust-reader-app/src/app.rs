@@ -6,7 +6,7 @@ use crate::views::settings::SettingsView;
 use crate::views::{
     ebook::EbookView,
     library::{LibraryCallbacks, LibraryView},
-    media::MediaView,
+    media::{media_overlay, MediaOverlay, MediaView},
     reader::ReaderView,
 };
 use egui_phosphor::regular;
@@ -621,15 +621,16 @@ impl ReaderApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let rect = ui.max_rect();
-            let has_video = self
+            let overlay = self
                 .media_view
                 .open
                 .as_ref()
-                .map(|o| o.last.has_video)
-                .unwrap_or(true);
-            // Audio-only: park the native overlay at zero size so it cannot
-            // cover the egui placeholder painted by MediaView::ui.
-            let bounds = if has_video {
+                .map(|o| media_overlay(&o.last))
+                .unwrap_or(MediaOverlay::None);
+            // Audio-only or decode error: park the native overlay at zero
+            // size so it cannot cover the egui layer painted by
+            // MediaView::ui.
+            let bounds = if matches!(overlay, MediaOverlay::None) {
                 wry::Rect {
                     position: wry::dpi::LogicalPosition::new(rect.min.x, rect.min.y).into(),
                     size: wry::dpi::LogicalSize::new(rect.width(), rect.height()).into(),
@@ -1877,6 +1878,7 @@ impl ReaderApp {
     }
 
     fn poll_media_covers(&mut self) {
+        let mut updated = false;
         while let Ok((id, path)) = self.media_cover_rx.try_recv() {
             if let Some(entry) = self
                 .library_view
@@ -1886,7 +1888,13 @@ impl ReaderApp {
                 .find(|e| e.comic_id == id)
             {
                 entry.cover_path = Some(path);
+                updated = true;
             }
+        }
+        // Same persistence timing as the comic cover path: save after a
+        // drained batch so cover_path survives restarts.
+        if updated {
+            let _ = self.store.save_library(&self.library_view.library);
         }
     }
 
@@ -1911,18 +1919,25 @@ impl ReaderApp {
             // 封面已在磁盘上（上次生成过）：直接回填路径，无需重新生成。
             if let Some(entry) = self.library_view.library.entries.get_mut(idx) {
                 entry.cover_path = Some(out);
+                let _ = self.store.save_library(&self.library_view.library);
             }
             return;
         }
         let tx = self.media_cover_tx.clone();
         std::thread::spawn(move || {
-            if rust_reader_media::cover::generate_cover(
+            // mpv grabs a full-resolution PNG; shrink it to the comic-cover
+            // thumbnail size and store JPEG so disk usage and GPU textures
+            // stay small (4K videos would otherwise upload 4K textures).
+            let tmp_png = covers_dir.join(format!(".{id}.cover-tmp.png"));
+            let ok = rust_reader_media::cover::generate_cover(
                 &input,
-                &out,
+                &tmp_png,
                 std::time::Duration::from_secs(15),
             )
             .is_ok()
-            {
+                && shrink_media_cover(&tmp_png, &out).is_ok();
+            std::fs::remove_file(&tmp_png).ok();
+            if ok {
                 let _ = tx.send((id, out));
             }
         });
@@ -2375,6 +2390,22 @@ fn save_cover_image(
     Some(path)
 }
 
+/// Scales a full-size media cover grab down to the comic-cover thumbnail
+/// size and writes it as JPEG, so media covers cost the same disk space and
+/// GPU texture memory as comic covers.
+fn shrink_media_cover(input: &Path, output: &Path) -> Result<PathBuf, String> {
+    let img = image::open(input).map_err(|e| e.to_string())?;
+    let thumb = img.thumbnail(
+        crate::loader::THUMBNAIL_MAX_DIMENSION,
+        crate::loader::THUMBNAIL_MAX_DIMENSION,
+    );
+    thumb
+        .to_rgb8()
+        .save_with_format(output, image::ImageFormat::Jpeg)
+        .map_err(|e| e.to_string())?;
+    Ok(output.to_path_buf())
+}
+
 fn migrate_library_ids(
     library: &mut Library,
     history: &mut History,
@@ -2769,12 +2800,18 @@ mod tests {
                 added_at: 0,
                 media_type: MediaType::Video,
             });
-        let cover = PathBuf::from("/tmp/covers/clip.png");
+        let cover = PathBuf::from("/tmp/covers/clip.jpg");
         app.media_cover_tx.send((id, cover.clone())).unwrap();
         app.poll_media_covers();
         assert_eq!(
             app.library_view.library.entries[0].cover_path.as_deref(),
             Some(cover.as_path())
+        );
+        let saved = app.store.load_library().unwrap();
+        assert_eq!(
+            saved.entries[0].cover_path.as_deref(),
+            Some(cover.as_path()),
+            "cover_path should be persisted to library.json"
         );
     }
 
@@ -2798,13 +2835,44 @@ mod tests {
         let covers_dir = tmp.path().join("covers");
         std::fs::create_dir_all(&covers_dir).unwrap();
         let cover = rust_reader_media::cover::cover_output_path(&covers_dir, &id);
-        std::fs::write(&cover, b"png").unwrap();
+        std::fs::write(&cover, b"jpeg").unwrap();
         app.request_media_cover(0);
         assert_eq!(
             app.library_view.library.entries[0].cover_path.as_deref(),
             Some(cover.as_path())
         );
         assert!(app.requested_cover_ids.contains(&id));
+        let saved = app.store.load_library().unwrap();
+        assert_eq!(
+            saved.entries[0].cover_path.as_deref(),
+            Some(cover.as_path()),
+            "backfilled cover_path should be persisted to library.json"
+        );
+    }
+
+    #[test]
+    fn test_shrink_media_cover_writes_jpeg_thumbnail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let png = tmp.path().join("grab.png");
+        let img = image::RgbaImage::from_pixel(1024, 512, image::Rgba([10, 20, 30, 255]));
+        img.save(&png).unwrap();
+        let out = tmp.path().join("cover.jpg");
+        shrink_media_cover(&png, &out).unwrap();
+        let thumb = image::open(&out).unwrap();
+        assert!(
+            thumb.width() <= crate::loader::THUMBNAIL_MAX_DIMENSION
+                && thumb.height() <= crate::loader::THUMBNAIL_MAX_DIMENSION,
+            "thumbnail should fit within THUMBNAIL_MAX_DIMENSION"
+        );
+        assert_eq!(
+            (thumb.width(), thumb.height()),
+            (256, 128),
+            "aspect ratio should be preserved"
+        );
+        assert!(
+            matches!(thumb, image::DynamicImage::ImageRgb8(_)),
+            "cover should be stored as JPEG"
+        );
     }
 
     fn should_show_bar(

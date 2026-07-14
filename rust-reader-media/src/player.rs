@@ -186,13 +186,16 @@ impl MpvPlayer {
         self.command(&["seek", &format!("{secs}")])
     }
 
-    pub fn seek_abs_ms(&self, ms: u64) -> Result<(), MediaError> {
-        self.command(&[
-            "seek",
-            &format!("{:.3}", ms as f64 / 1000.0),
-            "absolute",
-            "exact",
-        ])
+    /// Absolute seek. `exact` requests mpv's precise seek (decodes from the
+    /// previous keyframe to the exact frame); without it mpv snaps to the
+    /// nearest keyframe, which keeps interactive slider drags responsive.
+    pub fn seek_abs_ms(&self, ms: u64, exact: bool) -> Result<(), MediaError> {
+        let secs = format!("{:.3}", ms as f64 / 1000.0);
+        if exact {
+            self.command(&["seek", &secs, "absolute", "exact"])
+        } else {
+            self.command(&["seek", &secs, "absolute"])
+        }
     }
 
     pub fn set_volume(&self, volume: f64) -> Result<(), MediaError> {

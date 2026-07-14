@@ -36,7 +36,7 @@ impl MpvPlayer {
         Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
     }
 
-    pub fn seek_abs_ms(&self, _ms: u64) -> Result<(), MediaError> {
+    pub fn seek_abs_ms(&self, _ms: u64, _exact: bool) -> Result<(), MediaError> {
         Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
     }
 
