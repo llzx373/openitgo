@@ -24,6 +24,12 @@
 //! scheduling draws for hidden windows, so the update callback hops to the
 //! main thread's `rsDriveUpdate` selector, which answers `update()` under
 //! the mutex with the CGL context current — draws stay optional.
+//!
+//! OSD: a CATextLayer sublayer of the CAOpenGLLayer shows transient text
+//! (volume, mute, seeks) at the top-right of the video. egui cannot paint
+//! over the native view (that is why overlays park it at zero size), so the
+//! OSD lives in the native layer tree; CoreAnimation's implicit opacity
+//! animation provides the fade.
 
 // objc 0.2's sel_impl macro carries a stale `cfg(feature = "cargo-clippy")`;
 // same allow as platform.rs's dock_open module.
@@ -73,6 +79,7 @@ struct LayerState {
 pub struct MpvNativeView {
     view: *mut Object,
     layer: *mut Object,
+    osd_layer: *mut Object,
     state: *mut LayerState,
 }
 
@@ -367,7 +374,7 @@ impl MpvNativeView {
         // owns the parent window; every object is a valid, live instance
         // (freshly allocated or the window's content view), and selectors
         // match the receivers' classes.
-        let (view, layer) = unsafe {
+        let (view, layer, osd_layer) = unsafe {
             let frame = make_frame(&bounds);
             let view: *mut Object = msg_send![class!(NSView), alloc];
             let view: *mut Object = msg_send![view, initWithFrame: frame];
@@ -383,7 +390,22 @@ impl MpvNativeView {
             let () = msg_send![layer, setContentsScale: scale];
             let () = msg_send![view, setLayer: layer];
             let () = msg_send![ns_view, addSubview: view];
-            (view, layer)
+            // OSD text layer: a sublayer of the CAOpenGLLayer, hidden until
+            // the first set_osd. Retained by us (+1), released in Drop.
+            let osd_layer: *mut Object = msg_send![class!(CATextLayer), alloc];
+            let osd_layer: *mut Object = msg_send![osd_layer, init];
+            let () = msg_send![osd_layer, setFontSize: 20.0f64];
+            let fg: *mut Object = msg_send![class!(NSColor), colorWithRed: 1.0f64 green: 1.0f64 blue: 1.0f64 alpha: 1.0f64];
+            let fg_cg: *mut c_void = msg_send![fg, CGColor];
+            let () = msg_send![osd_layer, setForegroundColor: fg_cg];
+            let bg: *mut Object = msg_send![class!(NSColor), colorWithRed: 0.0f64 green: 0.0f64 blue: 0.0f64 alpha: 0.6f64];
+            let bg_cg: *mut c_void = msg_send![bg, CGColor];
+            let () = msg_send![osd_layer, setBackgroundColor: bg_cg];
+            let () = msg_send![osd_layer, setCornerRadius: 8.0f64];
+            let () = msg_send![osd_layer, setContentsScale: scale];
+            let () = msg_send![osd_layer, setOpacity: 0.0f32];
+            let () = msg_send![layer, addSublayer: osd_layer];
+            (view, layer, osd_layer)
         };
         let layer_addr = layer as usize;
         // SAFETY: state_ptr is a live Box<LayerState> (owned by the layer);
@@ -418,15 +440,57 @@ impl MpvNativeView {
         Ok(Self {
             view,
             layer,
+            osd_layer,
             state: state_ptr,
         })
     }
 
     pub fn set_bounds(&self, bounds: wry::Rect) {
-        // SAFETY: self.view is a live NSView owned by us; setFrame: is a plain
-        // setter that copies the rect.
+        // SAFETY: self.view/osd_layer are live objects owned by us.
         unsafe {
             let () = msg_send![self.view, setFrame: make_frame(&bounds)];
+            let frame: core_graphics::geometry::CGRect = msg_send![self.view, frame];
+            let cur: core_graphics::geometry::CGRect = msg_send![self.osd_layer, frame];
+            let () = msg_send![
+                self.osd_layer,
+                setFrame: osd_frame(frame.size.width, frame.size.height, cur.size.width, cur.size.height)
+            ];
+        }
+    }
+
+    /// Shows `text` at the top-right of the video. The CATextLayer fades in
+    /// via CoreAnimation's implicit opacity animation.
+    pub fn set_osd(&self, text: &str) {
+        let ctext = std::ffi::CString::new(text)
+            .unwrap_or_else(|_| std::ffi::CString::new("").expect("empty CString"));
+        // SAFETY: all objects are live instances owned by us, messaged on the
+        // UI thread; selectors match the receivers' classes.
+        unsafe {
+            let ns: *mut Object = msg_send![class!(NSString), alloc];
+            let ns: *mut Object = msg_send![ns, initWithUTF8String: ctext.as_ptr()];
+            let () = msg_send![self.osd_layer, setString: ns];
+            let () = msg_send![ns, release];
+            let text: core_graphics::geometry::CGSize =
+                msg_send![self.osd_layer, preferredFrameSize];
+            let frame: core_graphics::geometry::CGRect = msg_send![self.view, frame];
+            let () = msg_send![
+                self.osd_layer,
+                setFrame: osd_frame(
+                    frame.size.width,
+                    frame.size.height,
+                    text.width + 24.0,
+                    text.height + 10.0,
+                )
+            ];
+            let () = msg_send![self.osd_layer, setOpacity: 1.0f32];
+        }
+    }
+
+    /// Fades the OSD out (implicit animation); harmless when already hidden.
+    pub fn clear_osd(&self) {
+        // SAFETY: self.osd_layer is a live CATextLayer owned by us.
+        unsafe {
+            let () = msg_send![self.osd_layer, setOpacity: 0.0f32];
         }
     }
 }
@@ -462,6 +526,11 @@ impl Drop for MpvNativeView {
                 drop(render);
             });
         }
+        // SAFETY: balanced release for the alloc/init retain in new(). The
+        // superlayer also retains it until its own dealloc.
+        unsafe {
+            let () = msg_send![self.osd_layer, release];
+        }
         // SAFETY: balanced release for the alloc/init retains. The layer's
         // dealloc reclaims the Box<LayerState> and the base CGL references;
         // the view also retained the layer via setLayer, keeping everything
@@ -486,6 +555,25 @@ fn make_frame(bounds: &wry::Rect) -> core_graphics::geometry::CGRect {
     core_graphics::geometry::CGRect::new(
         &core_graphics::geometry::CGPoint::new(x, y),
         &core_graphics::geometry::CGSize::new(w, h),
+    )
+}
+
+/// Top-right anchor in the layer's bottom-left-origin coordinate space (our
+/// NSView is not flipped — the reason the video needs FLIP_Y). `text_w` is
+/// clamped so long device names cannot run off the left edge.
+fn osd_frame(
+    view_w: f64,
+    view_h: f64,
+    text_w: f64,
+    text_h: f64,
+) -> core_graphics::geometry::CGRect {
+    const MARGIN: f64 = 16.0;
+    let w = text_w.min((view_w - 2.0 * MARGIN).max(0.0));
+    let x = (view_w - w - MARGIN).max(MARGIN);
+    let y = (view_h - text_h - MARGIN).max(MARGIN);
+    core_graphics::geometry::CGRect::new(
+        &core_graphics::geometry::CGPoint::new(x, y),
+        &core_graphics::geometry::CGSize::new(w, text_h),
     )
 }
 

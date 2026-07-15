@@ -594,6 +594,7 @@ impl ReaderApp {
             return;
         }
         self.media_view.sync_state();
+        self.media_view.tick_osd();
 
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         let mouse_pos = ctx.input(|i| i.pointer.hover_pos());

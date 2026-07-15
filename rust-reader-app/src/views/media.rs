@@ -2,10 +2,18 @@ use rust_reader_media::tracks::{TrackInfo, TrackKind};
 use rust_reader_media::{MpvPlayer, PlayerState};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+const OSD_DURATION: Duration = Duration::from_millis(1000);
+
+struct Osd {
+    until: Instant,
+}
 
 #[derive(Default)]
 pub struct MediaView {
     pub open: Option<OpenMedia>,
+    osd: Option<Osd>,
 }
 
 pub struct OpenMedia {
@@ -193,6 +201,30 @@ impl MediaView {
             let _ = open.player.set_audio_track(id);
         }
     }
+
+    /// Shows an OSD message for ~1s. CoreAnimation fades the layer in/out
+    /// via its implicit opacity animation; we only track the expiry.
+    // Wired up in Task 5 （快捷键/滚轮 OSD 接线）; remove the allow then.
+    #[allow(dead_code)]
+    pub fn show_osd(&mut self, ctx: &egui::Context, text: String) {
+        if let Some(open) = self.open.as_ref() {
+            open.native.set_osd(&text);
+            self.osd = Some(Osd {
+                until: Instant::now() + OSD_DURATION,
+            });
+            ctx.request_repaint_after(OSD_DURATION);
+        }
+    }
+
+    /// Hides an expired OSD; called once per frame from render_media.
+    pub fn tick_osd(&mut self) {
+        if self.osd.as_ref().is_some_and(|o| Instant::now() >= o.until) {
+            if let Some(open) = self.open.as_ref() {
+                open.native.clear_osd();
+            }
+            self.osd = None;
+        }
+    }
 }
 
 /// What the egui central panel paints over the native mpv view. Whenever
@@ -238,6 +270,27 @@ pub fn next_speed(current: f64) -> f64 {
 /// Clamps a seek target into `[0, duration_ms]`.
 pub fn clamp_seek(position_ms: i64, duration_ms: u64) -> u64 {
     position_ms.clamp(0, duration_ms as i64) as u64
+}
+
+// The three OSD text helpers are wired up in Task 5 （快捷键/滚轮 OSD 接线）;
+// remove the allows then.
+#[allow(dead_code)]
+pub fn volume_osd_text(volume: f64) -> String {
+    format!("音量 {:.0}%", volume)
+}
+
+#[allow(dead_code)]
+pub fn speed_osd_text(speed: f64) -> String {
+    format!("{speed:.1}x")
+}
+
+#[allow(dead_code)]
+pub fn mute_osd_text(muted: bool) -> &'static str {
+    if muted {
+        "静音"
+    } else {
+        "取消静音"
+    }
 }
 
 /// Toolbar/dropdown label for a track: `#2 简中 [zh]`, or `#1 轨道 3`
@@ -290,6 +343,14 @@ mod tests {
         assert_eq!(clamp_seek(-500, 10_000), 0);
         assert_eq!(clamp_seek(5_000, 10_000), 5_000);
         assert_eq!(clamp_seek(99_999, 10_000), 10_000);
+    }
+
+    #[test]
+    fn osd_texts_format_values() {
+        assert_eq!(volume_osd_text(75.0), "音量 75%");
+        assert_eq!(speed_osd_text(1.5), "1.5x");
+        assert_eq!(mute_osd_text(true), "静音");
+        assert_eq!(mute_osd_text(false), "取消静音");
     }
 
     #[test]
