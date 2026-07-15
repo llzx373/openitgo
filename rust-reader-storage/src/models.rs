@@ -25,6 +25,9 @@ pub struct Settings {
     pub library_sort: LibrarySort,
     pub toolbar_display_mode: ToolbarDisplayMode,
     pub ebook: EbookSettings,
+    pub media_volume: f64,
+    pub media_speed: f64,
+    pub media_audio_device: String,
 }
 
 impl Default for Settings {
@@ -49,6 +52,9 @@ impl Default for Settings {
             library_sort: LibrarySort::default(),
             toolbar_display_mode: ToolbarDisplayMode::default(),
             ebook: EbookSettings::default(),
+            media_volume: 100.0,
+            media_speed: 1.0,
+            media_audio_device: String::new(),
         }
     }
 }
@@ -111,6 +117,18 @@ impl Settings {
                 self.ebook.margin_vertical
             ));
         }
+        if !(0.0..=100.0).contains(&self.media_volume) {
+            return Err(format!(
+                "media_volume must be between 0 and 100, got {}",
+                self.media_volume
+            ));
+        }
+        if !(0.1..=16.0).contains(&self.media_speed) {
+            return Err(format!(
+                "media_speed must be between 0.1 and 16, got {}",
+                self.media_speed
+            ));
+        }
         Ok(())
     }
 
@@ -127,6 +145,8 @@ impl Settings {
         self.ebook.line_height = self.ebook.line_height.clamp(1.0, 3.0);
         self.ebook.margin_horizontal = self.ebook.margin_horizontal.clamp(0, 200);
         self.ebook.margin_vertical = self.ebook.margin_vertical.clamp(0, 200);
+        self.media_volume = self.media_volume.clamp(0.0, 100.0);
+        self.media_speed = self.media_speed.clamp(0.1, 16.0);
     }
 }
 

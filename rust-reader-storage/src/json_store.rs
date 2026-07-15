@@ -219,4 +219,19 @@ mod tests {
         assert!(matches!(err, StorageError::InvalidSettings(_)));
         assert_eq!(clamped.cache_size_mb, 100);
     }
+
+    #[test]
+    fn test_media_settings_validate_and_clamp() {
+        let mut settings = crate::models::Settings {
+            media_volume: 150.0,
+            media_speed: 0.0,
+            ..Default::default()
+        };
+        assert!(settings.validate().is_err());
+        settings.clamp();
+        assert_eq!(settings.media_volume, 100.0);
+        assert_eq!(settings.media_speed, 0.1);
+        assert!(settings.validate().is_ok());
+        assert!(crate::models::Settings::default().validate().is_ok());
+    }
 }
