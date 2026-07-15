@@ -11,11 +11,19 @@ use crate::tracks::{has_real_video, parse_tracks, RawTrack};
 use libmpv_sys as mpv;
 use std::ffi::CString;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 pub struct MpvPlayer {
     handle: *mut mpv::mpv_handle,
     state: Arc<Mutex<PlayerState>>,
+    /// Tells the event thread to leave its wait loop; set by Drop before
+    /// joining the thread, so no `mpv_wait_event` call can race
+    /// `mpv_terminate_destroy` freeing the handle (observed as intermittent
+    /// SIGSEGV at address 0 inside libmpv during teardown).
+    quit: Arc<AtomicBool>,
+    event_thread: Option<JoinHandle<()>>,
 }
 
 // mpv handles are safe to command from any thread while the event loop owns
@@ -118,8 +126,14 @@ impl MpvPlayer {
             speed: 1.0,
             ..Default::default()
         }));
-        let player = Self { handle, state };
-        player.spawn_event_thread(repaint);
+        let mut player = Self {
+            handle,
+            state,
+            quit: Arc::new(AtomicBool::new(false)),
+            event_thread: None,
+        };
+        let event_thread = player.spawn_event_thread(repaint);
+        player.event_thread = Some(event_thread);
         Ok(player)
     }
 
@@ -217,20 +231,32 @@ impl MpvPlayer {
         self.set_property_string("aid", &id.to_string())
     }
 
-    fn spawn_event_thread(&self, repaint: Box<dyn Fn() + Send + Sync>) {
+    fn spawn_event_thread(&self, repaint: Box<dyn Fn() + Send + Sync>) -> JoinHandle<()> {
         let handle = SendHandle(self.handle);
         let state = self.state.clone();
+        let quit = self.quit.clone();
         std::thread::Builder::new()
             .name("mpv-events".to_string())
-            .spawn(move || event_loop(handle, state, repaint))
-            .expect("failed to spawn mpv event thread");
+            .spawn(move || event_loop(handle, state, quit, repaint))
+            .expect("failed to spawn mpv event thread")
     }
 }
 
 impl Drop for MpvPlayer {
     fn drop(&mut self) {
-        // SAFETY: handle is valid and owned by us; this blocks until the event
-        // thread has consumed MPV_EVENT_SHUTDOWN and the core is torn down.
+        // Stop the event thread BEFORE destroying the handle:
+        // mpv_terminate_destroy frees the client context, and a wait_event
+        // call that races the free segfaults inside libmpv (observed:
+        // intermittent SIGSEGV at address 0 on the mpv-events thread during
+        // teardown). The quit flag plus the 50ms wait timeout guarantee the
+        // thread leaves its loop; join makes the handle access over-with.
+        self.quit.store(true, Ordering::Release);
+        if let Some(thread) = self.event_thread.take() {
+            let _ = thread.join();
+        }
+        // SAFETY: handle is valid and owned by us, and no other thread can
+        // touch it now that the event thread is joined and the render
+        // context was freed before the player (lifetime contract).
         unsafe { mpv::mpv_terminate_destroy(self.handle()) };
     }
 }
@@ -238,14 +264,20 @@ impl Drop for MpvPlayer {
 fn event_loop(
     handle: SendHandle,
     state: Arc<Mutex<PlayerState>>,
+    quit: Arc<AtomicBool>,
     repaint: Box<dyn Fn() + Send + Sync>,
 ) {
     let handle = handle.0;
     loop {
-        // SAFETY: handle is valid for the lifetime of the event thread;
-        // mpv_terminate_destroy only completes once this loop has consumed
-        // the SHUTDOWN event and stopped calling wait_event.
-        let event = unsafe { mpv::mpv_wait_event(handle, -1.0) };
+        if quit.load(Ordering::Acquire) {
+            break;
+        }
+        // SAFETY: handle is valid for the lifetime of this loop — Drop sets
+        // `quit` and joins this thread before calling mpv_terminate_destroy.
+        // The 50ms timeout (instead of -1) lets the loop notice `quit`
+        // while no mpv events arrive; expiry returns MPV_EVENT_NONE, which
+        // the match below ignores.
+        let event = unsafe { mpv::mpv_wait_event(handle, 0.05) };
         if event.is_null() {
             break;
         }

@@ -49,7 +49,14 @@ extern "C" {
     // Not exposed by the cgl crate (0.3.2), declared in <OpenGL/CGLContext.h>.
     fn CGLRetainContext(ctx: cgl::CGLContextObj) -> cgl::CGLContextObj;
     fn CGLReleaseContext(ctx: cgl::CGLContextObj);
+    // Declared in <OpenGL/gl.h>; used to learn which framebuffer
+    // CoreAnimation bound for the current draw.
+    fn glGetIntegerv(pname: u32, params: *mut i32);
 }
+
+/// From <OpenGL/gl.h>; CoreAnimation binds its own drawable FBO (typically
+/// 1/2, alternating — not 0) before calling drawInCGLContext.
+const GL_FRAMEBUFFER_BINDING: u32 = 0x8CA6;
 
 /// Shared between the layer's draw callback and `MpvNativeView::drop`.
 /// Owned by the layer via the `_rsState` ivar and freed in `dealloc`, so any
@@ -226,15 +233,22 @@ extern "C" fn draw_in(
         return;
     };
     // CoreAnimation has already made `_ctx` (our pre-built context, handed
-    // out by copy_context) current on its render thread, as render.h requires.
+    // out by copy_context) current on its render thread, as render.h requires,
+    // and bound its own drawable framebuffer — which is NOT FBO 0 (observed:
+    // 1/2, alternating). mpv must target exactly that FBO or the layer's
+    // drawable stays untouched and composites as fully transparent.
+    //
     // SAFETY: `this` is a valid CALayer; `bounds`/`contentsScale` are plain
-    // getters that don't transfer ownership.
+    // getters that don't transfer ownership. glGetIntegerv is safe with a
+    // current context.
     let bounds: core_graphics::geometry::CGRect = unsafe { msg_send![this, bounds] };
     let scale: f64 = unsafe { msg_send![this, contentsScale] };
     let w = (bounds.size.width * scale) as i32;
     let h = (bounds.size.height * scale) as i32;
+    let mut fbo: i32 = 0;
+    unsafe { glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut fbo) };
     if w > 0 && h > 0 {
-        render.render(w, h);
+        render.render(fbo, w, h);
         render.report_swap();
     }
 }

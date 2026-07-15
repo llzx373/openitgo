@@ -137,16 +137,19 @@ impl RenderContext {
         unsafe { mpv::mpv_render_context_update(self.ctx) }
     }
 
-    /// Renders into the currently bound framebuffer (CAOpenGLLayer FBO 0).
-    /// Must be called on the render thread with the CGL context current.
-    pub fn render(&self, width: i32, height: i32) {
+    /// Renders into `fbo`, which must be the framebuffer CoreAnimation bound
+    /// for the current draw (CAOpenGLLayer binds its own drawable — typically
+    /// FBO 1/2, not 0 — before calling drawInCGLContext; the caller queries
+    /// GL_FRAMEBUFFER_BINDING and passes it here). Must be called on the
+    /// render thread with the CGL context current.
+    pub fn render(&self, fbo: i32, width: i32, height: i32) {
         let mut fbo = mpv::mpv_opengl_fbo {
-            fbo: 0,
+            fbo,
             w: width,
             h: height,
             internal_format: 0,
         };
-        let flip: i32 = 0; // CAOpenGLLayer is already upright.
+        let flip: i32 = 1; // CAOpenGLLayer's drawable is bottom-up for GL; 0 yields an upside-down image.
         let block: i32 = 0; // Never block the layer's display callback.
         let mut params = [
             mpv::mpv_render_param {
