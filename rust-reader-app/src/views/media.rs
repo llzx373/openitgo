@@ -14,6 +14,7 @@ struct Osd {
 pub struct MediaView {
     pub open: Option<OpenMedia>,
     osd: Option<Osd>,
+    pub scroll_acc: f32,
 }
 
 pub struct OpenMedia {
@@ -226,8 +227,6 @@ impl MediaView {
 
     /// Shows an OSD message for ~1s. CoreAnimation fades the layer in/out
     /// via its implicit opacity animation; we only track the expiry.
-    // Wired up in Task 5 （快捷键/滚轮 OSD 接线）; remove the allow then.
-    #[allow(dead_code)]
     pub fn show_osd(&mut self, ctx: &egui::Context, text: String) {
         if let Some(open) = self.open.as_ref() {
             open.native.set_osd(&text);
@@ -309,19 +308,14 @@ pub fn hover_time_at(
     Some((dur as f64 * ratio as f64) as u64)
 }
 
-// The three OSD text helpers are wired up in Task 5 （快捷键/滚轮 OSD 接线）;
-// remove the allows then.
-#[allow(dead_code)]
 pub fn volume_osd_text(volume: f64) -> String {
     format!("音量 {:.0}%", volume)
 }
 
-#[allow(dead_code)]
 pub fn speed_osd_text(speed: f64) -> String {
     format!("{speed:.1}x")
 }
 
-#[allow(dead_code)]
 pub fn mute_osd_text(muted: bool) -> &'static str {
     if muted {
         "静音"
@@ -338,6 +332,19 @@ pub fn track_label(t: &TrackInfo, index: usize) -> String {
         Some(lang) => format!("#{} {} [{}]", index + 1, base, lang),
         None => format!("#{} {}", index + 1, base),
     }
+}
+
+/// Pixels of scroll delta that make one 5% volume step.
+pub const SCROLL_VOLUME_STEP_PX: f32 = 25.0;
+
+/// Accumulates scroll delta into volume steps. Returns the new accumulator
+/// and how many 5% steps to apply (sign = direction). The remainder is kept,
+/// so reverse scrolling cancels partial steps and smooth trackpad scrolling
+/// cannot jump the volume in one event.
+pub fn accumulate_scroll(acc: f32, delta: f32) -> (f32, i32) {
+    let acc = acc + delta;
+    let steps = (acc / SCROLL_VOLUME_STEP_PX).trunc() as i32;
+    (acc - steps as f32 * SCROLL_VOLUME_STEP_PX, steps)
 }
 
 #[cfg(test)]
@@ -399,6 +406,22 @@ mod tests {
         assert_eq!(speed_osd_text(1.5), "1.5x");
         assert_eq!(mute_osd_text(true), "静音");
         assert_eq!(mute_osd_text(false), "取消静音");
+    }
+
+    #[test]
+    fn accumulate_scroll_steps_and_keeps_remainder() {
+        let (acc, steps) = accumulate_scroll(0.0, 30.0);
+        assert_eq!(steps, 1);
+        assert!((acc - 5.0).abs() < 1e-6);
+        let (acc, steps) = accumulate_scroll(acc, 20.0);
+        assert_eq!(steps, 1);
+        assert!((acc - 0.0).abs() < 1e-6);
+        // 反向滚动抵消累计值
+        let (acc, steps) = accumulate_scroll(10.0, -10.0);
+        assert_eq!(steps, 0);
+        assert!((acc - 0.0).abs() < 1e-6);
+        let (_acc, steps) = accumulate_scroll(0.0, -60.0);
+        assert_eq!(steps, -2);
     }
 
     #[test]

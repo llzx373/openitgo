@@ -622,6 +622,16 @@ impl ReaderApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let rect = ui.max_rect();
+            // Scroll-wheel volume over the video area.
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 && ui.rect_contains_pointer(rect) {
+                let (acc, steps) =
+                    crate::views::media::accumulate_scroll(self.media_view.scroll_acc, scroll);
+                self.media_view.scroll_acc = acc;
+                if steps != 0 {
+                    self.adjust_media_volume(ctx, steps as f64 * 5.0);
+                }
+            }
             let overlay = self
                 .media_view
                 .open
@@ -673,14 +683,18 @@ impl ReaderApp {
                     self.media_view.toggle_pause();
                 }
                 if ui.button("-10s").clicked() {
-                    self.media_view.seek_rel(-10.0);
+                    self.seek_media_rel(ctx, -10.0);
                 }
                 if ui.button("+10s").clicked() {
-                    self.media_view.seek_rel(10.0);
+                    self.seek_media_rel(ctx, 10.0);
                 }
                 ui.separator();
                 if ui.button(format!("{:.1}x", speed)).clicked() {
-                    let _ = self.media_view.cycle_speed();
+                    if let Some(target) = self.media_view.cycle_speed() {
+                        self.settings.media_speed = target;
+                        self.media_view
+                            .show_osd(ctx, crate::views::media::speed_osd_text(target));
+                    }
                 }
                 ui.separator();
                 let subs: Vec<(i64, String)> = tracks
@@ -757,6 +771,26 @@ impl ReaderApp {
             self.media_view
                 .show_osd(ctx, crate::views::media::mute_osd_text(muted).to_string());
         }
+    }
+
+    fn adjust_media_volume(&mut self, ctx: &egui::Context, delta: f64) {
+        if let Some(v) = self.media_view.adjust_volume(delta) {
+            self.settings.media_volume = v;
+            self.media_view
+                .show_osd(ctx, crate::views::media::volume_osd_text(v));
+        }
+    }
+
+    fn seek_media_rel(&mut self, ctx: &egui::Context, secs: f64) {
+        self.media_view.seek_rel(secs);
+        self.media_view.show_osd(ctx, format!("{:+}s", secs as i32));
+    }
+
+    fn set_media_speed(&mut self, ctx: &egui::Context, speed: f64) {
+        self.media_view.set_speed(speed);
+        self.settings.media_speed = speed;
+        self.media_view
+            .show_osd(ctx, crate::views::media::speed_osd_text(speed));
     }
 
     fn render_media_seekbar(&mut self, ctx: &egui::Context) {
@@ -1686,22 +1720,22 @@ impl ReaderApp {
                     self.media_view.toggle_pause();
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-                    self.media_view.seek_rel(5.0);
+                    self.seek_media_rel(ctx, 5.0);
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-                    self.media_view.seek_rel(-5.0);
+                    self.seek_media_rel(ctx, -5.0);
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::J)) {
-                    self.media_view.seek_rel(-10.0);
+                    self.seek_media_rel(ctx, -10.0);
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::L)) {
-                    self.media_view.seek_rel(10.0);
+                    self.seek_media_rel(ctx, 10.0);
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-                    let _ = self.media_view.adjust_volume(5.0);
+                    self.adjust_media_volume(ctx, 5.0);
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-                    let _ = self.media_view.adjust_volume(-5.0);
+                    self.adjust_media_volume(ctx, -5.0);
                 }
                 for (key, speed) in [
                     (egui::Key::Num1, 0.5),
@@ -1710,11 +1744,14 @@ impl ReaderApp {
                     (egui::Key::Num4, 2.0),
                 ] {
                     if ctx.input(|i| i.key_pressed(key)) {
-                        self.media_view.set_speed(speed);
+                        self.set_media_speed(ctx, speed);
                     }
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::V)) {
                     self.media_view.cycle_sub();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::M)) {
+                    self.toggle_media_mute(ctx);
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::F)) {
                     self.toggle_fullscreen(ctx);
