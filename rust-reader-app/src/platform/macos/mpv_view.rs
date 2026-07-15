@@ -1,6 +1,14 @@
-//! macOS native overlay hosting libmpv's CAOpenGLLayer, mirroring how the
-//! ebook webview is overlaid on the egui window. Coordinates are top-left
-//! logical points (winit's content view is flipped), same as wry child views.
+//! macOS mpv video layer: a CAOpenGLLayer inserted into the superlayer of
+//! the winit view's CAMetalLayer, anchored BELOW it via
+//! `insertSublayer:below:` (the view's layer IS wgpu's CAMetalLayer —
+//! wgpu-hal adopts it as the main layer; verified by Task 1 layer dumps).
+//! The egui surface is non-opaque (transparent backbuffer, see main.rs),
+//! so the video shows through the unpainted central area and egui
+//! menus/popups composite above the video. Coordinates are top-left
+//! logical (make_frame passes them through; the superlayer is
+//! geometryFlipped, confirmed empirically in Task 1). The OSD is a
+//! CATextLayer sublayer of the video layer and is visible through the
+//! same hole.
 //!
 //! GL context lifecycle: `MpvNativeView` pre-builds one CGLPixelFormat and
 //! one CGLContext. The same context is current for
@@ -25,11 +33,11 @@
 //! main thread's `rsDriveUpdate` selector, which answers `update()` under
 //! the mutex with the CGL context current — draws stay optional.
 //!
-//! OSD: a CATextLayer sublayer of the CAOpenGLLayer shows transient text
-//! (volume, mute, seeks) at the top-right of the video. egui cannot paint
-//! over the native view (that is why overlays park it at zero size), so the
-//! OSD lives in the native layer tree; CoreAnimation's implicit opacity
-//! animation provides the fade.
+//! OSD: a CATextLayer sublayer of the video layer shows transient text
+//! (volume, mute, seeks) at its top-right, composited below the egui
+//! surface like the rest of the layer. CoreAnimation's implicit opacity
+//! animation provides the fade, so `setOpacity` calls must stay outside
+//! the disabled-actions transactions used for geometry changes.
 
 // objc 0.2's sel_impl macro carries a stale `cfg(feature = "cargo-clippy")`;
 // same allow as platform.rs's dock_open module.
@@ -76,14 +84,18 @@ struct LayerState {
     cgl_ctx: cgl::CGLContextObj,
 }
 
+/// `layer` is retained +1 by our alloc/init in `new` and additionally by the
+/// superlayer while inserted (that retain is dropped by
+/// `removeFromSuperlayer` in `Drop`). `osd_layer` is retained +1 by us and
+/// by `layer` as its sublayer. `state` points at the layer-owned
+/// `Box<LayerState>` (freed in the layer's `dealloc`).
 pub struct MpvNativeView {
-    view: *mut Object,
     layer: *mut Object,
     osd_layer: *mut Object,
     state: *mut LayerState,
 }
 
-// The raw NSView/CALayer pointers are only touched from the UI thread that
+// The raw CALayer pointers are only touched from the UI thread that
 // owns this value; moving ownership between threads does not alias them.
 unsafe impl Send for MpvNativeView {}
 
@@ -333,6 +345,38 @@ impl MpvNativeView {
             RawWindowHandle::AppKit(h) => h.ns_view.as_ptr() as *mut Object,
             _ => return Err("媒体播放暂仅支持 macOS".to_string()),
         };
+        // The winit view's layer IS wgpu's CAMetalLayer (wgpu-hal adopts it
+        // as the view's main layer — Task 1 layer-dump verified), so "index 0
+        // of the view layer" would put the video INSIDE the metal layer,
+        // where sublayers always composite above the parent's content (Task
+        // 1 round 1 failure). Anchor the video layer BELOW the metal layer
+        // in its superlayer instead. Probe windows without wgpu have a plain
+        // CALayer after setWantsLayer: fall back to index 0 there. These
+        // checks run before any GL/layer/state allocation below so the Err
+        // paths stay leak-free.
+        //
+        // SAFETY: ns_view is the parent window's live view, messaged on the
+        // UI thread that owns it; selectors match the receivers' classes.
+        let (metal_layer, parent_layer, is_metal) = unsafe {
+            let () = msg_send![ns_view, setWantsLayer: YES];
+            let view_layer: *mut Object = msg_send![ns_view, layer];
+            if view_layer.is_null() {
+                return Err("父 view 尚无 layer（setWantsLayer 未生效），请重试".to_string());
+            }
+            let is_metal: bool = msg_send![view_layer, isKindOfClass: class!(CAMetalLayer)];
+            let parent_layer: *mut Object = if is_metal {
+                let parent: *mut Object = msg_send![view_layer, superlayer];
+                if parent.is_null() {
+                    return Err(
+                        "winit view 尚未挂入窗口层树（superlayer 为 nil），请重试".to_string()
+                    );
+                }
+                parent
+            } else {
+                view_layer
+            };
+            (view_layer, parent_layer, is_metal)
+        };
         // Pre-build the GL objects; the same CGL context backs the mpv render
         // context for its whole lifetime (create/render/free). The UI thread
         // normally has no current GL context, and mpv_render_context_create
@@ -372,13 +416,9 @@ impl MpvNativeView {
         let state_ptr = Box::into_raw(state);
         // SAFETY: all Objective-C messages below run on the UI thread that
         // owns the parent window; every object is a valid, live instance
-        // (freshly allocated or the window's content view), and selectors
-        // match the receivers' classes.
-        let (view, layer, osd_layer) = unsafe {
-            let frame = make_frame(&bounds);
-            let view: *mut Object = msg_send![class!(NSView), alloc];
-            let view: *mut Object = msg_send![view, initWithFrame: frame];
-            let () = msg_send![view, setWantsLayer: YES];
+        // (freshly allocated, or the layer-tree anchors validated above),
+        // and selectors match the receivers' classes.
+        let (layer, osd_layer) = unsafe {
             let layer: *mut Object = msg_send![layer_class(), alloc];
             let layer: *mut Object = msg_send![layer, init];
             (*layer).set_ivar::<usize>("_rsState", state_ptr as usize);
@@ -388,8 +428,20 @@ impl MpvNativeView {
             let window: *mut Object = msg_send![ns_view, window];
             let scale: f64 = msg_send![window, backingScaleFactor];
             let () = msg_send![layer, setContentsScale: scale];
-            let () = msg_send![view, setLayer: layer];
-            let () = msg_send![ns_view, addSubview: view];
+            // Bare layers animate geometry changes implicitly; the video
+            // must track egui layout exactly, so every frame change goes
+            // through a disabled-actions transaction (also in
+            // set_bounds/set_osd). The OSD opacity fade lives on osd_layer
+            // and is unaffected.
+            let () = msg_send![class!(CATransaction), begin];
+            let () = msg_send![class!(CATransaction), setDisableActions: YES];
+            let () = msg_send![layer, setFrame: make_frame(&bounds)];
+            let () = if is_metal {
+                msg_send![parent_layer, insertSublayer: layer below: metal_layer]
+            } else {
+                msg_send![parent_layer, insertSublayer: layer atIndex: 0u32]
+            };
+            let () = msg_send![class!(CATransaction), commit];
             // OSD text layer: a sublayer of the CAOpenGLLayer, hidden until
             // the first set_osd. Retained by us (+1), released in Drop.
             let osd_layer: *mut Object = msg_send![class!(CATextLayer), alloc];
@@ -405,11 +457,11 @@ impl MpvNativeView {
             let () = msg_send![osd_layer, setContentsScale: scale];
             let () = msg_send![osd_layer, setOpacity: 0.0f32];
             let () = msg_send![layer, addSublayer: osd_layer];
-            (view, layer, osd_layer)
+            (layer, osd_layer)
         };
         let layer_addr = layer as usize;
         // SAFETY: state_ptr is a live Box<LayerState> (owned by the layer);
-        // locking is uncontended here — the view was just attached and Drop
+        // locking is uncontended here — the layer was just inserted and Drop
         // has not run.
         let mut guard = unsafe { &*state_ptr }
             .render
@@ -438,7 +490,6 @@ impl MpvNativeView {
         }
         drop(guard);
         Ok(Self {
-            view,
             layer,
             osd_layer,
             state: state_ptr,
@@ -446,15 +497,20 @@ impl MpvNativeView {
     }
 
     pub fn set_bounds(&self, bounds: wry::Rect) {
-        // SAFETY: self.view/osd_layer are live objects owned by us.
+        // SAFETY: self.layer/osd_layer are live objects owned by us. Bare
+        // layers animate geometry changes implicitly, so every frame change
+        // goes through a disabled-actions transaction (see new()).
         unsafe {
-            let () = msg_send![self.view, setFrame: make_frame(&bounds)];
-            let frame: core_graphics::geometry::CGRect = msg_send![self.view, frame];
+            let () = msg_send![class!(CATransaction), begin];
+            let () = msg_send![class!(CATransaction), setDisableActions: YES];
+            let () = msg_send![self.layer, setFrame: make_frame(&bounds)];
+            let lbounds: core_graphics::geometry::CGRect = msg_send![self.layer, bounds];
             let cur: core_graphics::geometry::CGRect = msg_send![self.osd_layer, frame];
             let () = msg_send![
                 self.osd_layer,
-                setFrame: osd_frame(frame.size.width, frame.size.height, cur.size.width, cur.size.height)
+                setFrame: osd_frame(lbounds.size.width, lbounds.size.height, cur.size.width, cur.size.height)
             ];
+            let () = msg_send![class!(CATransaction), commit];
         }
     }
 
@@ -472,16 +528,21 @@ impl MpvNativeView {
             let () = msg_send![ns, release];
             let text: core_graphics::geometry::CGSize =
                 msg_send![self.osd_layer, preferredFrameSize];
-            let frame: core_graphics::geometry::CGRect = msg_send![self.view, frame];
+            let lbounds: core_graphics::geometry::CGRect = msg_send![self.layer, bounds];
+            let () = msg_send![class!(CATransaction), begin];
+            let () = msg_send![class!(CATransaction), setDisableActions: YES];
             let () = msg_send![
                 self.osd_layer,
                 setFrame: osd_frame(
-                    frame.size.width,
-                    frame.size.height,
+                    lbounds.size.width,
+                    lbounds.size.height,
                     text.width + 24.0,
                     text.height + 10.0,
                 )
             ];
+            let () = msg_send![class!(CATransaction), commit];
+            // Outside the transaction: the opacity fade needs the implicit
+            // animation that the transaction suppresses.
             let () = msg_send![self.osd_layer, setOpacity: 1.0f32];
         }
     }
@@ -497,9 +558,11 @@ impl MpvNativeView {
 
 impl Drop for MpvNativeView {
     fn drop(&mut self) {
-        // SAFETY: self.view is a live NSView owned by us.
+        // SAFETY: self.layer is a live CAOpenGLLayer owned by us; removing it
+        // from the superlayer drops the superlayer's retain, leaving our
+        // alloc/init retain (+1) balanced by the release below.
         unsafe {
-            let () = msg_send![self.view, removeFromSuperview];
+            let () = msg_send![self.layer, removeFromSuperlayer];
         }
         // Take the render context out under the lock: in-flight draws either
         // hold it (we wait them out) or will see None and skip. After this,
@@ -527,17 +590,17 @@ impl Drop for MpvNativeView {
             });
         }
         // SAFETY: balanced release for the alloc/init retain in new(). The
-        // superlayer also retains it until its own dealloc.
+        // video layer also retained it as a sublayer until the
+        // removeFromSuperlayer above.
         unsafe {
             let () = msg_send![self.osd_layer, release];
         }
-        // SAFETY: balanced release for the alloc/init retains. The layer's
-        // dealloc reclaims the Box<LayerState> and the base CGL references;
-        // the view also retained the layer via setLayer, keeping everything
-        // valid until here.
+        // SAFETY: balanced release for the alloc/init retain in new(). The
+        // layer's dealloc reclaims the Box<LayerState> and the base CGL
+        // references; the superlayer's retain was already dropped by the
+        // removeFromSuperlayer above.
         unsafe {
             let () = msg_send![self.layer, release];
-            let () = msg_send![self.view, release];
         }
     }
 }
@@ -558,9 +621,10 @@ fn make_frame(bounds: &wry::Rect) -> core_graphics::geometry::CGRect {
     )
 }
 
-/// Top-right anchor in the layer's bottom-left-origin coordinate space (our
-/// NSView is not flipped — the reason the video needs FLIP_Y). `text_w` is
-/// clamped so long device names cannot run off the left edge.
+/// Top-right anchor in the layer's bottom-left-origin coordinate space (the
+/// bare CAOpenGLLayer has default, unflipped geometry — the reason the video
+/// needs FLIP_Y). `text_w` is clamped so long device names cannot run off
+/// the left edge.
 fn osd_frame(
     view_w: f64,
     view_h: f64,
