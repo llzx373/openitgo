@@ -118,6 +118,12 @@ impl MpvPlayer {
                 cstring("track-list").as_ptr(),
                 mpv::mpv_format_MPV_FORMAT_NODE,
             );
+            mpv::mpv_observe_property(
+                handle,
+                7,
+                cstring("mute").as_ptr(),
+                mpv::mpv_format_MPV_FORMAT_FLAG,
+            );
         }
         // PlayerState::default() leaves volume/speed at 0.0; set sane initial
         // values matching mpv's own defaults (Task 4 review convention).
@@ -229,6 +235,42 @@ impl MpvPlayer {
 
     pub fn set_audio_track(&self, id: i64) -> Result<(), MediaError> {
         self.set_property_string("aid", &id.to_string())
+    }
+
+    pub fn set_muted(&self, muted: bool) -> Result<(), MediaError> {
+        self.set_property_string("mute", if muted { "yes" } else { "no" })
+    }
+
+    /// Enumerates mpv's `audio-device-list`. Returns an empty Vec when the
+    /// property is unavailable; callers treat that as "auto only".
+    pub fn audio_devices(&self) -> Vec<crate::devices::AudioDevice> {
+        let name = cstring("audio-device-list");
+        // SAFETY: a zeroed node is valid for mpv to fill; freed below after
+        // reading.
+        let mut node: mpv::mpv_node = unsafe { std::mem::zeroed() };
+        // SAFETY: handle is valid; `name` is a valid NUL-terminated string;
+        // `node` outlives the call.
+        let rc = unsafe {
+            mpv::mpv_get_property(
+                self.handle,
+                name.as_ptr(),
+                mpv::mpv_format_MPV_FORMAT_NODE,
+                &mut node as *mut _ as *mut std::ffi::c_void,
+            )
+        };
+        if rc < 0 {
+            return Vec::new();
+        }
+        // SAFETY: node is a filled NODE tree owned by us.
+        let raw = unsafe { read_audio_device_list(&mut node) };
+        // SAFETY: node was filled by mpv_get_property and not yet freed.
+        unsafe { mpv::mpv_free_node_contents(&mut node) };
+        crate::devices::parse_audio_devices(raw)
+    }
+
+    /// `name` is an entry of `audio-device-list`; "auto" follows the system.
+    pub fn set_audio_device(&self, name: &str) -> Result<(), MediaError> {
+        self.set_property_string("audio-device", name)
     }
 
     fn spawn_event_thread(&self, repaint: Box<dyn Fn() + Send + Sync>) -> JoinHandle<()> {
@@ -413,6 +455,13 @@ fn event_loop(
                                 should_repaint = true;
                             }
                         }
+                        7 => {
+                            if format == mpv::mpv_format_MPV_FORMAT_FLAG && !data.is_null() {
+                                // SAFETY: format guarantees data points to a c_int.
+                                s.muted = unsafe { *(data as *mut i32) } != 0;
+                                should_repaint = true;
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -516,6 +565,68 @@ unsafe fn read_track_list(node: *mut mpv::mpv_node) -> Vec<RawTrack> {
         }
         if !t.kind.is_empty() {
             out.push(t);
+        }
+    }
+    out
+}
+
+/// Walks an audio-device-list NODE (list of maps with string `name` /
+/// `description` keys) into FFI-free records.
+/// # Safety: `node` must point to a valid mpv_node owned by the caller.
+unsafe fn read_audio_device_list(node: *mut mpv::mpv_node) -> Vec<crate::devices::RawAudioDevice> {
+    let mut out = Vec::new();
+    // SAFETY: per caller, node points to a valid mpv_node owned by us.
+    if node.is_null() || unsafe { (*node).format } != mpv::mpv_format_MPV_FORMAT_NODE_ARRAY {
+        return out;
+    }
+    // SAFETY: format is NODE_ARRAY, so the list union member is valid.
+    let list = unsafe { (*node).u.list };
+    if list.is_null() {
+        return out;
+    }
+    // SAFETY: values has num entries.
+    let (num, values) = unsafe { ((*list).num, (*list).values) };
+    for i in 0..num {
+        // SAFETY: i < num, so values[i] is a valid mpv_node.
+        let entry = unsafe { values.offset(i as isize) };
+        if entry.is_null() || unsafe { (*entry).format } != mpv::mpv_format_MPV_FORMAT_NODE_MAP {
+            continue;
+        }
+        // SAFETY: format is NODE_MAP, so the list union member is valid.
+        let map = unsafe { (*entry).u.list };
+        if map.is_null() {
+            continue;
+        }
+        // SAFETY: keys and values each have num entries.
+        let (mnum, mvalues, mkeys) = unsafe { ((*map).num, (*map).values, (*map).keys) };
+        let mut device = crate::devices::RawAudioDevice {
+            name: String::new(),
+            description: None,
+        };
+        for j in 0..mnum {
+            // SAFETY: j < mnum, so keys[j] is a valid NUL-terminated string
+            // owned by the node.
+            let key = unsafe {
+                let k = mkeys.offset(j as isize);
+                if k.is_null() || (*k).is_null() {
+                    continue;
+                }
+                std::ffi::CStr::from_ptr(*k).to_string_lossy().into_owned()
+            };
+            // SAFETY: j < mnum, so values[j] is a valid mpv_node.
+            let v = unsafe { mvalues.offset(j as isize) };
+            if v.is_null() || unsafe { (*v).format } != mpv::mpv_format_MPV_FORMAT_STRING {
+                continue;
+            }
+            match key.as_str() {
+                // SAFETY: format checked STRING above; node_string copies it.
+                "name" => device.name = unsafe { node_string(v) },
+                "description" => device.description = Some(unsafe { node_string(v) }),
+                _ => {}
+            }
+        }
+        if !device.name.is_empty() {
+            out.push(device);
         }
     }
     out

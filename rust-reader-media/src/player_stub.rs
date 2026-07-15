@@ -55,4 +55,16 @@ impl MpvPlayer {
     pub fn set_audio_track(&self, _id: i64) -> Result<(), MediaError> {
         Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
     }
+
+    pub fn set_muted(&self, _muted: bool) -> Result<(), MediaError> {
+        Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
+    }
+
+    pub fn audio_devices(&self) -> Vec<crate::devices::AudioDevice> {
+        Vec::new()
+    }
+
+    pub fn set_audio_device(&self, _name: &str) -> Result<(), MediaError> {
+        Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
+    }
 }

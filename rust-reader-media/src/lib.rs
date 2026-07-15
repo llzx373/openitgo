@@ -1,5 +1,6 @@
 #[cfg(target_os = "macos")]
 pub mod cover;
+pub mod devices;
 pub mod error;
 #[cfg(not(target_os = "macos"))]
 pub mod cover {
@@ -31,6 +32,7 @@ pub mod state;
 pub mod time;
 pub mod tracks;
 
+pub use devices::AudioDevice;
 pub use error::MediaError;
 pub use player::MpvPlayer;
 pub use state::PlayerState;

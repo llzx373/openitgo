@@ -6,6 +6,7 @@ pub struct PlayerState {
     pub duration_ms: Option<u64>,
     pub paused: bool,
     pub volume: f64,
+    pub muted: bool,
     pub speed: f64,
     pub tracks: Vec<TrackInfo>,
     pub current_sub: Option<i64>,
