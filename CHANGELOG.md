@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 媒体书架集成：视频/音频文件与漫画、电子书同架展示、过滤与导入；封面由无头 mpv 截取（视频取 10% 帧，音频取专辑封面）。
 - 媒体播放进度恢复：复用历史记录保存播放位置（毫秒），中途退出后自动续播，接近结尾时从头播放。
 - macOS 打包脚本新增 `bundle_mpv`：将 libmpv 及其 Homebrew 依赖拷入 `.app` 的 `Contents/Frameworks` 并改写 `@rpath` 后逐个签名，打包产物无需安装 mpv。
+- 媒体播放：两行式全宽进度条（悬停显示目标时间，拖动关键帧对齐、松手精确跳转）。
+- 媒体播放：画面右上角 OSD 反馈（音量、静音、快进快退、倍速、输出设备切换），CATextLayer 原生叠加约 1 秒淡出。
+- 媒体播放：静音（底栏按钮 + M 键，静音时音量滑块灰显）与滚轮音量（视频区滚动，25px 一格 ±5%）。
+- 媒体播放：音频输出设备选择（工具栏下拉框，自动 + mpv 枚举设备），保存的设备不存在时回退自动。
+- 媒体播放：音量、倍速与输出设备全局记忆（`media_volume` / `media_speed` / `media_audio_device` 设置项）。
 
 ### Changed
 

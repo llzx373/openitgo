@@ -55,7 +55,8 @@ already embed it.
   `theme`, `default_mode`, `default_fit`, `double_page`,
   `wide_page_threshold`, `enable_page_animation`, `compress_images`,
   `decode_threads`, `cache_size_mb`, `real_image_cache_pages`,
-  `show_toolbar`, `show_statusbar`, `invert_scroll`, and `library_sort`.
+  `show_toolbar`, `show_statusbar`, `invert_scroll`, `library_sort`,
+  `media_volume`, `media_speed`, and `media_audio_device`.
 - **History entries** store both `comic_id` and `path` for robust matching.
 - **Library covers** are generated asynchronously from the first page and saved
   to `covers/`. Missing covers are re-requested on demand, and entries whose
@@ -79,7 +80,16 @@ already embed it.
   1/2, alternating — never 0); the draw must query `GL_FRAMEBUFFER_BINDING` and
   pass it to `RenderContext::render`, because rendering to FBO 0 leaves the
   layer's drawable untouched and composites fully transparent. `FLIP_Y` must be
-  1 for this drawable. Audio follows the macOS default output device.
+  1 for this drawable. Audio output defaults to the system device (`auto`) and
+  can be switched at runtime (see Media preferences below).
+- **Media OSD**: transient feedback (volume, mute, seeks, speed, device
+  switches) renders in a CATextLayer sublayer of the CAOpenGLLayer
+  (`MpvNativeView::set_osd/clear_osd`) — egui cannot paint over the native
+  video view. CoreAnimation's implicit opacity animation provides the fade;
+  Rust only tracks the 1s expiry (`MediaView::show_osd/tick_osd`).
+- **Media preferences**: volume/speed/audio-device are persisted globally in
+  `Settings` and applied by `MediaView::apply_startup_settings` after open;
+  a missing saved device falls back to "auto".
 - **MpvPlayer teardown** order matters: `Drop` sets a quit flag and joins the
   `mpv-events` thread (50ms `mpv_wait_event` timeout) *before*
   `mpv_terminate_destroy` — a `mpv_wait_event` call racing the handle free
