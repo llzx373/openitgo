@@ -75,6 +75,20 @@ already embed it.
   (`rust-reader-app/src/platform/macos/mpv_view.rs`); the egui control bars are
   repainted by the mpv event-pump thread calling `egui::Context::request_repaint()`.
   Playback progress is persisted in `HistoryEntry.char_offset` (milliseconds).
+  Inside `drawInCGLContext`, CoreAnimation binds its own drawable FBO (observed:
+  1/2, alternating — never 0); the draw must query `GL_FRAMEBUFFER_BINDING` and
+  pass it to `RenderContext::render`, because rendering to FBO 0 leaves the
+  layer's drawable untouched and composites fully transparent. `FLIP_Y` must be
+  1 for this drawable. Audio follows the macOS default output device.
+- **MpvPlayer teardown** order matters: `Drop` sets a quit flag and joins the
+  `mpv-events` thread (50ms `mpv_wait_event` timeout) *before*
+  `mpv_terminate_destroy` — a `mpv_wait_event` call racing the handle free
+  segfaults inside libmpv.
+- **Media diagnostic examples**: `rust-reader-app/examples/probe_visible.rs`
+  (visible window, real CA compositing, screenshot-verifiable),
+  `probe_mpv_view.rs` (offscreen overlay), and
+  `rust-reader-media/examples/{probe,probe_render}.rs` (headless player/render
+  context). `RUST_READER_MPV_LOG=1` enables mpv debug logs on stderr.
 - **Packaging**: `scripts/package-macos.sh` runs `bundle_mpv` before signing,
   copying libmpv and its Homebrew dependencies into `Contents/Frameworks` and
   rewriting their install names to `@rpath`, so the bundled app runs without a

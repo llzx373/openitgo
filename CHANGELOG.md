@@ -63,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - macOS: 修复应用未运行时通过 Finder / Dock 打开压缩包报 “rustReader cannot open files in the “Comic Archive” format” 的错误。通过 swizzle `-[NSApplication setDelegate:]` 在 winit 设置 delegate 前注入 `application:openURLs:` / `application:openFiles:` / `application:openFile:` 实现。
 - macOS: 修复应用图标在 Dock/Finder 中显示为带白色方角的问题。`generate_icons.py` 现在会使用 macOS 圆角遮罩生成带透明四角的 PNG 与 `.icns`。
 - 电子书：修复工具栏/状态栏不随 WebView 阅读位置上报实时刷新的问题；`EbookRenderer` 在处理 IPC position 消息时调用 `egui::Context::request_repaint()`。
+- 媒体播放：修复视频有进度无画面的问题；根因是 CAOpenGLLayer 在 `drawInCGLContext` 前绑定的是自己的 drawable FBO（实测 1/2 交替，并非 0），mpv 一直渲染到 FBO 0，layer 的 drawable 从未被写入而完全透明。现在渲染前查询 `GL_FRAMEBUFFER_BINDING` 并传入，同时 `FLIP_Y` 修正为 1（画面不再上下颠倒）。
+- 媒体播放：修复退出媒体播放时间歇性段错误（SIGSEGV）；根因是 `MpvPlayer::drop` 调 `mpv_terminate_destroy` 释放 handle 时，事件线程可能仍阻塞在 `mpv_wait_event` 中。现在 `Drop` 先置 quit 标志并 join 事件线程，再销毁 handle。
 
 ## [0.1.0] - 2026-06-23
 
