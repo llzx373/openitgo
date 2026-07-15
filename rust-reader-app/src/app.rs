@@ -6,6 +6,7 @@ use crate::views::settings::SettingsView;
 use crate::views::{
     ebook::EbookView,
     library::{LibraryCallbacks, LibraryView},
+    media::{media_overlay, MediaOverlay, MediaView},
     reader::ReaderView,
 };
 use egui_phosphor::regular;
@@ -36,9 +37,49 @@ fn is_ebook_file(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+const AUDIO_EXTS: &[&str] = &[
+    "mp3", "flac", "aac", "m4a", "ogg", "oga", "opus", "wav", "aiff", "ape", "wma",
+];
+
+fn is_media_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let ext = e.to_ascii_lowercase();
+            matches!(
+                ext.as_str(),
+                // 视频
+                "mp4"
+                    | "m4v"
+                    | "mkv"
+                    | "webm"
+                    | "avi"
+                    | "mov"
+                    | "wmv"
+                    | "flv"
+                    | "ts"
+                    | "m2ts"
+                    | "mpg"
+                    | "mpeg"
+                    | "3gp"
+            ) || AUDIO_EXTS.contains(&ext.as_str())
+        })
+        .unwrap_or(false)
+}
+
 fn media_type_for_path(path: &std::path::Path) -> MediaType {
     if is_ebook_file(path) {
         MediaType::Ebook
+    } else if is_media_file(path) {
+        match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some(ext) if AUDIO_EXTS.contains(&ext) => MediaType::Audio,
+            _ => MediaType::Video,
+        }
     } else {
         MediaType::Comic
     }
@@ -51,6 +92,7 @@ pub struct ReaderApp {
     pub library_view: LibraryView,
     pub reader_view: ReaderView,
     pub ebook_view: EbookView,
+    pub media_view: MediaView,
     pub settings_view: SettingsView,
     pub store: JsonStore,
     pub history: History,
@@ -60,10 +102,14 @@ pub struct ReaderApp {
     pub cover_loader: PageLoader,
     pub opener: Option<AsyncOpener<Comic>>,
     pub ebook_opener: Option<AsyncOpener<Ebook>>,
+    pub pending_media_open: Option<PathBuf>,
     /// Cover requests in flight: epoch -> (comic_id, comic_path).
     pub pending_covers: HashMap<crate::loader::Epoch, (String, PathBuf)>,
     /// Comic ids for which a cover generation has already been requested.
     pub requested_cover_ids: HashSet<String>,
+    /// Media cover results from worker threads: (comic_id, cover_path).
+    pub media_cover_tx: crossbeam_channel::Sender<(String, PathBuf)>,
+    pub media_cover_rx: crossbeam_channel::Receiver<(String, PathBuf)>,
     /// The theme currently applied to egui, used to avoid redundant updates.
     pub current_theme: Theme,
 }
@@ -93,6 +139,7 @@ impl Default for ReaderApp {
             settings.decode_threads as usize,
         );
         let cover_loader = PageLoader::new_with_compress(false, 1);
+        let (media_cover_tx, media_cover_rx) = crossbeam_channel::unbounded();
         Self {
             current_view: View::Library,
             last_view: View::Library,
@@ -100,6 +147,7 @@ impl Default for ReaderApp {
             library_view,
             reader_view: ReaderView::default(),
             ebook_view: EbookView::default(),
+            media_view: MediaView::default(),
             settings_view: SettingsView::default(),
             store,
             history,
@@ -109,8 +157,11 @@ impl Default for ReaderApp {
             cover_loader,
             opener: None,
             ebook_opener: None,
+            pending_media_open: None,
             pending_covers: HashMap::new(),
             requested_cover_ids: HashSet::new(),
+            media_cover_tx,
+            media_cover_rx,
             current_theme: Theme::System,
         }
     }
@@ -120,6 +171,7 @@ impl eframe::App for ReaderApp {
     fn on_exit(&mut self) {
         self.record_reader_history();
         self.record_ebook_history();
+        self.record_media_history();
         self.reader_view.close();
         let _ = self.store.save_settings(&self.settings);
         let _ = self.store.save_library(&self.library_view.library);
@@ -135,6 +187,10 @@ impl eframe::App for ReaderApp {
         if matches!(self.last_view, View::Ebook) && !matches!(self.current_view, View::Ebook) {
             self.record_ebook_history();
             self.ebook_view.close();
+        }
+        if matches!(self.last_view, View::Media) && !matches!(self.current_view, View::Media) {
+            self.record_media_history();
+            self.media_view.close();
         }
         self.last_view = self.current_view.clone();
 
@@ -158,6 +214,7 @@ impl eframe::App for ReaderApp {
         }
         self.poll_opener(ctx);
         self.poll_ebook_opener(ctx, frame);
+        self.poll_media_open(ctx, frame);
 
         let cache_size_mb = self.settings.cache_size_mb as usize;
         self.page_loader.set_compress(self.settings.compress_images);
@@ -169,6 +226,7 @@ impl eframe::App for ReaderApp {
             self.settings.real_image_cache_pages as usize,
         );
         self.poll_cover_results();
+        self.poll_media_covers();
 
         self.render_menu_bar(ctx);
 
@@ -176,6 +234,7 @@ impl eframe::App for ReaderApp {
             View::Library => self.render_library(ctx),
             View::Reader => self.render_reader(ctx),
             View::Ebook => self.render_ebook(ctx),
+            View::Media => self.render_media(ctx),
             View::Settings => self.render_settings(ctx),
             View::Loading(path) => self.render_loading(ctx, path),
         }
@@ -187,6 +246,7 @@ pub enum View {
     Library,
     Reader,
     Ebook,
+    Media,
     Settings,
     Loading(PathBuf),
 }
@@ -525,6 +585,202 @@ impl ReaderApp {
             };
             self.ebook_view.update_bounds(bounds);
             self.ebook_view.ui(ctx, ui);
+        });
+    }
+
+    fn render_media(&mut self, ctx: &egui::Context) {
+        if self.media_view.open.is_none() {
+            self.current_view = View::Library;
+            return;
+        }
+        self.media_view.sync_state();
+
+        let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        let mouse_pos = ctx.input(|i| i.pointer.hover_pos());
+        let screen_size = ctx.screen_rect().size();
+        let show_toolbar = Self::should_show_bar(
+            self.settings.show_toolbar,
+            fullscreen,
+            mouse_pos,
+            screen_size,
+            BarEdge::Top,
+        );
+        let show_seekbar = Self::should_show_bar(
+            self.settings.show_statusbar,
+            fullscreen,
+            mouse_pos,
+            screen_size,
+            BarEdge::Bottom,
+        );
+        if show_toolbar {
+            self.render_media_toolbar(ctx);
+        }
+        if show_seekbar {
+            self.render_media_seekbar(ctx);
+        }
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let rect = ui.max_rect();
+            let overlay = self
+                .media_view
+                .open
+                .as_ref()
+                .map(|o| media_overlay(&o.last))
+                .unwrap_or(MediaOverlay::None);
+            // Audio-only or decode error: park the native overlay at zero
+            // size so it cannot cover the egui layer painted by
+            // MediaView::ui.
+            let bounds = if matches!(overlay, MediaOverlay::None) {
+                wry::Rect {
+                    position: wry::dpi::LogicalPosition::new(rect.min.x, rect.min.y).into(),
+                    size: wry::dpi::LogicalSize::new(rect.width(), rect.height()).into(),
+                }
+            } else {
+                wry::Rect {
+                    position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+                    size: wry::dpi::LogicalSize::new(0.0, 0.0).into(),
+                }
+            };
+            self.media_view.update_bounds(bounds);
+            self.media_view.ui(ctx, ui);
+        });
+    }
+
+    fn render_media_toolbar(&mut self, ctx: &egui::Context) {
+        let (title, tracks, current_sub, current_audio, speed, paused) = self
+            .media_view
+            .open
+            .as_ref()
+            .map(|o| {
+                (
+                    o.title.clone(),
+                    o.last.tracks.clone(),
+                    o.last.current_sub,
+                    o.last.current_audio,
+                    o.last.speed,
+                    o.last.paused,
+                )
+            })
+            .unwrap_or_default();
+        egui::TopBottomPanel::top("media_toolbar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("书架").clicked() {
+                    self.current_view = View::Library;
+                }
+                ui.separator();
+                if ui.button(if paused { "播放" } else { "暂停" }).clicked() {
+                    self.media_view.toggle_pause();
+                }
+                if ui.button("-10s").clicked() {
+                    self.media_view.seek_rel(-10.0);
+                }
+                if ui.button("+10s").clicked() {
+                    self.media_view.seek_rel(10.0);
+                }
+                ui.separator();
+                if ui.button(format!("{:.1}x", speed)).clicked() {
+                    self.media_view.cycle_speed();
+                }
+                ui.separator();
+                let subs: Vec<(i64, String)> = tracks
+                    .iter()
+                    .filter(|t| t.kind == rust_reader_media::TrackKind::Sub)
+                    .enumerate()
+                    .map(|(i, t)| (t.id, crate::views::media::track_label(t, i)))
+                    .collect();
+                egui::ComboBox::from_label("字幕")
+                    .selected_text(
+                        current_sub
+                            .and_then(|id| subs.iter().find(|(sid, _)| *sid == id))
+                            .map(|(_, l)| l.clone())
+                            .unwrap_or_else(|| "关闭".to_string()),
+                    )
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(current_sub.is_none(), "关闭").clicked() {
+                            self.media_view.set_sub(None);
+                        }
+                        for (id, label) in &subs {
+                            if ui
+                                .selectable_label(current_sub == Some(*id), label)
+                                .clicked()
+                            {
+                                self.media_view.set_sub(Some(*id));
+                            }
+                        }
+                    });
+                let audios: Vec<(i64, String)> = tracks
+                    .iter()
+                    .filter(|t| t.kind == rust_reader_media::TrackKind::Audio)
+                    .enumerate()
+                    .map(|(i, t)| (t.id, crate::views::media::track_label(t, i)))
+                    .collect();
+                if audios.len() > 1 {
+                    egui::ComboBox::from_label("音轨")
+                        .selected_text(
+                            current_audio
+                                .and_then(|id| audios.iter().find(|(aid, _)| *aid == id))
+                                .map(|(_, l)| l.clone())
+                                .unwrap_or_else(|| "-".to_string()),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (id, label) in &audios {
+                                if ui
+                                    .selectable_label(current_audio == Some(*id), label)
+                                    .clicked()
+                                {
+                                    self.media_view.set_audio(*id);
+                                }
+                            }
+                        });
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("全屏").clicked() {
+                        self.toggle_fullscreen(ctx);
+                    }
+                    ui.label(title);
+                });
+            });
+        });
+    }
+
+    fn render_media_seekbar(&mut self, ctx: &egui::Context) {
+        let (pos, dur, volume) = self
+            .media_view
+            .open
+            .as_ref()
+            .map(|o| (o.last.position_ms, o.last.duration_ms, o.last.volume))
+            .unwrap_or((0, None, 100.0));
+        egui::TopBottomPanel::bottom("media_seekbar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(rust_reader_media::time::format_time_ms(pos));
+                match dur {
+                    Some(dur) if dur > 0 => {
+                        let mut ratio = pos as f32 / dur as f32;
+                        let slider = egui::Slider::new(&mut ratio, 0.0..=1.0).show_value(false);
+                        let width = (ui.available_width() - 220.0).max(60.0);
+                        if ui.add_sized([width, 16.0], slider).changed() {
+                            self.media_view.seek_to_ratio(ratio as f64);
+                        }
+                    }
+                    _ => {
+                        ui.label("--:--");
+                    }
+                }
+                ui.label(
+                    dur.map(rust_reader_media::time::format_time_ms)
+                        .unwrap_or_else(|| "--:--".to_string()),
+                );
+                let mut vol = volume as f32;
+                if ui
+                    .add_sized(
+                        [100.0, 16.0],
+                        egui::Slider::new(&mut vol, 0.0..=100.0).show_value(false),
+                    )
+                    .changed()
+                {
+                    self.media_view.set_volume(vol as f64);
+                }
+            });
         });
     }
 
@@ -1376,6 +1632,53 @@ impl ReaderApp {
                     self.ebook_view.prev_page();
                 }
             }
+            View::Media => {
+                if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+                    self.media_view.toggle_pause();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                    self.media_view.seek_rel(5.0);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                    self.media_view.seek_rel(-5.0);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::J)) {
+                    self.media_view.seek_rel(-10.0);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::L)) {
+                    self.media_view.seek_rel(10.0);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                    self.media_view.adjust_volume(5.0);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                    self.media_view.adjust_volume(-5.0);
+                }
+                for (key, speed) in [
+                    (egui::Key::Num1, 0.5),
+                    (egui::Key::Num2, 1.0),
+                    (egui::Key::Num3, 1.5),
+                    (egui::Key::Num4, 2.0),
+                ] {
+                    if ctx.input(|i| i.key_pressed(key)) {
+                        self.media_view.set_speed(speed);
+                    }
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::V)) {
+                    self.media_view.cycle_sub();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::F)) {
+                    self.toggle_fullscreen(ctx);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                    if fullscreen {
+                        self.toggle_fullscreen(ctx);
+                    } else {
+                        self.current_view = View::Library;
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1498,6 +1801,41 @@ impl ReaderApp {
         self.store.dir().join("covers")
     }
 
+    /// Media playback progress: `char_offset` holds the position in
+    /// milliseconds and `page_index` stays 0 (mirrors the ebook pattern).
+    fn record_media_history(&mut self) {
+        if let Some(open) = self.media_view.open.as_ref() {
+            let media_id = rust_reader_parser::stable_comic_id(&open.path);
+            let path = open.path.clone();
+            let position_ms = open.last.position_ms;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if let Some(entry) = self
+                .history
+                .entries
+                .iter_mut()
+                .find(|h| history_matches(h, &media_id, &path))
+            {
+                entry.comic_id = media_id;
+                entry.path = path;
+                entry.page_index = 0;
+                entry.char_offset = Some(position_ms as usize);
+                entry.last_read_at = now;
+            } else {
+                self.history.entries.push(HistoryEntry {
+                    comic_id: media_id,
+                    path,
+                    volume_index: 0,
+                    page_index: 0,
+                    char_offset: Some(position_ms as usize),
+                    last_read_at: now,
+                });
+            }
+        }
+    }
+
     fn request_cover(&mut self, comic_id: &str, path: &Path, source: PageSource) {
         if !self.requested_cover_ids.insert(comic_id.to_string()) {
             return;
@@ -1537,6 +1875,76 @@ impl ReaderApp {
                 }
             }
         }
+    }
+
+    fn poll_media_covers(&mut self) {
+        let mut updated = false;
+        while let Ok((id, path)) = self.media_cover_rx.try_recv() {
+            if let Some(entry) = self
+                .library_view
+                .library
+                .entries
+                .iter_mut()
+                .find(|e| e.comic_id == id)
+            {
+                entry.cover_path = Some(path);
+                updated = true;
+            }
+        }
+        // Same persistence timing as the comic cover path: save after a
+        // drained batch so cover_path survives restarts.
+        if updated {
+            let _ = self.store.save_library(&self.library_view.library);
+        }
+    }
+
+    fn request_media_cover(&mut self, idx: usize) {
+        let Some(entry) = self.library_view.library.entries.get(idx) else {
+            return;
+        };
+        let input = entry.path.clone();
+        let id = entry.comic_id.clone();
+        if !input.exists() {
+            return;
+        }
+        // The id stays in the set even when generation fails, so the library
+        // view's per-frame cover requests do not retry in a loop.
+        if !self.requested_cover_ids.insert(id.clone()) {
+            return;
+        }
+        let covers_dir = self.covers_dir();
+        std::fs::create_dir_all(&covers_dir).ok();
+        let out = rust_reader_media::cover::cover_output_path(&covers_dir, &id);
+        if out.exists() {
+            // 封面已在磁盘上（上次生成过）：直接回填路径，无需重新生成。
+            if let Some(entry) = self.library_view.library.entries.get_mut(idx) {
+                entry.cover_path = Some(out);
+                let _ = self.store.save_library(&self.library_view.library);
+            }
+            return;
+        }
+        let tx = self.media_cover_tx.clone();
+        std::thread::spawn(move || {
+            // mpv grabs a full-resolution PNG; shrink it to the comic-cover
+            // thumbnail size and store JPEG so disk usage and GPU textures
+            // stay small (4K videos would otherwise upload 4K textures).
+            let tmp_png = covers_dir.join(format!(".{id}.cover-tmp.png"));
+            let ok = rust_reader_media::cover::generate_cover(
+                &input,
+                &tmp_png,
+                std::time::Duration::from_secs(15),
+            )
+            .is_ok()
+                && shrink_media_cover(&tmp_png, &out).is_ok();
+            std::fs::remove_file(&tmp_png).ok();
+            if ok {
+                let _ = tx.send((id, out));
+            } else {
+                // 生成或缩放失败时清除可能残缺的 .jpg，
+                // 避免回填分支把坏文件当成有效封面。
+                std::fs::remove_file(&out).ok();
+            }
+        });
     }
 
     fn add_folder_to_library(&mut self, path: std::path::PathBuf) {
@@ -1626,9 +2034,44 @@ impl ReaderApp {
         }
     }
 
+    fn add_media_to_library(&mut self, path: std::path::PathBuf) {
+        if self
+            .library_view
+            .library
+            .entries
+            .iter()
+            .any(|e| e.path == path)
+        {
+            return;
+        }
+        let added_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let title = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("未知媒体")
+            .to_string();
+        let media_type = media_type_for_path(&path);
+        self.library_view
+            .library
+            .entries
+            .push(rust_reader_storage::models::LibraryEntry {
+                comic_id: rust_reader_parser::stable_comic_id(&path),
+                title,
+                path,
+                cover_path: None,
+                added_at,
+                media_type,
+            });
+    }
+
     fn add_file_to_library(&mut self, path: std::path::PathBuf) {
         if is_ebook_file(&path) {
             self.add_ebook_to_library(path);
+        } else if is_media_file(&path) {
+            self.add_media_to_library(path);
         } else if let Ok(comic) = rust_reader_parser::parse(&path) {
             self.add_comic_to_library(comic, &path);
         }
@@ -1681,6 +2124,10 @@ impl ReaderApp {
         let Some(entry) = self.library_view.library.entries.get(idx) else {
             return;
         };
+        if matches!(entry.media_type, MediaType::Video | MediaType::Audio) {
+            self.request_media_cover(idx);
+            return;
+        }
         if !entry.path.exists() {
             return;
         }
@@ -1743,8 +2190,43 @@ impl ReaderApp {
     fn open_path(&mut self, path: std::path::PathBuf) {
         if is_ebook_file(&path) {
             self.open_ebook(path);
+        } else if is_media_file(&path) {
+            self.open_media(path);
         } else {
             self.open_comic(path);
+        }
+    }
+
+    fn open_media(&mut self, path: std::path::PathBuf) {
+        timing::log(&format!("open_media {:?}", path));
+        self.pending_media_open = Some(path);
+    }
+
+    fn poll_media_open(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let Some(path) = self.pending_media_open.take() else {
+            return;
+        };
+        let screen = ctx.screen_rect();
+        let bounds = wry::Rect {
+            position: wry::dpi::LogicalPosition::new(screen.min.x, screen.min.y).into(),
+            size: wry::dpi::LogicalSize::new(screen.width(), screen.height()).into(),
+        };
+        let media_id = rust_reader_parser::stable_comic_id(&path);
+        let resume_ms = self
+            .history
+            .entries
+            .iter()
+            .find(|h| history_matches(h, &media_id, &path))
+            .and_then(|h| h.char_offset.map(|ms| ms as u64));
+        match self.media_view.open(ctx, frame, bounds, path, resume_ms) {
+            Ok(()) => {
+                self.current_view = View::Media;
+                self.error_message = None;
+            }
+            Err(e) => {
+                self.error_message = Some(format!("无法打开媒体文件: {}", e));
+                self.current_view = View::Library;
+            }
         }
     }
 
@@ -1813,7 +2295,8 @@ impl ReaderApp {
             self.add_folder_to_library(path.clone());
         }
         if let Some(path) = paths.first() {
-            if is_ebook_file(path) || rust_reader_parser::parse(path).is_ok() {
+            if is_ebook_file(path) || is_media_file(path) || rust_reader_parser::parse(path).is_ok()
+            {
                 self.open_path(path.clone());
             }
         }
@@ -1838,7 +2321,7 @@ fn history_matches(entry: &HistoryEntry, comic_id: &str, path: &std::path::Path)
 }
 
 /// Recursively walk `root` and return paths that look like supported comic
-/// files, ebook files, or folders containing images.
+/// files, ebook files, media files, or folders containing images.
 fn walk_supported_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut result = Vec::new();
     let mut dirs = vec![root.to_path_buf()];
@@ -1850,7 +2333,8 @@ fn walk_supported_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 dirs.push(path);
-            } else if is_supported_comic_file(&path) || is_ebook_file(&path) {
+            } else if is_supported_comic_file(&path) || is_ebook_file(&path) || is_media_file(&path)
+            {
                 result.push(path);
             }
         }
@@ -1908,6 +2392,22 @@ fn save_cover_image(
     let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8();
     rgb.save_with_format(&path, image::ImageFormat::Jpeg).ok()?;
     Some(path)
+}
+
+/// Scales a full-size media cover grab down to the comic-cover thumbnail
+/// size and writes it as JPEG, so media covers cost the same disk space and
+/// GPU texture memory as comic covers.
+fn shrink_media_cover(input: &Path, output: &Path) -> Result<PathBuf, String> {
+    let img = image::open(input).map_err(|e| e.to_string())?;
+    let thumb = img.thumbnail(
+        crate::loader::THUMBNAIL_MAX_DIMENSION,
+        crate::loader::THUMBNAIL_MAX_DIMENSION,
+    );
+    thumb
+        .to_rgb8()
+        .save_with_format(output, image::ImageFormat::Jpeg)
+        .map_err(|e| e.to_string())?;
+    Ok(output.to_path_buf())
 }
 
 fn migrate_library_ids(
@@ -2005,6 +2505,7 @@ mod tests {
                 settings.decode_threads as usize,
             );
             let cover_loader = PageLoader::new_with_compress(false, 1);
+            let (media_cover_tx, media_cover_rx) = crossbeam_channel::unbounded();
             Self {
                 current_view: View::Library,
                 last_view: View::Library,
@@ -2012,6 +2513,7 @@ mod tests {
                 library_view,
                 reader_view: ReaderView::default(),
                 ebook_view: EbookView::default(),
+                media_view: MediaView::default(),
                 settings_view: SettingsView::default(),
                 store,
                 history,
@@ -2021,8 +2523,11 @@ mod tests {
                 cover_loader,
                 opener: None,
                 ebook_opener: None,
+                pending_media_open: None,
                 pending_covers: HashMap::new(),
                 requested_cover_ids: HashSet::new(),
+                media_cover_tx,
+                media_cover_rx,
                 current_theme: Theme::System,
             }
         }
@@ -2146,6 +2651,41 @@ mod tests {
     }
 
     #[test]
+    fn test_is_media_file_recognizes_video_and_audio() {
+        assert!(is_media_file(Path::new("a.mp4")));
+        assert!(is_media_file(Path::new("a.MKV")));
+        assert!(is_media_file(Path::new("a.webm")));
+        assert!(is_media_file(Path::new("a.mp3")));
+        assert!(is_media_file(Path::new("a.flac")));
+        assert!(!is_media_file(Path::new("a.epub")));
+        assert!(!is_media_file(Path::new("a.cbz")));
+        assert!(!is_media_file(Path::new("a")));
+    }
+
+    #[test]
+    fn test_media_type_for_path_classifies_media() {
+        assert_eq!(media_type_for_path(Path::new("a.mp4")), MediaType::Video);
+        assert_eq!(media_type_for_path(Path::new("a.mkv")), MediaType::Video);
+        assert_eq!(media_type_for_path(Path::new("a.mp3")), MediaType::Audio);
+        assert_eq!(media_type_for_path(Path::new("a.flac")), MediaType::Audio);
+        assert_eq!(media_type_for_path(Path::new("a.epub")), MediaType::Ebook);
+        assert_eq!(media_type_for_path(Path::new("a.cbz")), MediaType::Comic);
+    }
+
+    #[test]
+    fn test_add_media_to_library_uses_stable_id_and_media_type() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let video = tmp_dir.path().join("clip.mp4");
+        std::fs::write(&video, b"fake").unwrap();
+        let (mut app, _tmp) = app_with_temp_store();
+        app.add_media_to_library(video.clone());
+        let entry = &app.library_view.library.entries[0];
+        assert_eq!(entry.media_type, MediaType::Video);
+        assert_eq!(entry.title, "clip");
+        assert_eq!(entry.comic_id, rust_reader_parser::stable_comic_id(&video));
+    }
+
+    #[test]
     fn test_open_path_dispatches_to_ebook_opener() {
         let (mut app, _tmp) = app_with_temp_store();
         app.open_path(PathBuf::from("/tmp/fake.epub"));
@@ -2221,6 +2761,122 @@ mod tests {
             ..Default::default()
         };
         assert!(!history_matches(&h, "def", Path::new("/book.epub")));
+    }
+
+    #[test]
+    fn test_media_history_entry_contract() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let video = tmp_dir.path().join("clip.mp4");
+        std::fs::write(&video, b"fake").unwrap();
+        let (mut app, _tmp) = app_with_temp_store();
+        let media_id = rust_reader_parser::stable_comic_id(&video);
+        app.history.entries.push(HistoryEntry {
+            comic_id: media_id.clone(),
+            path: video.clone(),
+            volume_index: 0,
+            page_index: 0,
+            char_offset: Some(42_000),
+            last_read_at: 1,
+        });
+        let entry = app
+            .history
+            .entries
+            .iter()
+            .find(|h| history_matches(h, &media_id, &video))
+            .unwrap();
+        assert_eq!(entry.char_offset, Some(42_000));
+        assert_eq!(entry.page_index, 0);
+    }
+
+    #[test]
+    fn test_poll_media_covers_sets_cover_path() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let video = PathBuf::from("/tmp/clip.mp4");
+        let id = rust_reader_parser::stable_comic_id(&video);
+        app.library_view
+            .library
+            .entries
+            .push(rust_reader_storage::models::LibraryEntry {
+                comic_id: id.clone(),
+                title: "clip".to_string(),
+                path: video,
+                cover_path: None,
+                added_at: 0,
+                media_type: MediaType::Video,
+            });
+        let cover = PathBuf::from("/tmp/covers/clip.jpg");
+        app.media_cover_tx.send((id, cover.clone())).unwrap();
+        app.poll_media_covers();
+        assert_eq!(
+            app.library_view.library.entries[0].cover_path.as_deref(),
+            Some(cover.as_path())
+        );
+        let saved = app.store.load_library().unwrap();
+        assert_eq!(
+            saved.entries[0].cover_path.as_deref(),
+            Some(cover.as_path()),
+            "cover_path should be persisted to library.json"
+        );
+    }
+
+    #[test]
+    fn test_request_media_cover_backfills_existing_cover() {
+        let (mut app, tmp) = app_with_temp_store();
+        let video = tmp.path().join("clip.mp4");
+        std::fs::write(&video, b"fake").unwrap();
+        let id = rust_reader_parser::stable_comic_id(&video);
+        app.library_view
+            .library
+            .entries
+            .push(rust_reader_storage::models::LibraryEntry {
+                comic_id: id.clone(),
+                title: "clip".to_string(),
+                path: video,
+                cover_path: None,
+                added_at: 0,
+                media_type: MediaType::Video,
+            });
+        let covers_dir = tmp.path().join("covers");
+        std::fs::create_dir_all(&covers_dir).unwrap();
+        let cover = rust_reader_media::cover::cover_output_path(&covers_dir, &id);
+        std::fs::write(&cover, b"jpeg").unwrap();
+        app.request_media_cover(0);
+        assert_eq!(
+            app.library_view.library.entries[0].cover_path.as_deref(),
+            Some(cover.as_path())
+        );
+        assert!(app.requested_cover_ids.contains(&id));
+        let saved = app.store.load_library().unwrap();
+        assert_eq!(
+            saved.entries[0].cover_path.as_deref(),
+            Some(cover.as_path()),
+            "backfilled cover_path should be persisted to library.json"
+        );
+    }
+
+    #[test]
+    fn test_shrink_media_cover_writes_jpeg_thumbnail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let png = tmp.path().join("grab.png");
+        let img = image::RgbaImage::from_pixel(1024, 512, image::Rgba([10, 20, 30, 255]));
+        img.save(&png).unwrap();
+        let out = tmp.path().join("cover.jpg");
+        shrink_media_cover(&png, &out).unwrap();
+        let thumb = image::open(&out).unwrap();
+        assert!(
+            thumb.width() <= crate::loader::THUMBNAIL_MAX_DIMENSION
+                && thumb.height() <= crate::loader::THUMBNAIL_MAX_DIMENSION,
+            "thumbnail should fit within THUMBNAIL_MAX_DIMENSION"
+        );
+        assert_eq!(
+            (thumb.width(), thumb.height()),
+            (256, 128),
+            "aspect ratio should be preserved"
+        );
+        assert!(
+            matches!(thumb, image::DynamicImage::ImageRgb8(_)),
+            "cover should be stored as JPEG"
+        );
     }
 
     fn should_show_bar(

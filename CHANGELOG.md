@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Phosphor icon font for the reader toolbar.
 - Toolbar display mode setting: icon + text, icon only, or text only.
 - VS Code 调试/任务配置：新增 `.vscode/launch.json`（Debug / Release / Attach）与 `.vscode/tasks.json`，与 Zed 配置对齐，方便在 VS Code 中运行、调试与打包。
+- 媒体播放（内嵌 libmpv）：支持打开并播放视频（mp4/mkv/webm/avi/mov 等）与音频（mp3/flac/aac/m4a/ogg/wav/opus 等），经 `CAOpenGLLayer` 原生叠加渲染。
+- 媒体控制：播放/暂停、±5s/±10s 跳转、可拖进度条、0.5–2 倍速、音量、字幕轨切换/关闭、音轨切换与全屏；工具栏与进度条自动隐藏。
+- 媒体书架集成：视频/音频文件与漫画、电子书同架展示、过滤与导入；封面由无头 mpv 截取（视频取 10% 帧，音频取专辑封面）。
+- 媒体播放进度恢复：复用历史记录保存播放位置（毫秒），中途退出后自动续播，接近结尾时从头播放。
+- macOS 打包脚本新增 `bundle_mpv`：将 libmpv 及其 Homebrew 依赖拷入 `.app` 的 `Contents/Frameworks` 并改写 `@rpath` 后逐个签名，打包产物无需安装 mpv。
 
 ### Changed
 
@@ -57,6 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 电子书：CSS columns 分页 review 修复——`showError` 使用独立 `#ebook-error-layer` 覆盖层并在渲染成功后隐藏；连续滚动模式在 `applySettings` 中以 `maxScroll()` 作为分母保留滚动比例；目录目标解析区分 fragment/path，对特殊 id 使用 `CSS.escape()`，Rust 侧对 fragment 做 URL 解码；`jump_to_toc` 在注入 JS 前同步 `current_chapter`。
 - macOS: 修复应用未运行时通过 Finder / Dock 打开压缩包报 “rustReader cannot open files in the “Comic Archive” format” 的错误。通过 swizzle `-[NSApplication setDelegate:]` 在 winit 设置 delegate 前注入 `application:openURLs:` / `application:openFiles:` / `application:openFile:` 实现。
 - macOS: 修复应用图标在 Dock/Finder 中显示为带白色方角的问题。`generate_icons.py` 现在会使用 macOS 圆角遮罩生成带透明四角的 PNG 与 `.icns`。
+- 电子书：修复工具栏/状态栏不随 WebView 阅读位置上报实时刷新的问题；`EbookRenderer` 在处理 IPC position 消息时调用 `egui::Context::request_repaint()`。
 
 ## [0.1.0] - 2026-06-23
 

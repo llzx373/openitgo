@@ -2,6 +2,8 @@
 
 #[cfg(target_os = "macos")]
 pub mod macos {
+    pub mod mpv_view;
+
     use crate::loader::{dynamic_to_loaded_image, LoadedImage, MAX_IMAGE_DIMENSION};
     use crate::timing;
     use core_foundation::base::{CFRelease, TCFType};
@@ -681,5 +683,21 @@ pub mod macos {
 
     pub fn decode_thumbnail_bytes(_bytes: &[u8]) -> Result<Option<ColorImage>, String> {
         Ok(None)
+    }
+
+    pub mod mpv_view {
+        pub struct MpvNativeView;
+        impl MpvNativeView {
+            pub fn new<
+                W: wry::raw_window_handle::HasWindowHandle + wry::raw_window_handle::HasDisplayHandle,
+            >(
+                _parent: &W,
+                _bounds: wry::Rect,
+                _player: &rust_reader_media::MpvPlayer,
+            ) -> Result<Self, String> {
+                Err("媒体播放暂仅支持 macOS".to_string())
+            }
+            pub fn set_bounds(&self, _bounds: wry::Rect) {}
+        }
     }
 }

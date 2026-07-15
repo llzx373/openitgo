@@ -2,6 +2,10 @@
 #
 # Package rustReader as a macOS .app bundle.
 #
+# Requires libmpv from Homebrew (`brew install mpv`); the library and its
+# dependencies are bundled into Contents/Frameworks, so the resulting .app
+# does not need a Homebrew mpv installation.
+#
 # Usage:
 #   scripts/package-macos.sh [output_dir]
 #
@@ -22,6 +26,7 @@ app_bundle="${output_dir}/${app_name}.app"
 contents_dir="${app_bundle}/Contents"
 macos_dir="${contents_dir}/MacOS"
 resources_dir="${contents_dir}/Resources"
+frameworks_dir="${contents_dir}/Frameworks"
 
 echo "Building release binary..."
 cd "${project_root}"
@@ -51,7 +56,97 @@ sed \
 
 plutil -lint "${info_plist}" >/dev/null
 
-echo "Signing app bundle with ad-hoc signature..."
+# Bundle libmpv and its Homebrew dependencies into Contents/Frameworks and
+# rewrite their install names to @rpath, so the app runs on machines without
+# a Homebrew mpv installation.
+bundle_mpv() {
+    mkdir -p "${frameworks_dir}"
+
+    echo "Bundling libmpv and its Homebrew dependencies..."
+    local mpv_prefix libmpv
+    mpv_prefix="$(brew --prefix mpv)"
+    libmpv="$(ls "${mpv_prefix}"/lib/libmpv.*.dylib 2>/dev/null | head -1 || true)"
+    if [[ -z "${libmpv}" ]]; then
+        echo "Error: libmpv not found. Run: brew install mpv" >&2
+        exit 1
+    fi
+
+    # Recursively collect Homebrew dylib dependencies (excluding system libs).
+    collect_deps() {
+        local lib="$1"
+        otool -L "${lib}" | awk 'NR>1 {print $1}' | while read -r dep; do
+            case "${dep}" in
+                /opt/homebrew/*|/usr/local/*)
+                    if [[ ! -f "${frameworks_dir}/$(basename "${dep}")" ]]; then
+                        cp "${dep}" "${frameworks_dir}/"
+                        collect_deps "${dep}"
+                    fi
+                    ;;
+            esac
+        done
+    }
+
+    cp "${libmpv}" "${frameworks_dir}/"
+    collect_deps "${libmpv}"
+
+    # Rewrite install names to @rpath and add rpath to the executable.
+    local dylib name
+    for dylib in "${frameworks_dir}"/*.dylib; do
+        name="$(basename "${dylib}")"
+        install_name_tool -id "@rpath/${name}" "${dylib}" 2>/dev/null || true
+        otool -L "${dylib}" | awk 'NR>1 {print $1}' | while read -r dep; do
+            case "${dep}" in
+                /opt/homebrew/*|/usr/local/*)
+                    install_name_tool -change "${dep}" "@rpath/$(basename "${dep}")" "${dylib}" || true
+                    ;;
+            esac
+        done
+    done
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "${macos_dir}/${app_name}"
+    # The main binary links libmpv directly; rewrite that reference too.
+    otool -L "${macos_dir}/${app_name}" | awk 'NR>1 {print $1}' | while read -r dep; do
+        case "${dep}" in
+            /opt/homebrew/*|/usr/local/*)
+                install_name_tool -change "${dep}" "@rpath/$(basename "${dep}")" "${macos_dir}/${app_name}" || true
+                ;;
+        esac
+    done
+
+    # Fail the packaging if any Homebrew reference survived the rewrite, or if
+    # a referenced @rpath dylib is missing from Contents/Frameworks. The
+    # -change calls above are best-effort, so verify the result explicitly
+    # instead of letting a broken bundle ship.
+    local check_failed=0 file dep
+    for file in "${macos_dir}/${app_name}" "${frameworks_dir}"/*.dylib; do
+        while read -r dep; do
+            case "${dep}" in
+                /opt/homebrew/*|/usr/local/*)
+                    echo "Error: ${file} still references ${dep}" >&2
+                    check_failed=1
+                    ;;
+                @rpath/*)
+                    name="${dep#@rpath/}"
+                    if [[ ! -f "${frameworks_dir}/${name}" ]]; then
+                        echo "Error: ${file} references ${dep}, missing from Contents/Frameworks" >&2
+                        check_failed=1
+                    fi
+                    ;;
+            esac
+        done < <(otool -L "${file}" | awk 'NR>1 {print $1}')
+    done
+    if [[ "${check_failed}" -ne 0 ]]; then
+        echo "Error: libmpv bundling verification failed." >&2
+        exit 1
+    fi
+    echo "Verified libmpv bundle: no Homebrew references remain, all @rpath dylibs are bundled."
+}
+
+bundle_mpv
+
+echo "Signing bundled dylibs and app bundle..."
+for dylib in "${frameworks_dir}"/*.dylib; do
+    codesign --force --sign - "${dylib}" >/dev/null
+done
 codesign --force --deep --sign - "${app_bundle}" >/dev/null
 
 echo "Done: ${app_bundle}"

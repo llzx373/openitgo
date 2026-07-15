@@ -40,10 +40,14 @@
 ```bash
 brew install mpv
 ls "$(brew --prefix mpv)/lib/" | grep libmpv        # 期望看到 libmpv.2.dylib
-PKG_CONFIG_PATH="$(brew --prefix mpv)/lib/pkgconfig" pkg-config --modversion libmpv
+otool -D "$(brew --prefix mpv)/lib/libmpv.2.dylib"  # install name 应为绝对路径
 ```
 
-Expected: 输出 mpv 的 client API 版本（如 `2.3`）。若 `libmpv.pc` 不存在，停下并与用户确认 mpv 安装方式。
+Expected: `libmpv.2.dylib` 存在，install name 为绝对路径（开发期可直接加载）。
+
+注意：brew 的 mpv formula（实测 0.41.0_6）**不提供 `libmpv.pc`**，不要用 pkg-config 验证。
+同时 `/opt/homebrew/lib` 不在 Rust 默认链接搜索路径，`ld` 直接 `-lmpv` 会报
+`library 'mpv' not found`——Task 5 用 build.rs 注入 link-search 解决。
 
 - [ ] **Step 2: workspace 加入新成员**
 
@@ -221,6 +225,7 @@ git commit -m "feat(storage): add Video/Audio variants to MediaType"
 - Modify: `rust-reader-app/src/app.rs:27-45`（`is_ebook_file` 旁新增 `is_media_file`，扩展 `media_type_for_path`）
 - Modify: `rust-reader-app/src/app.rs:1629-1635`（`add_file_to_library` 增加媒体分支）
 - Modify: `rust-reader-app/src/app.rs:1842-1860`（`walk_supported_files` 纳入媒体扩展名）
+- Modify: `rust-reader-app/src/views/library.rs:348-352`（`Library` 模式筛选放行 Video/Audio）
 
 **Interfaces:**
 - Consumes: `MediaType::Video/Audio`（Task 2）、`rust_reader_parser::stable_comic_id(&Path) -> String`
@@ -387,17 +392,67 @@ fn test_add_media_to_library_uses_stable_id_and_media_type() {
 
 （`test_app()` 用 tests 模块里既有的构造方式；若不存在同名 helper，照搬 `app.rs:2011` 附近的构造代码。）
 
-- [ ] **Step 8: 运行测试确认通过 + 全量流水线**
+- [ ] **Step 8: 书库筛选纳入媒体条目（`rust-reader-app/src/views/library.rs:348-352`）**
+
+设计文档假设"筛选逻辑自然生效无需改动"，但实际代码 `LibraryMode::Library`
+只放行 `MediaType::Comic`，媒体条目会在默认书库模式不可见。把
+`filtered_entries` 中的筛选改为：
+
+```rust
+let media_ok = match self.mode {
+    LibraryMode::Ebooks => e.media_type == MediaType::Ebook,
+    LibraryMode::Library => matches!(
+        e.media_type,
+        MediaType::Comic | MediaType::Video | MediaType::Audio
+    ),
+    _ => true,
+};
+```
+
+先写失败测试（追加到 `library.rs` 的 `mod tests`，参照 `test_search_filters_by_title`
+的 `LibraryView { ..Default::default() }` 构造方式）：
+
+```rust
+#[test]
+fn test_library_mode_includes_media_entries() {
+    let entry = |id: &str, media_type: MediaType| LibraryEntry {
+        comic_id: id.to_string(),
+        title: id.to_string(),
+        path: PathBuf::from(format!("/{id}")),
+        cover_path: None,
+        added_at: 0,
+        media_type,
+    };
+    let library = Library {
+        entries: vec![
+            entry("comic", MediaType::Comic),
+            entry("video", MediaType::Video),
+            entry("audio", MediaType::Audio),
+            entry("ebook", MediaType::Ebook),
+        ],
+    };
+    let view = LibraryView {
+        library,
+        mode: LibraryMode::Library,
+        ..Default::default()
+    };
+    let filtered = view.filtered_entries(&History::default(), LibrarySort::Title);
+    let ids: Vec<&str> = filtered.iter().map(|(_, e)| e.comic_id.as_str()).collect();
+    assert_eq!(ids, ["audio", "comic", "video"]);
+}
+```
+
+- [ ] **Step 9: 运行测试确认通过 + 全量流水线**
 
 Run: `cargo test -p rust-reader-app media`
 Expected: PASS
 Run: `cargo fmt --all && cargo check --workspace && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings`
 Expected: 全绿。
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
-git add rust-reader-app/src/app.rs
+git add rust-reader-app/src/app.rs rust-reader-app/src/views/library.rs
 git commit -m "feat(app): recognize media files and import them into the library"
 ```
 
@@ -591,6 +646,7 @@ git commit -m "feat(media): add track parsing and PlayerState types"
 
 **Files:**
 - Modify: `rust-reader-media/Cargo.toml`
+- Create: `rust-reader-media/build.rs`
 - Create: `rust-reader-media/src/player.rs`
 - Create: `rust-reader-media/examples/probe.rs`
 - Modify: `rust-reader-media/src/lib.rs`
@@ -610,14 +666,41 @@ git commit -m "feat(media): add track parsing and PlayerState types"
     `pub(crate) fn handle(&self) -> *mut libmpv_sys::mpv_handle`
   - `PlayerState` 由事件泵线程持续更新；`time-pos`/`duration` 变化时调用 `repaint` 回调
 
-- [ ] **Step 1: `rust-reader-media/Cargo.toml` 追加依赖**
+- [ ] **Step 1: `rust-reader-media/Cargo.toml` 追加依赖 + 新建 `rust-reader-media/build.rs`**
 
 ```toml
 [target.'cfg(target_os = "macos")'.dependencies]
 libmpv-sys = "3.1"
 ```
 
-（libmpv-sys 走 pkg-config；Task 1 已验证 `libmpv.pc` 存在。非 macOS 下不链接 libmpv，player 模块整体 `#[cfg(target_os = "macos")]`。）
+libmpv-sys 3.1 使用预生成的 bindings + `cargo:rustc-link-lib=mpv`，**不走 pkg-config**
+（bindgen feature 才需要头文件与 pkg-config，本项目不开）。但 macOS 上
+`/opt/homebrew/lib` 不在默认链接搜索路径，直接链接会报 `ld: library 'mpv' not found`，
+因此新建 `rust-reader-media/build.rs`：
+
+```rust
+//! Inject the Homebrew libmpv link search path on macOS.
+//!
+//! libmpv-sys emits `cargo:rustc-link-lib=mpv` but Homebrew's /opt/homebrew/lib
+//! (or /usr/local/lib on Intel) is not in the default linker search path.
+
+fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+    for dir in ["/opt/homebrew/lib", "/usr/local/lib"] {
+        if std::path::Path::new(dir).join("libmpv.dylib").exists() {
+            println!("cargo:rustc-link-search=native={dir}");
+            return;
+        }
+    }
+    println!(
+        "cargo:warning=libmpv.dylib not found in /opt/homebrew/lib or /usr/local/lib; install mpv via Homebrew"
+    );
+}
+```
+
+（非 macOS 下不链接 libmpv，player 模块整体 `#[cfg(target_os = "macos")]`。）
 
 - [ ] **Step 2: 实现 `rust-reader-media/src/player.rs`**
 
@@ -1132,31 +1215,80 @@ git commit -m "feat(media): MpvPlayer command API, event pump and property obser
 
 ### Task 6: macOS 原生渲染（RenderContext + mpv_view）
 
-**Files:**
+**Files:**（复审修订后的最终清单）
 - Modify: `rust-reader-media/Cargo.toml`（macOS deps 追加 `cgl = "0.3"`、`libc = "0.2"`）
 - Create: `rust-reader-media/src/render.rs`
-- Modify: `rust-reader-app/Cargo.toml:33`（macOS deps 追加 `libc = "0.2"`、`cgl = "0.3"`）
-- Create: `rust-reader-app/src/platform/mpv_view.rs`
-- Modify: `rust-reader-app/src/platform.rs:4`（macOS `pub mod macos` 内声明 `pub mod mpv_view;`）
+- Modify: `rust-reader-media/src/lib.rs`（`#[cfg(target_os = "macos")] pub mod render;`）
+- Modify: `rust-reader-media/src/player.rs`、`rust-reader-media/src/player_stub.rs`（追加 `stop()`；real 版另加 `RUST_READER_MPV_LOG=1` 门控的 mpv 日志输出，调试用）
+- Modify: `rust-reader-app/Cargo.toml`（macOS deps 追加 `libc = "0.2"`、`cgl = "0.3"`）
+- Create: `rust-reader-app/src/platform/macos/mpv_view.rs`
+- Create: `rust-reader-app/examples/probe_mpv_view.rs`
+- Modify: `rust-reader-app/src/platform.rs`（macOS `pub mod macos` 内声明 `pub mod mpv_view;`；非 macOS inline stub）
 
-**Interfaces:**
+**Interfaces:**（最终）
 - Consumes: Task 5（`MpvPlayer::handle()`）
 - Produces:
   - `rust_reader_media::render::RenderContext`：
     `unsafe fn new(player: &MpvPlayer) -> Result<Self, MediaError>`、
-    `fn set_update_callback<F: Fn() + Send + Sync + 'static>(&self, f: F)`、
+    `fn set_update_callback<F: Fn() + Send + Sync + 'static>(&mut self, f: F)`、
+    `fn update(&self) -> u64`、
     `fn render(&self, width: i32, height: i32)`、`fn report_swap(&self)`
   - `crate::platform::macos::mpv_view::MpvNativeView`：
     `fn new<W: HasWindowHandle + HasDisplayHandle>(parent: &W, bounds: wry::Rect, player: &MpvPlayer) -> Result<Self, String>`、
     `fn set_bounds(&self, bounds: wry::Rect)`、`fn remove_from_superview(&self)`
+  - `MpvPlayer::stop()`（real + stub）
   - 非 macOS：`pub mod mpv_view` stub，`new` 返回 `Err("媒体播放暂仅支持 macOS")`
 
-- [ ] **Step 1: `rust-reader-media/src/render.rs`**
+**最终设计要点（复审修订后，取代草稿约定）:**
+
+1. **预建 CGL 对象贯穿 render 生命周期**（复审 Critical 修复）。草稿在
+   `copyCGLPixelFormatForDisplayMask:`/`copyCGLContextForPixelFormat:` 里每次新建
+   CGL 对象，且 `RenderContext::new` 直接在 UI 线程调用——UI 线程（wgpu/Metal）没有
+   current CGL context，`mpv_render_context_create` 在此条件下确定性段错误。最终形态：
+   `MpvNativeView::new` 先用 `CGLChoosePixelFormat`/`CGLCreateContext` 预建一对
+   pf/ctx，create/free 都通过 `with_current_context`（CGLLockContext + 保存/恢复原
+   context）把预建 ctx 置为 current；pf/ctx 存入 layer 状态，两个 copy 回调返回预建
+   对象并 +1 retain（copy 语义转移所有权）。
+2. **LayerState + Mutex + dealloc**（复审 Important 修复，拆壳竞态）。草稿用
+   `Option<Box<RenderContext>>` + ivar 裸指针，Drop 与 CA render 线程的 draw 之间存在
+   UAF 窗口。最终形态：layer ivar `_rsState` 持有 `Box<LayerState>`（
+   `Mutex<Option<RenderContext>>` + cgl_pf + cgl_ctx），由 `dealloc` 释放（方法接收者
+   在调用期间保活，故任何在途 draw 都能安全解引用）；`drawInCGLContext` 用 `try_lock`，
+   抢不到就跳帧（绝不阻塞 CA render 线程）；`Drop` 用 blocking lock 把 render context
+   取出（在途 draw 被等完、新 draw 看到 `None` 跳过），再在 CGL current 下
+   `update()` + free。
+3. **rsDriveUpdate 驱动 `update()`**（调试中发现的架构结论）。草稿让 update 回调直接
+   `setNeedsDisplay`，靠 draw 驱动一切；但 `ADVANCED_CONTROL=1` 下每个 update 回调都
+   必须以 `mpv_render_context_update()` 应答，否则 vo core 卡死且不可恢复（此后
+   free/命令/terminate_destroy 全部挂起），而 CoreAnimation 不给隐藏窗口调度 draw。
+   最终形态：update 回调经 `performSelectorOnMainThread` 跳到 layer 的 `rsDriveUpdate`
+   selector（主线程），在 mutex + CGL current 下调 `render.update()`，返回 flags 含
+   `MPV_RENDER_UPDATE_FRAME(=1)` 时才 `setNeedsDisplay`；`draw_in` 只 `try_lock` +
+   `render` + `report_swap`（不再调 `update()`）。advanced 保持 1：它让
+   `BLOCK_FOR_TARGET_TIME=0` + `report_swap` 时序生效并启用 direct rendering（实测
+   advanced=0 时 free 反而必挂）。
+4. **aarch64 编译期断言**：`msg_send![this, bounds]` 经普通 `objc_msgSend` 返回
+   CGRect，依赖 arm64 统一 struct-return ABI；x86_64 需 `objc_msgSend_stret`。
+   用 `#[cfg(not(target_arch = "aarch64"))] compile_error!` 直接拒绝 Intel 构建，
+   而不是静默编出错误代码。
+5. **bindings 实际形态**（与草稿注释的出入，已按生成代码修正）：
+   `MPV_RENDER_API_TYPE_OPENGL` 是 `&'static [u8; 7]`（`b"opengl\0"`，非 `&CStr`）；
+   `mpv_opengl_init_params` 有第三个字段 `extra_exts`；`mpv_render_context_update`
+   返回 `u64` flags。`cgl` 0.3.2 未暴露 `CGLRetainContext`/`CGLReleaseContext`，
+   mpv_view.rs 自行 extern 声明（`#[link(name = "OpenGL", kind = "framework")]`）。
+
+- [x] **Step 1: `rust-reader-media/src/render.rs`（最终代码，与仓库一致）**
 
 ```rust
 //! mpv OpenGL render context. Rendering happens inside a CAOpenGLLayer
 //! (app side); this type only owns the mpv render context and its update
 //! callback. Mirrors mpv's examples/libmpv/cocoa/cocoabasic.m.
+//!
+//! Threading rules (per libmpv render.h): the render context must be created
+//! before the mpv handle is destroyed and freed before it; the update
+//! callback may fire from arbitrary mpv threads and must not call any mpv
+//! API — app code must hop to the render thread and call
+//! `mpv_render_context_update`/`render` there.
 
 use crate::error::MediaError;
 use crate::player::MpvPlayer;
@@ -1165,12 +1297,22 @@ use std::ffi::c_void;
 
 pub struct RenderContext {
     ctx: *mut mpv::mpv_render_context,
+    // Owns the closure passed to mpv's update callback; the raw pointer given
+    // to mpv aliases this box, so it must stay alive until the callback is
+    // unset in Drop.
     update_cb: Option<Box<Box<dyn Fn() + Send + Sync>>>,
 }
 
+// The render context is only driven from the layer's draw callback (render
+// thread) plus the update callback hop; ownership can move between threads.
 unsafe impl Send for RenderContext {}
 
-unsafe extern "C" fn get_proc_address(_ctx: *mut c_void, name: *const std::ffi::c_char) -> *mut c_void {
+// SAFETY: called by libmpv with `name` being a valid NUL-terminated GL
+// function name; dlsym on RTLD_DEFAULT is safe for any symbol name.
+unsafe extern "C" fn get_proc_address(
+    _ctx: *mut c_void,
+    name: *const std::ffi::c_char,
+) -> *mut c_void {
     libc::dlsym(libc::RTLD_DEFAULT, name)
 }
 
@@ -1178,19 +1320,35 @@ extern "C" fn update_trampoline(ctx: *mut c_void) {
     if ctx.is_null() {
         return;
     }
+    // SAFETY: `ctx` is the pointer we registered in `set_update_callback`,
+    // pointing at a live `Box<dyn Fn() + Send + Sync>`; the callback is unset
+    // before the box is dropped. libmpv forbids calling mpv APIs from this
+    // callback — we only invoke user code that hops threads.
     let cb = unsafe { &*(ctx as *const Box<dyn Fn() + Send + Sync>) };
     cb();
 }
 
 impl RenderContext {
-    /// # Safety: the caller must guarantee an OpenGL-capable environment
-    /// (macOS CAOpenGLLayer) and outlive ordering vs the player.
+    /// Creates an mpv render context for the OpenGL backend.
+    ///
+    /// # Safety
+    /// The caller must guarantee an OpenGL-capable environment
+    /// (macOS CAOpenGLLayer with a current CGL context) and that the returned
+    /// context is dropped before `player` is destroyed.
     pub unsafe fn new(player: &MpvPlayer) -> Result<Self, MediaError> {
         let mut init = mpv::mpv_opengl_init_params {
             get_proc_address: Some(get_proc_address),
             get_proc_address_ctx: std::ptr::null_mut(),
+            extra_exts: std::ptr::null(),
         };
         let api = c_api_type();
+        // Advanced control ON: it makes mpv_render_context_update() a hard
+        // requirement after each update callback, but it also makes
+        // BLOCK_FOR_TARGET_TIME=0 + report_swap timing effective and enables
+        // direct rendering. The app guarantees sustained update() calls via
+        // the layer's main-thread drive selector (see mpv_view.rs); letting
+        // callbacks go unanswered wedges the vo core, after which free,
+        // commands and terminate_destroy all hang.
         let advanced: i32 = 1;
         let mut params = [
             mpv::mpv_render_param {
@@ -1211,11 +1369,16 @@ impl RenderContext {
             },
         ];
         let mut ctx: *mut mpv::mpv_render_context = std::ptr::null_mut();
+        // SAFETY: player.handle() is a valid, initialized mpv handle; `params`
+        // is a valid INVALID-terminated array whose data pointers stay valid
+        // for the duration of the call (render.h only requires that).
         let rc = unsafe {
             mpv::mpv_render_context_create(&mut ctx, player.handle(), params.as_mut_ptr())
         };
         if rc < 0 || ctx.is_null() {
-            return Err(MediaError::Init(format!("mpv_render_context_create 失败: {rc}")));
+            return Err(MediaError::Init(format!(
+                "mpv_render_context_create 失败: {rc}"
+            )));
         }
         Ok(Self {
             ctx,
@@ -1223,9 +1386,14 @@ impl RenderContext {
         })
     }
 
+    /// Registers `f` as the frame-available callback. mpv may invoke it from
+    /// arbitrary threads; it must not call mpv APIs directly.
     pub fn set_update_callback<F: Fn() + Send + Sync + 'static>(&mut self, f: F) {
         let boxed: Box<Box<dyn Fn() + Send + Sync>> = Box::new(Box::new(f));
         let ptr = Box::into_raw(boxed);
+        // SAFETY: self.ctx is a valid render context; `ptr` stays valid until
+        // the callback is reset (Drop) because we re-box it into `update_cb`
+        // below.
         unsafe {
             mpv::mpv_render_context_set_update_callback(
                 self.ctx,
@@ -1233,11 +1401,26 @@ impl RenderContext {
                 ptr as *mut c_void,
             );
         }
-        // Reclaim any previous closure (mpv no longer references it after reset).
+        // Reclaim the raw pointer into owned storage; dropping any previous
+        // closure is safe because mpv no longer references it after the reset
+        // above.
         self.update_cb = Some(unsafe { Box::from_raw(ptr) });
     }
 
+    /// Must be called once after each update callback fired, on a thread with
+    /// the GL context current (a hard requirement because we create the
+    /// context with MPV_RENDER_PARAM_ADVANCED_CONTROL=1 — letting callbacks
+    /// go unanswered wedges the vo core, and free/commands/terminate then
+    /// hang). Returns the raw mpv_render_update_flag bitset.
+    pub fn update(&self) -> u64 {
+        // SAFETY: self.ctx is valid; the caller guarantees a current GL
+        // context on this thread and serialization with other mpv_render_*
+        // calls (MpvNativeView's mutex).
+        unsafe { mpv::mpv_render_context_update(self.ctx) }
+    }
+
     /// Renders into the currently bound framebuffer (CAOpenGLLayer FBO 0).
+    /// Must be called on the render thread with the CGL context current.
     pub fn render(&self, width: i32, height: i32) {
         let mut fbo = mpv::mpv_opengl_fbo {
             fbo: 0,
@@ -1265,20 +1448,32 @@ impl RenderContext {
                 data: std::ptr::null_mut(),
             },
         ];
+        // SAFETY: self.ctx is valid; `params` is a valid INVALID-terminated
+        // array living for the call; the caller guarantees a current GL
+        // context on this thread.
         unsafe { mpv::mpv_render_context_render(self.ctx, params.as_mut_ptr()) };
     }
 
+    /// Tells mpv a swap happened; call once after each `render` for timing.
     pub fn report_swap(&self) {
+        // SAFETY: self.ctx is valid; report_swap is thread-safe with a
+        // current context and ignored when no video is active.
         unsafe { mpv::mpv_render_context_report_swap(self.ctx) };
     }
 }
 
 fn c_api_type() -> *mut std::ffi::c_char {
+    // Bindings expose this as `&'static [u8; 7]` (b"opengl\0"), not `&CStr`;
+    // the cast drops const for the C API, which only reads it during create.
     mpv::MPV_RENDER_API_TYPE_OPENGL.as_ptr() as *mut std::ffi::c_char
 }
 
 impl Drop for RenderContext {
     fn drop(&mut self) {
+        // SAFETY: self.ctx is a valid render context owned by us. Unsetting
+        // the callback before free guarantees mpv cannot touch `update_cb`
+        // afterwards; the context is freed before the player handle per the
+        // caller's lifetime contract.
         unsafe {
             mpv::mpv_render_context_set_update_callback(self.ctx, None, std::ptr::null_mut());
             mpv::mpv_render_context_free(self.ctx);
@@ -1287,20 +1482,17 @@ impl Drop for RenderContext {
 }
 ```
 
-（`MPV_RENDER_API_TYPE_OPENGL` 在 libmpv-sys 中是 `&CStr` 常量；若实际类型不同，按生成代码调整为 `*mut c_char`。）
-
-- [ ] **Step 2: 编译检查 render.rs**
+- [x] **Step 2: 编译检查 render.rs**
 
 Run: `cargo check -p rust-reader-media`
-Expected: 通过（同样以 libmpv-sys 实际生成名为准微调）。
-`lib.rs` 追加：
+Expected: 通过。`lib.rs` 追加：
 
 ```rust
 #[cfg(target_os = "macos")]
 pub mod render;
 ```
 
-- [ ] **Step 3: `rust-reader-app/Cargo.toml` 依赖调整**
+- [x] **Step 3: `rust-reader-app/Cargo.toml` 依赖调整**
 
 `[dependencies]` 通用段追加（`state`/`tracks`/`time`/stub 在非 macOS 也要用）：
 
@@ -1315,41 +1507,102 @@ libc = "0.2"
 cgl = "0.3"
 ```
 
-- [ ] **Step 4: 创建 `rust-reader-app/src/platform/mpv_view.rs`（完整最终代码）**
+另：`rust-reader-media/src/player.rs` 与 `player_stub.rs` 追加 `stop()`（暂停并回到
+文件开头，供 MediaView 的"停止"键）；real 版 player 增加 `RUST_READER_MPV_LOG=1`
+门控的 mpv 日志打印（排查 AO/解码问题用，默认关闭）。
 
-`RenderContext` 的所有权约定：`MpvNativeView` 用 `Box` 持有它，地址在
-`Box` 内稳定，`CAOpenGLLayer` 的 ivar 保存该裸指针；`Drop` 时先把 ivar
-清零、释放 mpv 渲染上下文，再 release 原生对象，保证无野回调。
+- [x] **Step 4: 创建 `rust-reader-app/src/platform/macos/mpv_view.rs`（最终代码，与仓库一致）**
 
 ```rust
 //! macOS native overlay hosting libmpv's CAOpenGLLayer, mirroring how the
 //! ebook webview is overlaid on the egui window. Coordinates are top-left
 //! logical points (winit's content view is flipped), same as wry child views.
+//!
+//! GL context lifecycle: `MpvNativeView` pre-builds one CGLPixelFormat and
+//! one CGLContext. The same context is current for
+//! `mpv_render_context_create`, every `drawInCGLContext` and the final
+//! `mpv_render_context_free`, satisfying render.h's "same context" rule —
+//! the app (wgpu/Metal) has no current GL context on the UI thread, and
+//! creating the mpv render context without one segfaults. The layer's
+//! `copyCGLPixelFormatForDisplayMask:`/`copyCGLContextForPixelFormat:` return
+//! these pre-built objects with +1 retain (copy semantics).
+//!
+//! Teardown: the layer owns a `Box<LayerState>` (ivar `_rsState`, freed in
+//! `dealloc`) holding `Mutex<Option<RenderContext>>`. Draws `try_lock` and
+//! skip a frame on contention, so the CA render thread never blocks;
+//! `Drop` takes the render context out under a blocking lock, which both
+//! gates new draws (they see `None`) and waits out any in-flight draw
+//! (render.h: only one mpv_render_* call at a time).
+//!
+//! Update drive: with MPV_RENDER_PARAM_ADVANCED_CONTROL=1 every update
+//! callback must be answered by `mpv_render_context_update()` or the vo core
+//! wedges (and free/commands/terminate then hang). CoreAnimation stops
+//! scheduling draws for hidden windows, so the update callback hops to the
+//! main thread's `rsDriveUpdate` selector, which answers `update()` under
+//! the mutex with the CGL context current — draws stay optional.
+
+// objc 0.2's sel_impl macro carries a stale `cfg(feature = "cargo-clippy")`;
+// same allow as platform.rs's dock_open module.
+#![allow(unexpected_cfgs)]
+// The MediaView consumer lands in Task 7; until then the bin target (main.rs)
+// sees this API as unused (the lib target exposes it via `pub mod platform`).
+#![allow(dead_code)]
+
+// `msg_send![this, bounds]` returns CGRect through plain objc_msgSend; the
+// arm64 ABI handles struct returns uniformly, x86_64 would need
+// objc_msgSend_stret. Fail the build instead of silently miscompiling.
+#[cfg(not(target_arch = "aarch64"))]
+compile_error!(
+    "mpv_view assumes the arm64 objc_msgSend struct-return ABI (CGRect); Intel macOS needs stret handling"
+);
 
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel, BOOL, NO, YES};
 use objc::{class, msg_send, sel, sel_impl};
+use rust_reader_media::render::RenderContext;
 use std::ffi::c_void;
+use std::sync::Mutex;
 
-#[link(name = "QuartzCore", kind = "framework")]
-extern "C" {}
+#[link(name = "OpenGL", kind = "framework")]
+extern "C" {
+    // Not exposed by the cgl crate (0.3.2), declared in <OpenGL/CGLContext.h>.
+    fn CGLRetainContext(ctx: cgl::CGLContextObj) -> cgl::CGLContextObj;
+    fn CGLReleaseContext(ctx: cgl::CGLContextObj);
+}
+
+/// Shared between the layer's draw callback and `MpvNativeView::drop`.
+/// Owned by the layer via the `_rsState` ivar and freed in `dealloc`, so any
+/// in-flight draw (the receiver stays alive for its whole method call) always
+/// finds the pointee valid.
+struct LayerState {
+    /// Serializes mpv_render_* calls; `None` once teardown has taken the
+    /// render context out.
+    render: Mutex<Option<RenderContext>>,
+    cgl_pf: cgl::CGLPixelFormatObj,
+    cgl_ctx: cgl::CGLContextObj,
+}
 
 pub struct MpvNativeView {
     view: *mut Object,
     layer: *mut Object,
-    render: Option<Box<rust_reader_media::render::RenderContext>>,
+    state: *mut LayerState,
 }
 
+// The raw NSView/CALayer pointers are only touched from the UI thread that
+// owns this value; moving ownership between threads does not alias them.
 unsafe impl Send for MpvNativeView {}
 
 fn layer_class() -> &'static Class {
     use std::sync::OnceLock;
     static CLS: OnceLock<&'static Class> = OnceLock::new();
-    *CLS.get_or_init(|| {
+    CLS.get_or_init(|| {
         let superclass = Class::get("CAOpenGLLayer").expect("CAOpenGLLayer missing");
         let mut decl =
             ClassDecl::new("RustReaderMpvLayer", superclass).expect("failed to declare layer");
-        decl.add_ivar::<usize>("_rsRender");
+        decl.add_ivar::<usize>("_rsState");
+        // SAFETY: each selector matches the CAOpenGLLayer delegate method
+        // signature we register; the fn pointers use the C ABI and the types
+        // are layout-compatible with the Objective-C declarations.
         unsafe {
             decl.add_method(
                 sel!(copyCGLPixelFormatForDisplayMask:),
@@ -1376,12 +1629,48 @@ fn layer_class() -> &'static Class {
                 draw_in
                     as extern "C" fn(&Object, Sel, *mut c_void, *mut c_void, f64, *const c_void),
             );
+            decl.add_method(
+                sel!(rsDriveUpdate),
+                drive_update as extern "C" fn(&Object, Sel),
+            );
+            decl.add_method(sel!(dealloc), dealloc as extern "C" fn(&Object, Sel));
         }
         decl.register()
     })
 }
 
-extern "C" fn copy_pixel_format(_this: &Object, _sel: Sel, _mask: u32) -> *mut c_void {
+/// Reads the `_rsState` ivar. Returns `None` only after `dealloc` has run
+/// (which cannot race a live method call on the layer).
+fn state_from_ivar(this: &Object) -> Option<&LayerState> {
+    // SAFETY: `this` is a RustReaderMpvLayer instance; the ivar was declared
+    // with usize layout.
+    let ptr: usize = unsafe { *this.get_ivar("_rsState") };
+    if ptr == 0 {
+        return None;
+    }
+    // SAFETY: ptr came from Box::into_raw in MpvNativeView::new and is freed
+    // only in dealloc; the layer (method receiver) outlives this call, so the
+    // pointee is valid for its duration.
+    Some(unsafe { &*(ptr as *const LayerState) })
+}
+
+/// Runs `f` with `ctx` as the current CGL context, restoring the previous
+/// one. The CGL lock serializes with CoreAnimation's own use of the same
+/// context on its render thread.
+fn with_current_context<R>(ctx: cgl::CGLContextObj, f: impl FnOnce() -> R) -> R {
+    // SAFETY: ctx is a valid CGL context owned by us.
+    unsafe {
+        cgl::CGLLockContext(ctx);
+        let prev = cgl::CGLGetCurrentContext();
+        cgl::CGLSetCurrentContext(ctx);
+        let r = f();
+        cgl::CGLSetCurrentContext(prev);
+        cgl::CGLUnlockContext(ctx);
+        r
+    }
+}
+
+fn create_pixel_format() -> Option<cgl::CGLPixelFormatObj> {
     use cgl::{
         kCGLPFAAccelerated, kCGLPFADoubleBuffer, kCGLPFANoRecovery, CGLChoosePixelFormat,
         CGLPixelFormatAttribute,
@@ -1395,18 +1684,34 @@ extern "C" fn copy_pixel_format(_this: &Object, _sel: Sel, _mask: u32) -> *mut c
     ];
     let mut pf: cgl::CGLPixelFormatObj = std::ptr::null_mut();
     let mut npix: i32 = 0;
+    // SAFETY: attrs is a valid 0-terminated attribute array; pf/npix are valid
+    // out-pointers that outlive the call.
     unsafe {
         CGLChoosePixelFormat(attrs.as_ptr(), &mut pf, &mut npix);
     }
-    pf as *mut c_void
+    if pf.is_null() {
+        None
+    } else {
+        Some(pf)
+    }
 }
 
-extern "C" fn copy_context(_this: &Object, _sel: Sel, pf: *mut c_void) -> *mut c_void {
-    let mut ctx: cgl::CGLContextObj = std::ptr::null_mut();
-    unsafe {
-        cgl::CGLCreateContext(pf as cgl::CGLPixelFormatObj, std::ptr::null_mut(), &mut ctx);
+extern "C" fn copy_pixel_format(this: &Object, _sel: Sel, _mask: u32) -> *mut c_void {
+    match state_from_ivar(this) {
+        // +1 retain: copy semantics transfer ownership of the returned object
+        // to the layer.
+        Some(state) => unsafe { cgl::CGLRetainPixelFormat(state.cgl_pf) },
+        None => std::ptr::null_mut(),
     }
-    ctx as *mut c_void
+}
+
+extern "C" fn copy_context(this: &Object, _sel: Sel, _pf: *mut c_void) -> *mut c_void {
+    match state_from_ivar(this) {
+        // +1 retain: copy semantics transfer ownership of the returned object
+        // to the layer.
+        Some(state) => unsafe { CGLRetainContext(state.cgl_ctx) },
+        None => std::ptr::null_mut(),
+    }
 }
 
 extern "C" fn can_draw(
@@ -1428,11 +1733,21 @@ extern "C" fn draw_in(
     _t: f64,
     _ts: *const c_void,
 ) {
-    let ptr: usize = unsafe { *this.get_ivar("_rsRender") };
-    if ptr == 0 {
+    let Some(state) = state_from_ivar(this) else {
         return;
-    }
-    let render = unsafe { &*(ptr as *const rust_reader_media::render::RenderContext) };
+    };
+    // Never block the CA render thread: a contended lock means teardown is
+    // freeing the render context — skip this frame.
+    let Ok(guard) = state.render.try_lock() else {
+        return;
+    };
+    let Some(render) = guard.as_ref() else {
+        return;
+    };
+    // CoreAnimation has already made `_ctx` (our pre-built context, handed
+    // out by copy_context) current on its render thread, as render.h requires.
+    // SAFETY: `this` is a valid CALayer; `bounds`/`contentsScale` are plain
+    // getters that don't transfer ownership.
     let bounds: core_graphics::geometry::CGRect = unsafe { msg_send![this, bounds] };
     let scale: f64 = unsafe { msg_send![this, contentsScale] };
     let w = (bounds.size.width * scale) as i32;
@@ -1440,6 +1755,63 @@ extern "C" fn draw_in(
     if w > 0 && h > 0 {
         render.render(w, h);
         render.report_swap();
+    }
+}
+
+/// Runs on the main thread (via performSelectorOnMainThread from the mpv
+/// update callback). Answers every update callback with
+/// `mpv_render_context_update()` — a hard requirement with advanced control,
+/// independent of whether CoreAnimation schedules a draw (hidden windows).
+extern "C" fn drive_update(this: &Object, _sel: Sel) {
+    let Some(state) = state_from_ivar(this) else {
+        return;
+    };
+    // Blocking lock: renders are short (BLOCK_FOR_TARGET_TIME=0), and every
+    // callback must be answered to keep the vo core from wedging.
+    let guard = state.render.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(render) = guard.as_ref() else {
+        return;
+    };
+    let flags = with_current_context(state.cgl_ctx, || render.update());
+    // MPV_RENDER_UPDATE_FRAME from render.h (bit values are ABI-stable).
+    const MPV_RENDER_UPDATE_FRAME: u64 = 1;
+    if flags & MPV_RENDER_UPDATE_FRAME != 0 {
+        // SAFETY: `this` is a live layer (performSelector retained it);
+        // setNeedsDisplay takes no arguments.
+        unsafe {
+            let () = msg_send![this, setNeedsDisplay];
+        }
+    }
+}
+
+extern "C" fn dealloc(this: &Object, _sel: Sel) {
+    // SAFETY: `this` is a RustReaderMpvLayer; the ivar was declared as usize.
+    let ptr: usize = unsafe { *this.get_ivar("_rsState") };
+    if ptr != 0 {
+        // SAFETY: ptr came from Box::into_raw in MpvNativeView::new; dealloc
+        // runs at most once, so the box is reclaimed exactly once. No draw can
+        // be in-flight: a method receiver stays alive for its whole call.
+        let state = unsafe { Box::from_raw(ptr as *mut LayerState) };
+        // Defensive: if the view was leaked without Drop (e.g. mem::forget),
+        // free the render context here with the CGL context current.
+        if let Ok(mut guard) = state.render.lock() {
+            if let Some(render) = guard.take() {
+                with_current_context(state.cgl_ctx, || drop(render));
+            }
+        }
+        // SAFETY: balanced release of the base references created in new().
+        unsafe {
+            CGLReleaseContext(state.cgl_ctx);
+            cgl::CGLReleasePixelFormat(state.cgl_pf);
+        }
+    }
+    // SAFETY: forwards to CAOpenGLLayer's dealloc, required by ObjC rules.
+    unsafe {
+        let superclass = this
+            .class()
+            .superclass()
+            .expect("CAOpenGLLayer superclass missing");
+        msg_send![super(this, superclass), dealloc]
     }
 }
 
@@ -1459,17 +1831,55 @@ impl MpvNativeView {
             RawWindowHandle::AppKit(h) => h.ns_view.as_ptr() as *mut Object,
             _ => return Err("媒体播放暂仅支持 macOS".to_string()),
         };
-        let render = unsafe { rust_reader_media::render::RenderContext::new(player) }
-            .map_err(|e| e.to_string())?;
-        let mut render = Box::new(render);
+        // Pre-build the GL objects; the same CGL context backs the mpv render
+        // context for its whole lifetime (create/render/free). The UI thread
+        // normally has no current GL context, and mpv_render_context_create
+        // requires one.
+        let pf = create_pixel_format().ok_or("CGLChoosePixelFormat 失败".to_string())?;
+        let mut ctx: cgl::CGLContextObj = std::ptr::null_mut();
+        // SAFETY: pf is a valid pixel format object created above; ctx is a
+        // valid out-pointer.
         unsafe {
+            cgl::CGLCreateContext(pf, std::ptr::null_mut(), &mut ctx);
+        }
+        if ctx.is_null() {
+            // SAFETY: balanced release of pf created above.
+            unsafe { cgl::CGLReleasePixelFormat(pf) };
+            return Err("CGLCreateContext 失败".to_string());
+        }
+        // SAFETY: ctx is current inside with_current_context (render.h
+        // requirement); the render context is stored in LayerState and freed
+        // before the player per MpvNativeView's lifetime contract.
+        let render = with_current_context(ctx, || unsafe { RenderContext::new(player) });
+        let render = match render {
+            Ok(render) => render,
+            Err(e) => {
+                // SAFETY: balanced release of the objects created above.
+                unsafe {
+                    CGLReleaseContext(ctx);
+                    cgl::CGLReleasePixelFormat(pf);
+                }
+                return Err(e.to_string());
+            }
+        };
+        let state = Box::new(LayerState {
+            render: Mutex::new(Some(render)),
+            cgl_pf: pf,
+            cgl_ctx: ctx,
+        });
+        let state_ptr = Box::into_raw(state);
+        // SAFETY: all Objective-C messages below run on the UI thread that
+        // owns the parent window; every object is a valid, live instance
+        // (freshly allocated or the window's content view), and selectors
+        // match the receivers' classes.
+        let (view, layer) = unsafe {
             let frame = make_frame(&bounds);
             let view: *mut Object = msg_send![class!(NSView), alloc];
             let view: *mut Object = msg_send![view, initWithFrame: frame];
             let () = msg_send![view, setWantsLayer: YES];
             let layer: *mut Object = msg_send![layer_class(), alloc];
             let layer: *mut Object = msg_send![layer, init];
-            (*layer).set_ivar::<usize>("_rsRender", &mut *render as *mut _ as usize);
+            (*layer).set_ivar::<usize>("_rsState", state_ptr as usize);
             let () = msg_send![layer, setAsynchronous: YES];
             let () = msg_send![layer, setNeedsDisplayOnBoundsChange: YES];
             // Retina: match the window's backing scale.
@@ -1478,34 +1888,55 @@ impl MpvNativeView {
             let () = msg_send![layer, setContentsScale: scale];
             let () = msg_send![view, setLayer: layer];
             let () = msg_send![ns_view, addSubview: view];
-            let layer_addr = layer as usize;
+            (view, layer)
+        };
+        let layer_addr = layer as usize;
+        // SAFETY: state_ptr is a live Box<LayerState> (owned by the layer);
+        // locking is uncontended here — the view was just attached and Drop
+        // has not run.
+        let mut guard = unsafe { &*state_ptr }
+            .render
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(render) = guard.as_mut() {
             render.set_update_callback(move || {
-                // mpv calls this from arbitrary threads; hop to the main thread.
+                // mpv calls this from arbitrary threads; hop to the main
+                // thread, where rsDriveUpdate answers update() and schedules
+                // a draw. `layer` stays alive: the callback is unset (via
+                // RenderContext::drop, in MpvNativeView::drop) before the
+                // layer is released, and performSelectorOnMainThread retains
+                // the receiver until delivery.
                 let layer = layer_addr as *mut Object;
+                // SAFETY: per the lifetime note above, layer is valid;
+                // rsDriveUpdate takes no arguments and transfers nothing.
                 unsafe {
                     let () = msg_send![
                         layer,
-                        performSelectorOnMainThread: sel!(setNeedsDisplay)
+                        performSelectorOnMainThread: sel!(rsDriveUpdate)
                         withObject: std::ptr::null_mut::<Object>()
                         waitUntilDone: NO
                     ];
                 }
             });
-            Ok(Self {
-                view,
-                layer,
-                render: Some(render),
-            })
         }
+        drop(guard);
+        Ok(Self {
+            view,
+            layer,
+            state: state_ptr,
+        })
     }
 
     pub fn set_bounds(&self, bounds: wry::Rect) {
+        // SAFETY: self.view is a live NSView owned by us; setFrame: is a plain
+        // setter that copies the rect.
         unsafe {
             let () = msg_send![self.view, setFrame: make_frame(&bounds)];
         }
     }
 
     pub fn remove_from_superview(&self) {
+        // SAFETY: self.view is a live NSView owned by us.
         unsafe {
             let () = msg_send![self.view, removeFromSuperview];
         }
@@ -1514,11 +1945,39 @@ impl MpvNativeView {
 
 impl Drop for MpvNativeView {
     fn drop(&mut self) {
+        // SAFETY: self.view is a live NSView owned by us.
         unsafe {
             let () = msg_send![self.view, removeFromSuperview];
-            (*self.layer).set_ivar::<usize>("_rsRender", 0);
         }
-        self.render.take(); // frees the mpv render context before the layer dies
+        // Take the render context out under the lock: in-flight draws either
+        // hold it (we wait them out) or will see None and skip. After this,
+        // no draw can touch mpv again.
+        //
+        // SAFETY: self.state points at the layer-owned Box<LayerState>; the
+        // layer is still alive (we release it below), so the pointee is valid.
+        let render = {
+            let state = unsafe { &*self.state };
+            let mut guard = state.render.lock().unwrap_or_else(|e| e.into_inner());
+            let render = guard.take();
+            drop(guard);
+            render
+        };
+        if let Some(render) = render {
+            // Answer any still-pending update callback before free (harmless
+            // if none), then free with the same CGL context current — both
+            // render.h requirements.
+            //
+            // SAFETY: self.state is still valid (see above).
+            let ctx = unsafe { &*self.state }.cgl_ctx;
+            with_current_context(ctx, || {
+                render.update();
+                drop(render);
+            });
+        }
+        // SAFETY: balanced release for the alloc/init retains. The layer's
+        // dealloc reclaims the Box<LayerState> and the base CGL references;
+        // the view also retained the layer via setLayer, keeping everything
+        // valid until here.
         unsafe {
             let () = msg_send![self.layer, release];
             let () = msg_send![self.view, release];
@@ -1541,15 +2000,47 @@ fn make_frame(bounds: &wry::Rect) -> core_graphics::geometry::CGRect {
         &core_graphics::geometry::CGSize::new(w, h),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wry::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
+
+    #[test]
+    fn make_frame_logical_passthrough() {
+        let rect = wry::Rect {
+            position: LogicalPosition::new(10.0, 20.0).into(),
+            size: LogicalSize::new(640.0, 480.0).into(),
+        };
+        let frame = make_frame(&rect);
+        assert_eq!(frame.origin.x, 10.0);
+        assert_eq!(frame.origin.y, 20.0);
+        assert_eq!(frame.size.width, 640.0);
+        assert_eq!(frame.size.height, 480.0);
+    }
+
+    #[test]
+    fn make_frame_physical_widens_to_f64() {
+        let rect = wry::Rect {
+            position: PhysicalPosition::new(3, 4).into(),
+            size: PhysicalSize::new(100u32, 50u32).into(),
+        };
+        let frame = make_frame(&rect);
+        assert_eq!(frame.origin.x, 3.0);
+        assert_eq!(frame.origin.y, 4.0);
+        assert_eq!(frame.size.width, 100.0);
+        assert_eq!(frame.size.height, 50.0);
+    }
+}
 ```
 
-- [ ] **Step 5: 在 `rust-reader-app/src/platform.rs` 的 macOS `pub mod macos`（第 4 行）内声明**
+- [x] **Step 5: 在 `rust-reader-app/src/platform.rs` 的 macOS `pub mod macos` 内声明**
 
 ```rust
 pub mod mpv_view;
 ```
 
-非 macOS 的 `pub mod macos`（第 671 行）内加 inline stub：
+非 macOS 的 `pub mod macos` 内加 inline stub：
 
 ```rust
 pub mod mpv_view {
@@ -1568,22 +2059,180 @@ pub mod mpv_view {
 }
 ```
 
-- [ ] **Step 6: 编译检查**
+- [x] **Step 6: 创建 `rust-reader-app/examples/probe_mpv_view.rs` 并验收（最终代码，与仓库一致）**
 
-Run: `cargo check -p rust-reader-app`
-Expected: 通过。`make_frame` 已按 wry 0.55 的 `dpi::Position`/`Size` 枚举结构编写（Logical/Physical 两个分支）。
+probe 模拟真实 app 环境：创建线程（如同 wgpu/Metal UI 线程）**无 current CGL
+context**、offscreen 窗口、主 runloop 泵驱动 `rsDriveUpdate`。修复前在此路径上
+`mpv_render_context_create` 确定性段错误。
 
-- [ ] **Step 7: 全量流水线**
+```rust
+//! macOS-only probe for MpvNativeView, simulating the real app environment:
+//! the creating thread (like the wgpu/Metal UI thread) has NO current CGL
+//! context. Verifies that view + mpv render context creation still succeeds
+//! (a pre-fix version segfaulted inside mpv_render_context_create here) and
+//! that `has_video` flips to true once a video file loads.
+//! Usage: cargo run -p rust-reader-app --example probe_mpv_view -- <video-file>
 
-Run: `cargo fmt --all && cargo check --workspace && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings`
-Expected: 全绿。
+// objc 0.2's sel_impl macro carries a stale `cfg(feature = "cargo-clippy")`.
+#![allow(unexpected_cfgs)]
 
-- [ ] **Step 8: Commit**
+#[cfg(target_os = "macos")]
+fn main() {
+    use objc::runtime::{Object, NO};
+    use objc::{class, msg_send, sel, sel_impl};
+    use rust_reader_app::platform::macos::mpv_view::MpvNativeView;
+    use rust_reader_media::MpvPlayer;
+    use std::ffi::c_void;
+    use wry::dpi::{LogicalPosition, LogicalSize};
+    use wry::raw_window_handle::{
+        AppKitDisplayHandle, AppKitWindowHandle, DisplayHandle, HandleError, RawDisplayHandle,
+        RawWindowHandle, WindowHandle,
+    };
+
+    #[link(name = "AppKit", kind = "framework")]
+    extern "C" {}
+
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: probe_mpv_view <video-file>");
+
+    // Offscreen window + content view; no event loop is needed for creation.
+    // SAFETY: all messages go to valid AppKit objects on the main thread;
+    // selectors match the receivers' classes.
+    let (content_view, _window) = unsafe {
+        let _app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let rect = core_graphics::geometry::CGRect::new(
+            &core_graphics::geometry::CGPoint::new(0.0, 0.0),
+            &core_graphics::geometry::CGSize::new(640.0, 480.0),
+        );
+        let window: *mut Object = msg_send![class!(NSWindow), alloc];
+        let style: usize = 1 << 1; // NSWindowStyleMaskClosable
+        let window: *mut Object = msg_send![window,
+            initWithContentRect: rect
+            styleMask: style
+            backing: 2usize // NSBackingStoreBuffered
+            defer: NO
+        ];
+        let content_view: *mut Object = msg_send![window, contentView];
+        // No orderFront: the window stays offscreen on purpose — the
+        // rsDriveUpdate selector answers mpv's update callbacks on the main
+        // run loop independently of CoreAnimation draws, so playback health
+        // must not depend on visibility.
+        (content_view, window)
+    };
+    assert!(!content_view.is_null(), "NSWindow contentView is null");
+
+    struct Parent(*mut Object);
+    impl wry::raw_window_handle::HasWindowHandle for Parent {
+        fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+            let view = std::ptr::NonNull::new(self.0 as *mut c_void)
+                .expect("content view pointer is non-null");
+            // SAFETY: the handle borrows a live NSView that outlives it.
+            Ok(unsafe {
+                WindowHandle::borrow_raw(RawWindowHandle::AppKit(AppKitWindowHandle::new(view)))
+            })
+        }
+    }
+    impl wry::raw_window_handle::HasDisplayHandle for Parent {
+        fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+            // SAFETY: the AppKit display handle carries no pointers.
+            Ok(unsafe {
+                DisplayHandle::borrow_raw(RawDisplayHandle::AppKit(AppKitDisplayHandle::new()))
+            })
+        }
+    }
+    let parent = Parent(content_view);
+
+    // The crux: this thread must have no current CGL context, exactly like
+    // the app's wgpu/Metal UI thread.
+    // SAFETY: plain getter, no preconditions.
+    assert!(
+        unsafe { cgl::CGLGetCurrentContext() }.is_null(),
+        "probe must start with no current CGL context"
+    );
+
+    let player = MpvPlayer::new(Box::new(|| {})).expect("mpv init failed");
+    let bounds = wry::Rect {
+        position: LogicalPosition::new(0.0, 0.0).into(),
+        size: LogicalSize::new(640.0, 480.0).into(),
+    };
+    let view = MpvNativeView::new(&parent, bounds, &player).expect("MpvNativeView::new failed");
+    println!("MpvNativeView created with no pre-set current CGL context");
+    // SAFETY: plain getter, no preconditions.
+    assert!(
+        unsafe { cgl::CGLGetCurrentContext() }.is_null(),
+        "current CGL context must be restored after creation"
+    );
+
+    player
+        .load_file(std::path::Path::new(&path))
+        .expect("loadfile failed");
+    let state = player.state();
+    let mut saw_video = false;
+    for _ in 0..50 {
+        // Pump the main runloop for ~100ms so the queued setNeedsDisplay
+        // messages and CA commits run and the layer actually draws (each
+        // draw calls mpv update()/render() on the CA render thread).
+        // SAFETY: runUntilDate: on the main run loop from the main thread;
+        // NSDate factory returns an autoreleased object.
+        unsafe {
+            let run_loop: *mut Object = msg_send![class!(NSRunLoop), mainRunLoop];
+            let date: *mut Object = msg_send![class!(NSDate), dateWithTimeIntervalSinceNow: 0.1f64];
+            let () = msg_send![run_loop, runUntilDate: date];
+        }
+        let s = state.lock().unwrap();
+        saw_video |= s.has_video;
+        println!(
+            "pos={}ms dur={:?} video={} tracks={} err={:?}",
+            s.position_ms,
+            s.duration_ms,
+            s.has_video,
+            s.tracks.len(),
+            s.error
+        );
+    }
+    println!("probe_mpv_view done: has_video_seen={saw_video}");
+    // Teardown order: view (frees the render context) before player.
+    drop(view);
+    drop(player);
+    println!("teardown clean");
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("probe_mpv_view is macOS-only");
+}
+```
+
+Run: `cargo run -q -p rust-reader-app --example probe_mpv_view -- target/tmp/probe/test_noaudio.mp4`
+Expected: 打印 `MpvNativeView created with no pre-set current CGL context`，pos 持续
+推进、`has_video_seen=true`、`teardown clean`，exit=0。
+
+测试文件（不入 git）：
 
 ```bash
-git add rust-reader-media/ rust-reader-app/Cargo.toml rust-reader-app/src/platform.rs rust-reader-app/src/platform/mpv_view.rs
-git commit -m "feat(media): OpenGL render context and macOS CAOpenGLLayer overlay"
+ffmpeg -y -f lavfi -i testsrc=duration=8:size=320x240:rate=15 -an -c:v libx264 target/tmp/probe/test_noaudio.mp4
 ```
+
+**必须用无音频文件**（`-an`），原因见下方"环境注意"。
+
+- [x] **Step 7: 全量流水线**
+
+Run: `cargo fmt --all && cargo check --workspace && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings`
+Expected: 全绿（clippy 覆盖所有 examples，包括两个 probe）。
+
+- [x] **Step 8: Commits**
+
+```bash
+git commit -m "feat(media): OpenGL render context and macOS CAOpenGLLayer overlay"   # 869f47d
+git commit -m "fix(media): pre-built CGL context for render lifecycle, teardown race guard"  # ea6a55f
+```
+
+**环境注意（本机 AG06/AG03 USB 声卡，与本任务代码无关）:** mpv 的 CoreAudio AO 在该
+USB 声卡上初始化挂起，导致带音频的 mp4 卡死 playloop（pos=0，随后 free /
+terminate_destroy 全部 hang）；afplay 播放同文件正常。无 render context 的旧 probe
+（Task 5）对同一文件同样复现，证明与 Task 6 改动无关。所有 probe 一律使用 `-an`
+生成的无音频文件。
 
 ---
 
@@ -1838,17 +2487,28 @@ View::Media => {
 }
 ```
 
-- [ ] **Step 6: 编译 + 既有测试 + 流水线**
+- [ ] **Step 6: 移除临时 `dead_code` allow + 编译 + 既有测试 + 流水线**
+
+Task 6 在 `rust-reader-app/src/platform/macos/mpv_view.rs` 顶部留下了
+`#![allow(dead_code)]`（bin target 未消费时的临时措施）。本任务接通调用后必须
+**删除该 allow**，否则它会永久遮蔽真正的 dead code。删除后若有零星未用项，
+以实际使用为准（本任务接线后应全部被消费）；确属保留 API 的再单独评估，
+不得重新加回整模块 allow。
 
 Run: `cargo test -p rust-reader-app media`
 Expected: `should_resume` 测试 PASS，既有测试全过。
 Run: `cargo fmt --all && cargo check --workspace && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings`
-Expected: 全绿。
+Expected: 全绿（无 dead_code 警告）。
 
 - [ ] **Step 7: 手动验证（出画面里程碑）**
 
 Run: `cargo run -p rust-reader-app`，打开一个 mp4（拖入或从库打开）。
 Expected: 视频画面 + 声音；`Space` 暂停/继续；`←/→` 跳转；`Esc` 回书架；切到其他视图再回来不崩溃。音频文件（mp3）能出声（画面为黑）。
+
+环境注意（Task 6 复审实测）：本机若接有 USB 声卡（如 AG06/AG03），mpv 的
+CoreAudio AO 可能挂起（stock mpv CLI 同样复现，与代码无关）。验证声音前先用
+`mpv --ao=coreaudio 文件` 确认本机 AO 可用；若挂起，用无音频流文件验证画面链路，
+声音链路换内置扬声器环境复验。
 
 - [ ] **Step 8: Commit**
 
