@@ -28,6 +28,7 @@ pub struct OpenMedia {
     pub state: Arc<Mutex<PlayerState>>,
     pub last: PlayerState,
     pub pending_resume_ms: Option<u64>,
+    pub audio_devices: Vec<rust_reader_media::AudioDevice>,
 }
 
 impl MediaView {
@@ -59,6 +60,7 @@ impl MediaView {
             state,
             last: PlayerState::default(),
             pending_resume_ms: resume_ms,
+            audio_devices: Vec::new(),
         });
         Ok(())
     }
@@ -223,6 +225,40 @@ impl MediaView {
         if let Some(open) = self.open.as_ref() {
             let _ = open.player.set_audio_track(id);
         }
+    }
+
+    /// Re-enumerates output devices for the toolbar ComboBox.
+    pub fn refresh_audio_devices(&mut self) {
+        if let Some(open) = self.open.as_mut() {
+            open.audio_devices = open.player.audio_devices();
+        }
+    }
+
+    /// Applies persisted preferences after a successful open. Returns false
+    /// when the saved device no longer exists and "auto" was applied instead
+    /// (caller clears the stale setting).
+    pub fn apply_startup_settings(&mut self, volume: f64, speed: f64, audio_device: &str) -> bool {
+        let Some(open) = self.open.as_mut() else {
+            return true;
+        };
+        let _ = open.player.set_volume(volume);
+        let _ = open.player.set_speed(speed);
+        if audio_device.is_empty() {
+            return true;
+        }
+        let exists = open.audio_devices.iter().any(|d| d.name == audio_device);
+        let target = if exists { audio_device } else { "auto" };
+        let _ = open.player.set_audio_device(target);
+        exists
+    }
+
+    /// Empty `name` selects "auto" (follow the system default device).
+    pub fn set_audio_device(&mut self, name: &str) -> Result<(), rust_reader_media::MediaError> {
+        let Some(open) = self.open.as_ref() else {
+            return Ok(());
+        };
+        let name = if name.is_empty() { "auto" } else { name };
+        open.player.set_audio_device(name)
     }
 
     /// Shows an OSD message for ~1s. CoreAnimation fades the layer in/out

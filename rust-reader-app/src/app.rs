@@ -673,6 +673,18 @@ impl ReaderApp {
                 )
             })
             .unwrap_or_default();
+        let devices: Vec<(String, String)> = self
+            .media_view
+            .open
+            .as_ref()
+            .map(|o| {
+                o.audio_devices
+                    .iter()
+                    .map(|d| (d.name.clone(), d.label()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let current_device = self.settings.media_audio_device.clone();
         egui::TopBottomPanel::top("media_toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("书架").clicked() {
@@ -748,6 +760,30 @@ impl ReaderApp {
                             }
                         });
                 }
+                ui.separator();
+                let current_label = devices
+                    .iter()
+                    .find(|(n, _)| *n == current_device)
+                    .map(|(_, l)| l.clone())
+                    .unwrap_or_else(|| "自动".to_string());
+                egui::ComboBox::from_label("输出")
+                    .selected_text(current_label)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(current_device.is_empty(), "自动")
+                            .clicked()
+                        {
+                            self.set_media_audio_device(ctx, String::new(), "自动".to_string());
+                        }
+                        for (name, label) in &devices {
+                            if ui
+                                .selectable_label(current_device == *name, label)
+                                .clicked()
+                            {
+                                self.set_media_audio_device(ctx, name.clone(), label.clone());
+                            }
+                        }
+                    });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("全屏").clicked() {
                         self.toggle_fullscreen(ctx);
@@ -791,6 +827,18 @@ impl ReaderApp {
         self.settings.media_speed = speed;
         self.media_view
             .show_osd(ctx, crate::views::media::speed_osd_text(speed));
+    }
+
+    fn set_media_audio_device(&mut self, ctx: &egui::Context, name: String, label: String) {
+        match self.media_view.set_audio_device(&name) {
+            Ok(()) => {
+                self.settings.media_audio_device = name;
+                self.media_view.show_osd(ctx, format!("输出: {label}"));
+            }
+            Err(e) => {
+                self.error_message = Some(format!("无法切换音频输出设备: {e}"));
+            }
+        }
     }
 
     fn render_media_seekbar(&mut self, ctx: &egui::Context) {
@@ -2306,6 +2354,16 @@ impl ReaderApp {
             .and_then(|h| h.char_offset.map(|ms| ms as u64));
         match self.media_view.open(ctx, frame, bounds, path, resume_ms) {
             Ok(()) => {
+                self.media_view.refresh_audio_devices();
+                let device_ok = self.media_view.apply_startup_settings(
+                    self.settings.media_volume,
+                    self.settings.media_speed,
+                    &self.settings.media_audio_device,
+                );
+                if !device_ok {
+                    // 保存的设备已拔出：回退 auto 并更新设置。
+                    self.settings.media_audio_device.clear();
+                }
                 self.current_view = View::Media;
                 self.error_message = None;
             }
