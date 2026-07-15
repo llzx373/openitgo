@@ -138,23 +138,45 @@ impl MediaView {
         }
     }
 
+    /// Exact seek for when the slider drag ends (release); interactive drags
+    /// use the keyframe-aligned `seek_to_ratio` instead.
+    pub fn seek_to_ratio_exact(&mut self, ratio: f64) {
+        if let Some(open) = self.open.as_ref() {
+            if let Some(dur) = open.last.duration_ms {
+                let target = clamp_seek((dur as f64 * ratio.clamp(0.0, 1.0)) as i64, dur);
+                let _ = open.player.seek_abs_ms(target, true);
+            }
+        }
+    }
+
+    /// Returns the new muted state for OSD text; None when nothing is open.
+    pub fn toggle_mute(&mut self) -> Option<bool> {
+        let open = self.open.as_ref()?;
+        let muted = !open.last.muted;
+        let _ = open.player.set_muted(muted);
+        Some(muted)
+    }
+
     pub fn set_volume(&mut self, v: f64) {
         if let Some(open) = self.open.as_ref() {
             let _ = open.player.set_volume(v);
         }
     }
 
-    pub fn adjust_volume(&mut self, delta: f64) {
-        let v = self.open.as_ref().map(|o| o.last.volume + delta);
-        if let Some(v) = v {
-            self.set_volume(v);
-        }
+    /// Returns the applied (clamped) target volume for persistence/OSD.
+    pub fn adjust_volume(&mut self, delta: f64) -> Option<f64> {
+        let open = self.open.as_ref()?;
+        let target = (open.last.volume + delta).clamp(0.0, 100.0);
+        let _ = open.player.set_volume(target);
+        Some(target)
     }
 
-    pub fn cycle_speed(&mut self) {
-        if let Some(open) = self.open.as_ref() {
-            let _ = open.player.set_speed(next_speed(open.last.speed));
-        }
+    /// Returns the applied target speed for persistence/OSD.
+    pub fn cycle_speed(&mut self) -> Option<f64> {
+        let open = self.open.as_ref()?;
+        let target = next_speed(open.last.speed);
+        let _ = open.player.set_speed(target);
+        Some(target)
     }
 
     pub fn set_speed(&mut self, speed: f64) {
@@ -272,6 +294,21 @@ pub fn clamp_seek(position_ms: i64, duration_ms: u64) -> u64 {
     position_ms.clamp(0, duration_ms as i64) as u64
 }
 
+/// Maps a pointer x position on the seek bar to a time for the hover
+/// tooltip; None when the duration is unknown or the bar has no width.
+pub fn hover_time_at(
+    pointer_x: f32,
+    bar_rect: egui::Rect,
+    duration_ms: Option<u64>,
+) -> Option<u64> {
+    let dur = duration_ms?;
+    if bar_rect.width() <= 0.0 {
+        return None;
+    }
+    let ratio = ((pointer_x - bar_rect.left()) / bar_rect.width()).clamp(0.0, 1.0);
+    Some((dur as f64 * ratio as f64) as u64)
+}
+
 // The three OSD text helpers are wired up in Task 5 （快捷键/滚轮 OSD 接线）;
 // remove the allows then.
 #[allow(dead_code)]
@@ -336,6 +373,17 @@ mod tests {
         assert_eq!(next_speed(1.5), 2.0);
         assert_eq!(next_speed(2.0), 0.5);
         assert_eq!(next_speed(1.25), 0.5); // unknown -> restart cycle
+    }
+
+    #[test]
+    fn hover_time_maps_pointer_to_ratio_of_duration() {
+        let rect = egui::Rect::from_min_size(egui::pos2(100.0, 0.0), egui::vec2(200.0, 16.0));
+        assert_eq!(hover_time_at(100.0, rect, Some(60_000)), Some(0));
+        assert_eq!(hover_time_at(200.0, rect, Some(60_000)), Some(30_000));
+        assert_eq!(hover_time_at(300.0, rect, Some(60_000)), Some(60_000));
+        // 指针越界时 clamp
+        assert_eq!(hover_time_at(400.0, rect, Some(60_000)), Some(60_000));
+        assert_eq!(hover_time_at(200.0, rect, None), None);
     }
 
     #[test]

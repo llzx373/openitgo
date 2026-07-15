@@ -680,7 +680,7 @@ impl ReaderApp {
                 }
                 ui.separator();
                 if ui.button(format!("{:.1}x", speed)).clicked() {
-                    self.media_view.cycle_speed();
+                    let _ = self.media_view.cycle_speed();
                 }
                 ui.separator();
                 let subs: Vec<(i64, String)> = tracks
@@ -744,43 +744,91 @@ impl ReaderApp {
         });
     }
 
+    fn set_media_volume(&mut self, ctx: &egui::Context, v: f64) {
+        let v = v.clamp(0.0, 100.0);
+        self.media_view.set_volume(v);
+        self.settings.media_volume = v;
+        self.media_view
+            .show_osd(ctx, crate::views::media::volume_osd_text(v));
+    }
+
+    fn toggle_media_mute(&mut self, ctx: &egui::Context) {
+        if let Some(muted) = self.media_view.toggle_mute() {
+            self.media_view
+                .show_osd(ctx, crate::views::media::mute_osd_text(muted).to_string());
+        }
+    }
+
     fn render_media_seekbar(&mut self, ctx: &egui::Context) {
-        let (pos, dur, volume) = self
+        let (pos, dur, volume, muted) = self
             .media_view
             .open
             .as_ref()
-            .map(|o| (o.last.position_ms, o.last.duration_ms, o.last.volume))
-            .unwrap_or((0, None, 100.0));
+            .map(|o| {
+                (
+                    o.last.position_ms,
+                    o.last.duration_ms,
+                    o.last.volume,
+                    o.last.muted,
+                )
+            })
+            .unwrap_or((0, None, 100.0, false));
         egui::TopBottomPanel::bottom("media_seekbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(rust_reader_media::time::format_time_ms(pos));
+            ui.vertical(|ui| {
+                // Row 1: full-width seek bar with a hover-time tooltip.
                 match dur {
-                    Some(dur) if dur > 0 => {
-                        let mut ratio = pos as f32 / dur as f32;
+                    Some(d) if d > 0 => {
+                        let mut ratio = pos as f32 / d as f32;
                         let slider = egui::Slider::new(&mut ratio, 0.0..=1.0).show_value(false);
-                        let width = (ui.available_width() - 220.0).max(60.0);
-                        if ui.add_sized([width, 16.0], slider).changed() {
+                        let width = ui.available_width();
+                        let response = ui.add_sized([width, 16.0], slider);
+                        let hover_text = response.hover_pos().and_then(|hover| {
+                            crate::views::media::hover_time_at(hover.x, response.rect, dur)
+                                .map(rust_reader_media::time::format_time_ms)
+                        });
+                        if response.drag_stopped() {
+                            self.media_view.seek_to_ratio_exact(ratio as f64);
+                        } else if response.changed() {
                             self.media_view.seek_to_ratio(ratio as f64);
+                        }
+                        if let Some(text) = hover_text {
+                            // Consumes the response, so it goes last.
+                            response.on_hover_text(text);
                         }
                     }
                     _ => {
-                        ui.label("--:--");
+                        ui.add_enabled(
+                            false,
+                            egui::Slider::new(&mut 0.0f32, 0.0..=1.0).show_value(false),
+                        );
                     }
                 }
-                ui.label(
-                    dur.map(rust_reader_media::time::format_time_ms)
-                        .unwrap_or_else(|| "--:--".to_string()),
-                );
-                let mut vol = volume as f32;
-                if ui
-                    .add_sized(
-                        [100.0, 16.0],
-                        egui::Slider::new(&mut vol, 0.0..=100.0).show_value(false),
-                    )
-                    .changed()
-                {
-                    self.media_view.set_volume(vol as f64);
-                }
+                // Row 2: time display on the left; mute + volume on the right.
+                ui.horizontal(|ui| {
+                    let dur_text = dur
+                        .map(rust_reader_media::time::format_time_ms)
+                        .unwrap_or_else(|| "--:--".to_string());
+                    ui.label(format!(
+                        "{} / {}",
+                        rust_reader_media::time::format_time_ms(pos),
+                        dur_text
+                    ));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let mut vol = volume as f32;
+                        if ui
+                            .add_enabled(
+                                !muted,
+                                egui::Slider::new(&mut vol, 0.0..=100.0).show_value(false),
+                            )
+                            .changed()
+                        {
+                            self.set_media_volume(ctx, vol as f64);
+                        }
+                        if ui.button(if muted { "取消静音" } else { "静音" }).clicked() {
+                            self.toggle_media_mute(ctx);
+                        }
+                    });
+                });
             });
         });
     }
@@ -1650,10 +1698,10 @@ impl ReaderApp {
                     self.media_view.seek_rel(10.0);
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-                    self.media_view.adjust_volume(5.0);
+                    let _ = self.media_view.adjust_volume(5.0);
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-                    self.media_view.adjust_volume(-5.0);
+                    let _ = self.media_view.adjust_volume(-5.0);
                 }
                 for (key, speed) in [
                     (egui::Key::Num1, 0.5),
