@@ -90,6 +90,14 @@ already embed it.
   the egui painter instead. `MediaView::show_osd` stores the text plus the 1s
   expiry (`Osd`); `tick_osd` clears both paths. CoreAnimation's implicit
   opacity animation provides the native fade.
+- **Media menus/popups**: the native video view renders above the whole egui
+  layer, so any egui overlay inside the video rect (menu-bar menus, the
+  字幕/音轨/输出 dropdowns) would be invisible. `menu_overlay_open(ctx)`
+  detects visible `Order::Middle`/`Order::Foreground` areas; while one is
+  open, `render_media` parks the native view at zero size and keeps the
+  toolbar from auto-hiding in fullscreen. The media seek bar needs a scoped
+  `ui.spacing_mut().slider_width` override: egui 0.29 `Slider` always
+  allocates `slider_width` (100px) and ignores `add_sized`.
 - **Media preferences**: volume/speed/audio-device are persisted globally in
   `Settings` and applied by `MediaView::apply_startup_settings` after open;
   a missing saved device falls back to "auto".

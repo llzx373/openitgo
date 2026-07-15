@@ -599,13 +599,17 @@ impl ReaderApp {
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         let mouse_pos = ctx.input(|i| i.pointer.hover_pos());
         let screen_size = ctx.screen_rect().size();
+        // While a menu/dropdown is open, keep the toolbar up (otherwise the
+        // dropdown self-dismisses in fullscreen when the pointer leaves the
+        // top edge) and hide the native video so it cannot cover the menu.
+        let menu_open = menu_overlay_open(ctx);
         let show_toolbar = Self::should_show_bar(
             self.settings.show_toolbar,
             fullscreen,
             mouse_pos,
             screen_size,
             BarEdge::Top,
-        );
+        ) || (menu_open && self.settings.show_toolbar);
         let show_seekbar = Self::should_show_bar(
             self.settings.show_statusbar,
             fullscreen,
@@ -642,8 +646,9 @@ impl ReaderApp {
                 .unwrap_or(MediaOverlay::None);
             // Audio-only or decode error: park the native overlay at zero
             // size so it cannot cover the egui layer painted by
-            // MediaView::ui.
-            let bounds = if matches!(overlay, MediaOverlay::None) {
+            // MediaView::ui. Same while a menu/dropdown is open: the native
+            // view renders above egui and would cover the popup.
+            let bounds = if matches!(overlay, MediaOverlay::None) && !menu_open {
                 wry::Rect {
                     position: wry::dpi::LogicalPosition::new(rect.min.x, rect.min.y).into(),
                     size: wry::dpi::LogicalSize::new(rect.width(), rect.height()).into(),
@@ -861,12 +866,20 @@ impl ReaderApp {
         egui::TopBottomPanel::bottom("media_seekbar").show(ctx, |ui| {
             ui.vertical(|ui| {
                 // Row 1: full-width seek bar with a hover-time tooltip.
+                // egui 0.29 Slider always allocates spacing().slider_width
+                // (100px) and ignores add_sized, so override the width in a
+                // scoped Ui — without leaking it to the row-2 volume slider.
                 match dur {
                     Some(d) if d > 0 => {
                         let mut ratio = pos as f32 / d as f32;
                         let slider = egui::Slider::new(&mut ratio, 0.0..=1.0).show_value(false);
                         let width = ui.available_width();
-                        let response = ui.add_sized([width, 16.0], slider);
+                        let response = ui
+                            .scope(|ui| {
+                                ui.spacing_mut().slider_width = width;
+                                ui.add(slider)
+                            })
+                            .inner;
                         let hover_text = response.hover_pos().and_then(|hover| {
                             crate::views::media::hover_time_at(hover.x, response.rect, dur)
                                 .map(rust_reader_media::time::format_time_ms)
@@ -882,10 +895,14 @@ impl ReaderApp {
                         }
                     }
                     _ => {
-                        ui.add_enabled(
-                            false,
-                            egui::Slider::new(&mut 0.0f32, 0.0..=1.0).show_value(false),
-                        );
+                        let width = ui.available_width();
+                        ui.scope(|ui| {
+                            ui.spacing_mut().slider_width = width;
+                            ui.add_enabled(
+                                false,
+                                egui::Slider::new(&mut 0.0f32, 0.0..=1.0).show_value(false),
+                            )
+                        });
                     }
                 }
                 // Row 2: time display on the left; mute + volume on the right.
@@ -2603,6 +2620,20 @@ fn migrate_library_ids(
     true
 }
 
+/// True while any egui overlay (menu, dropdown popup, floating window) is
+/// visible. The native video view renders above the egui layer, so while an
+/// overlay is open the video must be parked at zero size — otherwise the
+/// overlay is covered by the video. Tooltips are ignored: they are small,
+/// follow the pointer, and must not blank the video.
+fn menu_overlay_open(ctx: &egui::Context) -> bool {
+    ctx.memory(|m| {
+        m.areas()
+            .visible_layer_ids()
+            .iter()
+            .any(|layer| matches!(layer.order, egui::Order::Middle | egui::Order::Foreground))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3104,5 +3135,38 @@ mod tests {
             screen,
             BarEdge::Bottom
         ));
+    }
+
+    fn run_frame_with_area(ctx: &egui::Context, order: egui::Order) {
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::Area::new(egui::Id::new("test_overlay"))
+                .order(order)
+                .show(ctx, |ui| {
+                    ui.label("overlay");
+                });
+        });
+    }
+
+    #[test]
+    fn test_menu_overlay_open_detects_popup_like_areas() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(Default::default(), |_| {});
+        assert!(!menu_overlay_open(&ctx), "no areas -> no overlay");
+
+        run_frame_with_area(&ctx, egui::Order::Foreground);
+        assert!(menu_overlay_open(&ctx), "dropdown/menu areas count");
+
+        run_frame_with_area(&ctx, egui::Order::Middle);
+        assert!(menu_overlay_open(&ctx), "floating windows count");
+    }
+
+    #[test]
+    fn test_menu_overlay_open_ignores_tooltips() {
+        let ctx = egui::Context::default();
+        run_frame_with_area(&ctx, egui::Order::Tooltip);
+        assert!(
+            !menu_overlay_open(&ctx),
+            "hover tooltips must not hide the video"
+        );
     }
 }

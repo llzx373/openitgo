@@ -70,6 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 电子书：修复工具栏/状态栏不随 WebView 阅读位置上报实时刷新的问题；`EbookRenderer` 在处理 IPC position 消息时调用 `egui::Context::request_repaint()`。
 - 媒体播放：修复视频有进度无画面的问题；根因是 CAOpenGLLayer 在 `drawInCGLContext` 前绑定的是自己的 drawable FBO（实测 1/2 交替，并非 0），mpv 一直渲染到 FBO 0，layer 的 drawable 从未被写入而完全透明。现在渲染前查询 `GL_FRAMEBUFFER_BINDING` 并传入，同时 `FLIP_Y` 修正为 1（画面不再上下颠倒）。
 - 媒体播放：修复退出媒体播放时间歇性段错误（SIGSEGV）；根因是 `MpvPlayer::drop` 调 `mpv_terminate_destroy` 释放 handle 时，事件线程可能仍阻塞在 `mpv_wait_event` 中。现在 `Drop` 先置 quit 标志并 join 事件线程，再销毁 handle。
+- 媒体播放：修复进度条实际只有 100px 宽的问题；根因是 egui 0.29 的 `Slider` 固定按 `spacing().slider_width` 分配宽度，`add_sized` 对其无效。现在在作用域内将 `slider_width` 覆盖为可用宽度，进度条占满整行（悬停时间映射也随之正确），第二行音量滑块不受影响。
+- 媒体播放：修复菜单栏菜单与字幕/音轨/输出下拉框被视频画面遮盖的问题；根因是原生视频视图位于整个 egui 图层之上，任何 egui 弹层都会被遮挡。现在 `menu_overlay_open` 检测到菜单/弹层打开时把原生视频视图临时停放为零尺寸，并在全屏下有弹层打开时保持媒体工具栏不自动隐藏。
 
 ## [0.1.0] - 2026-06-23
 
