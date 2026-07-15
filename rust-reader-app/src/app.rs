@@ -632,44 +632,50 @@ impl ReaderApp {
             self.render_media_seekbar(ctx);
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let rect = ui.max_rect();
-            // Scroll-wheel volume over the video area. Skipped while an egui
-            // popup (字幕/音轨/输出 dropdown) is open under the pointer, so
-            // scrolling the popup list does not also change the volume.
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 && ui.rect_contains_pointer(rect) && !ctx.is_pointer_over_area() {
-                let (acc, steps) =
-                    crate::views::media::accumulate_scroll(self.media_view.scroll_acc, scroll);
-                self.media_view.scroll_acc = acc;
-                if steps != 0 {
-                    self.adjust_media_volume(ctx, steps as f64 * 5.0);
+        // Transparent frame: the video layer composites below the egui
+        // surface (Task 4), so the central area must stay unpainted for the
+        // video to show through. Audio-only/error states still get an opaque
+        // black fill from MediaView::ui.
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none())
+            .show(ctx, |ui| {
+                let rect = ui.max_rect();
+                // Scroll-wheel volume over the video area. Skipped while an egui
+                // popup (字幕/音轨/输出 dropdown) is open under the pointer, so
+                // scrolling the popup list does not also change the volume.
+                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                if scroll != 0.0 && ui.rect_contains_pointer(rect) && !ctx.is_pointer_over_area() {
+                    let (acc, steps) =
+                        crate::views::media::accumulate_scroll(self.media_view.scroll_acc, scroll);
+                    self.media_view.scroll_acc = acc;
+                    if steps != 0 {
+                        self.adjust_media_volume(ctx, steps as f64 * 5.0);
+                    }
                 }
-            }
-            let overlay = self
-                .media_view
-                .open
-                .as_ref()
-                .map(|o| media_overlay(&o.last))
-                .unwrap_or(MediaOverlay::None);
-            // Audio-only or decode error: park the native overlay at zero
-            // size so it cannot cover the egui layer painted by
-            // MediaView::ui. Same while a menu/dropdown is open: the native
-            // view renders above egui and would cover the popup.
-            let bounds = if matches!(overlay, MediaOverlay::None) && !menu_open {
-                wry::Rect {
-                    position: wry::dpi::LogicalPosition::new(rect.min.x, rect.min.y).into(),
-                    size: wry::dpi::LogicalSize::new(rect.width(), rect.height()).into(),
-                }
-            } else {
-                wry::Rect {
-                    position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
-                    size: wry::dpi::LogicalSize::new(0.0, 0.0).into(),
-                }
-            };
-            self.media_view.update_bounds(bounds);
-            self.media_view.ui(ctx, ui);
-        });
+                let overlay = self
+                    .media_view
+                    .open
+                    .as_ref()
+                    .map(|o| media_overlay(&o.last))
+                    .unwrap_or(MediaOverlay::None);
+                // Audio-only or decode error: park the native overlay at zero
+                // size so it cannot cover the egui layer painted by
+                // MediaView::ui. Same while a menu/dropdown is open: the native
+                // view renders above egui and would cover the popup.
+                let bounds = if matches!(overlay, MediaOverlay::None) && !menu_open {
+                    wry::Rect {
+                        position: wry::dpi::LogicalPosition::new(rect.min.x, rect.min.y).into(),
+                        size: wry::dpi::LogicalSize::new(rect.width(), rect.height()).into(),
+                    }
+                } else {
+                    wry::Rect {
+                        position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+                        size: wry::dpi::LogicalSize::new(0.0, 0.0).into(),
+                    }
+                };
+                self.media_view.update_bounds(bounds);
+                self.media_view.ui(ctx, ui);
+            });
     }
 
     fn render_media_toolbar(&mut self, ctx: &egui::Context) {
