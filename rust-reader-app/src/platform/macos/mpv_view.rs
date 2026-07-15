@@ -607,4 +607,32 @@ mod tests {
         assert_eq!(frame.size.width, 100.0);
         assert_eq!(frame.size.height, 50.0);
     }
+
+    #[test]
+    fn osd_frame_anchors_top_right() {
+        let frame = osd_frame(800.0, 600.0, 120.0, 30.0);
+        assert_eq!(frame.size.width, 120.0);
+        assert_eq!(frame.size.height, 30.0);
+        assert_eq!(frame.origin.x, 800.0 - 120.0 - 16.0);
+        assert_eq!(frame.origin.y, 600.0 - 30.0 - 16.0);
+    }
+
+    #[test]
+    fn osd_frame_clamps_oversized_text_to_view() {
+        // Text wider than the view: clamp to view width minus margins and
+        // pin the origin to the left margin so the OSD stays on screen.
+        let frame = osd_frame(200.0, 100.0, 1000.0, 30.0);
+        assert_eq!(frame.size.width, 200.0 - 2.0 * 16.0);
+        assert_eq!(frame.origin.x, 16.0);
+        assert_eq!(frame.origin.y, 100.0 - 30.0 - 16.0);
+    }
+
+    #[test]
+    fn osd_frame_collapses_to_zero_width_on_tiny_view() {
+        // Parked (0x0) native view: width clamps to 0, origin to the margin.
+        let frame = osd_frame(0.0, 0.0, 100.0, 30.0);
+        assert_eq!(frame.size.width, 0.0);
+        assert_eq!(frame.origin.x, 16.0);
+        assert_eq!(frame.origin.y, 16.0);
+    }
 }

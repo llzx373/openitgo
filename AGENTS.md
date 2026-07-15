@@ -85,8 +85,11 @@ already embed it.
 - **Media OSD**: transient feedback (volume, mute, seeks, speed, device
   switches) renders in a CATextLayer sublayer of the CAOpenGLLayer
   (`MpvNativeView::set_osd/clear_osd`) — egui cannot paint over the native
-  video view. CoreAnimation's implicit opacity animation provides the fade;
-  Rust only tracks the 1s expiry (`MediaView::show_osd/tick_osd`).
+  video view. When the native view is parked at zero size (audio-only or
+  decode-error overlay), `MediaView::ui` paints the same text top-right with
+  the egui painter instead. `MediaView::show_osd` stores the text plus the 1s
+  expiry (`Osd`); `tick_osd` clears both paths. CoreAnimation's implicit
+  opacity animation provides the native fade.
 - **Media preferences**: volume/speed/audio-device are persisted globally in
   `Settings` and applied by `MediaView::apply_startup_settings` after open;
   a missing saved device falls back to "auto".

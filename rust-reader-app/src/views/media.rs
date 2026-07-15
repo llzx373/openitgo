@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 const OSD_DURATION: Duration = Duration::from_millis(1000);
 
 struct Osd {
+    text: String,
     until: Instant,
 }
 
@@ -101,6 +102,8 @@ impl MediaView {
         };
         let overlay = media_overlay(&open.last);
         let text = match &overlay {
+            // The native view covers the panel and its CATextLayer shows the
+            // OSD; nothing to paint here.
             MediaOverlay::None => return,
             // Decode error or audio-only file: the native view is parked at
             // zero size (see render_media), so paint the layer here.
@@ -116,6 +119,21 @@ impl MediaView {
             egui::FontId::proportional(24.0),
             egui::Color32::WHITE,
         );
+        // The parked native view's CATextLayer OSD is invisible (zero-size
+        // frame), so mirror the active OSD text here with matching styling:
+        // 20pt white text on 60% black, 8px radius, 16px top-right margin.
+        if let Some(osd) = &self.osd {
+            let font = egui::FontId::proportional(20.0);
+            let galley = painter.layout_no_wrap(osd.text.clone(), font, egui::Color32::WHITE);
+            let padding = egui::vec2(12.0, 5.0);
+            let size = galley.size() + padding * 2.0;
+            let bg = egui::Rect::from_min_size(
+                egui::pos2(rect.max.x - 16.0 - size.x, rect.min.y + 16.0),
+                size,
+            );
+            painter.rect_filled(bg, 8.0, egui::Color32::from_black_alpha(153));
+            painter.galley(bg.min + padding, galley, egui::Color32::WHITE);
+        }
     }
 
     pub fn toggle_pause(&mut self) {
@@ -235,21 +253,19 @@ impl MediaView {
     }
 
     /// Applies persisted preferences after a successful open. Returns false
-    /// when the saved device no longer exists and "auto" was applied instead
-    /// (caller clears the stale setting).
+    /// when the saved device provably no longer exists and "auto" was applied
+    /// instead (caller clears the stale setting).
     pub fn apply_startup_settings(&mut self, volume: f64, speed: f64, audio_device: &str) -> bool {
         let Some(open) = self.open.as_mut() else {
             return true;
         };
         let _ = open.player.set_volume(volume);
         let _ = open.player.set_speed(speed);
-        if audio_device.is_empty() {
-            return true;
+        let (target, saved_ok) = startup_device_target(audio_device, &open.audio_devices);
+        if let Some(target) = target {
+            let _ = open.player.set_audio_device(target);
         }
-        let exists = open.audio_devices.iter().any(|d| d.name == audio_device);
-        let target = if exists { audio_device } else { "auto" };
-        let _ = open.player.set_audio_device(target);
-        exists
+        saved_ok
     }
 
     /// Empty `name` selects "auto" (follow the system default device).
@@ -261,12 +277,15 @@ impl MediaView {
         open.player.set_audio_device(name)
     }
 
-    /// Shows an OSD message for ~1s. CoreAnimation fades the layer in/out
-    /// via its implicit opacity animation; we only track the expiry.
+    /// Shows an OSD message for ~1s. On video the CATextLayer sublayer fades
+    /// in/out via CoreAnimation's implicit opacity animation; when the native
+    /// view is parked (audio-only / error overlay), `ui` paints the stored
+    /// text instead. We only track the text and expiry here.
     pub fn show_osd(&mut self, ctx: &egui::Context, text: String) {
         if let Some(open) = self.open.as_ref() {
             open.native.set_osd(&text);
             self.osd = Some(Osd {
+                text,
                 until: Instant::now() + OSD_DURATION,
             });
             ctx.request_repaint_after(OSD_DURATION);
@@ -342,6 +361,37 @@ pub fn hover_time_at(
     }
     let ratio = ((pointer_x - bar_rect.left()) / bar_rect.width()).clamp(0.0, 1.0);
     Some((dur as f64 * ratio as f64) as u64)
+}
+
+/// Picks the audio device to apply at startup plus whether the saved setting
+/// is still valid. `None` means "leave the player on its current device".
+/// An empty enumeration is treated as transient (driver busy, list not ready
+/// yet): nothing is applied and the saved device is reported valid so the
+/// caller does not clear it.
+pub fn startup_device_target<'a>(
+    saved: &'a str,
+    enumerated: &[rust_reader_media::AudioDevice],
+) -> (Option<&'a str>, bool) {
+    if saved.is_empty() || enumerated.is_empty() {
+        return (None, true);
+    }
+    if enumerated.iter().any(|d| d.name == saved) {
+        (Some(saved), true)
+    } else {
+        (Some("auto"), false)
+    }
+}
+
+/// Caps a toolbar label at `max_chars` characters, appending "…" when
+/// truncated, so long device names cannot blow out the toolbar width.
+/// Counts chars (not bytes) so CJK labels truncate safely.
+pub fn truncate_label(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 pub fn volume_osd_text(volume: f64) -> String {
@@ -427,6 +477,9 @@ mod tests {
         // 指针越界时 clamp
         assert_eq!(hover_time_at(400.0, rect, Some(60_000)), Some(60_000));
         assert_eq!(hover_time_at(200.0, rect, None), None);
+        // 进度条宽度为 0 时无法映射
+        let zero = egui::Rect::from_min_size(egui::pos2(100.0, 0.0), egui::vec2(0.0, 16.0));
+        assert_eq!(hover_time_at(100.0, zero, Some(60_000)), None);
     }
 
     #[test]
@@ -434,6 +487,49 @@ mod tests {
         assert_eq!(clamp_seek(-500, 10_000), 0);
         assert_eq!(clamp_seek(5_000, 10_000), 5_000);
         assert_eq!(clamp_seek(99_999, 10_000), 10_000);
+    }
+
+    #[test]
+    fn startup_device_target_keeps_saved_device_on_empty_enumeration() {
+        use rust_reader_media::AudioDevice;
+        let dev = |name: &str| AudioDevice {
+            name: name.into(),
+            description: None,
+        };
+        // 未保存设备：不动播放器，设置有效
+        assert_eq!(startup_device_target("", &[dev("a")]), (None, true));
+        // 枚举瞬时失败（空列表）：不动播放器，且不得清除保存的设备
+        assert_eq!(startup_device_target("a", &[]), (None, true));
+        // 保存的设备仍在：应用它
+        assert_eq!(
+            startup_device_target("a", &[dev("a"), dev("b")]),
+            (Some("a"), true)
+        );
+        // 枚举成功但设备已拔出：回退 auto，调用方清除设置
+        assert_eq!(
+            startup_device_target("gone", &[dev("a")]),
+            (Some("auto"), false)
+        );
+    }
+
+    #[test]
+    fn truncate_label_caps_length_with_ellipsis() {
+        assert_eq!(truncate_label("自动", 20), "自动");
+        assert_eq!(
+            truncate_label("MacBook Pro 扬声器", 20),
+            "MacBook Pro 扬声器"
+        );
+        // ASCII：超过 20 字符截断为 19 + 省略号
+        assert_eq!(
+            truncate_label("ABCDEFGHIJKLMNOPQRSTUVWXYZ", 20),
+            "ABCDEFGHIJKLMNOPQRS…"
+        );
+        // 多字节字符按字符数截断，不会切在 UTF-8 边界中间
+        let cjk = "一二三四五六七八九十一二三四五六七八九十一";
+        assert_eq!(
+            truncate_label(cjk, 20),
+            "一二三四五六七八九十一二三四五六七八九…"
+        );
     }
 
     #[test]

@@ -622,9 +622,11 @@ impl ReaderApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let rect = ui.max_rect();
-            // Scroll-wheel volume over the video area.
+            // Scroll-wheel volume over the video area. Skipped while an egui
+            // popup (字幕/音轨/输出 dropdown) is open under the pointer, so
+            // scrolling the popup list does not also change the volume.
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 && ui.rect_contains_pointer(rect) {
+            if scroll != 0.0 && ui.rect_contains_pointer(rect) && !ctx.is_pointer_over_area() {
                 let (acc, steps) =
                     crate::views::media::accumulate_scroll(self.media_view.scroll_acc, scroll);
                 self.media_view.scroll_acc = acc;
@@ -767,7 +769,8 @@ impl ReaderApp {
                     .map(|(_, l)| l.clone())
                     .unwrap_or_else(|| "自动".to_string());
                 egui::ComboBox::from_label("输出")
-                    .selected_text(current_label)
+                    // 选中项截断显示，避免长设备名撑爆工具栏；下拉列表保留全名
+                    .selected_text(crate::views::media::truncate_label(&current_label, 20))
                     .show_ui(ui, |ui| {
                         if ui
                             .selectable_label(current_device.is_empty(), "自动")
