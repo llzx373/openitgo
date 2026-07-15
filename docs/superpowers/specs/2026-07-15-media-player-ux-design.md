@@ -30,6 +30,23 @@
 非目标（YAGNI）：缓冲区间显示、按文件记忆、设置面板设备项、
 输出设备热插拔自动刷新、进度条缩略图预览、OSD 动画以外的任何特效。
 
+## 2.1 修订记录（2026-07-15，写实施计划时发现并更正）
+
+1. **OSD 不能由 egui 绘制**：egui 画面在原生 NSView（视频层）之下，
+   `render_media` 的零尺寸停放代码即为证据。§5 的 `egui::Area` 方案更正为
+   **原生 CATextLayer 叠加**（`MpvNativeView::set_osd/clear_osd`），
+   淡入淡出由 CoreAnimation 对 `opacity` 的隐式动画免费获得，
+   Rust 侧只做 1 秒计时（显示 → 到期清除）。§12 的 `osd_alpha` 测试取消，
+   改为 OSD 文案纯函数测试。
+2. **进度条"松手精确跳转"是新代码而非沿用**：`MpvPlayer::seek_abs_ms`
+   有 `exact` 参数，但现有 seekbar 从未以 exact 调用。实施时新增
+   `MediaView::seek_to_ratio_exact`，在 `drag_stopped` 时调用。
+3. **"调整后立即保存"更正为写回 `self.settings`**：代码库现有的唯一
+   settings 持久化点是 `on_exit` 统一保存，媒体偏好与之保持一致
+   （不引入新的即时写盘点）。
+4. **OSD 触发点补充**：工具栏 ±10s 按钮与 ←/→/J/L 键是同一用户动作，
+   走同一 helper，同样触发 OSD。
+
 ## 3. 架构总览
 
 改动分布（无新增 crate / 模块）：
