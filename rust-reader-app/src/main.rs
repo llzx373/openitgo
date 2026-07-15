@@ -27,7 +27,13 @@ fn main() -> eframe::Result<()> {
     #[cfg(target_os = "macos")]
     crate::platform::macos::dock_open::install_dock_open_handler_early();
 
-    let mut viewport = egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]);
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1280.0, 800.0])
+        // Transparent backbuffer: egui-wgpu then picks
+        // CompositeAlphaMode::PreMultiplied and the CAMetalLayer becomes
+        // non-opaque, so the video layer below the egui surface (Task 4)
+        // shows through unpainted regions.
+        .with_transparent(true);
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(icon);
     }

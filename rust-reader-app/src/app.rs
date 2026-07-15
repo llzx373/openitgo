@@ -168,6 +168,14 @@ impl Default for ReaderApp {
 }
 
 impl eframe::App for ReaderApp {
+    /// Fully transparent: every view paints its own opaque panels, and in
+    /// the media view the unpainted central area must let the video layer
+    /// below the egui surface show through (see
+    /// platform/macos/mpv_view.rs).
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
+    }
+
     fn on_exit(&mut self) {
         self.record_reader_history();
         self.record_ebook_history();
