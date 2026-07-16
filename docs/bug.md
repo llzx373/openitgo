@@ -100,7 +100,7 @@ if reader.cache.total_size_bytes() >= budget {
 
 ## 已知问题（2026-07-15 记录）
 
-以下来自 mpv-under-egui 分支（视频层下沉）开发期间的冒烟取证，均为**基线既有问题**（经 A/B 对照或代码路径分析确认与该分支改动无关）。均未修复，优先级为自评。
+以下来自 mpv-under-egui 分支（视频层下沉）开发期间的冒烟取证，均为**基线既有问题**（经 A/B 对照或代码路径分析确认与该分支改动无关）。优先级为自评。
 
 ### 问题 A：mpv 启动偶发 wedge（DR image 分配卡死）（P1）
 
@@ -108,17 +108,18 @@ if reader.cache.total_size_bytes() >= budget {
 - **证据**：Task 4 新二进制与基线二进制 A/B 对照均复现 → 基线既有，与视频层下沉无关。
 - **修复线索**：暂无，需进一步诊断（疑与 mpv/CAOpenGLLayer 初始化时序有关）；复现不稳定。
 - **发现经过**：Task 5 真机冒烟期间。
+- **2026-07-16 复测**：20s H.264 测试片连续启动播放 8/8 正常（CPU 均在 4s 内进入稳定解码），未复现。下次 wedge 时请现场取证：`sample <pid>` 抓全栈 + `RUST_READER_MPV_LOG=1` 运行日志，再对照 vo core 状态分析。
 
-### 问题 B：dock-open 队列空闲滞留（P2）
+### 问题 B：dock-open 队列空闲滞留（P2）—— 已修复（2026-07-16）
 
 - **现象**：app 空闲时通过 Finder/Dock 投递的文件不立即打开，滞留到下次重绘（动一下窗口/鼠标才打开）。
-- **根因线索**：`application:openURLs:` 等回调把文件放入队列，但队列只在 egui `update()` 中排空；egui 空闲时不重绘，`update()` 不被调用。
-- **修复线索**：收到 openURLs 时主动唤醒 UI（`egui::Context::request_repaint()` 或经 winit event loop 的 user event）。
-- **发现经过**：Task 3 真机冒烟用 dock-open 通道投递测试视频时发现。
+- **根因**：`application:openURLs:` 等回调把文件放入 `OPEN_QUEUE`，但队列只在 egui `update()` 中排空（`app.rs` 的 `take_dock_open_paths`）；egui 空闲时 winit 事件循环睡眠、不重绘，`update()` 不被调用。
+- **修复**：`dock_open` 模块新增 `set_wake_context`（app 创建时注册 `egui::Context`），三个回调收文件后经 `enqueue_paths` 统一入队并 `request_repaint()` 唤醒事件循环（`rust-reader-app/src/platform.rs`、`main.rs`）。
+- **验证**：A/B 对照冒烟。基线（/Applications 旧包）：回调收到文件后 CPU 持平（6s 内 0:00.33→0:00.43），文件滞留，bug 复现；新二进制：投递后 1s 内媒体开始解码（5s 内 CPU 0:00.92→0:02.36），无需任何输入事件。
 
-### 问题 C：EOF 后空闲 OSD 滞留（P3）
+### 问题 C：EOF 后空闲 OSD 滞留（P3）—— 已修复（2026-07-16）
 
 - **现象**：播放结束（EOF）后，画面右上角 OSD 文字滞留超过设计的约 1s，直到下次重绘才消失。
-- **根因线索**：OSD 清除（`tick_osd`）由 egui 重绘驱动；播放中 mpv 事件泵持续 `request_repaint()`，EOF 后事件停止、egui 空闲，清理逻辑得不到执行。属事件驱动模型的既有行为。
-- **修复线索**：EOF/close 时主动 `clear_osd` 或补一次 `request_repaint()`（一行级修复）。
-- **发现经过**：Task 4 真机冒烟；与 media-player-ux 终审遗留 Minor"close() 未清 osd（≤1s 自愈）"同族。
+- **根因**（比原记录更深一层）：`show_osd` 本就调用了 `request_repaint_after(1s)`，但 egui 0.29 对非零延迟会**减去预测帧时长**（`context.rs` 中 `delay.saturating_sub(predicted_frame_time)`，约 16.7ms）且**只触发一帧**——到期帧总是在 `until` 之前约 17ms 触发，此时 `tick_osd` 的 `now >= until` 判断不成立、不清除，之后不再有任何帧被预约。播放中 mpv 事件泵的持续 `request_repaint()` 掩盖了这一点；EOF 后事件停止、egui 空闲，OSD 便滞留到下次用户输入。
+- **修复**：`tick_osd(ctx)` 在 OSD 未到期时按剩余时间重新 `request_repaint_after`（收敛一两帧后即清除）；同时 `MediaView::close()` 清除 `self.osd`，杜绝残留文本漏进下次打开的媒体（修复终审遗留的"close() 未清 osd"同族问题）。
+- **验证**：新增单元测试 `tick_osd_keeps_unexpired_osd_and_clears_expired`、`close_clears_osd_state`；早触发机制经 egui 0.29.1 源码确认。

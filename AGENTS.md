@@ -100,7 +100,12 @@ already embed it.
   When the native view is parked at zero size (audio-only or
   decode-error overlay), `MediaView::ui` paints the same text top-right with
   the egui painter instead. `MediaView::show_osd` stores the text plus the 1s
-  expiry (`Osd`); `tick_osd` clears both paths. CoreAnimation's implicit
+  expiry (`Osd`); `tick_osd` clears both paths and, while unexpired, re-arms
+  `request_repaint_after` for the remaining time — egui fires the scheduled
+  frame slightly early (predicted frame time is subtracted) and only once,
+  so without the re-arm an idle app (e.g. after EOF) never clears the OSD.
+  `MediaView::close()` clears the OSD state so it cannot leak into the next
+  opened media. CoreAnimation's implicit
   opacity animation provides the native fade.
 - **Media menus/popups**: with the video layer below the transparent egui
   surface, egui overlays (menu-bar menus, the 字幕/音轨/输出 dropdowns)
@@ -132,6 +137,14 @@ already embed it.
   copying libmpv and its Homebrew dependencies into `Contents/Frameworks` and
   rewriting their install names to `@rpath`, so the bundled app runs without a
   Homebrew mpv installation.
+- **Dock open (macOS)**: `platform::macos::dock_open` swizzles the
+  NSApplication delegate to queue files from `application:openURLs:` /
+  `application:openFiles:` / `application:openFile:` into `OPEN_QUEUE`, drained
+  once per frame in `App::update`. An idle egui app does not repaint, so the
+  callbacks must wake the event loop: `set_wake_context` (registered from the
+  app creator in `main.rs`) stores an `egui::Context` that `enqueue_paths`
+  calls `request_repaint()` on after every enqueue. Removing the wake
+  re-introduces the "dock-opened files stall until the next repaint" bug.
 
 ## Commits
 

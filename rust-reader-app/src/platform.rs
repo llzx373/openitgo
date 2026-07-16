@@ -532,11 +532,35 @@ pub mod macos {
             std::mem::take(&mut *guard)
         }
 
-        fn push_path(path: PathBuf) {
-            let mut guard = OPEN_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-            if !guard.iter().any(|p| p == &path) {
-                guard.push(path);
+        static WAKE_CTX: Mutex<Option<egui::Context>> = Mutex::new(None);
+
+        /// 注册用于唤醒 UI 的 egui Context；app 创建时调用一次。
+        pub fn set_wake_context(ctx: egui::Context) {
+            *WAKE_CTX.lock().unwrap_or_else(|e| e.into_inner()) = Some(ctx);
+        }
+
+        /// 空闲时 winit 事件循环睡眠、egui 不重绘，队列只能等下次 `update()`
+        /// 才能排空；收到打开事件后必须主动唤醒，否则文件滞留到下次重绘。
+        fn wake_ui() {
+            let ctx = WAKE_CTX.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(ctx) = ctx {
+                ctx.request_repaint();
             }
+        }
+
+        fn enqueue_paths(paths: Vec<PathBuf>) {
+            if paths.is_empty() {
+                return;
+            }
+            {
+                let mut guard = OPEN_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                for path in paths {
+                    if !guard.iter().any(|p| p == &path) {
+                        guard.push(path);
+                    }
+                }
+            }
+            wake_ui();
         }
 
         // SAFETY: 该函数作为 Objective-C method 被 AppKit 在主线程调用；`files` 为
@@ -558,12 +582,7 @@ pub mod macos {
                     paths.len()
                 ));
             }
-            let mut guard = OPEN_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-            for path in paths {
-                if !guard.iter().any(|p| p == &path) {
-                    guard.push(path);
-                }
-            }
+            enqueue_paths(paths);
         }
 
         // SAFETY: 该函数作为 Objective-C method 被 AppKit 在主线程调用；`urls` 为
@@ -585,12 +604,7 @@ pub mod macos {
                     paths.len()
                 ));
             }
-            let mut guard = OPEN_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-            for path in paths {
-                if !guard.iter().any(|p| p == &path) {
-                    guard.push(path);
-                }
-            }
+            enqueue_paths(paths);
         }
 
         // SAFETY: 该函数作为 Objective-C method 被 AppKit 在主线程调用；`file` 为
@@ -611,7 +625,7 @@ pub mod macos {
                     "dock_open: received file via application:openFile: {}",
                     path.display()
                 ));
-                push_path(path);
+                enqueue_paths(vec![path]);
                 YES
             } else {
                 // 返回 NO 表示我们未处理该文件，系统可能会尝试其他 handler。

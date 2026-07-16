@@ -50,7 +50,10 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| {
             fonts::setup_fonts(&cc.egui_ctx);
             #[cfg(target_os = "macos")]
-            crate::platform::macos::dock_open::install_dock_open_handler();
+            {
+                crate::platform::macos::dock_open::install_dock_open_handler();
+                crate::platform::macos::dock_open::set_wake_context(cc.egui_ctx.clone());
+            }
             Ok(Box::new(ReaderApp::new(cc)))
         }),
     )

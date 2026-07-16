@@ -68,6 +68,9 @@ impl MediaView {
 
     pub fn close(&mut self) {
         self.open = None; // Drops native view, render context and player.
+                          // The native view (and its CATextLayer OSD) is gone; drop the egui-side
+                          // OSD state too, or the stale text leaks into the next opened media.
+        self.osd = None;
     }
 
     pub fn update_bounds(&mut self, bounds: wry::Rect) {
@@ -293,12 +296,24 @@ impl MediaView {
     }
 
     /// Hides an expired OSD; called once per frame from render_media.
-    pub fn tick_osd(&mut self) {
-        if self.osd.as_ref().is_some_and(|o| Instant::now() >= o.until) {
+    ///
+    /// egui fires the frame scheduled by `request_repaint_after` slightly
+    /// EARLY (it subtracts the predicted frame time) and only once, so an
+    /// unexpired OSD must re-arm the timer here — otherwise an idle app
+    /// (e.g. after EOF, when the mpv event pump stops repainting) never gets
+    /// another frame and the OSD lingers until the next user input.
+    pub fn tick_osd(&mut self, ctx: &egui::Context) {
+        let Some(osd) = &self.osd else {
+            return;
+        };
+        let now = Instant::now();
+        if now >= osd.until {
             if let Some(open) = self.open.as_ref() {
                 open.native.clear_osd();
             }
             self.osd = None;
+        } else {
+            ctx.request_repaint_after(osd.until.saturating_duration_since(now));
         }
     }
 }
@@ -538,6 +553,42 @@ mod tests {
         assert_eq!(speed_osd_text(1.5), "1.5x");
         assert_eq!(mute_osd_text(true), "静音");
         assert_eq!(mute_osd_text(false), "取消静音");
+    }
+
+    #[test]
+    fn tick_osd_keeps_unexpired_osd_and_clears_expired() {
+        let ctx = egui::Context::default();
+        // 未到期：保留（tick 会为剩余时间重新预约一帧，见 tick_osd 注释）。
+        let mut view = MediaView {
+            osd: Some(Osd {
+                text: "x".into(),
+                until: Instant::now() + Duration::from_secs(60),
+            }),
+            ..Default::default()
+        };
+        view.tick_osd(&ctx);
+        assert!(view.osd.is_some());
+        // 已到期：清除；open 为 None 时仅清 egui 侧状态，不触碰原生层。
+        view.osd = Some(Osd {
+            text: "x".into(),
+            until: Instant::now() - Duration::from_millis(1),
+        });
+        view.tick_osd(&ctx);
+        assert!(view.osd.is_none());
+    }
+
+    #[test]
+    fn close_clears_osd_state() {
+        // close 丢弃原生层后若不清 egui 侧 OSD，残留文本会漏进下次打开的媒体。
+        let mut view = MediaView {
+            osd: Some(Osd {
+                text: "x".into(),
+                until: Instant::now() + Duration::from_secs(60),
+            }),
+            ..Default::default()
+        };
+        view.close();
+        assert!(view.osd.is_none());
     }
 
     #[test]
