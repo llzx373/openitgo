@@ -609,7 +609,7 @@ impl ReaderApp {
         let screen_size = ctx.screen_rect().size();
         // While a menu/dropdown is open, keep the toolbar up (otherwise the
         // dropdown self-dismisses in fullscreen when the pointer leaves the
-        // top edge) and hide the native video so it cannot cover the menu.
+        // top edge).
         let menu_open = menu_overlay_open(ctx);
         let show_toolbar = Self::should_show_bar(
             self.settings.show_toolbar,
@@ -658,11 +658,11 @@ impl ReaderApp {
                     .as_ref()
                     .map(|o| media_overlay(&o.last))
                     .unwrap_or(MediaOverlay::None);
-                // Audio-only or decode error: park the native overlay at zero
-                // size so it cannot cover the egui layer painted by
-                // MediaView::ui. Same while a menu/dropdown is open: the native
-                // view renders above egui and would cover the popup.
-                let bounds = if matches!(overlay, MediaOverlay::None) && !menu_open {
+                // Audio-only or decode error: park the native layer at zero
+                // size so the egui placeholder painted by MediaView::ui shows
+                // instead of the video. Menus need no parking: the egui
+                // surface composites above the video layer now.
+                let bounds = if matches!(overlay, MediaOverlay::None) {
                     wry::Rect {
                         position: wry::dpi::LogicalPosition::new(rect.min.x, rect.min.y).into(),
                         size: wry::dpi::LogicalSize::new(rect.width(), rect.height()).into(),
