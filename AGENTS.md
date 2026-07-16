@@ -81,7 +81,9 @@ already embed it.
   zero alpha) and the media view's CentralPanel uses a transparent frame, so
   the video shows through the unpainted central area while egui menus,
   dropdowns and popups composite above it. Hit-testing is unaffected (the
-  egui NSView still receives all events). Bare-layer geometry changes must go
+  egui NSView still receives all events). The egui control bars are
+  repainted by the mpv event-pump thread calling
+  `egui::Context::request_repaint()`. Bare-layer geometry changes must go
   through a `CATransaction` with disabled actions; the OSD opacity fade
   relies on implicit animation and must stay outside such transactions.
   Playback progress is persisted in `HistoryEntry.char_offset` (milliseconds).
@@ -107,8 +109,10 @@ already embed it.
   toolbar from auto-hiding in fullscreen while a menu is open. The media
   seek bar needs a scoped `ui.spacing_mut().slider_width` override: egui 0.29
   `Slider` always allocates `slider_width` (100px) and ignores `add_sized`.
-  The diagnostic examples `probe_overlay.rs` (transparent-compositing proof)
-  and `probe_visible.rs` (real video compositing) verify the layering.
+  The diagnostic examples `probe_overlay.rs` (transparent-compositing proof),
+  `probe_visible.rs` (bare window without an egui surface — exercises the
+  index-0 fallback), and `probe_video_overlay.rs` (real video compositing
+  below the transparent egui surface) verify the layering.
 - **Media preferences**: volume/speed/audio-device are persisted globally in
   `Settings` and applied by `MediaView::apply_startup_settings` after open;
   a missing saved device falls back to "auto".

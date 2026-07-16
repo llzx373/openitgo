@@ -373,6 +373,16 @@ impl MpvNativeView {
                 }
                 parent
             } else {
+                // Below-egui anchoring needs the CAMetalLayer sibling; the
+                // index-0 fallback (expected only in probe windows without
+                // wgpu) stacks the video ABOVE the egui surface, so log it.
+                let cls: *const i8 = msg_send![view_layer, className];
+                let cls = std::ffi::CStr::from_ptr(cls).to_string_lossy();
+                eprintln!(
+                    "[mpv_view] view layer is {cls}, not CAMetalLayer; layer structure may \
+                     have changed — using insertSublayer:atIndex:0 fallback (video will \
+                     composite above egui)"
+                );
                 view_layer
             };
             (view_layer, parent_layer, is_metal)
@@ -590,8 +600,8 @@ impl Drop for MpvNativeView {
             });
         }
         // SAFETY: balanced release for the alloc/init retain in new(). The
-        // video layer also retained it as a sublayer until the
-        // removeFromSuperlayer above.
+        // video layer also retained it as a sublayer until the video layer's
+        // dealloc below.
         unsafe {
             let () = msg_send![self.osd_layer, release];
         }
