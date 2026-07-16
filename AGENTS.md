@@ -72,9 +72,18 @@ already embed it.
   resize: font/size/margin/theme changes re-layout and preserve the approximate
   character offset, while window resize debounces and preserves the scroll ratio
   in scroll mode or the current spread in paginated modes.
-- **Media playback** renders mpv video through a native `CAOpenGLLayer` overlay
-  (`rust-reader-app/src/platform/macos/mpv_view.rs`); the egui control bars are
-  repainted by the mpv event-pump thread calling `egui::Context::request_repaint()`.
+- **Media playback** renders mpv video through a CAOpenGLLayer inserted into
+  the superlayer of the winit view's CAMetalLayer, anchored BELOW it via
+  `insertSublayer:below:` (the view's layer IS wgpu's CAMetalLayer — wgpu-hal
+  adopts it as the main layer) (`rust-reader-app/src/platform/macos/mpv_view.rs`).
+  The app runs with a
+  transparent backbuffer (`with_transparent(true)` + `clear_color` returning
+  zero alpha) and the media view's CentralPanel uses a transparent frame, so
+  the video shows through the unpainted central area while egui menus,
+  dropdowns and popups composite above it. Hit-testing is unaffected (the
+  egui NSView still receives all events). Bare-layer geometry changes must go
+  through a `CATransaction` with disabled actions; the OSD opacity fade
+  relies on implicit animation and must stay outside such transactions.
   Playback progress is persisted in `HistoryEntry.char_offset` (milliseconds).
   Inside `drawInCGLContext`, CoreAnimation binds its own drawable FBO (observed:
   1/2, alternating — never 0); the draw must query `GL_FRAMEBUFFER_BINDING` and
@@ -84,20 +93,22 @@ already embed it.
   can be switched at runtime (see Media preferences below).
 - **Media OSD**: transient feedback (volume, mute, seeks, speed, device
   switches) renders in a CATextLayer sublayer of the CAOpenGLLayer
-  (`MpvNativeView::set_osd/clear_osd`) — egui cannot paint over the native
-  video view. When the native view is parked at zero size (audio-only or
+  (`MpvNativeView::set_osd/clear_osd`) — the CATextLayer lives inside the
+  video layer below egui and shows through the transparent central area.
+  When the native view is parked at zero size (audio-only or
   decode-error overlay), `MediaView::ui` paints the same text top-right with
   the egui painter instead. `MediaView::show_osd` stores the text plus the 1s
   expiry (`Osd`); `tick_osd` clears both paths. CoreAnimation's implicit
   opacity animation provides the native fade.
-- **Media menus/popups**: the native video view renders above the whole egui
-  layer, so any egui overlay inside the video rect (menu-bar menus, the
-  字幕/音轨/输出 dropdowns) would be invisible. `menu_overlay_open(ctx)`
-  detects visible `Order::Middle`/`Order::Foreground` areas; while one is
-  open, `render_media` parks the native view at zero size and keeps the
-  toolbar from auto-hiding in fullscreen. The media seek bar needs a scoped
-  `ui.spacing_mut().slider_width` override: egui 0.29 `Slider` always
-  allocates `slider_width` (100px) and ignores `add_sized`.
+- **Media menus/popups**: with the video layer below the transparent egui
+  surface, egui overlays (menu-bar menus, the 字幕/音轨/输出 dropdowns)
+  naturally render above the video. `menu_overlay_open(ctx)` (visible
+  `Order::Middle`/`Order::Foreground` areas) is still used to keep the media
+  toolbar from auto-hiding in fullscreen while a menu is open. The media
+  seek bar needs a scoped `ui.spacing_mut().slider_width` override: egui 0.29
+  `Slider` always allocates `slider_width` (100px) and ignores `add_sized`.
+  The diagnostic examples `probe_overlay.rs` (transparent-compositing proof)
+  and `probe_visible.rs` (real video compositing) verify the layering.
 - **Media preferences**: volume/speed/audio-device are persisted globally in
   `Settings` and applied by `MediaView::apply_startup_settings` after open;
   a missing saved device falls back to "auto".
@@ -107,7 +118,10 @@ already embed it.
   segfaults inside libmpv.
 - **Media diagnostic examples**: `rust-reader-app/examples/probe_visible.rs`
   (visible window, real CA compositing, screenshot-verifiable),
-  `probe_mpv_view.rs` (offscreen overlay), and
+  `probe_mpv_view.rs` (offscreen overlay),
+  `probe_overlay.rs` (transparent-compositing proof for the
+  video-below-egui layering), `probe_video_overlay.rs` (real video layer
+  compositing verification), and
   `rust-reader-media/examples/{probe,probe_render}.rs` (headless player/render
   context). `RUST_READER_MPV_LOG=1` enables mpv debug logs on stderr.
 - **Packaging**: `scripts/package-macos.sh` runs `bundle_mpv` before signing,

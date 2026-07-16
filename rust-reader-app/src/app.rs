@@ -2635,10 +2635,11 @@ fn migrate_library_ids(
 }
 
 /// True while any egui overlay (menu, dropdown popup, floating window) is
-/// visible. The native video view renders above the egui layer, so while an
-/// overlay is open the video must be parked at zero size — otherwise the
-/// overlay is covered by the video. Tooltips are ignored: they are small,
-/// follow the pointer, and must not blank the video.
+/// visible. The video layer sits below the transparent egui surface, so
+/// overlays composite above the video on their own — this is only used to
+/// keep the media toolbar from auto-hiding in fullscreen while a menu is
+/// open. Tooltips are ignored: they are small, follow the pointer, and must
+/// not affect the toolbar.
 fn menu_overlay_open(ctx: &egui::Context) -> bool {
     ctx.memory(|m| {
         m.areas()
