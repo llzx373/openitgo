@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 电子书历史与书签：复用现有 `History` / `Bookmarks`，保存/恢复章节索引与字符偏移；支持添加/删除/跳转电子书书签。
 - 书架混排电子书：`LibraryEntry` 增加 `media_type`，可按"全部 / 漫画 / 电子书"过滤，点击电子书条目进入 `View::Ebook`。
 - 电子书打开流程测试：`is_ebook_file` 扩展名识别与 `open_path` 分发测试。
-- 环境变量 `RUST_READER_OPEN`，启动时自动打开指定漫画或电子书（开发/测试用）。
+- 环境变量 `OPENITGO_OPEN`，启动时自动打开指定漫画或电子书（开发/测试用）。
 - macOS: drag archives or folders onto the Dock icon to open them, even when the app is not running.
 - macOS packaging script (`scripts/package-macos.sh`) that builds a signed `.app` bundle, plus a Zed task to run it.
 - Menu bar with File / View / Read / Tools / Help menus, available even when the toolbar is hidden.
@@ -47,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Library card click now triggers on the whole card, not just the cover.
 - 媒体播放：视频层从 egui 之上的原生 NSView 改为 egui 透明 surface 之下的 CA 子层（透明 backbuffer 合成）；菜单栏菜单与字幕/音轨/输出下拉框现在直接悬浮在视频画面之上，打开菜单时视频不再黑屏让位。
+- 项目更名为 OpenItGo：workspace 各 crate 由 `rust-reader-*` 更名为 `openitgo-*`，窗口标题、关于框、`.app` 包名、bundle id（`com.liu.openitgo`）与环境变量前缀（`OPENITGO_*`）同步更新；配置目录改为 `~/.config/openitgo`，首次启动自动从旧 `rust-reader` 目录迁移，迁移失败时继续使用旧目录。
 
 ### Fixed
 
@@ -66,7 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 电子书：布局缓存 key 增加 `--font` 变量，避免字体变更后仍使用旧排版结果。
 - 电子书：加载章节时清理超出相邻窗口的预加载 `<template>` 节点，避免 DOM 无限增长。
 - 电子书：CSS columns 分页 review 修复——`showError` 使用独立 `#ebook-error-layer` 覆盖层并在渲染成功后隐藏；连续滚动模式在 `applySettings` 中以 `maxScroll()` 作为分母保留滚动比例；目录目标解析区分 fragment/path，对特殊 id 使用 `CSS.escape()`，Rust 侧对 fragment 做 URL 解码；`jump_to_toc` 在注入 JS 前同步 `current_chapter`。
-- macOS: 修复应用未运行时通过 Finder / Dock 打开压缩包报 “rustReader cannot open files in the “Comic Archive” format” 的错误。通过 swizzle `-[NSApplication setDelegate:]` 在 winit 设置 delegate 前注入 `application:openURLs:` / `application:openFiles:` / `application:openFile:` 实现。
+- macOS: 修复应用未运行时通过 Finder / Dock 打开压缩包报 “OpenItGo cannot open files in the “Comic Archive” format” 的错误。通过 swizzle `-[NSApplication setDelegate:]` 在 winit 设置 delegate 前注入 `application:openURLs:` / `application:openFiles:` / `application:openFile:` 实现。
 - macOS: 修复应用图标在 Dock/Finder 中显示为带白色方角的问题。`generate_icons.py` 现在会使用 macOS 圆角遮罩生成带透明四角的 PNG 与 `.icns`。
 - 电子书：修复工具栏/状态栏不随 WebView 阅读位置上报实时刷新的问题；`EbookRenderer` 在处理 IPC position 消息时调用 `egui::Context::request_repaint()`。
 - 媒体播放：修复视频有进度无画面的问题；根因是 CAOpenGLLayer 在 `drawInCGLContext` 前绑定的是自己的 drawable FBO（实测 1/2 交替，并非 0），mpv 一直渲染到 FBO 0，layer 的 drawable 从未被写入而完全透明。现在渲染前查询 `GL_FRAMEBUFFER_BINDING` 并传入，同时 `FLIP_Y` 修正为 1（画面不再上下颠倒）。

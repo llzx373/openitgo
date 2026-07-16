@@ -1,5 +1,5 @@
 [workspace]
-members = ["rust-reader-core", "rust-reader-parser", "rust-reader-storage", "rust-reader-app", "rust-reader-media"]
+members = ["openitgo-core", "openitgo-parser", "openitgo-storage", "openitgo-app", "openitgo-media"]
 resolver = "2"
 
 [workspace.dependencies]

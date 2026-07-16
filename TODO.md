@@ -1,4 +1,4 @@
-# rustReader 开发 TODO
+# OpenItGo 开发 TODO
 
 按优先级分为 P0/P1/P2/P3。逐个实现，遇到不确定状况先询问用户。完整审计报告见 `docs/audit-report.md`（该报告为 2026-06-17 之前的快照，大量条目已实现，当前状态以本 TODO 为准）。
 
@@ -189,7 +189,7 @@
 详细设计/计划见 `docs/superpowers/plans/`（2026-07 系列）。
 
 - [x] 33. 媒体播放基础
-  - [x] 33.1 `rust-reader-media`：libmpv 命令封装、事件泵、属性观察、OpenGL 渲染上下文
+  - [x] 33.1 `openitgo-media`：libmpv 命令封装、事件泵、属性观察、OpenGL 渲染上下文
   - [x] 33.2 macOS 视频层：`CAOpenGLLayer` + `drawInCGLContext`（drawable FBO 绑定查询与 `FLIP_Y` 修正，修复有进度无画面）
   - [x] 33.3 打开/播放视频与音频，书架集成与封面生成（无头 mpv 截取视频 10% 帧、音频专辑封面）
   - [x] 33.4 播放进度毫秒级持久化与续播（复用历史记录 `char_offset`）

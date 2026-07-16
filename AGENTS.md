@@ -1,20 +1,20 @@
-# rustReader Agent Instructions
+# OpenItGo Agent Instructions
 
 ## Project Overview
 
-`rustReader` is a desktop comic/manga reader built with Rust, `eframe`, `egui`, and `wgpu`.
+`OpenItGo` is a desktop comic/manga reader built with Rust, `eframe`, `egui`, and `wgpu`.
 It supports ZIP/CBZ, RAR/CBR, PDF, and folders of images, plus EPUB, TXT, MOBI/AZW3, and
 Markdown ebooks through an embedded `wry` webview renderer, and plays video/audio files
 through an embedded `libmpv` backend.
 
 ## Repository Layout
 
-- `rust-reader-core/` — shared models, reading-state machine, and layout math.
-- `rust-reader-parser/` — archive/folder/PDF parsers and comic ID generation.
-- `rust-reader-storage/` — JSON persistence for settings, library, history, and bookmarks.
-- `rust-reader-media/` — libmpv wrapper: commands, event pump, property observation,
+- `openitgo-core/` — shared models, reading-state machine, and layout math.
+- `openitgo-parser/` — archive/folder/PDF parsers and comic ID generation.
+- `openitgo-storage/` — JSON persistence for settings, library, history, and bookmarks.
+- `openitgo-media/` — libmpv wrapper: commands, event pump, property observation,
   OpenGL render context, and headless cover generation.
-- `rust-reader-app/` — egui application, cache, loader, and UI views.
+- `openitgo-app/` — egui application, cache, loader, and UI views.
 - `docs/` — audit reports, bug notes, and implementation plans.
 
 ## Build & Test
@@ -29,7 +29,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Media playback requires libmpv from Homebrew (`brew install mpv`) to build
-`rust-reader-media` and to run the app from source; packaged `.app` bundles
+`openitgo-media` and to run the app from source; packaged `.app` bundles
 already embed it.
 
 ## Coding Conventions
@@ -43,7 +43,7 @@ already embed it.
 ## Key Architectural Notes
 
 - **Comic IDs** are generated deterministically from the file/folder path via
-  `rust_reader_parser::stable_comic_id`. Never use the filename alone.
+  `openitgo_parser::stable_comic_id`. Never use the filename alone.
 - **PageLoader** runs IO and decode workers in background threads; results are
   sent back to the UI thread via channels. The app also maintains a separate
   `cover_loader` for library cover thumbnails.
@@ -63,7 +63,7 @@ already embed it.
   source file no longer exist are marked as deleted.
 - **EbookRenderer** hosts a `wry` child webview and serves a small HTML reader
   shell over the custom `ebook://` protocol. Chapter content is fetched via
-  `ebook://reader?chapter=N` and rendered by `rust_reader_parser::html::render_chapter_html`.
+  `ebook://reader?chapter=N` and rendered by `openitgo_parser::html::render_chapter_html`.
   Pagination is handled by the embedded CSS `columns` paginator; the JS side uses
   a `sendIpc` helper that retries if the `window.ipc` bridge is not yet injected.
   Pagination transforms must be applied to `#column-content` inside `#column-view`;
@@ -75,7 +75,7 @@ already embed it.
 - **Media playback** renders mpv video through a CAOpenGLLayer inserted into
   the superlayer of the winit view's CAMetalLayer, anchored BELOW it via
   `insertSublayer:below:` (the view's layer IS wgpu's CAMetalLayer — wgpu-hal
-  adopts it as the main layer) (`rust-reader-app/src/platform/macos/mpv_view.rs`).
+  adopts it as the main layer) (`openitgo-app/src/platform/macos/mpv_view.rs`).
   The app runs with a
   transparent backbuffer (`with_transparent(true)` + `clear_color` returning
   zero alpha) and the media view's CentralPanel uses a transparent frame, so
@@ -128,7 +128,7 @@ already embed it.
 - **MpvPlayer command rule**: every mpv command/property call made from the
   UI thread MUST use the async libmpv APIs (`mpv_command_async`,
   `mpv_set_property_async`, `mpv_get_property_async` — see
-  `rust-reader-media/src/player.rs`). A blocking call (`mpv_command`,
+  `openitgo-media/src/player.rs`). A blocking call (`mpv_command`,
   `mpv_get_property`, ...) parks the UI thread on mpv's core dispatch queue,
   which can itself be waiting for first-frame DR image allocation — and that
   allocation can only be serviced by the UI thread answering
@@ -139,14 +139,14 @@ already embed it.
   `mpv-events` thread (50ms `mpv_wait_event` timeout) *before*
   `mpv_terminate_destroy` — a `mpv_wait_event` call racing the handle free
   segfaults inside libmpv.
-- **Media diagnostic examples**: `rust-reader-app/examples/probe_visible.rs`
+- **Media diagnostic examples**: `openitgo-app/examples/probe_visible.rs`
   (visible window, real CA compositing, screenshot-verifiable),
   `probe_mpv_view.rs` (offscreen overlay),
   `probe_overlay.rs` (transparent-compositing proof for the
   video-below-egui layering), `probe_video_overlay.rs` (real video layer
   compositing verification), and
-  `rust-reader-media/examples/{probe,probe_render}.rs` (headless player/render
-  context). `RUST_READER_MPV_LOG=1` enables mpv debug logs on stderr.
+  `openitgo-media/examples/{probe,probe_render}.rs` (headless player/render
+  context). `OPENITGO_MPV_LOG=1` enables mpv debug logs on stderr.
 - **Packaging**: `scripts/package-macos.sh` runs `bundle_mpv` before signing,
   copying libmpv and its Homebrew dependencies into `Contents/Frameworks` and
   rewriting their install names to `@rpath`, so the bundled app runs without a

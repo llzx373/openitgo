@@ -3658,6 +3658,85 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "openitgo-app"
+version = "0.1.0"
+dependencies = [
+ "bcdec_rs",
+ "cgl",
+ "core-foundation 0.10.1",
+ "core-graphics 0.24.0",
+ "crossbeam-channel",
+ "eframe",
+ "egui",
+ "egui-phosphor",
+ "foreign-types",
+ "image",
+ "libc",
+ "objc",
+ "openitgo-core",
+ "openitgo-media",
+ "openitgo-parser",
+ "openitgo-storage",
+ "pdf-render",
+ "percent-encoding",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "texpresso",
+ "time",
+ "unrar",
+ "wry",
+ "zip 2.4.2",
+]
+
+[[package]]
+name = "openitgo-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "openitgo-media"
+version = "0.1.0"
+dependencies = [
+ "cgl",
+ "libc",
+ "libmpv-sys",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "openitgo-parser"
+version = "0.1.0"
+dependencies = [
+ "epub",
+ "image",
+ "mobi",
+ "openitgo-core",
+ "pdf",
+ "pulldown-cmark",
+ "tempfile",
+ "thiserror 1.0.69",
+ "unrar",
+ "zip 2.4.2",
+]
+
+[[package]]
+name = "openitgo-storage"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "openitgo-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4547,85 +4626,6 @@ name = "rle-decode-fast"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3582f63211428f83597b51b2ddb88e2a91a9d52d12831f9d08f5e624e8977422"
-
-[[package]]
-name = "rust-reader-app"
-version = "0.1.0"
-dependencies = [
- "bcdec_rs",
- "cgl",
- "core-foundation 0.10.1",
- "core-graphics 0.24.0",
- "crossbeam-channel",
- "eframe",
- "egui",
- "egui-phosphor",
- "foreign-types",
- "image",
- "libc",
- "objc",
- "pdf-render",
- "percent-encoding",
- "rfd",
- "rust-reader-core",
- "rust-reader-media",
- "rust-reader-parser",
- "rust-reader-storage",
- "serde",
- "serde_json",
- "tempfile",
- "texpresso",
- "time",
- "unrar",
- "wry",
- "zip 2.4.2",
-]
-
-[[package]]
-name = "rust-reader-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "rust-reader-media"
-version = "0.1.0"
-dependencies = [
- "cgl",
- "libc",
- "libmpv-sys",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "rust-reader-parser"
-version = "0.1.0"
-dependencies = [
- "epub",
- "image",
- "mobi",
- "pdf",
- "pulldown-cmark",
- "rust-reader-core",
- "tempfile",
- "thiserror 1.0.69",
- "unrar",
- "zip 2.4.2",
-]
-
-[[package]]
-name = "rust-reader-storage"
-version = "0.1.0"
-dependencies = [
- "dirs 5.0.1",
- "rust-reader-core",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
-]
 
 [[package]]
 name = "rustc-hash"

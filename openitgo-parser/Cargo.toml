@@ -1,0 +1,20 @@
+[package]
+name = "openitgo-parser"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Comic archive parsers for OpenItGo"
+
+[dependencies]
+openitgo-core = { path = "../openitgo-core" }
+image = { workspace = true }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+unrar = "0.5"
+pdf = "0.9"
+epub = "2.1"
+mobi = "0.8"
+pulldown-cmark = "0.13"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.14"

@@ -1,4 +1,4 @@
-# rustReader
+# OpenItGo
 
 一款使用 Rust + egui + wgpu 构建的跨平台桌面漫画/小说阅读器，支持国漫（左→右）、日漫（右→左）和韩漫/Webtoon（长条从上到下）三种漫画阅读模式，EPUB/TXT/MOBI/AZW3/Markdown 电子书阅读，以及基于内嵌 libmpv 的视频/音频播放。
 
@@ -84,7 +84,7 @@
 |---|---|
 | 拖拽文件/文件夹到窗口 | 打开漫画、电子书或媒体文件；若拖拽的是普通文件夹则递归扫描导入 |
 | 拖拽文件/文件夹到 Dock 图标（macOS） | 应用未运行时也会启动并打开；文件夹会递归扫描导入 |
-| 环境变量 `RUST_READER_OPEN` | 启动时自动打开指定路径的漫画/电子书（开发/测试用） |
+| 环境变量 `OPENITGO_OPEN` | 启动时自动打开指定路径的漫画/电子书（开发/测试用） |
 | 滚轮 | 国漫/日漫翻页；Webtoon 垂直滚动；可在设置中反转滚轮方向 |
 | Ctrl + 滚轮 | 缩放 |
 | 双击页面 | 在原始尺寸（100%）与自动适应页面之间切换 |
@@ -115,13 +115,13 @@
 brew install mpv
 ```
 
-- 从源码构建与运行的机器需要安装，否则 `rust-reader-media` 无法链接。
+- 从源码构建与运行的机器需要安装，否则 `openitgo-media` 无法链接。
 - `scripts/package-macos.sh` 打包出的 `.app` 已内嵌 libmpv 及其依赖，终端用户无需安装 mpv。
 
 ## 运行
 
 ```bash
-cargo run -p rust-reader-app
+cargo run -p openitgo-app
 ```
 
 ## 测试

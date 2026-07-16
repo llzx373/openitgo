@@ -18,7 +18,7 @@
 
 ### Bug 1：解码任务丢弃后永远不重试（P0，核心死锁）
 
-**位置**：`rust-reader-app/src/loader.rs` 的 `process_io_request` + `rust-reader-app/src/views/reader.rs` 的 `request_page`
+**位置**：`openitgo-app/src/loader.rs` 的 `process_io_request` + `openitgo-app/src/views/reader.rs` 的 `request_page`
 
 **触发路径**：
 
@@ -47,7 +47,7 @@ if reader.pending_pages.contains_key(&page_index) {
 
 ### Bug 2：pending 状态无超时机制（P1）
 
-**位置**：`rust-reader-app/src/views/reader.rs`
+**位置**：`openitgo-app/src/views/reader.rs`
 
 早期 `pending_pages` 是 `HashSet<usize>`，没有关联的超时时间。页面只有以下方式离开 pending 状态：
 - `LoadResult` 到达（`update()` 中 `pending_pages.remove()`）
@@ -57,13 +57,13 @@ if reader.pending_pages.contains_key(&page_index) {
 
 ### 问题 3：IO 单线程限制（P2）
 
-**位置**：`rust-reader-app/src/loader.rs`
+**位置**：`openitgo-app/src/loader.rs`
 
 早期全局只有一个 IO 线程处理所有文件读取。虽然读取后立刻将解码任务派发给多线程 worker，但文件读取本身是串行的。快速翻页产生的并发文件读取请求都在排队。
 
 ### 问题 4：预加载冷却期过长（P3）
 
-**位置**：`rust-reader-app/src/views/reader.rs`
+**位置**：`openitgo-app/src/views/reader.rs`
 
 早期：
 
@@ -75,7 +75,7 @@ const PRELOAD_COOLDOWN_AFTER_TURN: Duration = Duration::from_millis(300);
 
 ### 问题 5：缓存满时预加载直接跳过（P3）
 
-**位置**：`rust-reader-app/src/views/reader.rs`
+**位置**：`openitgo-app/src/views/reader.rs`
 
 早期逻辑：
 
@@ -119,7 +119,7 @@ if reader.cache.total_size_bytes() >= budget {
 
 - **现象**：app 空闲时通过 Finder/Dock 投递的文件不立即打开，滞留到下次重绘（动一下窗口/鼠标才打开）。
 - **根因**：`application:openURLs:` 等回调把文件放入 `OPEN_QUEUE`，但队列只在 egui `update()` 中排空（`app.rs` 的 `take_dock_open_paths`）；egui 空闲时 winit 事件循环睡眠、不重绘，`update()` 不被调用。
-- **修复**：`dock_open` 模块新增 `set_wake_context`（app 创建时注册 `egui::Context`），三个回调收文件后经 `enqueue_paths` 统一入队并 `request_repaint()` 唤醒事件循环（`rust-reader-app/src/platform.rs`、`main.rs`）。
+- **修复**：`dock_open` 模块新增 `set_wake_context`（app 创建时注册 `egui::Context`），三个回调收文件后经 `enqueue_paths` 统一入队并 `request_repaint()` 唤醒事件循环（`openitgo-app/src/platform.rs`、`main.rs`）。
 - **验证**：A/B 对照冒烟。基线（/Applications 旧包）：回调收到文件后 CPU 持平（6s 内 0:00.33→0:00.43），文件滞留，bug 复现；新二进制：投递后 1s 内媒体开始解码（5s 内 CPU 0:00.92→0:02.36），无需任何输入事件。
 
 ### 问题 C：EOF 后空闲 OSD 滞留（P3）—— 已修复（2026-07-16）

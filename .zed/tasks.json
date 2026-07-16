@@ -2,7 +2,7 @@
   {
     "label": "Run app",
     "command": "cargo",
-    "args": ["run", "-p", "rust-reader-app"],
+    "args": ["run", "-p", "openitgo-app"],
     "env": {},
     "use_new_terminal": false,
     "allow_concurrent_runs": false,
@@ -56,7 +56,7 @@
   {
     "label": "Build release",
     "command": "cargo",
-    "args": ["build", "--release", "-p", "rust-reader-app"],
+    "args": ["build", "--release", "-p", "openitgo-app"],
     "env": {},
     "use_new_terminal": false,
     "allow_concurrent_runs": false,

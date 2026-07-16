@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Package rustReader as a macOS .app bundle.
+# Package OpenItGo as a macOS .app bundle.
 #
 # Requires libmpv from Homebrew (`brew install mpv`); the library and its
 # dependencies are bundled into Contents/Frameworks, so the resulting .app
@@ -16,9 +16,9 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd "${script_dir}/.." && pwd)"
 
-app_name="rustReader"
-binary_name="rust-reader-app"
-bundle_id="com.liu.rustReader"
+app_name="OpenItGo"
+binary_name="openitgo-app"
+bundle_id="com.liu.openitgo"
 version="0.1.0"
 
 output_dir="${1:-${project_root}/target/release/bundle}"

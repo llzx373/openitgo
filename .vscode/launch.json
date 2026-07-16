@@ -2,29 +2,29 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug rust-reader-app",
+      "name": "Debug openitgo-app",
       "type": "lldb",
       "request": "launch",
       "cargo": {
-        "args": ["run", "-p", "rust-reader-app"]
+        "args": ["run", "-p", "openitgo-app"]
       },
       "args": [],
       "cwd": "${workspaceFolder}",
       "env": {}
     },
     {
-      "name": "Debug rust-reader-app (release)",
+      "name": "Debug openitgo-app (release)",
       "type": "lldb",
       "request": "launch",
       "cargo": {
-        "args": ["run", "--release", "-p", "rust-reader-app"]
+        "args": ["run", "--release", "-p", "openitgo-app"]
       },
       "args": [],
       "cwd": "${workspaceFolder}",
       "env": {}
     },
     {
-      "name": "Attach to rust-reader-app",
+      "name": "Attach to openitgo-app",
       "type": "lldb",
       "request": "attach",
       "pid": "${command:pickMyProcess}"

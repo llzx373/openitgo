@@ -1,0 +1,39 @@
+[package]
+name = "openitgo-app"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Desktop egui application for OpenItGo"
+
+[dependencies]
+crossbeam-channel = "0.5"
+eframe = { version = "0.29", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "wayland", "x11"] }
+egui = "0.29"
+egui-phosphor = "0.7"
+bcdec_rs = "0.2"
+image = { workspace = true }
+texpresso = "2.0"
+pdf-render = "1.0.0-beta.9"
+rfd = "0.15"
+openitgo-core = { path = "../openitgo-core" }
+openitgo-media = { path = "../openitgo-media" }
+openitgo-parser = { path = "../openitgo-parser" }
+openitgo-storage = { path = "../openitgo-storage" }
+time = "0.3"
+wry = "0.55"
+serde = { workspace = true }
+serde_json = { workspace = true }
+percent-encoding = "2"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+unrar = "0.5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-graphics = "0.24"
+foreign-types = "0.5"
+objc = "0.2" # NSApplication delegate for Dock open-file events
+libc = "0.2"
+cgl = "0.3"
+
+[dev-dependencies]
+tempfile = "3.14"

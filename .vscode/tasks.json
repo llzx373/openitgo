@@ -5,7 +5,7 @@
       "label": "Run app",
       "type": "shell",
       "command": "cargo",
-      "args": ["run", "-p", "rust-reader-app"],
+      "args": ["run", "-p", "openitgo-app"],
       "group": {
         "kind": "build",
         "isDefault": true
@@ -80,7 +80,7 @@
       "label": "Build release",
       "type": "shell",
       "command": "cargo",
-      "args": ["build", "--release", "-p", "rust-reader-app"],
+      "args": ["build", "--release", "-p", "openitgo-app"],
       "group": "build",
       "presentation": {
         "reveal": "always",

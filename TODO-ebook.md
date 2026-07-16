@@ -21,7 +21,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 **实现要点：**
 - [x] 在 `EbookView` 中增加 `show_toc: bool` 状态与当前高亮章节索引。
-- [x] 在 `rust-reader-app/src/app.rs` 的 `render_ebook` 中增加侧边栏/弹窗形式的目录 UI。
+- [x] 在 `openitgo-app/src/app.rs` 的 `render_ebook` 中增加侧边栏/弹窗形式的目录 UI。
 - [x] 工具栏/菜单栏的"目录"按钮绑定到打开/关闭目录面板。
 - [x] 目录项点击调用 `ebook_view.goto_chapter(index)`。
 - [x] 当前阅读章节在目录中高亮显示（可基于 `renderer.current_position().0` 同步）。
@@ -107,14 +107,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 **目标**：为电子书解析器补充 fixture 与边界条件测试。
 
 **实现要点：**
-- [x] 在 `rust-reader-parser/tests/fixtures/` 下放置最小 EPUB 文件。
+- [x] 在 `openitgo-parser/tests/fixtures/` 下放置最小 EPUB 文件。
 - [x] 为 `parse_ebook` 编写 EPUB、TXT、MOBI、Markdown 集成测试。
 - [x] 测试空文件、无章节标记文件、错误格式文件的解析错误。
 - [x] 测试 EPUB 目录为空时回退到 spine 的行为。
 - [x] 测试 TXT/Markdown 分章逻辑（按标题、按字数 fallback）。
 
 **测试要求：**
-- [x] `rust-reader-parser/tests/ebook_integration.rs` 至少覆盖 4 种格式。
+- [x] `openitgo-parser/tests/ebook_integration.rs` 至少覆盖 4 种格式。
 - [x] 边界测试：空文件返回 `NoPages`。
 - [x] 边界测试：EPUB TOC 为空时使用 spine。
 
