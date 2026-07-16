@@ -1,4 +1,4 @@
-# 快速翻页加载卡死 Bug 分析
+# Bug 分析与已知问题
 
 ## 现象
 
@@ -95,3 +95,30 @@ if reader.cache.total_size_bytes() >= budget {
 2. **P1**：为 `pending_pages` 添加超时机制（如超 5 秒未返回则移除并允许重试）；对在 `pending_pages` 中但超时的页面，`request_page()` 应强制重新发送
 3. **P2**：允许并发文件读取（多 IO 线程 + 共享 raw-bytes cache）
 4. **P3**：预加载冷却期恢复时，检查当前页是否已在缓存中，若不在则立即预加载；缓存满时应淘汰旧页腾出空间继续预加载，而非直接跳过
+
+---
+
+## 已知问题（2026-07-15 记录）
+
+以下来自 mpv-under-egui 分支（视频层下沉）开发期间的冒烟取证，均为**基线既有问题**（经 A/B 对照或代码路径分析确认与该分支改动无关）。均未修复，优先级为自评。
+
+### 问题 A：mpv 启动偶发 wedge（DR image 分配卡死）（P1）
+
+- **现象**：启动播放偶发卡死，栈显示卡在 DR image 分配。
+- **证据**：Task 4 新二进制与基线二进制 A/B 对照均复现 → 基线既有，与视频层下沉无关。
+- **修复线索**：暂无，需进一步诊断（疑与 mpv/CAOpenGLLayer 初始化时序有关）；复现不稳定。
+- **发现经过**：Task 5 真机冒烟期间。
+
+### 问题 B：dock-open 队列空闲滞留（P2）
+
+- **现象**：app 空闲时通过 Finder/Dock 投递的文件不立即打开，滞留到下次重绘（动一下窗口/鼠标才打开）。
+- **根因线索**：`application:openURLs:` 等回调把文件放入队列，但队列只在 egui `update()` 中排空；egui 空闲时不重绘，`update()` 不被调用。
+- **修复线索**：收到 openURLs 时主动唤醒 UI（`egui::Context::request_repaint()` 或经 winit event loop 的 user event）。
+- **发现经过**：Task 3 真机冒烟用 dock-open 通道投递测试视频时发现。
+
+### 问题 C：EOF 后空闲 OSD 滞留（P3）
+
+- **现象**：播放结束（EOF）后，画面右上角 OSD 文字滞留超过设计的约 1s，直到下次重绘才消失。
+- **根因线索**：OSD 清除（`tick_osd`）由 egui 重绘驱动；播放中 mpv 事件泵持续 `request_repaint()`，EOF 后事件停止、egui 空闲，清理逻辑得不到执行。属事件驱动模型的既有行为。
+- **修复线索**：EOF/close 时主动 `clear_osd` 或补一次 `request_repaint()`（一行级修复）。
+- **发现经过**：Task 4 真机冒烟；与 media-player-ux 终审遗留 Minor"close() 未清 osd（≤1s 自愈）"同族。
