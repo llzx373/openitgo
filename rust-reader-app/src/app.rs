@@ -223,6 +223,10 @@ impl eframe::App for ReaderApp {
         self.poll_opener(ctx);
         self.poll_ebook_opener(ctx, frame);
         self.poll_media_open(ctx, frame);
+        if self.media_view.take_startup_device_invalid() {
+            // 保存的音频设备已拔出：已回退 auto，同步清除持久化设置。
+            self.settings.media_audio_device.clear();
+        }
 
         let cache_size_mb = self.settings.cache_size_mb as usize;
         self.page_loader.set_compress(self.settings.compress_images);
@@ -698,12 +702,8 @@ impl ReaderApp {
             .media_view
             .open
             .as_ref()
-            .map(|o| {
-                o.audio_devices
-                    .iter()
-                    .map(|d| (d.name.clone(), d.label()))
-                    .collect()
-            })
+            .and_then(|o| o.last.audio_devices.as_ref())
+            .map(|ds| ds.iter().map(|d| (d.name.clone(), d.label())).collect())
             .unwrap_or_default();
         let current_device = self.settings.media_audio_device.clone();
         egui::TopBottomPanel::top("media_toolbar").show(ctx, |ui| {
@@ -2389,15 +2389,11 @@ impl ReaderApp {
         match self.media_view.open(ctx, frame, bounds, path, resume_ms) {
             Ok(()) => {
                 self.media_view.refresh_audio_devices();
-                let device_ok = self.media_view.apply_startup_settings(
+                self.media_view.apply_startup_settings(
                     self.settings.media_volume,
                     self.settings.media_speed,
                     &self.settings.media_audio_device,
                 );
-                if !device_ok {
-                    // 保存的设备已拔出：回退 auto 并更新设置。
-                    self.settings.media_audio_device.clear();
-                }
                 self.current_view = View::Media;
                 self.error_message = None;
             }

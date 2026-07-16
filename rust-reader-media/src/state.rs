@@ -1,3 +1,4 @@
+use crate::devices::AudioDevice;
 use crate::tracks::TrackInfo;
 
 #[derive(Debug, Clone, Default)]
@@ -15,4 +16,7 @@ pub struct PlayerState {
     pub loaded: bool,
     pub ended: bool,
     pub error: Option<String>,
+    /// `None` until the first async audio-device-list reply lands — keeps
+    /// "not enumerated yet" distinct from a genuinely empty enumeration.
+    pub audio_devices: Option<Vec<AudioDevice>>,
 }

@@ -42,6 +42,10 @@ fn cstring(s: &str) -> CString {
     CString::new(s).unwrap_or_else(|_| CString::new("").unwrap())
 }
 
+/// reply_userdata for the async `audio-device-list` query; observed
+/// properties use 1-7 (different event type, but keep namespaces distinct).
+const AUDIO_DEVICES_REPLY_USERDATA: u64 = 100;
+
 impl MpvPlayer {
     pub fn new(repaint: Box<dyn Fn() + Send + Sync>) -> Result<Self, MediaError> {
         // SAFETY: mpv_create has no preconditions.
@@ -151,13 +155,19 @@ impl MpvPlayer {
         self.handle
     }
 
+    /// reply_userdata 0: the fire-and-forget reply event is ignored by
+    /// event_loop. MUST stay async: a blocking mpv_command on the UI thread
+    /// deadlocks against first-frame DR image allocation, which can only be
+    /// serviced by the UI thread answering mpv_render_context_update()
+    /// (docs/bug.md 问题 A).
     fn command(&self, args: &[&str]) -> Result<(), MediaError> {
         let cargs: Vec<CString> = args.iter().map(|a| cstring(a)).collect();
         let mut ptrs: Vec<*const std::ffi::c_char> = cargs.iter().map(|c| c.as_ptr()).collect();
         ptrs.push(std::ptr::null());
         // SAFETY: handle is valid; ptrs is a NULL-terminated array of valid
-        // NUL-terminated strings that outlive the synchronous call.
-        let rc = unsafe { mpv::mpv_command(self.handle, ptrs.as_mut_ptr()) };
+        // NUL-terminated strings. mpv copies the args while queueing, so they
+        // only need to outlive this call.
+        let rc = unsafe { mpv::mpv_command_async(self.handle, 0, ptrs.as_mut_ptr()) };
         if rc < 0 {
             return Err(MediaError::Command {
                 code: rc,
@@ -169,9 +179,21 @@ impl MpvPlayer {
 
     fn set_property_string(&self, name: &str, value: &str) -> Result<(), MediaError> {
         let (n, v) = (cstring(name), cstring(value));
-        // SAFETY: handle is valid; n/v are valid NUL-terminated strings that
-        // outlive the call.
-        let rc = unsafe { mpv::mpv_set_property_string(self.handle, n.as_ptr(), v.as_ptr()) };
+        let mut vptr = v.as_ptr() as *mut std::ffi::c_char;
+        // SAFETY: handle is valid; n/v are valid NUL-terminated strings. For
+        // MPV_FORMAT_STRING, data points to a char*; client.h documents the
+        // value is copied before the call returns. Async for the same
+        // deadlock reason as command() — never block the UI thread on the
+        // core dispatch queue.
+        let rc = unsafe {
+            mpv::mpv_set_property_async(
+                self.handle,
+                0,
+                n.as_ptr(),
+                mpv::mpv_format_MPV_FORMAT_STRING,
+                &mut vptr as *mut _ as *mut std::ffi::c_void,
+            )
+        };
         if rc < 0 {
             return Err(MediaError::Command {
                 code: rc,
@@ -241,31 +263,31 @@ impl MpvPlayer {
         self.set_property_string("mute", if muted { "yes" } else { "no" })
     }
 
-    /// Enumerates mpv's `audio-device-list`. Returns an empty Vec when the
-    /// property is unavailable; callers treat that as "auto only".
-    pub fn audio_devices(&self) -> Vec<crate::devices::AudioDevice> {
+    /// Fires an async `audio-device-list` query; the reply is parsed on the
+    /// event thread into `PlayerState::audio_devices` (None until the first
+    /// reply lands). Async like every other call here — a blocking
+    /// mpv_get_property on the UI thread deadlocks against first-frame DR
+    /// image allocation (see command(), docs/bug.md 问题 A).
+    pub fn request_audio_devices(&self) -> Result<(), MediaError> {
         let name = cstring("audio-device-list");
-        // SAFETY: a zeroed node is valid for mpv to fill; freed below after
-        // reading.
-        let mut node: mpv::mpv_node = unsafe { std::mem::zeroed() };
-        // SAFETY: handle is valid; `name` is a valid NUL-terminated string;
-        // `node` outlives the call.
+        // SAFETY: handle is valid; name is a valid NUL-terminated string that
+        // outlives the call. The reply arrives as MPV_EVENT_GET_PROPERTY_REPLY
+        // carrying AUDIO_DEVICES_REPLY_USERDATA.
         let rc = unsafe {
-            mpv::mpv_get_property(
+            mpv::mpv_get_property_async(
                 self.handle,
+                AUDIO_DEVICES_REPLY_USERDATA,
                 name.as_ptr(),
                 mpv::mpv_format_MPV_FORMAT_NODE,
-                &mut node as *mut _ as *mut std::ffi::c_void,
             )
         };
         if rc < 0 {
-            return Vec::new();
+            return Err(MediaError::Command {
+                code: rc,
+                what: "get audio-device-list".to_string(),
+            });
         }
-        // SAFETY: node is a filled NODE tree owned by us.
-        let raw = unsafe { read_audio_device_list(&mut node) };
-        // SAFETY: node was filled by mpv_get_property and not yet freed.
-        unsafe { mpv::mpv_free_node_contents(&mut node) };
-        crate::devices::parse_audio_devices(raw)
+        Ok(())
     }
 
     /// `name` is an entry of `audio-device-list`; "auto" follows the system.
@@ -371,6 +393,27 @@ fn event_loop(
                     }
                 }
                 repaint();
+            }
+            mpv::mpv_event_id_MPV_EVENT_GET_PROPERTY_REPLY => {
+                // SAFETY: reply_userdata is a plain value field on the event.
+                let userdata = unsafe { (*event).reply_userdata };
+                if userdata == AUDIO_DEVICES_REPLY_USERDATA {
+                    // SAFETY: for MPV_EVENT_GET_PROPERTY_REPLY, event data
+                    // points to a valid mpv_event_property owned by mpv.
+                    let prop = unsafe { (*event).data as *mut mpv::mpv_event_property };
+                    if !prop.is_null() {
+                        let (format, data) = unsafe { ((*prop).format, (*prop).data) };
+                        if format == mpv::mpv_format_MPV_FORMAT_NODE && !data.is_null() {
+                            // SAFETY: data points to a valid mpv_node owned by
+                            // mpv for the duration of the event; we only read.
+                            let raw = unsafe { read_audio_device_list(data as *mut mpv::mpv_node) };
+                            if let Ok(mut s) = state.lock() {
+                                s.audio_devices = Some(crate::devices::parse_audio_devices(raw));
+                            }
+                            repaint();
+                        }
+                    }
+                }
             }
             mpv::mpv_event_id_MPV_EVENT_PROPERTY_CHANGE => {
                 // SAFETY: event is valid; reply_userdata is a plain value field

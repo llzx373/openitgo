@@ -119,8 +119,22 @@ already embed it.
   index-0 fallback), and `probe_video_overlay.rs` (real video compositing
   below the transparent egui surface) verify the layering.
 - **Media preferences**: volume/speed/audio-device are persisted globally in
-  `Settings` and applied by `MediaView::apply_startup_settings` after open;
-  a missing saved device falls back to "auto".
+  `Settings` and applied by `MediaView::apply_startup_settings` after open.
+  Volume/speed are set immediately; the audio device is deferred
+  (`pending_startup_device`) until the async `audio-device-list` reply lands
+  in `PlayerState::audio_devices`, then validated in `sync_state` —
+  a missing saved device falls back to "auto" and is reported once via
+  `take_startup_device_invalid` (the app clears the stale setting).
+- **MpvPlayer command rule**: every mpv command/property call made from the
+  UI thread MUST use the async libmpv APIs (`mpv_command_async`,
+  `mpv_set_property_async`, `mpv_get_property_async` — see
+  `rust-reader-media/src/player.rs`). A blocking call (`mpv_command`,
+  `mpv_get_property`, ...) parks the UI thread on mpv's core dispatch queue,
+  which can itself be waiting for first-frame DR image allocation — and that
+  allocation can only be serviced by the UI thread answering
+  `mpv_render_context_update()`. The resulting circular wait froze the
+  window on media re-open (docs/bug.md 问题 A). The `audio-device-list`
+  reply is parsed on the event thread into `PlayerState::audio_devices`.
 - **MpvPlayer teardown** order matters: `Drop` sets a quit flag and joins the
   `mpv-events` thread (50ms `mpv_wait_event` timeout) *before*
   `mpv_terminate_destroy` — a `mpv_wait_event` call racing the handle free

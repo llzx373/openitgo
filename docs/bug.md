@@ -100,15 +100,20 @@ if reader.cache.total_size_bytes() >= budget {
 
 ## 已知问题（2026-07-15 记录）
 
-以下来自 mpv-under-egui 分支（视频层下沉）开发期间的冒烟取证，均为**基线既有问题**（经 A/B 对照或代码路径分析确认与该分支改动无关）。优先级为自评。
+以下来自 mpv-under-egui 分支（视频层下沉）开发期间的冒烟取证，均为**基线既有问题**（经 A/B 对照或代码路径分析确认与该分支改动无关）。优先级为自评。三个问题均已于 2026-07-16 修复。
 
-### 问题 A：mpv 启动偶发 wedge（DR image 分配卡死）（P1）
+### 问题 A：mpv 启动偶发 wedge（DR image 分配卡死）（P1）—— 已修复（2026-07-16）
 
-- **现象**：启动播放偶发卡死，栈显示卡在 DR image 分配。
-- **证据**：Task 4 新二进制与基线二进制 A/B 对照均复现 → 基线既有，与视频层下沉无关。
-- **修复线索**：暂无，需进一步诊断（疑与 mpv/CAOpenGLLayer 初始化时序有关）；复现不稳定。
-- **发现经过**：Task 5 真机冒烟期间。
-- **2026-07-16 复测**：20s H.264 测试片连续启动播放 8/8 正常（CPU 均在 4s 内进入稳定解码），未复现。下次 wedge 时请现场取证：`sample <pid>` 抓全栈 + `RUST_READER_MPV_LOG=1` 运行日志，再对照 vo core 状态分析。
+- **现象**：启动播放偶发卡死，栈显示卡在 DR image 分配。同一根因在播放中拖入新视频时**必现**（2026-07-16 用户报告，实机复现：CPU 停滞、窗口永久冻结）。
+- **根因**（sample 抓栈 + mpv 日志互证，`target/wedgetest/` 留存取证）：四方循环等待——
+  1. 主线程在 `poll_media_open` 里发**同步** mpv 调用（`refresh_audio_devices` 的 `mpv_get_property` 等），阻塞在 `mp_dispatch_lock`，等 core 播放线程处理；
+  2. core 线程在 `write_video` 里等解码线程产出第一帧；
+  3. 解码线程在 `get_buffer2 → dr_helper_get_image → mp_dispatch_run` 里等 **DR 图像分配**，该请求只能由调用 `mpv_render_context_update()` 的线程（即主线程 `rsDriveUpdate`）服务；
+  4. 主线程阻塞在第 1 步，永远跑不到 `rsDriveUpdate` → 闭环死锁。
+  启动时该竞态窗口窄（mpv 常以 "DR path suspected slow, disabling" 降级躲过），表现为偶发；拖入新文件时 `refresh_audio_devices`/`apply_startup_settings` 一串同步调用与新文件首帧 DR 分配重叠，窗口变宽，几乎必现。
+- **修复**：UI 线程的 mpv 调用全部改为异步 API——`mpv_command_async`（loadfile/seek/pause/stop）、`mpv_set_property_async`（音量/倍速/静音/轨道/输出设备）、`mpv_get_property_async`（`audio-device-list`，回复由事件泵解析进 `PlayerState::audio_devices`）。主线程永不阻塞在 core 分派上，DR 分配随时可被服务，环路拆除。启动音频设备改为延迟应用：枚举回复到达后经 `pending_startup_device` + `startup_device_target` 校验，设备已拔出则回退 auto 并由 `take_startup_device_invalid` 通知 app 清除设置。
+- **验证**：原卡死场景（A 播放中投递 B）连续 2 次不再冻结，CPU 持续上升，日志确认 B 的 DR 分配完成、`VO: [libmpv] 1280x720` 正常起播。
+- **发现经过**：Task 5 真机冒烟期间（启动偶发）；2026-07-16 拖放场景稳定复现后确诊。
 
 ### 问题 B：dock-open 队列空闲滞留（P2）—— 已修复（2026-07-16）
 

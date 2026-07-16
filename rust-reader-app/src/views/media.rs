@@ -16,6 +16,9 @@ pub struct MediaView {
     pub open: Option<OpenMedia>,
     osd: Option<Osd>,
     pub scroll_acc: f32,
+    /// Set once when the deferred startup device apply finds the saved
+    /// device missing; read via take_startup_device_invalid.
+    startup_device_invalid: bool,
 }
 
 pub struct OpenMedia {
@@ -29,7 +32,9 @@ pub struct OpenMedia {
     pub state: Arc<Mutex<PlayerState>>,
     pub last: PlayerState,
     pub pending_resume_ms: Option<u64>,
-    pub audio_devices: Vec<rust_reader_media::AudioDevice>,
+    /// Saved audio device to validate+apply once the async device-list
+    /// reply lands in `last.audio_devices` (see sync_state).
+    pending_startup_device: Option<String>,
 }
 
 impl MediaView {
@@ -61,7 +66,7 @@ impl MediaView {
             state,
             last: PlayerState::default(),
             pending_resume_ms: resume_ms,
-            audio_devices: Vec::new(),
+            pending_startup_device: None,
         });
         Ok(())
     }
@@ -80,8 +85,10 @@ impl MediaView {
     }
 
     /// Copies the latest player state into `last` for UI reads; applies a
-    /// pending resume once the duration is known.
+    /// pending resume once the duration is known, and the deferred startup
+    /// audio device once the async device-list reply has landed.
     pub fn sync_state(&mut self) {
+        let mut device_invalid = false;
         if let Some(open) = self.open.as_mut() {
             if let Ok(s) = open.state.lock() {
                 open.last = s.clone();
@@ -94,6 +101,18 @@ impl MediaView {
                     open.pending_resume_ms = None;
                 }
             }
+            if open.pending_startup_device.is_some() && open.last.audio_devices.is_some() {
+                let saved = open.pending_startup_device.take().unwrap_or_default();
+                let enumerated = open.last.audio_devices.clone().unwrap_or_default();
+                let (target, saved_ok) = startup_device_target(&saved, &enumerated);
+                if let Some(target) = target {
+                    let _ = open.player.set_audio_device(target);
+                }
+                device_invalid = !saved_ok;
+            }
+        }
+        if device_invalid {
+            self.startup_device_invalid = true;
         }
     }
 
@@ -248,27 +267,36 @@ impl MediaView {
         }
     }
 
-    /// Re-enumerates output devices for the toolbar ComboBox.
+    /// Fires the async device enumeration; the reply lands in
+    /// `PlayerState::audio_devices` a few frames later.
     pub fn refresh_audio_devices(&mut self) {
-        if let Some(open) = self.open.as_mut() {
-            open.audio_devices = open.player.audio_devices();
+        if let Some(open) = self.open.as_ref() {
+            let _ = open.player.request_audio_devices();
         }
     }
 
-    /// Applies persisted preferences after a successful open. Returns false
-    /// when the saved device provably no longer exists and "auto" was applied
-    /// instead (caller clears the stale setting).
-    pub fn apply_startup_settings(&mut self, volume: f64, speed: f64, audio_device: &str) -> bool {
+    /// Applies persisted preferences after a successful open. Volume/speed
+    /// are set (async) right away; the audio device can only be validated
+    /// against the async enumeration once its reply lands, so it is deferred
+    /// to `sync_state` via `pending_startup_device`. If the saved device
+    /// turns out to be missing, "auto" is applied and
+    /// `take_startup_device_invalid` reports it once.
+    pub fn apply_startup_settings(&mut self, volume: f64, speed: f64, audio_device: &str) {
         let Some(open) = self.open.as_mut() else {
-            return true;
+            return;
         };
         let _ = open.player.set_volume(volume);
         let _ = open.player.set_speed(speed);
-        let (target, saved_ok) = startup_device_target(audio_device, &open.audio_devices);
-        if let Some(target) = target {
-            let _ = open.player.set_audio_device(target);
+        if !audio_device.is_empty() {
+            open.pending_startup_device = Some(audio_device.to_string());
         }
-        saved_ok
+    }
+
+    /// One-shot report: true once after the saved startup audio device was
+    /// found missing and "auto" was applied instead (caller clears the
+    /// persisted setting).
+    pub fn take_startup_device_invalid(&mut self) -> bool {
+        std::mem::take(&mut self.startup_device_invalid)
     }
 
     /// Empty `name` selects "auto" (follow the system default device).
