@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Phosphor icon font for the reader toolbar.
 - Toolbar display mode setting: icon + text, icon only, or text only.
 - VS Code 调试/任务配置：新增 `.vscode/launch.json`（Debug / Release / Attach）与 `.vscode/tasks.json`，与 Zed 配置对齐，方便在 VS Code 中运行、调试与打包。
-- 媒体播放（内嵌 libmpv）：支持打开并播放视频（mp4/mkv/webm/avi/mov 等）与音频（mp3/flac/aac/m4a/ogg/wav/opus 等），经 `CAOpenGLLayer` 原生叠加渲染。
+- 媒体播放（内嵌 libmpv）：支持打开并播放视频（mp4/mkv/webm/avi/mov 等）与音频（mp3/flac/aac/m4a/ogg/wav/opus 等），经 `CAOpenGLLayer` 渲染。
 - 媒体控制：播放/暂停、±5s/±10s 跳转、可拖进度条、0.5–2 倍速、音量、字幕轨切换/关闭、音轨切换与全屏；工具栏与进度条自动隐藏。
 - 媒体书架集成：视频/音频文件与漫画、电子书同架展示、过滤与导入；封面由无头 mpv 截取（视频取 10% 帧，音频取专辑封面）。
 - 媒体播放进度恢复：复用历史记录保存播放位置（毫秒），中途退出后自动续播，接近结尾时从头播放。

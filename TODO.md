@@ -184,6 +184,27 @@
   - [x] 32.3 减少 resize 时重新布局开销
   - [ ] 32.4 评估大章节分段加载
 
+## P2 — 媒体播放（内嵌 libmpv）
+
+详细设计/计划见 `docs/superpowers/plans/`（2026-07 系列）。
+
+- [x] 33. 媒体播放基础
+  - [x] 33.1 `rust-reader-media`：libmpv 命令封装、事件泵、属性观察、OpenGL 渲染上下文
+  - [x] 33.2 macOS 视频层：`CAOpenGLLayer` + `drawInCGLContext`（drawable FBO 绑定查询与 `FLIP_Y` 修正，修复有进度无画面）
+  - [x] 33.3 打开/播放视频与音频，书架集成与封面生成（无头 mpv 截取视频 10% 帧、音频专辑封面）
+  - [x] 33.4 播放进度毫秒级持久化与续播（复用历史记录 `char_offset`）
+  - [x] 33.5 修复退出播放时间歇性段错误（`MpvPlayer::drop` 先 join 事件线程再销毁 handle）
+- [x] 34. 播放控制与 OSD
+  - [x] 34.1 播放/暂停、±5s/±10s 跳转、两行式全宽进度条（悬停预览目标时间、关键帧对齐拖动、松手精确跳转）
+  - [x] 34.2 倍速、字幕轨切换/关闭、音轨切换、音频输出设备选择、全屏
+  - [x] 34.3 音量/静音/滚轮音量与画面右上角 `CATextLayer` OSD 反馈
+  - [x] 34.4 音量/倍速/输出设备全局记忆（`media_volume` / `media_speed` / `media_audio_device`）
+- [x] 35. 视频层下沉到 egui 之下（方案 A）
+  - [x] 35.1 全窗口透明 backbuffer（`with_transparent(true)` + `clear_color` 全透明）
+  - [x] 35.2 媒体中央面板透明化（`Frame::none()`）
+  - [x] 35.3 `MpvNativeView` 裸层重构：视频层插到 winit view 的 `CAMetalLayer` 的 superlayer 中、`insertSublayer:below:` 锚定
+  - [x] 35.4 移除菜单停放 hack：菜单栏菜单与字幕/音轨/输出下拉框直接悬浮在视频之上
+
 ## 历史已完成项
 
 - [x] 修复双页模式下右页无右键/拖拽响应
