@@ -6,6 +6,7 @@ pub mod markdown;
 pub mod mobi;
 pub mod pdf;
 pub mod rar;
+pub mod text_encoding;
 pub mod traits;
 pub mod txt;
 pub mod zip;

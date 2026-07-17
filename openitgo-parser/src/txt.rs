@@ -1,7 +1,6 @@
 use crate::chapters::{build_chapters, split_by_heading, split_by_word_count, text_ebook};
 use crate::traits::ParseError;
 use openitgo_core::ebook::Ebook;
-use std::fs;
 use std::path::Path;
 
 pub struct TxtParser;
@@ -30,8 +29,7 @@ impl TxtParser {
     }
 
     pub fn parse(path: &Path) -> Result<Ebook, ParseError> {
-        let text =
-            fs::read_to_string(path).map_err(|e| ParseError::InvalidText(format!("{}", e)))?;
+        let text = crate::text_encoding::read_text_lossy(path)?;
 
         if text.trim().is_empty() {
             return Err(ParseError::NoPages);

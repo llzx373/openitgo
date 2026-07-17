@@ -10,8 +10,7 @@ pub fn render_chapter_html(ebook: &Ebook, chapter_index: usize) -> Result<String
     let path = &ebook.path;
 
     if is_text_like_path(path) {
-        let text =
-            std::fs::read_to_string(path).map_err(|e| ParseError::InvalidText(format!("{}", e)))?;
+        let text = crate::text_encoding::read_text_lossy(path)?;
         let parts = if is_markdown_path(path) {
             let mut ch = split_markdown(&text);
             if ch.is_empty() {

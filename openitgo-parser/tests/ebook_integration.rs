@@ -168,3 +168,18 @@ fn test_epub_without_toc_uses_spine() {
     let ebook = parse_ebook(&path).unwrap();
     assert!(!ebook.chapters.is_empty());
 }
+
+#[test]
+fn test_parse_gbk_txt_with_headings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("book_gbk.txt");
+    let (bytes, _, _) = encoding_rs::GBK.encode(
+        "第一章 风起\n\n他睁开眼睛，发现自己躺在陌生的床上。\n\n第二章 云涌\n\n她合上书本，望向窗外。",
+    );
+    std::fs::write(&path, &bytes).unwrap();
+
+    let ebook = parse_ebook(&path).unwrap();
+    assert_eq!(ebook.total_chapters(), 2);
+    assert_eq!(ebook.chapters[0].title.as_deref(), Some("第一章 风起"));
+    assert_eq!(ebook.chapters[1].title.as_deref(), Some("第二章 云涌"));
+}
