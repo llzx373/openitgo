@@ -237,20 +237,20 @@
 
 ### P2 — 媒体播放增强
 
-- [ ] 43. 播放列表 / 同目录下一集自动续播：`MPV_EVENT_END_FILE` 仅置 `s.ended` 标志（`player.rs:378-396`），app 侧无消费
-- [ ] 44. 外部字幕加载（`sub-add`）与字幕延迟调节：现仅支持容器内轨切换
+- [x] 43. 同目录下一集自动续播：消费 `ended` 标志，EOF 后按自然排序打开同目录下一集并 OSD 提示（播放列表面板出范围，未做）
+- [x] 44. 外部字幕加载（`sub-add`，srt/ass/ssa/vtt）与字幕延迟调节（菜单 ±0.1s/重置 + Z/X 快捷键，OSD 反馈）
 - [ ] 45. 媒体杂项增强：截图、AB 循环、mpv 章节导航、循环播放、倍速微调（现仅 0.5/1/1.5/2 四档）
 
 ### P2 — 漫画与书架增强
 
 - [ ] 46. 加密 ZIP/RAR 密码支持：zip 无 aes-crypto 特性、unrar 未用 `with_password`，需密码输入 UI
 - [ ] 47. 图片旋转（90° 步进，含宽页检测联动）
-- [ ] 48. 每本书的阅读设置记忆（模式/双页/缩放，现重开即丢回全局默认）
+- [x] 48. 每本书的阅读设置记忆（模式/双页/缩放按 comic_id 存入 `comic_settings.json`，打开时优先于全局默认）
 - [ ] 49. 书架分组/标签、阅读统计、书签缩略图
 
 ### P2 — 设置与快捷键
 
-- [ ] 50. 首页/末页快捷键：菜单有按钮但 `Shortcuts` 体系无此动作，`key_from_name` 未映射 Home/End（`shortcuts.rs:3-56`）
+- [x] 50. 首页/末页快捷键：`Shortcuts` 新增 `first_page`/`last_page`（默认 Home/End，可在设置中自定义）
 - [ ] 51. 快捷键一览/帮助面板（键位可自定义却无处查看）
 
 ### P2 — 电子书已知限制（CSS columns，见 `docs/superpowers/reports/2026-06-26-css-columns-test-plan.md`）
@@ -262,8 +262,8 @@
 
 ### P3 — 工程化
 
-- [ ] 56. CI 修复与扩展：ubuntu job 缺 webkit2gtk（wry 0.55 构建依赖，CI 可能红）；新增 macOS job 覆盖主平台媒体路径（libmpv / `mpv_view.rs` / dock_open 目前零 CI 覆盖）
+- [x] 56. CI 修复与扩展：ubuntu job 安装 `libwebkit2gtk-4.1-dev` 修复 wry 构建；新增 macOS job（brew mpv + check/clippy/test）覆盖媒体路径；同步补齐 `player_stub` 非 macOS 编译缺口（ubuntu 首跑结果待 CI 确认）
 - [ ] 57. 依赖升级评估：egui 0.29 → 上游 0.33+（牵动 wgpu 与既有 API workaround）；跟踪 `pdf-render` beta 迭代；合并双 PDF 栈（parser `pdf 0.9` 取页数 + app `pdf-render` 渲染）；`objc 0.2` → objc2
 - [ ] 58. `openitgo-media` 核心（player/render）单元测试，现仅靠手动 probe
 - [ ] 59. 跨平台补全：Windows/Linux `env::args` 文件关联打开（现全仓无 argv 处理）、媒体播放非 macOS 实现、对应打包脚本；README "跨平台" 措辞与实际对齐
-- [ ] 60. 清理：`probe_overlay.rs` 使命完成可删（同步 AGENTS.md）；5 个未归档 examples 登记或清理；`docs/bug.md` 全部修复可归档；`docs/superpowers/README.md` 索引补最近 7 篇计划
+- [x] 60. 清理：`probe_overlay.rs` 已删（AGENTS.md 已同步）；5 个 examples 已登记；`docs/bug.md` 已归档至 `docs/superpowers/reports/2026-07-17-bug-notes-archived.md`；`docs/superpowers/README.md` 索引已补全

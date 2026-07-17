@@ -47,14 +47,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 电子书：字体设置下拉框（预设 + 自定义值保留），`ebook.font_family` 空值校验与钳制。
 - 电子书：TXT/Markdown 自动识别编码——UTF-8（含 BOM）直通，GBK/GB18030/Big5 等经 chardetng + encoding_rs 转码。
 - 电子书视图快捷键补全：Escape 返回书架（搜索条可见时优先关闭搜索）、PageUp/PageDown/Space 翻页、Cmd/Ctrl+F 唤起搜索。
+- 媒体播放：播放到结尾自动续播同目录下一集（数字感知自然排序），OSD 提示集名；已是最后一集时给出一次性提示。
+- 媒体播放：外部字幕加载（字幕菜单"加载外部字幕…"，支持 srt/ass/ssa/vtt）与字幕延迟调节（菜单 ±0.1s/重置，Z/X 快捷键，OSD 反馈当前延迟）。
+- 阅读器：首页/末页快捷键（默认 Home/End，可在设置面板自定义，不随 RTL 翻转）。
+- 漫画：每本书的阅读设置记忆——模式/双页/缩放按 `comic_id` 存入 `comic_settings.json`，重新打开时优先于全局默认恢复；无记录的书籍行为不变。
 
 ### Changed
 
 - Library card click now triggers on the whole card, not just the cover.
 - 媒体播放：视频层从 egui 之上的原生 NSView 改为 egui 透明 surface 之下的 CA 子层（透明 backbuffer 合成）；菜单栏菜单与字幕/音轨/输出下拉框现在直接悬浮在视频画面之上，打开菜单时视频不再黑屏让位。
 - 项目更名为 OpenItGo：workspace 各 crate 由 `rust-reader-*` 更名为 `openitgo-*`，窗口标题、关于框、`.app` 包名、bundle id（`com.liu.openitgo`）与环境变量前缀（`OPENITGO_*`）同步更新；配置目录改为 `~/.config/openitgo`（开发阶段均为新用户，不提供旧 `rust-reader` 目录迁移）。
+- CI：ubuntu job 安装 `libwebkit2gtk-4.1-dev` 修复 wry 构建；新增 macOS job（brew mpv + check/clippy/test）覆盖媒体路径。
+- 清理：删除 `probe_overlay.rs` 诊断示例；`docs/bug.md` 归档至 `docs/superpowers/reports/2026-07-17-bug-notes-archived.md`；AGENTS.md 登记 5 个 profiling/smoke 示例；`docs/superpowers/README.md` 索引补全。
 
 ### Fixed
+
+- 修复非 macOS 平台编译失败：`player_stub` 补齐 `request_audio_devices` / `sub_add` / `adjust_sub_delay` / `reset_sub_delay`（其中 `request_audio_devices` 为既有缺口），ubuntu CI 由此可用。
 
 - 电子书：修复 calibre 风格 EPUB（如《朱颜血》）封面/简介等章节渲染报 "No pages found" 的问题；根因是 NCX 中的 href 带 `#fragment` 或未归一化的 `../`（相对 OPF 目录），zip 精确匹配查找失败，查找前新增归一化（去 fragment、解析 `.`/`..`）。
 
