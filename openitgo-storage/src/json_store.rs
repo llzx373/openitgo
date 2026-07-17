@@ -24,19 +24,7 @@ impl JsonStore {
     }
 
     pub fn default_dir() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| Self::migrate_legacy_dir(&d))
-    }
-
-    /// Resolve the store dir under `base`, migrating the pre-rename
-    /// `rust-reader` directory on first launch. If the rename fails, keep
-    /// using the legacy directory so existing data is not stranded.
-    fn migrate_legacy_dir(base: &Path) -> PathBuf {
-        let dir = base.join("openitgo");
-        let legacy = base.join("rust-reader");
-        if !dir.exists() && legacy.is_dir() && std::fs::rename(&legacy, &dir).is_err() {
-            return legacy;
-        }
-        dir
+        dirs::config_dir().map(|d| d.join("openitgo"))
     }
 
     pub fn ensure_dir(&self) -> Result<(), StorageError> {
@@ -154,22 +142,6 @@ impl JsonStore {
 mod tests {
     use super::*;
     use crate::models::Settings;
-
-    #[test]
-    fn test_default_dir_migrates_legacy_rust_reader_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let legacy = tmp.path().join("rust-reader");
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(legacy.join("settings.json"), "{}").unwrap();
-
-        let dir = JsonStore::migrate_legacy_dir(tmp.path());
-        assert_eq!(dir, tmp.path().join("openitgo"));
-        assert!(dir.join("settings.json").exists());
-        assert!(!legacy.exists());
-
-        // Second call is a no-op once the new directory exists.
-        assert_eq!(JsonStore::migrate_legacy_dir(tmp.path()), dir);
-    }
 
     #[test]
     fn test_roundtrip_settings() {
