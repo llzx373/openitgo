@@ -217,3 +217,53 @@
 - [x] 图片降采样，避免超高分辨率图撑爆内存
 - [x] 点击屏幕左右半边翻页
 - [x] macOS Dock 拖入打开（含应用未运行时通过 Finder / Dock 打开压缩包）
+
+## 新一轮待办（2026-07-17 全面检查后整理）
+
+来源：代码扫描（dead code / 半成品）、docs 已知限制、功能缺口评估。编号自 36 起。
+
+### P0 — 进行中收尾
+
+- [ ] 36. 提交更名 OpenItGo 收尾改动（当前未提交：`json_store.rs` 删除旧 `rust-reader` 目录迁移逻辑 + CHANGELOG/README 措辞同步），先跑完整验证流水线
+
+### P1 — 半成品功能接线（小改动大收益）
+
+- [ ] 37. 电子书全文搜索接 UI：JS 侧 `findText/findNext/findPrev/clearHighlights` 与 Rust API 已就绪但标 `#[allow(dead_code)]`（`ebook_renderer.rs:207-237`），只差工具栏搜索框；注意重排后高亮丢失需重新执行 findText
+- [ ] 38. EPUB 内嵌图片显示：`<img>` 相对 src 解析到 `ebook://`，协议处理器对非 `?chapter=N` 请求一律空 200（`ebook_renderer.rs:325-333`），需从 EPUB 包内取资源返回
+- [ ] 39. EPUB 内嵌字体支持：`sanitize_epub_html` 丢弃 `<link>`（`html.rs:132-134`），需保留并改写为 `ebook://` 资源 + `@font-face`
+- [ ] 40. `ebook.font_family` 设置 UI：字段已持久化并传给 JS，但设置面板/工具栏均无入口，是当前唯一死字段
+- [ ] 41. TXT 编码检测：`fs::read_to_string` 仅认 UTF-8（`txt.rs:33`），GBK/Big5 直接报错
+- [ ] 42. 电子书视图快捷键补全：Escape 返回书架、章节跳转键（现仅左/右翻页，`app.rs:1792-1799`）
+
+### P2 — 媒体播放增强
+
+- [ ] 43. 播放列表 / 同目录下一集自动续播：`MPV_EVENT_END_FILE` 仅置 `s.ended` 标志（`player.rs:378-396`），app 侧无消费
+- [ ] 44. 外部字幕加载（`sub-add`）与字幕延迟调节：现仅支持容器内轨切换
+- [ ] 45. 媒体杂项增强：截图、AB 循环、mpv 章节导航、循环播放、倍速微调（现仅 0.5/1/1.5/2 四档）
+
+### P2 — 漫画与书架增强
+
+- [ ] 46. 加密 ZIP/RAR 密码支持：zip 无 aes-crypto 特性、unrar 未用 `with_password`，需密码输入 UI
+- [ ] 47. 图片旋转（90° 步进，含宽页检测联动）
+- [ ] 48. 每本书的阅读设置记忆（模式/双页/缩放，现重开即丢回全局默认）
+- [ ] 49. 书架分组/标签、阅读统计、书签缩略图
+
+### P2 — 设置与快捷键
+
+- [ ] 50. 首页/末页快捷键：菜单有按钮但 `Shortcuts` 体系无此动作，`key_from_name` 未映射 Home/End（`shortcuts.rs:3-56`）
+- [ ] 51. 快捷键一览/帮助面板（键位可自定义却无处查看）
+
+### P2 — 电子书已知限制（CSS columns，见 `docs/superpowers/reports/2026-06-26-css-columns-test-plan.md`）
+
+- [ ] 52. 电子书模式下 egui 菜单/弹层被 wry webview 遮盖（mpv 视频层下沉方案明确排除电子书，需单独方案）
+- [ ] 53. 排版边缘情况：超高图片跨页拆分、宽表格溢出、EPUB 自带 `column-*`/`position:fixed` 样式冲突
+- [ ] 54. 执行 CSS columns 手动测试矩阵（6 类书 × 9 项操作，验收勾选至今为空）
+- [ ] 55. 大章节分段加载评估（原 32.4，Phase 5 遗留）
+
+### P3 — 工程化
+
+- [ ] 56. CI 修复与扩展：ubuntu job 缺 webkit2gtk（wry 0.55 构建依赖，CI 可能红）；新增 macOS job 覆盖主平台媒体路径（libmpv / `mpv_view.rs` / dock_open 目前零 CI 覆盖）
+- [ ] 57. 依赖升级评估：egui 0.29 → 上游 0.33+（牵动 wgpu 与既有 API workaround）；跟踪 `pdf-render` beta 迭代；合并双 PDF 栈（parser `pdf 0.9` 取页数 + app `pdf-render` 渲染）；`objc 0.2` → objc2
+- [ ] 58. `openitgo-media` 核心（player/render）单元测试，现仅靠手动 probe
+- [ ] 59. 跨平台补全：Windows/Linux `env::args` 文件关联打开（现全仓无 argv 处理）、媒体播放非 macOS 实现、对应打包脚本；README "跨平台" 措辞与实际对齐
+- [ ] 60. 清理：`probe_overlay.rs` 使命完成可删（同步 AGENTS.md）；5 个未归档 examples 登记或清理；`docs/bug.md` 全部修复可归档；`docs/superpowers/README.md` 索引补最近 7 篇计划
