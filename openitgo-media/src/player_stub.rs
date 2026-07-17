@@ -1,4 +1,7 @@
 //! Non-macOS stub so app code compiles unchanged on other platforms.
+//!
+//! This stub MUST mirror `player.rs`'s public API method-for-method; the
+//! ubuntu CI job (non-macOS `cargo check`) is the regression detector.
 
 use crate::error::MediaError;
 use crate::state::PlayerState;
@@ -52,11 +55,27 @@ impl MpvPlayer {
         Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
     }
 
+    pub fn sub_add(&self, _path: &Path) -> Result<(), MediaError> {
+        Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
+    }
+
+    pub fn adjust_sub_delay(&self, _delta: f64) -> Result<(), MediaError> {
+        Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
+    }
+
+    pub fn reset_sub_delay(&self) -> Result<(), MediaError> {
+        Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
+    }
+
     pub fn set_audio_track(&self, _id: i64) -> Result<(), MediaError> {
         Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
     }
 
     pub fn set_muted(&self, _muted: bool) -> Result<(), MediaError> {
+        Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
+    }
+
+    pub fn request_audio_devices(&self) -> Result<(), MediaError> {
         Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
     }
 
