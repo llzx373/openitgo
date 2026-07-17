@@ -68,6 +68,11 @@ already embed it.
   a `sendIpc` helper that retries if the `window.ipc` bridge is not yet injected.
   Pagination transforms must be applied to `#column-content` inside `#column-view`;
   `#column-view` itself is the click/wheel event container and must not be translated.
+  The custom-protocol callback's Request URI is the full absolute URL: in
+  `ebook://reader/res/...` the `reader` part is the host in `http::Uri` semantics
+  and never appears in `uri().path()`, so resource discriminators must live in
+  the path (`/res/<archive-path>`) or query (`?chapter=N`) — never expect a host
+  segment to show up in the path.
 - **EbookRenderer position preservation** distinguishes settings changes from window
   resize: font/size/margin/theme changes re-layout and preserve the approximate
   character offset, while window resize debounces and preserves the scroll ratio

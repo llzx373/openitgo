@@ -602,7 +602,10 @@ function setSearchActiveIndex(index) {{
 function findText(query) {{
   clearHighlights();
   ebookSearchQuery = query || '';
-  if (!query) return;
+  if (!query) {{
+    sendIpc({{ type: 'search', count: 0, active: -1 }});
+    return;
+  }}
   const root = getActiveChapterRoot();
   if (!root) return;
   const lowerQuery = query.toLowerCase();
@@ -2681,6 +2684,11 @@ mod tests {
         assert!(
             find_text.contains("count: 0, active: -1"),
             "findText should report zero matches via IPC"
+        );
+        assert_eq!(
+            find_text.matches("count: 0, active: -1").count(),
+            2,
+            "findText should reset the count both on empty query and on no matches"
         );
 
         assert!(

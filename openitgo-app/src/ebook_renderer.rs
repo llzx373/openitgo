@@ -363,8 +363,10 @@ fn handle_ebook_protocol(
         .unwrap()
 }
 
-/// Extract and percent-decode the archive path from an `ebook://res/<path>`
-/// request URI. Returns `None` for non-resource paths.
+/// Extract and percent-decode the archive path from an
+/// `ebook://reader/res/<path>` request URI (`uri().path()` yields `/res/<path>`;
+/// the `reader` host segment is not part of the path). Returns `None` for
+/// non-resource paths.
 fn decode_res_path(path: &str) -> Option<String> {
     let raw = path.strip_prefix("/res/")?;
     if raw.is_empty() {
@@ -395,6 +397,62 @@ mod tests {
         assert_eq!(decode_res_path("/reader"), None);
         assert_eq!(decode_res_path("/res/"), None);
         assert_eq!(decode_res_path("/other/x"), None);
+    }
+
+    #[test]
+    fn test_handle_ebook_protocol_serves_resource_via_absolute_url() {
+        // End-to-end seam test: parse a real EPUB fixture and drive the
+        // protocol handler with the full absolute URL shape wry 0.55 actually
+        // delivers (`reader` is the URI host; `uri().path()` is `/res/...`).
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../openitgo-parser/tests/fixtures/minimal.epub");
+        let ebook = openitgo_parser::parse_ebook(&fixture).expect("fixture parses");
+        assert!(
+            ebook
+                .resources
+                .iter()
+                .any(|r| r.href == "OEBPS/chapter1.xhtml"),
+            "fixture manifest should list OEBPS/chapter1.xhtml: {:?}",
+            ebook.resources
+        );
+        let state = Arc::new(Mutex::new(RendererState {
+            ebook,
+            current_chapter: 0,
+            char_offset: 0,
+            current_spread: 0,
+            total_spreads: 1,
+            settings: EbookSettings::default(),
+            search_count: 0,
+            search_active: -1,
+        }));
+
+        let req = wry::http::Request::builder()
+            .uri("ebook://reader/res/OEBPS/chapter1.xhtml")
+            .body(Vec::new())
+            .unwrap();
+        assert_eq!(req.uri().path(), "/res/OEBPS/chapter1.xhtml");
+        let resp = handle_ebook_protocol(&state, req);
+        assert_eq!(resp.status(), 200);
+        assert!(
+            !resp.body().is_empty(),
+            "an existing resource must not hit the empty-200 fallback"
+        );
+        let content_type = resp
+            .headers()
+            .get("Content-Type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert_eq!(content_type, "application/xhtml+xml");
+
+        // A missing resource still falls back to the empty 200.
+        let req = wry::http::Request::builder()
+            .uri("ebook://reader/res/OEBPS/nope.png")
+            .body(Vec::new())
+            .unwrap();
+        let resp = handle_ebook_protocol(&state, req);
+        assert_eq!(resp.status(), 200);
+        assert!(resp.body().is_empty());
     }
 
     #[test]

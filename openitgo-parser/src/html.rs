@@ -293,7 +293,7 @@ fn is_epub_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Percent-encode set for `ebook://res/` paths: keep path-safe ASCII readable,
+/// Percent-encode set for `ebook://reader/res/` paths: keep path-safe ASCII readable,
 /// encode everything else (spaces, non-ASCII, ...).
 const RES_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
     .remove(b'/')
@@ -326,7 +326,11 @@ fn resolve_resource_path(dir: &str, rel: &str) -> String {
     parts.join("/")
 }
 
-/// Build an absolute `ebook://res/` URL for a relative resource reference.
+/// Build an absolute `ebook://reader/res/` URL for a relative resource
+/// reference. The URL shares the shell page's host (`reader`) because the
+/// custom-protocol callback receives the full absolute URL as an `http::Uri`:
+/// the host segment never appears in `uri().path()`, so the `/res/` marker
+/// must live in the path — and same-origin font loads avoid CORS issues.
 /// Returns `None` for references that must stay untouched (absolute URLs,
 /// `data:` URIs, fragments, empty values).
 fn to_res_url(dir: &str, value: &str) -> Option<String> {
@@ -343,11 +347,11 @@ fn to_res_url(dir: &str, value: &str) -> Option<String> {
         return None;
     }
     let encoded = percent_encoding::utf8_percent_encode(&resolved, RES_ENCODE_SET);
-    Some(format!("ebook://res/{}", encoded))
+    Some(format!("ebook://reader/res/{}", encoded))
 }
 
 /// Rewrite relative resource references (`src=` / `xlink:href=` attribute
-/// values) in sanitized EPUB chapter HTML to absolute `ebook://res/` URLs,
+/// values) in sanitized EPUB chapter HTML to absolute `ebook://reader/res/` URLs,
 /// resolved against the chapter's directory inside the archive. Run after
 /// [`sanitize_epub_html`], which guarantees tags and quotes are balanced.
 pub fn rewrite_epub_urls(html: &str, chapter_href: &str) -> String {
@@ -443,7 +447,7 @@ pub fn rewrite_epub_urls(html: &str, chapter_href: &str) -> String {
 
 /// Extract all `@font-face { ... }` blocks from a stylesheet, rewriting
 /// relative `url(...)` references (resolved against the stylesheet's own
-/// directory) to `ebook://res/` URLs. Every other rule is dropped so book
+/// directory) to `ebook://reader/res/` URLs. Every other rule is dropped so book
 /// layout CSS never reaches the paginator.
 pub fn extract_font_faces(css: &str, css_href: &str) -> String {
     let dir = chapter_dir(css_href);
@@ -498,7 +502,7 @@ pub fn extract_font_faces(css: &str, css_href: &str) -> String {
     out
 }
 
-/// Rewrite every relative `url(...)` in a CSS block to `ebook://res/` URLs.
+/// Rewrite every relative `url(...)` in a CSS block to `ebook://reader/res/` URLs.
 /// Absolute/data references are copied untouched.
 fn rewrite_css_urls(block: &str, dir: &str) -> String {
     let lower = block.to_ascii_lowercase();
@@ -763,7 +767,7 @@ mod tests {
         let html = r#"<p><img src="../Images/pic.png"/></p>"#;
         let out = rewrite_epub_urls(html, "OEBPS/Text/ch1.xhtml");
         assert!(
-            out.contains(r#"src="ebook://res/OEBPS/Images/pic.png""#),
+            out.contains(r#"src="ebook://reader/res/OEBPS/Images/pic.png""#),
             "got: {out}"
         );
     }
@@ -773,7 +777,7 @@ mod tests {
         let html = "<img src='images/a b.png'/>";
         let out = rewrite_epub_urls(html, "OEBPS/Text/ch1.xhtml");
         assert!(
-            out.contains("src='ebook://res/OEBPS/Text/images/a%20b.png'"),
+            out.contains("src='ebook://reader/res/OEBPS/Text/images/a%20b.png'"),
             "got: {out}"
         );
     }
@@ -790,7 +794,7 @@ mod tests {
         let html = r#"<svg><image xlink:href="../Images/p.svg"/></svg>"#;
         let out = rewrite_epub_urls(html, "OEBPS/Text/ch1.xhtml");
         assert!(
-            out.contains(r#"xlink:href="ebook://res/OEBPS/Images/p.svg""#),
+            out.contains(r#"xlink:href="ebook://reader/res/OEBPS/Images/p.svg""#),
             "got: {out}"
         );
     }
@@ -803,7 +807,7 @@ mod tests {
         assert!(out.contains(r#"see src="x.png" here"#), "got: {out}");
         assert!(out.contains(r#"data-src="y.png""#), "got: {out}");
         assert!(
-            out.contains(r#"src="ebook://res/OEBPS/Text/z.png""#),
+            out.contains(r#"src="ebook://reader/res/OEBPS/Text/z.png""#),
             "got: {out}"
         );
     }
@@ -813,7 +817,7 @@ mod tests {
         let html = r#"<img src="图片.png"/>"#;
         let out = rewrite_epub_urls(html, "OEBPS/Text/ch1.xhtml");
         assert!(
-            out.contains("ebook://res/OEBPS/Text/%E5%9B%BE%E7%89%87.png"),
+            out.contains("ebook://reader/res/OEBPS/Text/%E5%9B%BE%E7%89%87.png"),
             "got: {out}"
         );
     }
@@ -824,7 +828,7 @@ mod tests {
         let out = extract_font_faces(css, "OEBPS/Styles/s.css");
         assert!(out.contains("@font-face"), "got: {out}");
         assert!(
-            out.contains(r#"url("ebook://res/OEBPS/Fonts/my.ttf")"#),
+            out.contains(r#"url("ebook://reader/res/OEBPS/Fonts/my.ttf")"#),
             "got: {out}"
         );
     }
@@ -834,7 +838,7 @@ mod tests {
         let css = "@font-face { src: url(fonts/a.woff2) format('woff2'); }";
         let out = extract_font_faces(css, "OEBPS/Styles/s.css");
         assert!(
-            out.contains(r#"url("ebook://res/OEBPS/Styles/fonts/a.woff2")"#),
+            out.contains(r#"url("ebook://reader/res/OEBPS/Styles/fonts/a.woff2")"#),
             "got: {out}"
         );
         assert!(out.contains("format('woff2')"), "got: {out}");
@@ -863,8 +867,14 @@ mod tests {
             "@font-face { src: url(a.ttf); } body { color: red; } @font-face { src: url(b.otf); }";
         let out = extract_font_faces(css, "s.css");
         assert_eq!(out.matches("@font-face").count(), 2);
-        assert!(out.contains(r#"url("ebook://res/a.ttf")"#), "got: {out}");
-        assert!(out.contains(r#"url("ebook://res/b.otf")"#), "got: {out}");
+        assert!(
+            out.contains(r#"url("ebook://reader/res/a.ttf")"#),
+            "got: {out}"
+        );
+        assert!(
+            out.contains(r#"url("ebook://reader/res/b.otf")"#),
+            "got: {out}"
+        );
         assert!(!out.contains("color"), "got: {out}");
     }
 

@@ -30,7 +30,9 @@
 
 ### Task 38/39 — EPUB 资源服务 + 内嵌字体（同一机制，一个 commit）
 
-**资源通道 `ebook://res/<路径>`**：
+**资源通道 `ebook://reader/res/<路径>`**：
+
+> 修订注记（2026-07-17 终审）：原设计为 `ebook://res/<路径>`，但 wry 协议回调的 Request URI 是完整绝对 URL，`res` 会被 `http::Uri` 解析为 host，`uri().path()` 永不含 `/res/` 前缀；故改为与壳页面同 host 的 `ebook://reader/res/<路径>`（path 为 `/res/...`，字体加载同源，规避自定义协议跨源字体 CORS 风险）。下文条目中的 `ebook://res/` 字样为修订前原文，保留备查。
 
 - 协议 handler 识别 `/res/` 前缀 → percent-decode 路径 → `epub::doc::EpubDoc::get_resource_by_path` 取字节 → MIME 从 `ebook.resources` 查表，扩展名兜底；找不到返回空 200（保持现有"空 200 防 reload"约定）。
 - 新增纯函数 `rewrite_epub_urls(html, chapter_dir) -> String`（`openitgo-parser/src/html.rs`）：把 `<img>`/`<image>` 的 `src` 等相对路径按章节所在目录 resolve（归一化 `..`/`.`，去前导 `/`）后改写为 `ebook://res/<percent-encoded>`；`data:`、绝对 URL（含 scheme）不改写。

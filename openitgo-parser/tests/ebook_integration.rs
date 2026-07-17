@@ -259,12 +259,12 @@ fn test_epub_chapter_rewrites_img_and_injects_font_face() {
     let ebook = parse_ebook(&path).unwrap();
     let html = openitgo_parser::html::render_chapter_html(&ebook, 0).unwrap();
     assert!(
-        html.contains("ebook://res/OEBPS/Images/pic.png"),
+        html.contains("ebook://reader/res/OEBPS/Images/pic.png"),
         "got: {html}"
     );
     assert!(html.contains("@font-face"), "got: {html}");
     assert!(
-        html.contains("ebook://res/OEBPS/Fonts/f.ttf"),
+        html.contains("ebook://reader/res/OEBPS/Fonts/f.ttf"),
         "got: {html}"
     );
     assert!(

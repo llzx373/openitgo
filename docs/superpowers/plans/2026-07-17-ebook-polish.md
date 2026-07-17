@@ -1698,3 +1698,7 @@ git commit -m "docs: 勾选 TODO 36-42 并更新 CHANGELOG——电子书搜索/
 4. 打开一本 GBK 编码 TXT → 中文正常显示、自动分章；UTF-8 文件行为不变。
 5. 电子书视图按 Escape 返回书架；PageDown/Space 下一页、PageUp 上一页；搜索框输入时 Space 不误翻页。
 6. 回归：打开漫画与视频各一，确认阅读/播放不受影响（本批改动集中在电子书路径，预期无影响）。
+
+## 修订记录
+
+- 2026-07-17 终审修订——Task 3（EPUB 资源通道）资源 URL 由 `ebook://res/<path>` 改为 `ebook://reader/res/<path>`：wry 协议回调的 Request URI 为完整绝对 URL，`res` 会被 `http::Uri` 解析为 host，`uri().path()` 永不含 `/res/` 前缀，导致资源请求全部静默落入空 200 兜底。改为与壳页面同 host 后 path 为 `/res/...`，且字体加载与文档同源，规避自定义协议跨源字体 CORS 风险。同步补 handler 级集成测试（`ebook_renderer.rs` 以真实 fixture 走通 `handle_ebook_protocol`）与 AGENTS.md 备忘。上文 Task 3 正文中出现的 `ebook://res/` 字样为修订前原文，保留备查。

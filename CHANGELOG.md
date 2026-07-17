@@ -43,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 媒体播放：音频输出设备选择（工具栏下拉框，自动 + mpv 枚举设备），保存的设备不存在时回退自动。
 - 媒体播放：音量、倍速与输出设备全局记忆（`media_volume` / `media_speed` / `media_audio_device` 设置项）。
 - 电子书：全文搜索（工具栏搜索条 + Cmd/Ctrl+F，命中计数 `n/m`，Enter/Shift+Enter 前后跳转，设置变更/resize/换章重排后自动恢复高亮）。
-- 电子书：EPUB 内嵌图片与内嵌字体显示——章节 HTML 的相对资源引用改写为 `ebook://res/` 绝对 URL 并由自定义协议从包内取资源（MIME 取 manifest）；书籍 CSS 中的 `@font-face` 单独提取注入，不引入整份书籍样式。
+- 电子书：EPUB 内嵌图片与内嵌字体显示——章节 HTML 的相对资源引用改写为 `ebook://reader/res/` 绝对 URL 并由自定义协议从包内取资源（MIME 取 manifest）；书籍 CSS 中的 `@font-face` 单独提取注入，不引入整份书籍样式。
 - 电子书：字体设置下拉框（预设 + 自定义值保留），`ebook.font_family` 空值校验与钳制。
 - 电子书：TXT/Markdown 自动识别编码——UTF-8（含 BOM）直通，GBK/GB18030/Big5 等经 chardetng + encoding_rs 转码。
 - 电子书视图快捷键补全：Escape 返回书架（搜索条可见时优先关闭搜索）、PageUp/PageDown/Space 翻页、Cmd/Ctrl+F 唤起搜索。
