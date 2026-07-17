@@ -238,6 +238,8 @@ impl SettingsView {
             ("上一页", |s| &mut s.prev_page),
             ("向下翻页", |s| &mut s.page_down),
             ("向上翻页", |s| &mut s.page_up),
+            ("首页", |s| &mut s.first_page),
+            ("末页", |s| &mut s.last_page),
             ("全屏", |s| &mut s.fullscreen),
             ("适应页面", |s| &mut s.fit_page),
             ("适应宽度", |s| &mut s.fit_width),

@@ -161,6 +161,8 @@ impl Settings {
 pub struct Shortcuts {
     pub next_page: Vec<String>,
     pub prev_page: Vec<String>,
+    pub first_page: Vec<String>,
+    pub last_page: Vec<String>,
     pub page_down: Vec<String>,
     pub page_up: Vec<String>,
     pub fullscreen: Vec<String>,
@@ -177,6 +179,8 @@ impl Default for Shortcuts {
         Self {
             next_page: vec!["ArrowRight".to_string()],
             prev_page: vec!["ArrowLeft".to_string()],
+            first_page: vec!["Home".to_string()],
+            last_page: vec!["End".to_string()],
             page_down: vec!["PageDown".to_string(), "Space".to_string()],
             page_up: vec!["PageUp".to_string()],
             fullscreen: vec!["F11".to_string()],
@@ -533,5 +537,22 @@ mod tests {
         assert!(s.back_to_library.contains(&"Escape".to_string()));
         assert!(s.page_down.contains(&"PageDown".to_string()));
         assert!(s.page_up.contains(&"PageUp".to_string()));
+    }
+
+    #[test]
+    fn test_shortcuts_default_first_last_page() {
+        let s = Shortcuts::default();
+        assert_eq!(s.first_page, vec!["Home".to_string()]);
+        assert_eq!(s.last_page, vec!["End".to_string()]);
+    }
+
+    #[test]
+    fn test_shortcuts_deserialize_missing_first_last_page_uses_defaults() {
+        // 旧版 settings.json 不含 first_page/last_page 字段，应落到新默认值
+        let json = r#"{"next_page":["ArrowRight"],"prev_page":["ArrowLeft"]}"#;
+        let s: Shortcuts = serde_json::from_str(json).unwrap();
+        assert_eq!(s.next_page, vec!["ArrowRight".to_string()]);
+        assert_eq!(s.first_page, vec!["Home".to_string()]);
+        assert_eq!(s.last_page, vec!["End".to_string()]);
     }
 }

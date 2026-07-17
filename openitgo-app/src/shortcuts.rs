@@ -8,6 +8,8 @@ pub fn key_from_name(name: &str) -> Option<Key> {
         "ArrowDown" => Some(Key::ArrowDown),
         "PageDown" => Some(Key::PageDown),
         "PageUp" => Some(Key::PageUp),
+        "Home" => Some(Key::Home),
+        "End" => Some(Key::End),
         "Space" => Some(Key::Space),
         "Enter" => Some(Key::Enter),
         "Escape" => Some(Key::Escape),
@@ -78,5 +80,11 @@ mod tests {
     fn test_key_from_name_known_keys() {
         assert_eq!(key_from_name("Escape"), Some(Key::Escape));
         assert_eq!(key_from_name("F11"), Some(Key::F11));
+    }
+
+    #[test]
+    fn test_key_from_name_home_end() {
+        assert_eq!(key_from_name("Home"), Some(Key::Home));
+        assert_eq!(key_from_name("End"), Some(Key::End));
     }
 }

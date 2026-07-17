@@ -1800,6 +1800,17 @@ impl ReaderApp {
                         self.reader_prev_page();
                     }
                 }
+                // 首页/末页不随 RTL 翻转：首页永远是第一页
+                if is_shortcut_pressed(ctx, &self.settings.shortcuts.first_page) {
+                    if let Some(reader) = self.reader_view.open.as_mut() {
+                        reader.first_page();
+                    }
+                }
+                if is_shortcut_pressed(ctx, &self.settings.shortcuts.last_page) {
+                    if let Some(reader) = self.reader_view.open.as_mut() {
+                        reader.last_page();
+                    }
+                }
                 if is_shortcut_pressed(ctx, &self.settings.shortcuts.page_down) {
                     self.reader_page_down();
                 }
