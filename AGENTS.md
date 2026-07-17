@@ -11,7 +11,8 @@ through an embedded `libmpv` backend.
 
 - `openitgo-core/` — shared models, reading-state machine, and layout math.
 - `openitgo-parser/` — archive/folder/PDF parsers and comic ID generation.
-- `openitgo-storage/` — JSON persistence for settings, library, history, and bookmarks.
+- `openitgo-storage/` — JSON persistence for settings, library, history, bookmarks,
+  and per-comic reading settings.
 - `openitgo-media/` — libmpv wrapper: commands, event pump, property observation,
   OpenGL render context, and headless cover generation.
 - `openitgo-app/` — egui application, cache, loader, and UI views.
@@ -58,6 +59,19 @@ already embed it.
   `show_toolbar`, `show_statusbar`, `invert_scroll`, `library_sort`,
   `media_volume`, `media_speed`, and `media_audio_device`.
 - **History entries** store both `comic_id` and `path` for robust matching.
+- **Per-comic reading settings** (`comic_settings.json`,
+  `HashMap<String, ComicReadingSettings>` keyed by comic_id) remember each
+  book's mode/double-page/fit. They override the global defaults only when a
+  comic is opened (`poll_opener`: `set_mode` like the mode menu,
+  `set_double_page`, then assign `fit_mode` so it flows through the same
+  pending-fit path as `default_fit`). Changes from any source (menu, toolbar,
+  shortcuts, double-click fit toggle) are caught by
+  `ReaderApp::maybe_save_comic_settings` at the end of `App::update`, which
+  diffs the open comic's `(mode, double_page, fit_mode)` against
+  `last_saved_comic_settings` and writes on change; the snapshot is reset on
+  open/close, and a failed save still updates it to avoid per-frame error
+  spam. Global `settings.double_page` etc. keep updating as before — the
+  per-book memory is an open-time override layer only.
 - **Library covers** are generated asynchronously from the first page and saved
   to `covers/`. Missing covers are re-requested on demand, and entries whose
   source file no longer exist are marked as deleted.

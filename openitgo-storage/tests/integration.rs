@@ -1,9 +1,12 @@
+use openitgo_core::models::{FitMode, ReadingMode};
 use openitgo_storage::{
     json_store::JsonStore,
     models::{
-        Bookmark, Bookmarks, History, HistoryEntry, Library, LibraryEntry, MediaType, Settings,
+        Bookmark, Bookmarks, ComicReadingSettings, History, HistoryEntry, Library, LibraryEntry,
+        MediaType, Settings,
     },
 };
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[test]
@@ -77,6 +80,24 @@ fn test_bookmarks_roundtrip() {
 }
 
 #[test]
+fn test_comic_settings_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = JsonStore::new(tmp.path());
+    let mut settings = HashMap::new();
+    settings.insert(
+        "id1".to_string(),
+        ComicReadingSettings {
+            mode: ReadingMode::Rtl,
+            double_page: true,
+            fit: FitMode::Page,
+        },
+    );
+    store.save_comic_settings(&settings).unwrap();
+    let loaded = store.load_comic_settings().unwrap();
+    assert_eq!(settings, loaded);
+}
+
+#[test]
 fn test_all_persisted_files_are_created() {
     let tmp = tempfile::tempdir().unwrap();
     let store = JsonStore::new(tmp.path());
@@ -84,9 +105,11 @@ fn test_all_persisted_files_are_created() {
     store.save_library(&Library::default()).unwrap();
     store.save_history(&History::default()).unwrap();
     store.save_bookmarks(&Bookmarks::default()).unwrap();
+    store.save_comic_settings(&HashMap::new()).unwrap();
 
     assert!(tmp.path().join("settings.json").exists());
     assert!(tmp.path().join("library.json").exists());
     assert!(tmp.path().join("history.json").exists());
     assert!(tmp.path().join("bookmarks.json").exists());
+    assert!(tmp.path().join("comic_settings.json").exists());
 }

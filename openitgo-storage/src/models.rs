@@ -343,9 +343,30 @@ pub struct Bookmarks {
     pub entries: Vec<Bookmark>,
 }
 
+/// 每本书记忆的阅读设置（模式/双页/缩放），打开时覆盖全局默认；
+/// 以 comic_id 为 key 存于 comic_settings.json。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComicReadingSettings {
+    pub mode: ReadingMode,
+    pub double_page: bool,
+    pub fit: FitMode,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_comic_reading_settings_serde_roundtrip() {
+        let s = ComicReadingSettings {
+            mode: ReadingMode::Rtl,
+            double_page: true,
+            fit: FitMode::Page,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let loaded: ComicReadingSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, loaded);
+    }
 
     #[test]
     fn test_settings_default() {

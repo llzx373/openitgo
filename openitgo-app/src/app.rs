@@ -16,8 +16,8 @@ use openitgo_core::state::ReadingState;
 use openitgo_storage::{
     json_store::JsonStore,
     models::{
-        Bookmarks, EbookTheme, History, HistoryEntry, Library, MediaType, Settings, Theme,
-        ToolbarDisplayMode,
+        Bookmarks, ComicReadingSettings, EbookTheme, History, HistoryEntry, Library, MediaType,
+        Settings, Theme, ToolbarDisplayMode,
     },
 };
 use std::collections::{HashMap, HashSet};
@@ -185,12 +185,18 @@ pub struct ReaderApp {
     pub media_cover_rx: crossbeam_channel::Receiver<(String, PathBuf)>,
     /// The theme currently applied to egui, used to avoid redundant updates.
     pub current_theme: Theme,
+    /// 每本书记忆的阅读设置（comic_id -> 模式/双页/缩放），打开漫画时覆盖全局默认。
+    pub comic_settings: HashMap<String, ComicReadingSettings>,
+    /// 上次写盘的每书阅读设置快照（含 comic_id）。每帧与当前打开漫画的
+    /// 三元组对比，变更时 upsert 并写盘；打开/关闭漫画时重置。
+    pub last_saved_comic_settings: Option<(String, ComicReadingSettings)>,
 }
 
 impl Default for ReaderApp {
     fn default() -> Self {
         let store = JsonStore::new(JsonStore::default_dir().unwrap_or_else(|| PathBuf::from(".")));
         let (settings, settings_error) = load_settings_with_error(&store);
+        let (comic_settings, comic_settings_error) = load_comic_settings_with_error(&store);
         let library = store.load_library().unwrap_or_default();
         let mut history = store.load_history().unwrap_or_default();
         let mut bookmarks = store.load_bookmarks().unwrap_or_default();
@@ -225,7 +231,7 @@ impl Default for ReaderApp {
             store,
             history,
             bookmarks,
-            error_message: settings_error,
+            error_message: settings_error.or(comic_settings_error),
             page_loader,
             cover_loader,
             opener: None,
@@ -236,6 +242,8 @@ impl Default for ReaderApp {
             media_cover_tx,
             media_cover_rx,
             current_theme: Theme::System,
+            comic_settings,
+            last_saved_comic_settings: None,
         }
     }
 }
@@ -323,6 +331,7 @@ impl eframe::App for ReaderApp {
             View::Settings => self.render_settings(ctx),
             View::Loading(path) => self.render_loading(ctx, path),
         }
+        self.maybe_save_comic_settings();
     }
 }
 
@@ -399,6 +408,15 @@ impl ReaderApp {
                     let mut state = ReadingState::new(self.settings.default_mode, total);
                     state.set_double_page(self.settings.double_page, total);
                     state.fit_mode = self.settings.default_fit;
+                    // 每本书记忆的阅读设置（模式/双页/缩放）优先于全局默认；
+                    // 应用方式与模式菜单/双页开关一致，fit 走 default_fit 同一后续路径。
+                    if let Some(saved) = self.comic_settings.get(&comic.id).copied() {
+                        state.set_mode(saved.mode, total);
+                        state.set_double_page(saved.double_page, total);
+                        state.fit_mode = saved.fit;
+                    }
+                    self.last_saved_comic_settings =
+                        Some(comic_reading_settings_snapshot(&comic.id, &state));
                     if let Some(h) = self
                         .history
                         .entries
@@ -2158,6 +2176,26 @@ impl ReaderApp {
         }
     }
 
+    /// 每帧检测当前打开漫画的阅读设置（模式/双页/缩放）与上次写盘值是否不同：
+    /// 不同则 upsert 到每书记忆表并立即写盘（用户手势频率，直接写即可）。
+    /// 集中在帧尾做快照对比，可以捕获菜单、工具栏、快捷键、双击切 fit 等
+    /// 所有修改来源。保存失败时快照照样更新，避免每帧重复轰炸错误信息。
+    fn maybe_save_comic_settings(&mut self) {
+        let Some(reader) = self.reader_view.open.as_ref() else {
+            self.last_saved_comic_settings = None;
+            return;
+        };
+        let snapshot = comic_reading_settings_snapshot(&reader.comic.id, &reader.state);
+        if self.last_saved_comic_settings.as_ref() == Some(&snapshot) {
+            return;
+        }
+        self.comic_settings.insert(snapshot.0.clone(), snapshot.1);
+        if let Err(e) = self.store.save_comic_settings(&self.comic_settings) {
+            self.error_message = Some(format!("无法保存阅读设置: {}", e));
+        }
+        self.last_saved_comic_settings = Some(snapshot);
+    }
+
     fn record_reader_history(&mut self) {
         if let Some(reader) = self.reader_view.open.as_ref() {
             let comic_id = reader.comic.id.clone();
@@ -2746,6 +2784,30 @@ fn load_settings_with_error(store: &JsonStore) -> (Settings, Option<String>) {
     }
 }
 
+fn load_comic_settings_with_error(
+    store: &JsonStore,
+) -> (HashMap<String, ComicReadingSettings>, Option<String>) {
+    match store.load_comic_settings() {
+        Ok(m) => (m, None),
+        Err(e) => (HashMap::new(), Some(e.to_string())),
+    }
+}
+
+/// 当前打开漫画阅读设置（模式/双页/缩放）的快照，用于与上次写盘值对比。
+fn comic_reading_settings_snapshot(
+    comic_id: &str,
+    state: &ReadingState,
+) -> (String, ComicReadingSettings) {
+    (
+        comic_id.to_string(),
+        ComicReadingSettings {
+            mode: state.mode,
+            double_page: state.double_page,
+            fit: state.fit_mode,
+        },
+    )
+}
+
 fn history_matches(entry: &HistoryEntry, comic_id: &str, path: &std::path::Path) -> bool {
     if entry.comic_id == comic_id {
         return true;
@@ -2943,6 +3005,7 @@ mod tests {
         fn with_store_dir(dir: &Path) -> Self {
             let store = JsonStore::new(dir);
             let (settings, _settings_error) = load_settings_with_error(&store);
+            let (comic_settings, _) = load_comic_settings_with_error(&store);
             let library = store.load_library().unwrap_or_default();
             let history = store.load_history().unwrap_or_default();
             let bookmarks = store.load_bookmarks().unwrap_or_default();
@@ -2977,6 +3040,8 @@ mod tests {
                 media_cover_tx,
                 media_cover_rx,
                 current_theme: Theme::System,
+                comic_settings,
+                last_saved_comic_settings: None,
             }
         }
     }
@@ -3040,6 +3105,237 @@ mod tests {
             .expect("reader should be open");
         assert_eq!(reader.comic.id, comic_id);
         assert_eq!(reader.state.current_page, 1);
+    }
+
+    #[test]
+    fn test_comic_reading_settings_snapshot_captures_triple() {
+        let mut state = ReadingState::new(ReadingMode::Ltr, 10);
+        state.set_double_page(true, 10);
+        state.fit_mode = FitMode::Page;
+        let snapshot = comic_reading_settings_snapshot("comic-1", &state);
+        assert_eq!(
+            snapshot,
+            (
+                "comic-1".to_string(),
+                ComicReadingSettings {
+                    mode: ReadingMode::Ltr,
+                    double_page: true,
+                    fit: FitMode::Page,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn test_poll_opener_applies_saved_comic_settings() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let comic_dir = tempfile::tempdir().unwrap();
+        write_dummy_image(comic_dir.path(), "page0.png");
+        write_dummy_image(comic_dir.path(), "page1.png");
+        let comic_id = openitgo_parser::stable_comic_id(comic_dir.path());
+        app.comic_settings.insert(
+            comic_id,
+            ComicReadingSettings {
+                mode: ReadingMode::Rtl,
+                double_page: true,
+                fit: FitMode::Page,
+            },
+        );
+
+        app.open_comic(comic_dir.path().to_path_buf());
+        let ctx = egui::Context::default();
+        for _ in 0..100 {
+            app.poll_opener(&ctx);
+            if app.current_view == View::Reader {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(app.current_view, View::Reader);
+        let reader = app
+            .reader_view
+            .open
+            .as_ref()
+            .expect("reader should be open");
+        assert_eq!(reader.state.mode, ReadingMode::Rtl);
+        assert!(reader.state.double_page);
+        assert_eq!(reader.state.fit_mode, FitMode::Page);
+        // 打开即记录快照：未做改动时不应立刻触发写盘。
+        assert_eq!(
+            app.last_saved_comic_settings,
+            Some(comic_reading_settings_snapshot(
+                &reader.comic.id,
+                &reader.state
+            ))
+        );
+    }
+
+    #[test]
+    fn test_poll_opener_without_saved_settings_uses_global_defaults() {
+        let (mut app, _tmp) = app_with_temp_store();
+        app.settings.default_mode = ReadingMode::Webtoon;
+        app.settings.double_page = true;
+        app.settings.default_fit = FitMode::Original;
+        let comic_dir = tempfile::tempdir().unwrap();
+        write_dummy_image(comic_dir.path(), "page0.png");
+        write_dummy_image(comic_dir.path(), "page1.png");
+
+        app.open_comic(comic_dir.path().to_path_buf());
+        let ctx = egui::Context::default();
+        for _ in 0..100 {
+            app.poll_opener(&ctx);
+            if app.current_view == View::Reader {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(app.current_view, View::Reader);
+        let reader = app
+            .reader_view
+            .open
+            .as_ref()
+            .expect("reader should be open");
+        assert_eq!(reader.state.mode, ReadingMode::Webtoon);
+        // Webtoon 下双页被抑制，与现状一致。
+        assert!(!reader.state.double_page);
+        assert_eq!(reader.state.fit_mode, FitMode::Original);
+    }
+
+    #[test]
+    fn test_maybe_save_comic_settings_writes_on_change() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let ctx = egui::Context::default();
+        app.reader_view.open(
+            &ctx,
+            dummy_comic(),
+            ReadingState::new(ReadingMode::Ltr, 10),
+            &PageLoader::default(),
+            1.4,
+            true,
+        );
+        // 模拟 poll_opener 打开时记录的快照。
+        let initial = {
+            let reader = app.reader_view.open.as_ref().unwrap();
+            comic_reading_settings_snapshot(&reader.comic.id, &reader.state)
+        };
+        app.last_saved_comic_settings = Some(initial);
+
+        // 用户改了双页和 fit（来源不限：菜单/工具栏/快捷键/双击）。
+        {
+            let reader = app.reader_view.open.as_mut().unwrap();
+            reader.state.set_double_page(true, 10);
+            reader.state.fit_mode = FitMode::Width;
+        }
+        app.maybe_save_comic_settings();
+
+        let saved = app.store.load_comic_settings().unwrap();
+        assert_eq!(
+            saved.get("test-comic"),
+            Some(&ComicReadingSettings {
+                mode: ReadingMode::Ltr,
+                double_page: true,
+                fit: FitMode::Width,
+            })
+        );
+        // 快照已更新：无新变化时再次调用不会重写文件。
+        std::fs::remove_file(app.store.dir().join("comic_settings.json")).unwrap();
+        app.maybe_save_comic_settings();
+        assert!(!app.store.dir().join("comic_settings.json").exists());
+    }
+
+    #[test]
+    fn test_maybe_save_comic_settings_unchanged_writes_nothing() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let ctx = egui::Context::default();
+        app.reader_view.open(
+            &ctx,
+            dummy_comic(),
+            ReadingState::new(ReadingMode::Ltr, 10),
+            &PageLoader::default(),
+            1.4,
+            true,
+        );
+        let initial = {
+            let reader = app.reader_view.open.as_ref().unwrap();
+            comic_reading_settings_snapshot(&reader.comic.id, &reader.state)
+        };
+        app.last_saved_comic_settings = Some(initial);
+
+        app.maybe_save_comic_settings();
+
+        assert!(!app.store.dir().join("comic_settings.json").exists());
+    }
+
+    #[test]
+    fn test_maybe_save_comic_settings_resets_snapshot_when_reader_closed() {
+        let (mut app, _tmp) = app_with_temp_store();
+        app.last_saved_comic_settings = Some((
+            "test-comic".to_string(),
+            ComicReadingSettings {
+                mode: ReadingMode::Ltr,
+                double_page: false,
+                fit: FitMode::Height,
+            },
+        ));
+
+        app.maybe_save_comic_settings();
+
+        assert_eq!(app.last_saved_comic_settings, None);
+    }
+
+    #[test]
+    fn test_comic_settings_persist_across_reopen() {
+        let (mut app1, store_tmp) = app_with_temp_store();
+        let comic_dir = store_tmp.path().join("test-comic");
+        std::fs::create_dir(&comic_dir).unwrap();
+        for i in 0..4 {
+            write_dummy_image(&comic_dir, &format!("page{}.png", i));
+        }
+        let comic_id = openitgo_parser::stable_comic_id(&comic_dir);
+
+        app1.open_comic(comic_dir.clone());
+        let ctx = egui::Context::default();
+        for _ in 0..100 {
+            app1.poll_opener(&ctx);
+            if app1.current_view == View::Reader {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(app1.current_view, View::Reader);
+        // 用户修改三项设置，帧尾 diff 检测写盘。
+        {
+            let reader = app1.reader_view.open.as_mut().unwrap();
+            let total = reader.total_pages();
+            reader.state.set_mode(ReadingMode::Rtl, total);
+            reader.state.set_double_page(true, total);
+            reader.state.fit_mode = FitMode::Page;
+        }
+        app1.maybe_save_comic_settings();
+
+        // 模拟重开：新 App 实例从同一 store 目录加载并应用记忆设置。
+        let mut app2 = ReaderApp::with_store_dir(store_tmp.path());
+        assert!(app2.comic_settings.contains_key(&comic_id));
+        app2.open_comic(comic_dir);
+        for _ in 0..100 {
+            app2.poll_opener(&ctx);
+            if app2.current_view == View::Reader {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(app2.current_view, View::Reader);
+        let reader = app2
+            .reader_view
+            .open
+            .as_ref()
+            .expect("reader should be open");
+        assert_eq!(reader.state.mode, ReadingMode::Rtl);
+        assert!(reader.state.double_page);
+        assert_eq!(reader.state.fit_mode, FitMode::Page);
     }
 
     #[test]

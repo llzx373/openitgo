@@ -1,4 +1,5 @@
-use crate::models::{Bookmarks, History, Library, Settings};
+use crate::models::{Bookmarks, ComicReadingSettings, History, Library, Settings};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -81,6 +82,19 @@ impl JsonStore {
         self.read_json_with_backup("bookmarks.json")
     }
 
+    pub fn save_comic_settings(
+        &self,
+        settings: &HashMap<String, ComicReadingSettings>,
+    ) -> Result<(), StorageError> {
+        self.write_json("comic_settings.json", settings)
+    }
+
+    pub fn load_comic_settings(
+        &self,
+    ) -> Result<HashMap<String, ComicReadingSettings>, StorageError> {
+        self.read_json_with_backup("comic_settings.json")
+    }
+
     /// Write a JSON file atomically:
     /// 1. Serialize to a temporary file in the same directory.
     /// 2. If a previous file exists, copy it to `<name>.bak`.
@@ -141,7 +155,72 @@ impl JsonStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Settings;
+    use crate::models::{ComicReadingSettings, Settings};
+    use openitgo_core::models::{FitMode, ReadingMode};
+    use std::collections::HashMap;
+
+    fn sample_comic_settings() -> HashMap<String, ComicReadingSettings> {
+        let mut map = HashMap::new();
+        map.insert(
+            "comic-1".to_string(),
+            ComicReadingSettings {
+                mode: ReadingMode::Rtl,
+                double_page: true,
+                fit: FitMode::Width,
+            },
+        );
+        map
+    }
+
+    #[test]
+    fn test_roundtrip_comic_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = JsonStore::new(tmp.path());
+        let map = sample_comic_settings();
+        store.save_comic_settings(&map).unwrap();
+        let loaded = store.load_comic_settings().unwrap();
+        assert_eq!(map, loaded);
+    }
+
+    #[test]
+    fn test_load_comic_settings_missing_file_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = JsonStore::new(tmp.path());
+        let loaded = store.load_comic_settings().unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn test_comic_settings_load_falls_back_to_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = JsonStore::new(tmp.path());
+        store.save_comic_settings(&sample_comic_settings()).unwrap();
+        let mut newer = HashMap::new();
+        newer.insert(
+            "comic-1".to_string(),
+            ComicReadingSettings {
+                mode: ReadingMode::Webtoon,
+                double_page: false,
+                fit: FitMode::Height,
+            },
+        );
+        store.save_comic_settings(&newer).unwrap();
+
+        // 损坏主文件；备份仍是上一份有效数据（与 settings 一致的行为）。
+        std::fs::write(tmp.path().join("comic_settings.json"), "not json").unwrap();
+
+        let loaded = store.load_comic_settings().unwrap();
+        assert_eq!(loaded, sample_comic_settings());
+    }
+
+    #[test]
+    fn test_comic_settings_backup_is_created() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = JsonStore::new(tmp.path());
+        store.save_comic_settings(&sample_comic_settings()).unwrap();
+        store.save_comic_settings(&HashMap::new()).unwrap();
+        assert!(tmp.path().join("comic_settings.json.bak").exists());
+    }
 
     #[test]
     fn test_roundtrip_settings() {
