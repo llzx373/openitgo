@@ -167,6 +167,7 @@ mod tests {
                 mode: ReadingMode::Rtl,
                 double_page: true,
                 fit: FitMode::Width,
+                rotation: 0,
             },
         );
         map
@@ -202,6 +203,7 @@ mod tests {
                 mode: ReadingMode::Webtoon,
                 double_page: false,
                 fit: FitMode::Height,
+                rotation: 0,
             },
         );
         store.save_comic_settings(&newer).unwrap();

@@ -428,12 +428,17 @@ impl ReaderApp {
                     let mut state = ReadingState::new(self.settings.default_mode, total);
                     state.set_double_page(self.settings.double_page, total);
                     state.fit_mode = self.settings.default_fit;
-                    // 每本书记忆的阅读设置（模式/双页/缩放）优先于全局默认；
+                    // 每本书记忆的阅读设置（模式/双页/缩放/旋转）优先于全局默认；
                     // 应用方式与模式菜单/双页开关一致，fit 走 default_fit 同一后续路径。
                     if let Some(saved) = self.comic_settings.get(&comic.id).copied() {
                         state.set_mode(saved.mode, total);
                         state.set_double_page(saved.double_page, total);
                         state.fit_mode = saved.fit;
+                        // 只接受 90° 步进值，脏数据按 0 处理。
+                        state.rotation = match saved.rotation {
+                            90 | 180 | 270 => saved.rotation,
+                            _ => 0,
+                        };
                     }
                     self.last_saved_comic_settings =
                         Some(comic_reading_settings_snapshot(&comic.id, &state));
@@ -1344,6 +1349,14 @@ impl ReaderApp {
                         reader.request_fit(FitMode::Page);
                     }
                 }
+                if toolbar_button(ui, regular::ARROW_CLOCKWISE, "旋转", display_mode)
+                    .on_hover_text("顺时针旋转 90°")
+                    .clicked()
+                {
+                    if let Some(reader) = self.reader_view.open.as_mut() {
+                        reader.rotate_cw();
+                    }
+                }
                 ui.separator();
 
                 if toolbar_button(ui, regular::CARET_LEFT, "上一页", display_mode).clicked() {
@@ -2029,6 +2042,21 @@ impl ReaderApp {
                 let total = reader.total_pages();
                 reader.state.set_double_page(new_double, total);
                 reader.pending_fit = Some(FitMode::Page);
+            }
+            ui.close_menu();
+        }
+        let rotation = self
+            .reader_view
+            .open
+            .as_ref()
+            .map(|r| r.state.rotation)
+            .unwrap_or(0);
+        if ui
+            .button(format!("旋转 90°（当前 {}°）", rotation))
+            .clicked()
+        {
+            if let Some(reader) = self.reader_view.open.as_mut() {
+                reader.rotate_cw();
             }
             ui.close_menu();
         }
@@ -3169,7 +3197,7 @@ impl PasswordDialog {
     }
 }
 
-/// 当前打开漫画阅读设置（模式/双页/缩放）的快照，用于与上次写盘值对比。
+/// 当前打开漫画阅读设置（模式/双页/缩放/旋转）的快照，用于与上次写盘值对比。
 fn comic_reading_settings_snapshot(
     comic_id: &str,
     state: &ReadingState,
@@ -3180,6 +3208,7 @@ fn comic_reading_settings_snapshot(
             mode: state.mode,
             double_page: state.double_page,
             fit: state.fit_mode,
+            rotation: state.rotation % 360,
         },
     )
 }
@@ -3540,6 +3569,7 @@ mod tests {
                     mode: ReadingMode::Ltr,
                     double_page: true,
                     fit: FitMode::Page,
+                    rotation: 0,
                 }
             )
         );
@@ -3558,6 +3588,7 @@ mod tests {
                 mode: ReadingMode::Rtl,
                 double_page: true,
                 fit: FitMode::Page,
+                rotation: 0,
             },
         );
 
@@ -3656,6 +3687,7 @@ mod tests {
                 mode: ReadingMode::Ltr,
                 double_page: true,
                 fit: FitMode::Width,
+                rotation: 0,
             })
         );
         // 快照已更新：无新变化时再次调用不会重写文件。
@@ -3696,12 +3728,75 @@ mod tests {
                 mode: ReadingMode::Ltr,
                 double_page: false,
                 fit: FitMode::Height,
+                rotation: 0,
             },
         ));
 
         app.maybe_save_comic_settings();
 
         assert_eq!(app.last_saved_comic_settings, None);
+    }
+
+    #[test]
+    fn test_poll_opener_applies_saved_rotation() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let comic_dir = tempfile::tempdir().unwrap();
+        write_dummy_image(comic_dir.path(), "page0.png");
+        write_dummy_image(comic_dir.path(), "page1.png");
+        let comic_id = openitgo_parser::stable_comic_id(comic_dir.path());
+        app.comic_settings.insert(
+            comic_id,
+            ComicReadingSettings {
+                mode: ReadingMode::Ltr,
+                double_page: false,
+                fit: FitMode::Page,
+                rotation: 90,
+            },
+        );
+
+        app.open_comic(comic_dir.path().to_path_buf());
+        let ctx = egui::Context::default();
+        for _ in 0..100 {
+            app.poll_opener(&ctx);
+            if app.current_view == View::Reader {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(app.current_view, View::Reader);
+        let reader = app
+            .reader_view
+            .open
+            .as_ref()
+            .expect("reader should be open");
+        assert_eq!(reader.state.rotation, 90);
+    }
+
+    #[test]
+    fn test_maybe_save_comic_settings_persists_rotation_change() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let comic = dummy_comic();
+        let comic_id = comic.id.clone();
+        let ctx = egui::Context::default();
+        app.reader_view.open(
+            &ctx,
+            comic,
+            ReadingState::new(ReadingMode::Ltr, 10),
+            &PageLoader::default(),
+            1.4,
+            true,
+        );
+        app.last_saved_comic_settings = Some(comic_reading_settings_snapshot(
+            &comic_id,
+            &app.reader_view.open.as_ref().unwrap().state,
+        ));
+
+        app.reader_view.open.as_mut().unwrap().rotate_cw();
+        app.maybe_save_comic_settings();
+
+        let saved = app.comic_settings.get(&comic_id).expect("should be saved");
+        assert_eq!(saved.rotation, 90);
     }
 
     #[test]

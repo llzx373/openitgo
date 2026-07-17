@@ -343,13 +343,17 @@ pub struct Bookmarks {
     pub entries: Vec<Bookmark>,
 }
 
-/// 每本书记忆的阅读设置（模式/双页/缩放），打开时覆盖全局默认；
+/// 每本书记忆的阅读设置（模式/双页/缩放/旋转），打开时覆盖全局默认；
 /// 以 comic_id 为 key 存于 comic_settings.json。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ComicReadingSettings {
     pub mode: ReadingMode,
     pub double_page: bool,
     pub fit: FitMode,
+    /// 90° 步进旋转（0/90/180/270）；旧文件无此字段时默认为 0。
+    /// （用 u16 而非 u8：270 超出 u8 范围。）
+    #[serde(default)]
+    pub rotation: u16,
 }
 
 #[cfg(test)]
@@ -362,6 +366,29 @@ mod tests {
             mode: ReadingMode::Rtl,
             double_page: true,
             fit: FitMode::Page,
+            rotation: 0,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let loaded: ComicReadingSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, loaded);
+    }
+
+    #[test]
+    fn test_comic_reading_settings_deserializes_missing_rotation_as_zero() {
+        // 旧版 comic_settings.json 不含 rotation 字段（枚举按变体名序列化）
+        let json = r#"{"mode":"Ltr","double_page":true,"fit":"Page"}"#;
+        let s: ComicReadingSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.rotation, 0);
+        assert!(s.double_page);
+    }
+
+    #[test]
+    fn test_comic_reading_settings_rotation_roundtrip() {
+        let s = ComicReadingSettings {
+            mode: ReadingMode::Ltr,
+            double_page: false,
+            fit: FitMode::Width,
+            rotation: 270,
         };
         let json = serde_json::to_string(&s).unwrap();
         let loaded: ComicReadingSettings = serde_json::from_str(&json).unwrap();

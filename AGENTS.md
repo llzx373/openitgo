@@ -68,13 +68,14 @@ already embed it.
 - **History entries** store both `comic_id` and `path` for robust matching.
 - **Per-comic reading settings** (`comic_settings.json`,
   `HashMap<String, ComicReadingSettings>` keyed by comic_id) remember each
-  book's mode/double-page/fit. They override the global defaults only when a
+  book's mode/double-page/fit/rotation. They override the global defaults only when a
   comic is opened (`poll_opener`: `set_mode` like the mode menu,
   `set_double_page`, then assign `fit_mode` so it flows through the same
-  pending-fit path as `default_fit`). Changes from any source (menu, toolbar,
+  pending-fit path as `default_fit`, then assign `rotation` accepting only
+  90° steps — dirty values fall back to 0). Changes from any source (menu, toolbar,
   shortcuts, double-click fit toggle) are caught by
   `ReaderApp::maybe_save_comic_settings` at the end of `App::update`, which
-  diffs the open comic's `(mode, double_page, fit_mode)` against
+  diffs the open comic's `(mode, double_page, fit_mode, rotation)` against
   `last_saved_comic_settings` and writes on change; the snapshot is reset on
   open/close, and a failed save still updates it to avoid per-frame error
   spam. Global `settings.double_page` etc. keep updating as before — the

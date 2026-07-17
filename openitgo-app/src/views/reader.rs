@@ -120,6 +120,12 @@ impl OpenReader {
         self.pending_fit = Some(fit);
     }
 
+    /// 顺时针旋转 90° 并重新适配（与双页开关同一路径）。
+    pub fn rotate_cw(&mut self) {
+        self.state.rotate_cw();
+        self.pending_fit = Some(FitMode::Page);
+    }
+
     pub(crate) fn mark_page_turn(&mut self) {
         self.last_page_turn = Instant::now();
     }
@@ -153,9 +159,13 @@ impl OpenReader {
         let total = self.total_pages();
         if self.is_double_page() {
             let threshold = self.wide_page_threshold;
+            let rotation = self.state.rotation;
             let cache = &self.cache;
             self.state.next_spread(total, |idx| {
-                let Some([w, h]) = cache.get_original_size(idx) else {
+                let Some([w, h]) = cache
+                    .get_original_size(idx)
+                    .map(|s| openitgo_core::state::rotate_size(s, rotation))
+                else {
                     return false;
                 };
                 h != 0 && (w as f32 / h as f32) >= threshold
@@ -172,9 +182,13 @@ impl OpenReader {
         let from = self.state.current_page;
         if self.is_double_page() {
             let threshold = self.wide_page_threshold;
+            let rotation = self.state.rotation;
             let cache = &self.cache;
             self.state.prev_spread(|idx| {
-                let Some([w, h]) = cache.get_original_size(idx) else {
+                let Some([w, h]) = cache
+                    .get_original_size(idx)
+                    .map(|s| openitgo_core::state::rotate_size(s, rotation))
+                else {
                     return false;
                 };
                 h != 0 && (w as f32 / h as f32) >= threshold
@@ -244,8 +258,15 @@ impl OpenReader {
         }
     }
 
+    /// 旋转后的有效页面尺寸（90°/270° 宽高互换）；未加载时为 None。
+    fn effective_size(&self, page_index: usize) -> Option<[u32; 2]> {
+        self.cache
+            .get_original_size(page_index)
+            .map(|s| openitgo_core::state::rotate_size(s, self.state.rotation))
+    }
+
     fn is_wide_page(&self, page_index: usize) -> bool {
-        let Some([w, h]) = self.cache.get_original_size(page_index) else {
+        let Some([w, h]) = self.effective_size(page_index) else {
             return false;
         };
         if h == 0 {
@@ -255,10 +276,10 @@ impl OpenReader {
     }
 
     fn spread_size(&self) -> Option<egui::Vec2> {
-        let left_size = self.cache.get_original_size(self.left_page?)?;
+        let left_size = self.effective_size(self.left_page?)?;
         let right_size = self
             .right_page
-            .and_then(|idx| self.cache.get_original_size(idx))
+            .and_then(|idx| self.effective_size(idx))
             .unwrap_or([0, 0]);
         Some(egui::vec2(
             (left_size[0] + right_size[0]) as f32,
@@ -757,14 +778,13 @@ impl ReaderView {
         reader.last_available_size = Some(available_size);
 
         let left_size = left_idx
-            .and_then(|idx| reader.cache.get_original_size(idx))
+            .and_then(|idx| reader.effective_size(idx))
             .map(|s| egui::vec2(s[0] as f32, s[1] as f32))
             .unwrap_or(FALLBACK_PAGE_SIZE);
         let right_size = match right_idx {
             None => egui::Vec2::ZERO,
             Some(idx) => reader
-                .cache
-                .get_original_size(idx)
+                .effective_size(idx)
                 .map(|s| egui::vec2(s[0] as f32, s[1] as f32))
                 .unwrap_or(FALLBACK_PAGE_SIZE),
         };
@@ -854,8 +874,7 @@ impl ReaderView {
         let page_sizes: Vec<Vec2> = (0..total)
             .map(|idx| {
                 reader
-                    .cache
-                    .get_original_size(idx)
+                    .effective_size(idx)
                     .map(|s| Vec2::new(s[0] as f32, s[1] as f32))
                     .unwrap_or_else(|| Vec2::new(FALLBACK_PAGE_SIZE.x, FALLBACK_PAGE_SIZE.y))
             })
@@ -978,13 +997,11 @@ impl ReaderView {
         // Use cached original sizes for layout; fall back to placeholder sizes if
         // the metadata has not arrived yet.
         let from_size = reader
-            .cache
-            .get_original_size(from_idx)
+            .effective_size(from_idx)
             .map(|s| egui::vec2(s[0] as f32, s[1] as f32))
             .unwrap_or(FALLBACK_PAGE_SIZE);
         let to_size = reader
-            .cache
-            .get_original_size(to_idx)
+            .effective_size(to_idx)
             .map(|s| egui::vec2(s[0] as f32, s[1] as f32))
             .unwrap_or(FALLBACK_PAGE_SIZE);
 
@@ -1230,12 +1247,25 @@ fn render_page_or_placeholder(
     let texture = full_texture.as_ref().or(texture);
 
     if let Some(texture) = texture {
-        let response = ui.put(
-            rect,
-            egui::Image::new(texture)
-                .fit_to_exact_size(rect.size())
-                .sense(egui::Sense::click_and_drag()),
-        );
+        // 90° 步进旋转：rect 尺寸已由 effective_size 换好宽高。egui 的
+        // rotate 是把网格绕中心整体旋转，旋转后足迹宽高互换；因此 90°/270°
+        // 时网格尺寸要预先换成 rect 的转置（即纹理原始宽高比），旋转后
+        // 才能恰好填满 rect 且保持等比缩放。ui.put 会把图片在 rect 内居中，
+        // 使网格中心与 rect 中心重合。
+        let mesh_size = match reader.state.rotation % 360 {
+            90 | 270 => egui::vec2(rect.height(), rect.width()),
+            _ => rect.size(),
+        };
+        let mut image = egui::Image::new(texture)
+            .fit_to_exact_size(mesh_size)
+            .sense(egui::Sense::click_and_drag());
+        if reader.state.rotation != 0 {
+            image = image.rotate(
+                (reader.state.rotation as f32).to_radians(),
+                egui::Vec2::splat(0.5),
+            );
+        }
+        let response = ui.put(rect, image);
         if response.dragged() {
             let delta = response.drag_delta();
             reader.state.pan += Vec2::new(delta.x, delta.y);

@@ -90,6 +90,7 @@ fn test_comic_settings_roundtrip() {
             mode: ReadingMode::Rtl,
             double_page: true,
             fit: FitMode::Page,
+            rotation: 0,
         },
     );
     store.save_comic_settings(&settings).unwrap();

@@ -43,6 +43,8 @@ pub struct ReadingState {
     pub pan: Vec2,
     pub fit_mode: FitMode,
     pub double_page: bool,
+    /// 90° 步进的显示旋转（0/90/180/270），随每书阅读设置持久化。
+    pub rotation: u16,
 }
 
 impl ReadingState {
@@ -54,6 +56,7 @@ impl ReadingState {
             pan: Vec2::ZERO,
             fit_mode: default_fit_mode(mode),
             double_page: false,
+            rotation: 0,
         };
         state.clamp_page(total_pages);
         state
@@ -90,6 +93,12 @@ impl ReadingState {
         self.double_page = double_page && !self.mode.is_webtoon();
         self.pan = Vec2::ZERO;
         self.clamp_page(total_pages);
+    }
+
+    /// 顺时针旋转 90°（360° 取模回 0）。旋转不重置页码/缩放，
+    /// 重新适配由调用方挂 pending_fit（与双页开关同一路径）。
+    pub fn rotate_cw(&mut self) {
+        self.rotation = (self.rotation + 90) % 360;
     }
 
     pub fn toggle_double_page(&mut self, total_pages: usize) {
@@ -203,6 +212,14 @@ fn default_fit_mode(mode: ReadingMode) -> FitMode {
     match mode {
         ReadingMode::Ltr | ReadingMode::Rtl => FitMode::Height,
         ReadingMode::Webtoon => FitMode::Width,
+    }
+}
+
+/// 90° 步进旋转后的有效尺寸：90°/270° 宽高互换；其余值（含非法值）原样返回。
+pub fn rotate_size(size: [u32; 2], rotation: u16) -> [u32; 2] {
+    match rotation % 360 {
+        90 | 270 => [size[1], size[0]],
+        _ => size,
     }
 }
 
@@ -332,5 +349,39 @@ mod tests {
         // ensures the constructor respects total_pages when it is non-zero.
         let state = ReadingState::new(ReadingMode::Ltr, 3);
         assert_eq!(state.current_page, 0);
+    }
+
+    #[test]
+    fn test_rotate_cw_steps_and_wraps() {
+        let mut state = ReadingState::new(ReadingMode::Ltr, 10);
+        assert_eq!(state.rotation, 0);
+        state.rotate_cw();
+        assert_eq!(state.rotation, 90);
+        state.rotate_cw();
+        assert_eq!(state.rotation, 180);
+        state.rotate_cw();
+        assert_eq!(state.rotation, 270);
+        state.rotate_cw();
+        assert_eq!(state.rotation, 0);
+    }
+
+    #[test]
+    fn test_rotate_size_swaps_on_quarter_turns() {
+        assert_eq!(rotate_size([800, 1200], 0), [800, 1200]);
+        assert_eq!(rotate_size([800, 1200], 90), [1200, 800]);
+        assert_eq!(rotate_size([800, 1200], 180), [800, 1200]);
+        assert_eq!(rotate_size([800, 1200], 270), [1200, 800]);
+        // 防御：非 90 倍数的值按不旋转处理
+        assert_eq!(rotate_size([800, 1200], 45), [800, 1200]);
+        assert_eq!(rotate_size([800, 1200], 450), [1200, 800]);
+    }
+
+    #[test]
+    fn test_rotation_does_not_affect_page_navigation() {
+        let mut state = ReadingState::new(ReadingMode::Ltr, 10);
+        state.rotate_cw();
+        state.next_page(10);
+        assert_eq!(state.current_page, 1);
+        assert_eq!(state.rotation, 90);
     }
 }
