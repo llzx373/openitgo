@@ -48,10 +48,14 @@ pub fn render_chapter_html(ebook: &Ebook, chapter_index: usize) -> Result<String
             .chapters
             .get(chapter_index)
             .ok_or(ParseError::NoPages)?;
+        // NCX/nav 的 href 可能带 `#fragment` 或未归一化的 `..`（calibre 常用
+        // `../page.html` 引用 OPF 目录外的页面），而 zip 按名字精确匹配，两者
+        // 都会导致查找失败；查找前必须先归一化。
+        let chapter_path = normalize_epub_href(&chapter.href);
         let html = doc
-            .get_resource_str_by_path(&chapter.href)
+            .get_resource_str_by_path(&chapter_path)
             .ok_or(ParseError::NoPages)?;
-        let rewritten = rewrite_epub_urls(&sanitize_epub_html(&html), &chapter.href);
+        let rewritten = rewrite_epub_urls(&sanitize_epub_html(&html), &chapter_path);
         let fonts = extract_font_face_css(ebook, &mut doc);
         if fonts.is_empty() {
             Ok(rewritten)
@@ -324,6 +328,16 @@ fn resolve_resource_path(dir: &str, rel: &str) -> String {
         }
     }
     parts.join("/")
+}
+
+/// Normalize an EPUB chapter/resource href for archive lookup: strip any
+/// `#fragment` and resolve `.` / `..` segments (calibre NCX files reference
+/// pages outside the OPF directory as `../page.html`, and anchors as
+/// `page.html#toc_1`). Zip lookups are exact-match, so both forms would
+/// otherwise miss.
+fn normalize_epub_href(href: &str) -> String {
+    let no_fragment = href.split('#').next().unwrap_or("");
+    resolve_resource_path("", no_fragment)
 }
 
 /// Build an absolute `ebook://reader/res/` URL for a relative resource
@@ -738,6 +752,25 @@ mod tests {
         let html = r#"<p id="p1" class="text">Hello <abbr title="test">abbr</abbr></p>"#;
         let clean = sanitize_epub_html(html);
         assert_eq!(clean, html);
+    }
+
+    #[test]
+    fn test_normalize_epub_href() {
+        assert_eq!(
+            normalize_epub_href("OPS/coverpage.html#toc_1"),
+            "OPS/coverpage.html"
+        );
+        assert_eq!(normalize_epub_href("OPS/../speci.html"), "speci.html");
+        assert_eq!(
+            normalize_epub_href("OPS/../chapter0.9.html#toc_1"),
+            "chapter0.9.html"
+        );
+        assert_eq!(
+            normalize_epub_href("OPS/chapter1.html"),
+            "OPS/chapter1.html"
+        );
+        assert_eq!(normalize_epub_href("chapter1.xhtml"), "chapter1.xhtml");
+        assert_eq!(normalize_epub_href("#only_fragment"), "");
     }
 
     #[test]

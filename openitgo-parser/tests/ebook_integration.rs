@@ -286,3 +286,130 @@ fn test_read_epub_resource() {
     assert!(bytes.starts_with(b"\x89PNG"));
     assert!(openitgo_parser::html::read_epub_resource(&ebook, "OEBPS/nope.png").is_none());
 }
+
+/// calibre 风格 EPUB：NCX 的 content src 带 `#fragment`，且用 `../` 引用
+/// OPF 目录之外的资源。两者都会导致 zip 精确匹配查找失败（朱颜血.epub 实案）。
+fn build_calibre_style_epub() -> Vec<u8> {
+    use std::io::Cursor;
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+    zip.start_file("mimetype", options).unwrap();
+    zip.write_all(b"application/epub+zip").unwrap();
+
+    zip.start_file("META-INF/container.xml", options).unwrap();
+    zip.write_all(
+        br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OPS/fb.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>
+"#,
+    )
+    .unwrap();
+
+    zip.start_file("OPS/fb.opf", options).unwrap();
+    zip.write_all(
+        br#"<?xml version="1.0"?>
+<package version="2.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="bookid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Calibre Style</dc:title>
+    <dc:identifier id="bookid">calibre</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="cover" href="coverpage.html" media-type="application/xhtml+xml"/>
+    <item id="speci" href="../speci.html" media-type="application/xhtml+xml"/>
+    <item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="img" href="images/cover.jpg" media-type="image/jpeg"/>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+  </manifest>
+  <spine toc="ncx">
+    <itemref idref="cover"/>
+    <itemref idref="speci"/>
+    <itemref idref="ch1"/>
+  </spine>
+</package>
+"#,
+    )
+    .unwrap();
+
+    zip.start_file("OPS/toc.ncx", options).unwrap();
+    zip.write_all(
+        r#"<?xml version="1.0"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <navMap>
+    <navPoint id="n1" playOrder="1">
+      <navLabel><text>封面</text></navLabel>
+      <content src="coverpage.html#toc_1"/>
+    </navPoint>
+    <navPoint id="n2" playOrder="2">
+      <navLabel><text>书籍简介</text></navLabel>
+      <content src="../speci.html"/>
+    </navPoint>
+    <navPoint id="n3" playOrder="3">
+      <navLabel><text>第一章</text></navLabel>
+      <content src="chapter1.xhtml"/>
+    </navPoint>
+  </navMap>
+</ncx>
+"#
+        .as_bytes(),
+    )
+    .unwrap();
+
+    zip.start_file("OPS/coverpage.html", options).unwrap();
+    zip.write_all(
+        r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>封面</title></head><body><div><img alt="封面" src="images/cover.jpg"/><h1 id="toc_1" style="display:none;"></h1></div></body></html>"#.as_bytes(),
+    )
+    .unwrap();
+
+    zip.start_file("speci.html", options).unwrap();
+    zip.write_all(
+        r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>简介</title></head><body><p>这是一本测试书。</p></body></html>"#.as_bytes(),
+    )
+    .unwrap();
+
+    zip.start_file("OPS/chapter1.xhtml", options).unwrap();
+    zip.write_all(
+        r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>第一章</title></head><body><p>正文内容。</p></body></html>"#.as_bytes(),
+    )
+    .unwrap();
+
+    zip.start_file("OPS/images/cover.jpg", options).unwrap();
+    zip.write_all(b"\xff\xd8\xffFAKEJPG").unwrap();
+
+    zip.finish().unwrap().into_inner()
+}
+
+#[test]
+fn test_render_chapter_with_fragment_href() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("calibre.epub");
+    std::fs::write(&path, build_calibre_style_epub()).unwrap();
+
+    let ebook = parse_ebook(&path).unwrap();
+    // 封面章：NCX href 带 #fragment，zip 精确匹配必须先去 fragment
+    let html = openitgo_parser::html::render_chapter_html(&ebook, 0).unwrap();
+    assert!(
+        html.contains("ebook://reader/res/OPS/images/cover.jpg"),
+        "封面章内图片应按章节目录改写: {html}"
+    );
+}
+
+#[test]
+fn test_render_chapter_with_parent_ref_href() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("calibre.epub");
+    std::fs::write(&path, build_calibre_style_epub()).unwrap();
+
+    let ebook = parse_ebook(&path).unwrap();
+    // 书籍简介：NCX href 为 ../speci.html，root_base.join 后为 OPS/../speci.html，
+    // 必须归一化为 speci.html 才能在 zip 中命中
+    let html = openitgo_parser::html::render_chapter_html(&ebook, 1).unwrap();
+    assert!(html.contains("这是一本测试书"), "got: {html}");
+    // 普通章节不受影响
+    let html = openitgo_parser::html::render_chapter_html(&ebook, 2).unwrap();
+    assert!(html.contains("正文内容"), "got: {html}");
+}
