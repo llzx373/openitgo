@@ -249,6 +249,30 @@ impl MediaView {
         }
     }
 
+    /// Loads an external subtitle file; mpv selects it immediately and the
+    /// track-list observation picks it up automatically.
+    pub fn sub_add(&mut self, path: &std::path::Path) -> Result<(), openitgo_media::MediaError> {
+        let Some(open) = self.open.as_ref() else {
+            return Ok(());
+        };
+        open.player.sub_add(path)
+    }
+
+    /// Returns the new sub-delay for the OSD, computed as
+    /// `last.sub_delay + delta` (mpv's property reply re-syncs a frame later,
+    /// so a one-frame error is acceptable).
+    pub fn adjust_sub_delay(&mut self, delta: f64) -> Option<f64> {
+        let open = self.open.as_ref()?;
+        let _ = open.player.adjust_sub_delay(delta);
+        Some(open.last.sub_delay + delta)
+    }
+
+    pub fn reset_sub_delay(&mut self) {
+        if let Some(open) = self.open.as_ref() {
+            let _ = open.player.reset_sub_delay();
+        }
+    }
+
     pub fn cycle_sub(&mut self) {
         if let Some(open) = self.open.as_ref() {
             let subs: Vec<i64> = open
@@ -468,6 +492,15 @@ pub fn mute_osd_text(muted: bool) -> &'static str {
     }
 }
 
+/// 字幕延迟 OSD 数值：`0.0` / `+0.1` / `-0.2`，保留一位小数；零不带符号。
+pub fn format_sub_delay(v: f64) -> String {
+    if v == 0.0 {
+        "0.0".to_string()
+    } else {
+        format!("{v:+.1}")
+    }
+}
+
 /// Toolbar/dropdown label for a track: `#2 简中 [zh]`, or `#1 轨道 3`
 /// when the track carries no title.
 pub fn track_label(t: &TrackInfo, index: usize) -> String {
@@ -596,6 +629,21 @@ mod tests {
         assert_eq!(speed_osd_text(1.5), "1.5x");
         assert_eq!(mute_osd_text(true), "静音");
         assert_eq!(mute_osd_text(false), "取消静音");
+    }
+
+    #[test]
+    fn format_sub_delay_signs_and_rounds_to_one_decimal() {
+        // 0 不带符号
+        assert_eq!(format_sub_delay(0.0), "0.0");
+        // 正值带 +
+        assert_eq!(format_sub_delay(0.1), "+0.1");
+        assert_eq!(format_sub_delay(1.0), "+1.0");
+        // 负值带 -
+        assert_eq!(format_sub_delay(-0.2), "-0.2");
+        assert_eq!(format_sub_delay(-1.5), "-1.5");
+        // 保留一位小数（累加浮点误差被舍掉）
+        assert_eq!(format_sub_delay(0.30000000000000004), "+0.3");
+        assert_eq!(format_sub_delay(-0.05), "-0.1");
     }
 
     #[test]

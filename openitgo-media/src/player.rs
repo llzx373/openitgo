@@ -43,7 +43,7 @@ fn cstring(s: &str) -> CString {
 }
 
 /// reply_userdata for the async `audio-device-list` query; observed
-/// properties use 1-7 (different event type, but keep namespaces distinct).
+/// properties use 1-8 (different event type, but keep namespaces distinct).
 const AUDIO_DEVICES_REPLY_USERDATA: u64 = 100;
 
 impl MpvPlayer {
@@ -127,6 +127,12 @@ impl MpvPlayer {
                 7,
                 cstring("mute").as_ptr(),
                 mpv::mpv_format_MPV_FORMAT_FLAG,
+            );
+            mpv::mpv_observe_property(
+                handle,
+                8,
+                cstring("sub-delay").as_ptr(),
+                mpv::mpv_format_MPV_FORMAT_DOUBLE,
             );
         }
         // PlayerState::default() leaves volume/speed at 0.0; set sane initial
@@ -253,6 +259,26 @@ impl MpvPlayer {
             Some(id) => self.set_property_string("sid", &id.to_string()),
             None => self.set_property_string("sid", "no"),
         }
+    }
+
+    /// Loads an external subtitle file and selects it immediately (`select`
+    /// flag), so the new track shows without a manual sid switch.
+    pub fn sub_add(&self, path: &Path) -> Result<(), MediaError> {
+        let s = path
+            .to_str()
+            .ok_or_else(|| MediaError::Load("路径包含非 UTF-8 字符".into()))?;
+        self.command(&["sub-add", s, "select"])
+    }
+
+    /// Adjusts `sub-delay` by `delta` seconds (mpv `add` command).
+    pub fn adjust_sub_delay(&self, delta: f64) -> Result<(), MediaError> {
+        self.command(&["add", "sub-delay", &format!("{delta}")])
+    }
+
+    /// Resets `sub-delay` to 0 (the OSD/UI mirrors this from the observed
+    /// property a frame later).
+    pub fn reset_sub_delay(&self) -> Result<(), MediaError> {
+        self.set_property_string("sub-delay", "0.0")
     }
 
     pub fn set_audio_track(&self, id: i64) -> Result<(), MediaError> {
@@ -503,6 +529,13 @@ fn event_loop(
                             if format == mpv::mpv_format_MPV_FORMAT_FLAG && !data.is_null() {
                                 // SAFETY: format guarantees data points to a c_int.
                                 s.muted = unsafe { *(data as *mut i32) } != 0;
+                                should_repaint = true;
+                            }
+                        }
+                        8 => {
+                            if format == mpv::mpv_format_MPV_FORMAT_DOUBLE && !data.is_null() {
+                                // SAFETY: format guarantees data points to an f64.
+                                s.sub_delay = unsafe { *(data as *mut f64) };
                                 should_repaint = true;
                             }
                         }

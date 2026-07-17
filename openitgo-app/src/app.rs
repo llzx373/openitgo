@@ -864,6 +864,20 @@ impl ReaderApp {
                                 self.media_view.set_sub(Some(*id));
                             }
                         }
+                        ui.separator();
+                        if ui.button("加载外部字幕…").clicked() {
+                            self.load_external_subtitle(ctx);
+                        }
+                        ui.separator();
+                        if ui.button("字幕延迟 -0.1s").clicked() {
+                            self.adjust_media_sub_delay(ctx, -0.1);
+                        }
+                        if ui.button("字幕延迟 +0.1s").clicked() {
+                            self.adjust_media_sub_delay(ctx, 0.1);
+                        }
+                        if ui.button("重置字幕延迟").clicked() {
+                            self.reset_media_sub_delay(ctx);
+                        }
                     });
                 let audios: Vec<(i64, String)> = tracks
                     .iter()
@@ -970,6 +984,43 @@ impl ReaderApp {
                 self.error_message = Some(format!("无法切换音频输出设备: {e}"));
             }
         }
+    }
+
+    fn load_external_subtitle(&mut self, ctx: &egui::Context) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("字幕", &["srt", "ass", "ssa", "vtt"])
+            .pick_file()
+        else {
+            return;
+        };
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("未知字幕")
+            .to_string();
+        match self.media_view.sub_add(&path) {
+            Ok(()) => self.media_view.show_osd(ctx, format!("已加载字幕：{name}")),
+            Err(e) => {
+                self.error_message = Some(format!("无法加载字幕: {e}"));
+            }
+        }
+    }
+
+    fn adjust_media_sub_delay(&mut self, ctx: &egui::Context, delta: f64) {
+        if let Some(v) = self.media_view.adjust_sub_delay(delta) {
+            self.media_view.show_osd(
+                ctx,
+                format!("字幕延迟 {}s", crate::views::media::format_sub_delay(v)),
+            );
+        }
+    }
+
+    fn reset_media_sub_delay(&mut self, ctx: &egui::Context) {
+        self.media_view.reset_sub_delay();
+        self.media_view.show_osd(
+            ctx,
+            format!("字幕延迟 {}s", crate::views::media::format_sub_delay(0.0)),
+        );
     }
 
     fn render_media_seekbar(&mut self, ctx: &egui::Context) {
@@ -2034,6 +2085,12 @@ impl ReaderApp {
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::V)) {
                     self.media_view.cycle_sub();
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::Z)) {
+                    self.adjust_media_sub_delay(ctx, -0.1);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::X)) {
+                    self.adjust_media_sub_delay(ctx, 0.1);
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::M)) {
                     self.toggle_media_mute(ctx);
