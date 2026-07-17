@@ -10,7 +10,7 @@ fn main() -> eframe::Result<()> {
     let path = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .expect("usage: cargo run --example profile_open -- <path-to-archive>");
+        .expect("usage: cargo run --example profile_view -- <path-to-archive>");
 
     let app = ReaderApp {
         opener: Some(AsyncOpener::<Comic>::open(path.clone(), |p| {

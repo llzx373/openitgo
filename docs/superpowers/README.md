@@ -17,9 +17,24 @@
 | `specs/2026-06-17-gpu-texture-compression-design.md` | 部分实现 | 对应设计文档 |
 | `plans/2026-06-22-thumbnail-first-rendering.md` | 已实现 | 缩略图优先渲染，部分 API 与计划有差异 |
 | `specs/2026-06-22-thumbnail-first-rendering-design.md` | 已实现 | 对应设计文档 |
+| `plans/2026-06-22-macos-dock-drop-open-plan.md` | 已实现 | macOS Dock 拖入打开（swizzle NSApplication delegate + 路径队列逐帧排空） |
+| `specs/2026-06-22-macos-dock-drop-open-design.md` | 已实现 | 对应设计文档 |
+| `plans/2026-06-23-icons-toolbar-plan.md` | 已实现 | 应用图标与工具栏图标/文字混合显示模式 |
+| `specs/2026-06-23-icons-toolbar-design.md` | 已实现 | 对应设计文档 |
 | `plans/2026-06-24-ebook-reader.md` | 已实现 | 电子书阅读完整功能已实现，包括目录面板、历史书签、书架混排与 reload 修复 |
 | `plans/2026-06-24-ebook-spread-pagination.md` | 已实现 | 电子书单页/双页 spread 分页改造，消除横向漏边，3D 翻页、预加载、设置/resize 重测 |
 | `specs/2026-06-24-ebook-spread-pagination-design.md` | 已实现 | 对应 spread 分页设计文档 |
+| `plans/2026-06-26-migrate-ebook-to-css-columns.md` | 已实现 | 电子书分页从 JS 行盒测量迁移到 CSS columns |
+| `plans/2026-06-26-ebook-page-bottom-mask.md` | 已实现 | 电子书跨页漏行动态遮罩（方案 B） |
+| `reports/2026-06-26-css-columns-test-plan.md` | 部分执行（手动矩阵待走查，见 TODO #54） | CSS columns 分页器手动测试计划 |
+| `plans/2026-07-14-media-playback.md` | 已实现 | 媒体播放（视频 + 音频，内嵌 libmpv） |
+| `specs/2026-07-14-media-playback-design.md` | 已实现 | 对应设计文档 |
+| `plans/2026-07-15-media-player-ux.md` | 已实现 | 播放器体验补齐（全宽进度条/OSD/静音/滚轮音量/设备选择/音量倍速记忆） |
+| `specs/2026-07-15-media-player-ux-design.md` | 已实现 | 对应设计文档 |
+| `plans/2026-07-15-mpv-under-egui-overlay.md` | 已实现 | mpv 视频层下沉到 egui 之下（透明 backbuffer 合成） |
+| `plans/2026-07-17-ebook-polish.md` | 已实现 | 电子书收尾（编码检测/EPUB 图片与字体/字体设置/搜索/快捷键，TODO 36–42） |
+| `specs/2026-07-17-ebook-polish-design.md` | 已实现 | 对应设计文档 |
+| `reports/2026-07-17-bug-notes-archived.md` | 已归档（全部修复） | 原 `docs/bug.md`：快速翻页加载死锁与媒体播放已知问题笔记 |
 
 阅读建议：
 - 想了解当前功能与交互，请优先查看根目录 `README.md`、`CHANGELOG.md`、`TODO.md`。

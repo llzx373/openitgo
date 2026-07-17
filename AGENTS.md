@@ -119,10 +119,10 @@ already embed it.
   toolbar from auto-hiding in fullscreen while a menu is open. The media
   seek bar needs a scoped `ui.spacing_mut().slider_width` override: egui 0.29
   `Slider` always allocates `slider_width` (100px) and ignores `add_sized`.
-  The diagnostic examples `probe_overlay.rs` (transparent-compositing proof),
-  `probe_visible.rs` (bare window without an egui surface — exercises the
-  index-0 fallback), and `probe_video_overlay.rs` (real video compositing
-  below the transparent egui surface) verify the layering.
+  The diagnostic examples `probe_visible.rs` (bare window without an egui
+  surface — exercises the index-0 fallback) and `probe_video_overlay.rs`
+  (real video compositing below the transparent egui surface) verify the
+  layering.
 - **Media preferences**: volume/speed/audio-device are persisted globally in
   `Settings` and applied by `MediaView::apply_startup_settings` after open.
   Volume/speed are set immediately; the audio device is deferred
@@ -138,7 +138,8 @@ already embed it.
   which can itself be waiting for first-frame DR image allocation — and that
   allocation can only be serviced by the UI thread answering
   `mpv_render_context_update()`. The resulting circular wait froze the
-  window on media re-open (docs/bug.md 问题 A). The `audio-device-list`
+  window on media re-open (docs/superpowers/reports/2026-07-17-bug-notes-archived.md
+  问题 A). The `audio-device-list`
   reply is parsed on the event thread into `PlayerState::audio_devices`.
 - **MpvPlayer teardown** order matters: `Drop` sets a quit flag and joins the
   `mpv-events` thread (50ms `mpv_wait_event` timeout) *before*
@@ -146,12 +147,17 @@ already embed it.
   segfaults inside libmpv.
 - **Media diagnostic examples**: `openitgo-app/examples/probe_visible.rs`
   (visible window, real CA compositing, screenshot-verifiable),
-  `probe_mpv_view.rs` (offscreen overlay),
-  `probe_overlay.rs` (transparent-compositing proof for the
-  video-below-egui layering), `probe_video_overlay.rs` (real video layer
-  compositing verification), and
+  `probe_mpv_view.rs` (offscreen overlay), `probe_video_overlay.rs` (real
+  video layer compositing verification), and
   `openitgo-media/examples/{probe,probe_render}.rs` (headless player/render
   context). `OPENITGO_MPV_LOG=1` enables mpv debug logs on stderr.
+- **Reader diagnostic examples** (`openitgo-app/examples/`，用法均为
+  `cargo run -p openitgo-app --example <name> -- <漫画路径>`)：
+  - `flip_through.rs`：逐页顺序请求整本漫画，报告每页成功/错误/超时（PageLoader 全页遍历冒烟）。
+  - `rapid_flip.rs`：以 80ms 间隔连续请求全部页面，统计加载延迟与错误（快速翻页压力回归）。
+  - `profile_open.rs`：带 UI 打开漫画，10 秒后打印缓存快照（总页数/缩略图/全尺寸页数）并自动退出（打开性能剖析）。
+  - `profile_view.rs`：同 `profile_open.rs` 但持续运行，每 10 秒打印一次缓存快照（浏览期缓存观察）。
+  - `ui_smoke.rs`：带 UI 打开漫画，当前页进入缓存即自动退出（30 秒超时），UI 启动冒烟。
 - **Packaging**: `scripts/package-macos.sh` runs `bundle_mpv` before signing,
   copying libmpv and its Homebrew dependencies into `Contents/Frameworks` and
   rewriting their install names to `@rpath`, so the bundled app runs without a

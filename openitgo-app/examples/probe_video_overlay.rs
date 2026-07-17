@@ -1,7 +1,7 @@
 //! Real-video compositing probe for the mpv-under-egui flip (Task 4):
-//! identical layout to probe_overlay (opaque top/bottom bars, central
-//! transparent hole, semi-transparent green popup over the hole), but the
-//! hole is filled by the REAL `MpvNativeView` — the CAOpenGLLayer playing an
+//! the window has opaque top/bottom bars and a central transparent hole
+//! with a semi-transparent green popup over it; the hole is filled by the
+//! REAL `MpvNativeView` — the CAOpenGLLayer playing an
 //! actual video via libmpv — instead of a red placeholder CALayer. The video
 //! layer anchors below the winit view's CAMetalLayer inside
 //! `MpvNativeView::new`; the egui surface is transparent, so the video shows
@@ -26,7 +26,7 @@ mod imp {
     #[link(name = "QuartzCore", kind = "framework")]
     extern "C" {}
 
-    /// Hole margins in points, identical to probe_overlay.
+    /// Hole margins in points.
     const BAR_MARGIN_PT: f64 = 60.0;
 
     struct ProbeApp {

@@ -159,7 +159,7 @@ impl MpvPlayer {
     /// event_loop. MUST stay async: a blocking mpv_command on the UI thread
     /// deadlocks against first-frame DR image allocation, which can only be
     /// serviced by the UI thread answering mpv_render_context_update()
-    /// (docs/bug.md 问题 A).
+    /// (docs/superpowers/reports/2026-07-17-bug-notes-archived.md 问题 A).
     fn command(&self, args: &[&str]) -> Result<(), MediaError> {
         let cargs: Vec<CString> = args.iter().map(|a| cstring(a)).collect();
         let mut ptrs: Vec<*const std::ffi::c_char> = cargs.iter().map(|c| c.as_ptr()).collect();
@@ -267,7 +267,8 @@ impl MpvPlayer {
     /// event thread into `PlayerState::audio_devices` (None until the first
     /// reply lands). Async like every other call here — a blocking
     /// mpv_get_property on the UI thread deadlocks against first-frame DR
-    /// image allocation (see command(), docs/bug.md 问题 A).
+    /// image allocation (see command(),
+    /// docs/superpowers/reports/2026-07-17-bug-notes-archived.md 问题 A).
     pub fn request_audio_devices(&self) -> Result<(), MediaError> {
         let name = cstring("audio-device-list");
         // SAFETY: handle is valid; name is a valid NUL-terminated string that
