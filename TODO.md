@@ -224,16 +224,16 @@
 
 ### P0 — 进行中收尾
 
-- [ ] 36. 提交更名 OpenItGo 收尾改动（当前未提交：`json_store.rs` 删除旧 `rust-reader` 目录迁移逻辑 + CHANGELOG/README 措辞同步），先跑完整验证流水线
+- [x] 36. 提交更名 OpenItGo 收尾改动（当前未提交：`json_store.rs` 删除旧 `rust-reader` 目录迁移逻辑 + CHANGELOG/README 措辞同步），先跑完整验证流水线
 
 ### P1 — 半成品功能接线（小改动大收益）
 
-- [ ] 37. 电子书全文搜索接 UI：JS 侧 `findText/findNext/findPrev/clearHighlights` 与 Rust API 已就绪但标 `#[allow(dead_code)]`（`ebook_renderer.rs:207-237`），只差工具栏搜索框；注意重排后高亮丢失需重新执行 findText
-- [ ] 38. EPUB 内嵌图片显示：`<img>` 相对 src 解析到 `ebook://`，协议处理器对非 `?chapter=N` 请求一律空 200（`ebook_renderer.rs:325-333`），需从 EPUB 包内取资源返回
-- [ ] 39. EPUB 内嵌字体支持：`sanitize_epub_html` 丢弃 `<link>`（`html.rs:132-134`），需保留并改写为 `ebook://` 资源 + `@font-face`
-- [ ] 40. `ebook.font_family` 设置 UI：字段已持久化并传给 JS，但设置面板/工具栏均无入口，是当前唯一死字段
-- [ ] 41. TXT 编码检测：`fs::read_to_string` 仅认 UTF-8（`txt.rs:33`），GBK/Big5 直接报错
-- [ ] 42. 电子书视图快捷键补全：Escape 返回书架、章节跳转键（现仅左/右翻页，`app.rs:1792-1799`）
+- [x] 37. 电子书全文搜索接 UI：JS 侧 `findText/findNext/findPrev/clearHighlights` 与 Rust API 已就绪但标 `#[allow(dead_code)]`（`ebook_renderer.rs:207-237`），只差工具栏搜索框；注意重排后高亮丢失需重新执行 findText
+- [x] 38. EPUB 内嵌图片显示：`<img>` 相对 src 解析到 `ebook://`，协议处理器对非 `?chapter=N` 请求一律空 200（`ebook_renderer.rs:325-333`），需从 EPUB 包内取资源返回
+- [x] 39. EPUB 内嵌字体支持：`sanitize_epub_html` 丢弃 `<link>`（`html.rs:132-134`），需保留并改写为 `ebook://` 资源 + `@font-face`
+- [x] 40. `ebook.font_family` 设置 UI：字段已持久化并传给 JS，但设置面板/工具栏均无入口，是当前唯一死字段
+- [x] 41. TXT 编码检测：`fs::read_to_string` 仅认 UTF-8（`txt.rs:33`），GBK/Big5 直接报错
+- [x] 42. 电子书视图快捷键补全：Escape 返回书架、章节跳转键（现仅左/右翻页，`app.rs:1792-1799`）
 
 ### P2 — 媒体播放增强
 
