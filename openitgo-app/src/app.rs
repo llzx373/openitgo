@@ -190,6 +190,8 @@ pub struct ReaderApp {
     /// 上次写盘的每书阅读设置快照（含 comic_id）。每帧与当前打开漫画的
     /// 三元组对比，变更时 upsert 并写盘；打开/关闭漫画时重置。
     pub last_saved_comic_settings: Option<(String, ComicReadingSettings)>,
+    /// 帮助菜单"快捷键一览"面板的显示状态。
+    pub show_shortcuts: bool,
 }
 
 impl Default for ReaderApp {
@@ -244,6 +246,7 @@ impl Default for ReaderApp {
             current_theme: Theme::System,
             comic_settings,
             last_saved_comic_settings: None,
+            show_shortcuts: false,
         }
     }
 }
@@ -331,6 +334,7 @@ impl eframe::App for ReaderApp {
             View::Settings => self.render_settings(ctx),
             View::Loading(path) => self.render_loading(ctx, path),
         }
+        self.render_shortcuts_window(ctx);
         self.maybe_save_comic_settings();
     }
 }
@@ -1645,6 +1649,10 @@ impl ReaderApp {
                 });
 
                 ui.menu_button("帮助", |ui| {
+                    if ui.button("快捷键一览").clicked() {
+                        self.show_shortcuts = true;
+                        ui.close_menu();
+                    }
                     if ui.button("关于 OpenItGo").clicked() {
                         self.error_message = Some(format!(
                             "OpenItGo v{}\n一个用 Rust 写的漫画阅读器。",
@@ -1655,6 +1663,59 @@ impl ReaderApp {
                 });
             });
         });
+    }
+
+    /// 帮助菜单的只读快捷键一览面板（编辑入口在 设置 → 快捷键）。
+    fn render_shortcuts_window(&mut self, ctx: &egui::Context) {
+        if !self.show_shortcuts {
+            return;
+        }
+        let mut open = self.show_shortcuts;
+        egui::Window::new("快捷键一览")
+            .collapsible(false)
+            .resizable(true)
+            .default_width(420.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("可自定义快捷键（修改入口：设置 → 快捷键）");
+                egui::Grid::new("shortcuts_configurable_grid")
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for (action, keys) in
+                            crate::shortcuts::configurable_shortcut_rows(&self.settings.shortcuts)
+                        {
+                            ui.label(action);
+                            ui.label(keys);
+                            ui.end_row();
+                        }
+                    });
+                ui.separator();
+                ui.label("内置快捷键（阅读器）");
+                egui::Grid::new("shortcuts_reader_grid")
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for (keys, action) in crate::shortcuts::hardcoded_reader_rows() {
+                            ui.label(keys);
+                            ui.label(action);
+                            ui.end_row();
+                        }
+                    });
+                ui.separator();
+                ui.label("内置快捷键（媒体）");
+                egui::Grid::new("shortcuts_media_grid")
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for (keys, action) in crate::shortcuts::hardcoded_media_rows() {
+                            ui.label(keys);
+                            ui.label(action);
+                            ui.end_row();
+                        }
+                    });
+            });
+        self.show_shortcuts = open;
     }
 
     fn render_reader_menu(&mut self, ui: &mut egui::Ui) {
@@ -3042,6 +3103,7 @@ mod tests {
                 current_theme: Theme::System,
                 comic_settings,
                 last_saved_comic_settings: None,
+                show_shortcuts: false,
             }
         }
     }
