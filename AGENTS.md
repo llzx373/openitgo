@@ -130,6 +130,18 @@ already embed it.
   in `PlayerState::audio_devices`, then validated in `sync_state` —
   a missing saved device falls back to "auto" and is reported once via
   `take_startup_device_invalid` (the app clears the stale setting).
+- **Media auto-next (自动续播)**: `ReaderApp::maybe_auto_next_media` runs in
+  `render_media` right after `sync_state`; when `open.last.ended` is true
+  with no `error`, it opens the next media file in the same directory
+  exactly once per opened media (`MediaView::auto_next_fired`, reset in
+  `MediaView::open`). The successor comes from `next_media_in_dir`
+  (`app.rs`), sorted by the numeric-aware, case-insensitive `natural_cmp`
+  ("EP2" < "EP10"). The "自动播放下一集" OSD is stashed in
+  `MediaView::pending_open_osd` and shown by `MediaView::open` after the new
+  media is up — showing it before the swap would paint on the old native
+  view, which the swap destroys. Playback errors (`error` non-empty) never
+  trigger auto-next; at the last episode a one-shot `已是最后一集` OSD shows
+  instead.
 - **MpvPlayer command rule**: every mpv command/property call made from the
   UI thread MUST use the async libmpv APIs (`mpv_command_async`,
   `mpv_set_property_async`, `mpv_get_property_async` — see

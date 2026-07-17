@@ -67,6 +67,79 @@ fn is_media_file(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// 数字感知、大小写不敏感的自然排序比较（"EP2" < "EP10"）。
+/// 连续数字段按数值比较，其余字符按小写后的字典序逐字符比较。
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    fn take_digits(it: &mut std::iter::Peekable<std::str::Chars>) -> String {
+        let mut s = String::new();
+        while let Some(c) = it.peek() {
+            if !c.is_ascii_digit() {
+                break;
+            }
+            s.push(*c);
+            it.next();
+        }
+        s
+    }
+
+    let mut ca = a.chars().peekable();
+    let mut cb = b.chars().peekable();
+    loop {
+        match (ca.peek().copied(), cb.peek().copied()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
+                let na = take_digits(&mut ca);
+                let nb = take_digits(&mut cb);
+                // 去掉前导零后先比长度再比字典序，即数值比较（无溢出风险）。
+                let ta = na.trim_start_matches('0');
+                let tb = nb.trim_start_matches('0');
+                let ord = ta.len().cmp(&tb.len()).then_with(|| ta.cmp(tb));
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+            (Some(x), Some(y)) => {
+                let ord = x.to_lowercase().cmp(y.to_lowercase());
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+                ca.next();
+                cb.next();
+            }
+        }
+    }
+}
+
+/// 返回同目录下按自然排序位于 current 之后的第一个媒体文件；
+/// current 不在目录的媒体列表中或已是最后一个时返回 None。
+fn next_media_in_dir(current: &Path) -> Option<PathBuf> {
+    let dir = current.parent()?;
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && is_media_file(p))
+        .collect();
+    entries.sort_by(|a, b| {
+        let an = a
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let bn = b
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // 自然比较相等（仅大小写/前导零差异）时用原始文件名兜底，保证排序确定。
+        natural_cmp(&an, &bn).then_with(|| an.cmp(&bn))
+    });
+    let pos = entries.iter().position(|p| p == current)?;
+    entries.get(pos + 1).cloned()
+}
+
 fn media_type_for_path(path: &std::path::Path) -> MediaType {
     if is_ebook_file(path) {
         MediaType::Ebook
@@ -601,12 +674,47 @@ impl ReaderApp {
         });
     }
 
+    /// 播放正常结束（ended 且无 error）时自动续播同目录自然排序的下一集，
+    /// 每个打开的媒体只触发一次（auto_next_fired 守卫，open() 时复位）。
+    /// 有下一集时经 open_media 走正常打开流程（含历史续播的默认行为），
+    /// OSD 通过 pending_open_osd 由 MediaView::open 在新媒体就绪后显示。
+    fn maybe_auto_next_media(&mut self, ctx: &egui::Context) {
+        let should_fire = match self.media_view.open.as_ref() {
+            Some(open) => {
+                !self.media_view.auto_next_fired && open.last.ended && open.last.error.is_none()
+            }
+            None => false,
+        };
+        if !should_fire {
+            return;
+        }
+        self.media_view.auto_next_fired = true;
+        let Some(current) = self.media_view.open.as_ref().map(|o| o.path.clone()) else {
+            return;
+        };
+        match next_media_in_dir(&current) {
+            Some(next) => {
+                let title = next
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("未知媒体")
+                    .to_string();
+                self.media_view.pending_open_osd = Some(format!("自动播放下一集：{title}"));
+                self.open_media(next);
+            }
+            None => {
+                self.media_view.show_osd(ctx, "已是最后一集".to_string());
+            }
+        }
+    }
+
     fn render_media(&mut self, ctx: &egui::Context) {
         if self.media_view.open.is_none() {
             self.current_view = View::Library;
             return;
         }
         self.media_view.sync_state();
+        self.maybe_auto_next_media(ctx);
         self.media_view.tick_osd(ctx);
 
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
@@ -3273,5 +3381,80 @@ mod tests {
             !menu_overlay_open(&ctx),
             "hover tooltips must not hide the video"
         );
+    }
+
+    #[test]
+    fn natural_cmp_orders_digit_runs_numerically() {
+        use std::cmp::Ordering::*;
+        assert_eq!(natural_cmp("EP2", "EP10"), Less);
+        assert_eq!(natural_cmp("EP10", "EP2"), Greater);
+        assert_eq!(natural_cmp("EP10", "EP10"), Equal);
+        // 同前缀数字段：整段数字按数值比较，而不是逐字符
+        assert_eq!(natural_cmp("EP2x", "EP10a"), Less);
+        assert_eq!(natural_cmp("file9.mkv", "file10.mkv"), Less);
+        // 前导零不影响数值比较
+        assert_eq!(natural_cmp("EP02", "EP2"), Equal);
+    }
+
+    #[test]
+    fn natural_cmp_is_case_insensitive() {
+        use std::cmp::Ordering::*;
+        assert_eq!(natural_cmp("ep2", "EP2"), Equal);
+        assert_eq!(natural_cmp("ABC", "abd"), Less);
+        assert_eq!(natural_cmp("a", "B"), Less);
+    }
+
+    #[test]
+    fn natural_cmp_non_digit_parts_compare_lexicographically() {
+        use std::cmp::Ordering::*;
+        assert_eq!(natural_cmp("abc", "abd"), Less);
+        // 前缀相同则短串在前
+        assert_eq!(natural_cmp("abc", "ab"), Greater);
+        assert_eq!(natural_cmp("", ""), Equal);
+        assert_eq!(natural_cmp("", "a"), Less);
+    }
+
+    #[test]
+    fn next_media_in_dir_follows_natural_order_and_skips_non_media() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        for name in ["EP1.mkv", "EP2.mkv", "EP10.mkv", "notes.txt"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        // 扩展名像媒体的目录不算媒体文件
+        std::fs::create_dir(dir.join("EP3.mkv")).unwrap();
+
+        assert_eq!(
+            next_media_in_dir(&dir.join("EP1.mkv")),
+            Some(dir.join("EP2.mkv"))
+        );
+        assert_eq!(
+            next_media_in_dir(&dir.join("EP2.mkv")),
+            Some(dir.join("EP10.mkv"))
+        );
+        // 已是最后一集
+        assert_eq!(next_media_in_dir(&dir.join("EP10.mkv")), None);
+        // current 不存在于目录中
+        assert_eq!(next_media_in_dir(&dir.join("EP9.mkv")), None);
+        // current 本身不是媒体文件
+        assert_eq!(next_media_in_dir(&dir.join("notes.txt")), None);
+    }
+
+    #[test]
+    fn next_media_in_dir_filters_audio_and_video() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        for name in ["a.mp3", "b.flac", "c.mkv", "d.cbz", "e.pdf"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        assert_eq!(
+            next_media_in_dir(&dir.join("a.mp3")),
+            Some(dir.join("b.flac"))
+        );
+        assert_eq!(
+            next_media_in_dir(&dir.join("b.flac")),
+            Some(dir.join("c.mkv"))
+        );
+        assert_eq!(next_media_in_dir(&dir.join("c.mkv")), None);
     }
 }

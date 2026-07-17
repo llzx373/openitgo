@@ -19,6 +19,13 @@ pub struct MediaView {
     /// Set once when the deferred startup device apply finds the saved
     /// device missing; read via take_startup_device_invalid.
     startup_device_invalid: bool,
+    /// Guard so "auto-play next episode" fires at most once per opened
+    /// media; reset in open().
+    pub auto_next_fired: bool,
+    /// OSD text to show once the next open succeeds (e.g. the auto-next
+    /// notice); consumed by open(). It must wait for the new media: shown
+    /// earlier it would paint on the old native view, which the swap destroys.
+    pub pending_open_osd: Option<String>,
 }
 
 pub struct OpenMedia {
@@ -47,6 +54,11 @@ impl MediaView {
         path: PathBuf,
         resume_ms: Option<u64>,
     ) -> Result<(), String> {
+        // Auto-next one-shot state resets/is consumed with every open; take
+        // the pending OSD up front so a failed open cannot leak it into a
+        // later, unrelated open.
+        self.auto_next_fired = false;
+        let pending_osd = self.pending_open_osd.take();
         let ctx2 = ctx.clone();
         let player =
             MpvPlayer::new(Box::new(move || ctx2.request_repaint())).map_err(|e| e.to_string())?;
@@ -68,6 +80,9 @@ impl MediaView {
             pending_resume_ms: resume_ms,
             pending_startup_device: None,
         });
+        if let Some(text) = pending_osd {
+            self.show_osd(ctx, text);
+        }
         Ok(())
     }
 
