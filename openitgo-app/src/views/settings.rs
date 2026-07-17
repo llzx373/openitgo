@@ -154,6 +154,37 @@ impl SettingsView {
                 );
             });
 
+        ui.label("字体");
+        let current_font = settings.ebook.font_family.clone();
+        egui::ComboBox::from_id_salt("ebook_font_family")
+            .selected_text(&current_font)
+            .show_ui(ui, |ui| {
+                const PRESETS: &[&str] = &[
+                    "system-ui",
+                    "serif",
+                    "sans-serif",
+                    "monospace",
+                    "PingFang SC",
+                    "Songti SC",
+                    "Kaiti SC",
+                    "Hiragino Sans GB",
+                ];
+                for preset in PRESETS {
+                    ui.selectable_value(
+                        &mut settings.ebook.font_family,
+                        preset.to_string(),
+                        *preset,
+                    );
+                }
+                if !PRESETS.contains(&current_font.as_str()) {
+                    ui.selectable_value(
+                        &mut settings.ebook.font_family,
+                        current_font.clone(),
+                        current_font.clone(),
+                    );
+                }
+            });
+
         ui.horizontal(|ui| {
             ui.label("字体大小:");
             ui.add(egui::Slider::new(&mut settings.ebook.font_size, 10..=72));

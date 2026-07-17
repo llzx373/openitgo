@@ -117,6 +117,9 @@ impl Settings {
                 self.ebook.margin_vertical
             ));
         }
+        if self.ebook.font_family.trim().is_empty() {
+            return Err("ebook.font_family must not be empty".to_string());
+        }
         if !(0.0..=100.0).contains(&self.media_volume) {
             return Err(format!(
                 "media_volume must be between 0 and 100, got {}",
@@ -145,6 +148,9 @@ impl Settings {
         self.ebook.line_height = self.ebook.line_height.clamp(1.0, 3.0);
         self.ebook.margin_horizontal = self.ebook.margin_horizontal.clamp(0, 200);
         self.ebook.margin_vertical = self.ebook.margin_vertical.clamp(0, 200);
+        if self.ebook.font_family.trim().is_empty() {
+            self.ebook.font_family = "system-ui".to_string();
+        }
         self.media_volume = self.media_volume.clamp(0.0, 100.0);
         self.media_speed = self.media_speed.clamp(0.1, 16.0);
     }
@@ -504,5 +510,20 @@ mod tests {
         s.clamp();
         assert_eq!(s.ebook.margin_horizontal, 200);
         assert_eq!(s.ebook.margin_vertical, 200);
+    }
+
+    #[test]
+    fn test_settings_validate_rejects_empty_font_family() {
+        let mut s = Settings::default();
+        s.ebook.font_family = "   ".to_string();
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn test_settings_clamp_restores_default_font_family() {
+        let mut s = Settings::default();
+        s.ebook.font_family = String::new();
+        s.clamp();
+        assert_eq!(s.ebook.font_family, "system-ui");
     }
 }
