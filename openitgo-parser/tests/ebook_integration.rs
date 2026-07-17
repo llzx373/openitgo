@@ -183,3 +183,106 @@ fn test_parse_gbk_txt_with_headings() {
     assert_eq!(ebook.chapters[0].title.as_deref(), Some("第一章 风起"));
     assert_eq!(ebook.chapters[1].title.as_deref(), Some("第二章 云涌"));
 }
+
+fn build_epub_with_resources() -> Vec<u8> {
+    use std::io::Cursor;
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+    zip.start_file("mimetype", options).unwrap();
+    zip.write_all(b"application/epub+zip").unwrap();
+
+    zip.start_file("META-INF/container.xml", options).unwrap();
+    zip.write_all(
+        br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>
+"#,
+    )
+    .unwrap();
+
+    zip.start_file("OEBPS/content.opf", options).unwrap();
+    zip.write_all(
+        br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="id" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Resource Book</dc:title>
+    <dc:identifier id="id">res-1</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="ch1" href="Text/ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="img" href="Images/pic.png" media-type="image/png"/>
+    <item id="font" href="Fonts/f.ttf" media-type="font/ttf"/>
+    <item id="css" href="Styles/s.css" media-type="text/css"/>
+  </manifest>
+  <spine>
+    <itemref idref="ch1"/>
+  </spine>
+</package>
+"#,
+    )
+    .unwrap();
+
+    zip.start_file("OEBPS/Text/ch1.xhtml", options).unwrap();
+    zip.write_all(
+        br#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head><body><p>before</p><img src="../Images/pic.png"/><p>after</p></body></html>"#,
+    )
+    .unwrap();
+
+    zip.start_file("OEBPS/Images/pic.png", options).unwrap();
+    zip.write_all(b"\x89PNG\r\n\x1a\nFAKE").unwrap();
+
+    zip.start_file("OEBPS/Fonts/f.ttf", options).unwrap();
+    zip.write_all(b"\x00\x01\x00\x00FAKETTF").unwrap();
+
+    zip.start_file("OEBPS/Styles/s.css", options).unwrap();
+    zip.write_all(
+        br#"body { color: red; }
+@font-face { font-family: "Embedded"; src: url("../Fonts/f.ttf"); }
+"#,
+    )
+    .unwrap();
+
+    zip.finish().unwrap().into_inner()
+}
+
+#[test]
+fn test_epub_chapter_rewrites_img_and_injects_font_face() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("res.epub");
+    std::fs::write(&path, build_epub_with_resources()).unwrap();
+
+    let ebook = parse_ebook(&path).unwrap();
+    let html = openitgo_parser::html::render_chapter_html(&ebook, 0).unwrap();
+    assert!(
+        html.contains("ebook://res/OEBPS/Images/pic.png"),
+        "got: {html}"
+    );
+    assert!(html.contains("@font-face"), "got: {html}");
+    assert!(
+        html.contains("ebook://res/OEBPS/Fonts/f.ttf"),
+        "got: {html}"
+    );
+    assert!(
+        !html.contains("color: red"),
+        "book layout CSS must be dropped: {html}"
+    );
+}
+
+#[test]
+fn test_read_epub_resource() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("res.epub");
+    std::fs::write(&path, build_epub_with_resources()).unwrap();
+
+    let ebook = parse_ebook(&path).unwrap();
+    let (mime, bytes) =
+        openitgo_parser::html::read_epub_resource(&ebook, "OEBPS/Images/pic.png").unwrap();
+    assert_eq!(mime, "image/png");
+    assert!(bytes.starts_with(b"\x89PNG"));
+    assert!(openitgo_parser::html::read_epub_resource(&ebook, "OEBPS/nope.png").is_none());
+}

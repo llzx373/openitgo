@@ -3739,6 +3739,7 @@ dependencies = [
  "mobi",
  "openitgo-core",
  "pdf",
+ "percent-encoding",
  "pulldown-cmark",
  "tempfile",
  "thiserror 1.0.69",

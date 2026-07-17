@@ -322,6 +322,21 @@ fn handle_ebook_protocol(
             .unwrap();
     }
 
+    if let Some(res_path) = decode_res_path(path) {
+        match openitgo_parser::html::read_epub_resource(&state.ebook, &res_path) {
+            Some((mime, bytes)) => {
+                return wry::http::Response::builder()
+                    .header("Content-Type", mime)
+                    .header("Cache-Control", "no-cache, no-store, must-revalidate")
+                    .body(bytes.into())
+                    .unwrap();
+            }
+            None => {
+                eprintln!("EbookRenderer: resource not found: {res_path}");
+            }
+        }
+    }
+
     // Return an empty 200 response for unknown resource requests instead of a
     // 404, which can be treated as a navigation error by WebKit and trigger a
     // reload of the shell page.
@@ -333,9 +348,39 @@ fn handle_ebook_protocol(
         .unwrap()
 }
 
+/// Extract and percent-decode the archive path from an `ebook://res/<path>`
+/// request URI. Returns `None` for non-resource paths.
+fn decode_res_path(path: &str) -> Option<String> {
+    let raw = path.strip_prefix("/res/")?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(
+        percent_encoding::percent_decode_str(raw)
+            .decode_utf8()
+            .map(|c| c.into_owned())
+            .unwrap_or_else(|_| raw.to_string()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_decode_res_path() {
+        assert_eq!(
+            decode_res_path("/res/OEBPS/Images/pic.png"),
+            Some("OEBPS/Images/pic.png".to_string())
+        );
+        assert_eq!(
+            decode_res_path("/res/OEBPS/a%20b.png"),
+            Some("OEBPS/a b.png".to_string())
+        );
+        assert_eq!(decode_res_path("/reader"), None);
+        assert_eq!(decode_res_path("/res/"), None);
+        assert_eq!(decode_res_path("/other/x"), None);
+    }
 
     #[test]
     fn test_js_settings_mode_strings() {
