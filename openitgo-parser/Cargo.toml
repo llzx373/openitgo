@@ -8,7 +8,7 @@ description = "Comic archive parsers for OpenItGo"
 [dependencies]
 openitgo-core = { path = "../openitgo-core" }
 image = { workspace = true }
-zip = { version = "2.2", default-features = false, features = ["deflate"] }
+zip = { version = "2.2", default-features = false, features = ["deflate", "aes-crypto"] }
 unrar = "0.5"
 pdf = "0.9"
 epub = "2.1"

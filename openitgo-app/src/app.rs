@@ -192,6 +192,16 @@ pub struct ReaderApp {
     pub last_saved_comic_settings: Option<(String, ComicReadingSettings)>,
     /// 帮助菜单"快捷键一览"面板的显示状态。
     pub show_shortcuts: bool,
+    /// 会话级压缩包密码缓存（不落盘）；key 为压缩包路径。
+    pub passwords: HashMap<PathBuf, String>,
+    /// 加密压缩包密码对话框状态；Some 时渲染模态窗口。
+    pub password_dialog: Option<PasswordDialog>,
+    /// 批量导入中等待输密码的文件队列（逐个弹同一对话框）。
+    pub pending_password_imports: Vec<PathBuf>,
+    /// 批量导入被用户取消的加密文件计数（汇总提示后清零）。
+    pub skipped_encrypted_imports: usize,
+    /// 最近一次 open_comic 的目标路径（供密码错误标记关联对话框）。
+    pub opening_path: Option<PathBuf>,
 }
 
 impl Default for ReaderApp {
@@ -247,6 +257,11 @@ impl Default for ReaderApp {
             comic_settings,
             last_saved_comic_settings: None,
             show_shortcuts: false,
+            passwords: HashMap::new(),
+            password_dialog: None,
+            pending_password_imports: Vec::new(),
+            skipped_encrypted_imports: 0,
+            opening_path: None,
         }
     }
 }
@@ -335,6 +350,7 @@ impl eframe::App for ReaderApp {
             View::Loading(path) => self.render_loading(ctx, path),
         }
         self.render_shortcuts_window(ctx);
+        self.render_password_dialog(ctx);
         self.maybe_save_comic_settings();
     }
 }
@@ -440,10 +456,18 @@ impl ReaderApp {
                     self.current_view = View::Reader;
                     self.error_message = None;
                 }
-                Err(e) => {
-                    self.error_message = Some(format!("无法打开漫画: {}", e));
-                    self.current_view = View::Library;
-                }
+                Err(e) => match password_prompt_kind(&e) {
+                    Some(kind) => {
+                        if let Some(path) = self.opening_path.take() {
+                            self.password_dialog = Some(PasswordDialog::new(path, kind));
+                        }
+                        self.current_view = View::Library;
+                    }
+                    None => {
+                        self.error_message = Some(format!("无法打开漫画: {}", e));
+                        self.current_view = View::Library;
+                    }
+                },
             },
         }
     }
@@ -1822,6 +1846,104 @@ impl ReaderApp {
         self.show_shortcuts = open;
     }
 
+    /// 加密压缩包密码对话框：确认后缓存密码（会话级）并重试打开/导入；
+    /// 取消则放弃打开，导入流程中则跳过该文件。
+    fn render_password_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.password_dialog.as_mut() else {
+            return;
+        };
+        let name = dialog
+            .path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("压缩包")
+            .to_string();
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("输入密码")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(format!("「{name}」已加密，请输入密码："));
+                if dialog.incorrect {
+                    ui.colored_label(ui.visuals().error_fg_color, "密码错误，请重试。");
+                }
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut dialog.input)
+                        .password(true)
+                        .desired_width(260.0),
+                );
+                if !response.has_focus() {
+                    response.request_focus();
+                }
+                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    confirm = true;
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("确定").clicked() {
+                        confirm = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if confirm {
+            let dialog = self.password_dialog.take().unwrap();
+            let pw = dialog.input.trim().to_string();
+            if !pw.is_empty() {
+                self.passwords.insert(dialog.path.clone(), pw);
+                self.sync_passwords_to_loaders();
+            }
+            if self.pending_password_imports.contains(&dialog.path) {
+                self.retry_password_import(dialog.path);
+            } else {
+                self.open_path(dialog.path);
+            }
+        } else if cancel {
+            let dialog = self.password_dialog.take().unwrap();
+            if self.pending_password_imports.contains(&dialog.path) {
+                self.skip_password_import(dialog.path);
+            }
+        }
+    }
+
+    fn sync_passwords_to_loaders(&self) {
+        for loader in [&self.page_loader, &self.cover_loader] {
+            *loader.passwords().write().unwrap() = self.passwords.clone();
+        }
+    }
+
+    fn retry_password_import(&mut self, path: PathBuf) {
+        self.pending_password_imports.retain(|p| p != &path);
+        self.add_file_to_library(path);
+        self.advance_password_import_queue();
+    }
+
+    fn skip_password_import(&mut self, path: PathBuf) {
+        self.pending_password_imports.retain(|p| p != &path);
+        self.skipped_encrypted_imports += 1;
+        self.advance_password_import_queue();
+    }
+
+    fn advance_password_import_queue(&mut self) {
+        if let Some(next) = self.pending_password_imports.first().cloned() {
+            // retry_password_import 里 add_file_to_library 可能刚用
+            // PasswordIncorrect 打开过对话框——不要覆盖它。
+            if self.password_dialog.is_none() {
+                self.password_dialog =
+                    Some(PasswordDialog::new(next, PasswordPromptKind::Required));
+            }
+        } else if self.skipped_encrypted_imports > 0 {
+            self.error_message = Some(format!(
+                "已跳过 {} 个加密压缩包",
+                self.skipped_encrypted_imports
+            ));
+            self.skipped_encrypted_imports = 0;
+        }
+    }
+
     fn render_reader_menu(&mut self, ui: &mut egui::Ui) {
         if ui.button("上一页").clicked() {
             self.reader_prev_page();
@@ -2712,8 +2834,32 @@ impl ReaderApp {
             self.add_ebook_to_library(path);
         } else if is_media_file(&path) {
             self.add_media_to_library(path);
-        } else if let Ok(comic) = openitgo_parser::parse(&path) {
-            self.add_comic_to_library(comic, &path);
+        } else {
+            let password = self.passwords.get(&path).cloned();
+            match openitgo_parser::parse_with_password(&path, password.as_deref()) {
+                Ok(comic) => self.add_comic_to_library(comic, &path),
+                Err(e)
+                    if matches!(
+                        e,
+                        openitgo_parser::traits::ParseError::PasswordRequired
+                            | openitgo_parser::traits::ParseError::PasswordIncorrect
+                    ) =>
+                {
+                    let kind =
+                        if matches!(e, openitgo_parser::traits::ParseError::PasswordIncorrect) {
+                            PasswordPromptKind::Incorrect
+                        } else {
+                            PasswordPromptKind::Required
+                        };
+                    if !self.pending_password_imports.contains(&path) {
+                        self.pending_password_imports.push(path.clone());
+                    }
+                    if self.password_dialog.is_none() {
+                        self.password_dialog = Some(PasswordDialog::new(path, kind));
+                    }
+                }
+                Err(_) => {}
+            }
         }
     }
 
@@ -2774,7 +2920,8 @@ impl ReaderApp {
         if !self.requested_cover_ids.insert(entry.comic_id.clone()) {
             return;
         }
-        let comic = match openitgo_parser::parse(&entry.path) {
+        let password = self.passwords.get(&entry.path).cloned();
+        let comic = match openitgo_parser::parse_with_password(&entry.path, password.as_deref()) {
             Ok(c) => c,
             Err(_) => {
                 self.requested_cover_ids.remove(&entry.comic_id);
@@ -2811,9 +2958,19 @@ impl ReaderApp {
 
     fn open_comic(&mut self, path: std::path::PathBuf) {
         timing::log(&format!("open_comic {:?}", path));
-        self.opener = Some(AsyncOpener::open(path.clone(), |p| {
-            openitgo_parser::parse(p).map_err(|e| e.to_string())
+        let password = self.passwords.get(&path).cloned();
+        self.opener = Some(AsyncOpener::open(path.clone(), move |p| {
+            openitgo_parser::parse_with_password(p, password.as_deref()).map_err(|e| match e {
+                openitgo_parser::traits::ParseError::PasswordRequired => {
+                    PASSWORD_REQUIRED_MARKER.to_string()
+                }
+                openitgo_parser::traits::ParseError::PasswordIncorrect => {
+                    PASSWORD_INCORRECT_MARKER.to_string()
+                }
+                other => other.to_string(),
+            })
         }));
+        self.opening_path = Some(path.clone());
         self.current_view = View::Loading(path);
         self.error_message = None;
     }
@@ -2941,7 +3098,14 @@ impl ReaderApp {
             self.add_folder_to_library(path.clone());
         }
         if let Some(path) = paths.first() {
-            if is_ebook_file(path) || is_media_file(path) || openitgo_parser::parse(path).is_ok() {
+            let password = self.passwords.get(path).cloned();
+            let probe = openitgo_parser::parse_with_password(path, password.as_deref());
+            let openable = probe.is_ok()
+                || matches!(
+                    probe,
+                    Err(openitgo_parser::traits::ParseError::PasswordRequired)
+                );
+            if is_ebook_file(path) || is_media_file(path) || openable {
                 self.open_path(path.clone());
             }
         }
@@ -2964,6 +3128,44 @@ fn load_comic_settings_with_error(
     match store.load_comic_settings() {
         Ok(m) => (m, None),
         Err(e) => (HashMap::new(), Some(e.to_string())),
+    }
+}
+
+/// AsyncOpener 只携带 String 错误：用不可见前缀标记密码类错误，
+/// poll_opener 据此弹密码对话框而不是普通错误。
+const PASSWORD_REQUIRED_MARKER: &str = "\u{1}password-required";
+const PASSWORD_INCORRECT_MARKER: &str = "\u{1}password-incorrect";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PasswordPromptKind {
+    Required,
+    Incorrect,
+}
+
+fn password_prompt_kind(err: &str) -> Option<PasswordPromptKind> {
+    if err == PASSWORD_REQUIRED_MARKER {
+        Some(PasswordPromptKind::Required)
+    } else if err == PASSWORD_INCORRECT_MARKER {
+        Some(PasswordPromptKind::Incorrect)
+    } else {
+        None
+    }
+}
+
+/// 加密压缩包密码输入对话框状态（会话内有效，不落盘）。
+pub struct PasswordDialog {
+    path: PathBuf,
+    input: String,
+    incorrect: bool,
+}
+
+impl PasswordDialog {
+    fn new(path: PathBuf, kind: PasswordPromptKind) -> Self {
+        Self {
+            path,
+            input: String::new(),
+            incorrect: matches!(kind, PasswordPromptKind::Incorrect),
+        }
     }
 }
 
@@ -3217,8 +3419,50 @@ mod tests {
                 comic_settings,
                 last_saved_comic_settings: None,
                 show_shortcuts: false,
+                passwords: HashMap::new(),
+                password_dialog: None,
+                pending_password_imports: Vec::new(),
+                skipped_encrypted_imports: 0,
+                opening_path: None,
             }
         }
+    }
+
+    #[test]
+    fn test_password_prompt_kind_matches_markers() {
+        assert!(matches!(
+            password_prompt_kind(PASSWORD_REQUIRED_MARKER),
+            Some(PasswordPromptKind::Required)
+        ));
+        assert!(matches!(
+            password_prompt_kind(PASSWORD_INCORRECT_MARKER),
+            Some(PasswordPromptKind::Incorrect)
+        ));
+        assert!(password_prompt_kind("无法打开漫画: io error").is_none());
+    }
+
+    #[test]
+    fn test_sync_passwords_to_loaders_copies_map() {
+        let (mut app, _tmp) = app_with_temp_store();
+        app.passwords
+            .insert(std::path::PathBuf::from("/tmp/enc.cbz"), "pw".to_string());
+        app.sync_passwords_to_loaders();
+        let page_pw = app.page_loader.passwords();
+        assert_eq!(
+            page_pw
+                .read()
+                .unwrap()
+                .get(std::path::Path::new("/tmp/enc.cbz")),
+            Some(&"pw".to_string())
+        );
+        let cover_pw = app.cover_loader.passwords();
+        assert_eq!(
+            cover_pw
+                .read()
+                .unwrap()
+                .get(std::path::Path::new("/tmp/enc.cbz")),
+            Some(&"pw".to_string())
+        );
     }
 
     #[test]

@@ -20,6 +20,10 @@ pub enum ParseError {
     InvalidMobi(String),
     #[error("Invalid text file: {0}")]
     InvalidText(String),
+    #[error("archive is encrypted and requires a password")]
+    PasswordRequired,
+    #[error("incorrect archive password")]
+    PasswordIncorrect,
 }
 
 pub trait Parser: Send + Sync {

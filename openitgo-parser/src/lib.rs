@@ -24,12 +24,18 @@ use std::path::Path;
 use traits::{ParseError, Parser};
 
 pub fn parse(path: &Path) -> Result<Comic, ParseError> {
+    parse_with_password(path, None)
+}
+
+/// Parse a comic archive/folder, decrypting encrypted ZIP/RAR entries with
+/// `password` when needed. Folder and PDF sources ignore `password`.
+pub fn parse_with_password(path: &Path, password: Option<&str>) -> Result<Comic, ParseError> {
     if folder::FolderParser::supports(path) {
         folder::FolderParser::parse(path)
     } else if zip::ZipParser::supports(path) {
-        zip::ZipParser::parse(path)
+        zip::parse_zip(path, password)
     } else if RarParser::supports(path) {
-        RarParser::parse(path)
+        rar::parse_rar(path, password)
     } else if pdf::PdfParser::supports(path) {
         pdf::PdfParser::parse(path)
     } else {

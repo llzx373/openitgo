@@ -8,6 +8,7 @@ use pdf_render::vello_cpu::color::palette::css::WHITE;
 use pdf_render::{render, RenderSettings};
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
@@ -155,6 +156,10 @@ impl SharedRawCache {
     }
 }
 
+/// Session-only archive password cache shared between the app and every IO
+/// worker. Never persisted (spec: passwords live for the app session only).
+pub type SharedPasswords = Arc<RwLock<HashMap<PathBuf, String>>>;
+
 pub type Epoch = u64;
 
 #[allow(dead_code)]
@@ -232,6 +237,7 @@ pub struct PageLoader {
     receiver: Receiver<LoadResult>,
     epoch: Arc<AtomicU64>,
     compress: Arc<AtomicBool>,
+    passwords: SharedPasswords,
     _io_workers: Vec<thread::JoinHandle<()>>,
     _decode_workers: Vec<thread::JoinHandle<()>>,
 }
@@ -289,6 +295,7 @@ impl PageLoader {
         // decompressed more than once.
         let raw_cache = SharedRawCache::new(512 * 1024 * 1024);
         let pdf_cache = PdfDocumentCache::new();
+        let passwords: SharedPasswords = Arc::new(RwLock::new(HashMap::new()));
         let io_thread_count = worker_count;
         let mut io_workers = Vec::with_capacity(io_thread_count);
         for _ in 0..io_thread_count {
@@ -300,6 +307,7 @@ impl PageLoader {
             let low_full_decode_sender = low_full_decode_sender.clone();
             let raw_cache = raw_cache.clone();
             let pdf_cache = pdf_cache.clone();
+            let passwords = passwords.clone();
             io_workers.push(thread::spawn(move || {
                 let mut zip_cache = ZipCache::new();
                 let mut high_disconnected = false;
@@ -319,6 +327,7 @@ impl PageLoader {
                             &mut zip_cache,
                             &raw_cache,
                             &pdf_cache,
+                            &passwords,
                         );
                     }
                     select! {
@@ -334,6 +343,7 @@ impl PageLoader {
                                     &mut zip_cache,
                                     &raw_cache,
                                     &pdf_cache,
+                                    &passwords,
                                 );
                             } else {
                                 high_disconnected = true;
@@ -354,6 +364,7 @@ impl PageLoader {
                                     &mut zip_cache,
                                     &raw_cache,
                                     &pdf_cache,
+                                    &passwords,
                                 );
                             } else {
                                 low_disconnected = true;
@@ -480,9 +491,15 @@ impl PageLoader {
             receiver,
             epoch: Arc::new(AtomicU64::new(1)),
             compress,
+            passwords,
             _io_workers: io_workers,
             _decode_workers: decode_workers,
         }
+    }
+
+    /// Shared session password cache; the app writes, IO workers read.
+    pub fn passwords(&self) -> SharedPasswords {
+        self.passwords.clone()
     }
 
     pub fn set_compress(&self, compress: bool) {
@@ -575,6 +592,7 @@ fn process_io_request(
     zip_cache: &mut ZipCache,
     raw_cache: &SharedRawCache,
     pdf_cache: &PdfDocumentCache,
+    passwords: &SharedPasswords,
 ) {
     let priority_label = match priority {
         LoadPriority::High => "high",
@@ -621,53 +639,61 @@ fn process_io_request(
                 image: Err(e),
             }));
         }
-        _ => match read_page_bytes(&req.source, zip_cache, raw_cache) {
-            Ok((bytes, format_hint)) => {
-                let job = DecodeJob {
-                    epoch: req.epoch,
-                    page_index: req.page_index,
-                    thumbnail: req.thumbnail,
-                    bytes,
-                    format_hint,
-                };
-                let sender = match (priority, req.thumbnail) {
-                    (LoadPriority::High, _) => high_decode_sender,
-                    (LoadPriority::Low, true) => low_thumb_decode_sender,
-                    (LoadPriority::Low, false) => low_full_decode_sender,
-                };
-                if sender.try_send(job).is_err() {
-                    timing::log(&format!(
-                        "IO dropped decode job page {} ({} queue full)",
-                        req.page_index, priority_label
-                    ));
-                    // High-priority failures are real errors the UI should surface.
-                    // Low-priority (preload/thumbnail) failures are transient backpressure;
-                    // tell the UI to drop the pending marker so it can retry later.
-                    let dropped = priority == LoadPriority::Low;
+        _ => {
+            let password = match &req.source {
+                PageSource::ZipEntry { archive, .. } | PageSource::RarEntry { archive, .. } => {
+                    passwords.read().unwrap().get(archive).cloned()
+                }
+                _ => None,
+            };
+            match read_page_bytes(&req.source, zip_cache, raw_cache, password.as_deref()) {
+                Ok((bytes, format_hint)) => {
+                    let job = DecodeJob {
+                        epoch: req.epoch,
+                        page_index: req.page_index,
+                        thumbnail: req.thumbnail,
+                        bytes,
+                        format_hint,
+                    };
+                    let sender = match (priority, req.thumbnail) {
+                        (LoadPriority::High, _) => high_decode_sender,
+                        (LoadPriority::Low, true) => low_thumb_decode_sender,
+                        (LoadPriority::Low, false) => low_full_decode_sender,
+                    };
+                    if sender.try_send(job).is_err() {
+                        timing::log(&format!(
+                            "IO dropped decode job page {} ({} queue full)",
+                            req.page_index, priority_label
+                        ));
+                        // High-priority failures are real errors the UI should surface.
+                        // Low-priority (preload/thumbnail) failures are transient backpressure;
+                        // tell the UI to drop the pending marker so it can retry later.
+                        let dropped = priority == LoadPriority::Low;
+                        let _ = result_sender.send(LoadResult {
+                            epoch: req.epoch,
+                            page_index: req.page_index,
+                            thumbnail: req.thumbnail,
+                            dropped,
+                            original_size: [0, 0],
+                            image: Err(format!(
+                                "{} decode queue full for page {}",
+                                priority_label, req.page_index
+                            )),
+                        });
+                    }
+                }
+                Err(e) => {
                     let _ = result_sender.send(LoadResult {
                         epoch: req.epoch,
                         page_index: req.page_index,
                         thumbnail: req.thumbnail,
-                        dropped,
+                        dropped: false,
                         original_size: [0, 0],
-                        image: Err(format!(
-                            "{} decode queue full for page {}",
-                            priority_label, req.page_index
-                        )),
+                        image: Err(e),
                     });
                 }
             }
-            Err(e) => {
-                let _ = result_sender.send(LoadResult {
-                    epoch: req.epoch,
-                    page_index: req.page_index,
-                    thumbnail: req.thumbnail,
-                    dropped: false,
-                    original_size: [0, 0],
-                    image: Err(e),
-                });
-            }
-        },
+        }
     }
 }
 
@@ -676,6 +702,7 @@ fn read_zip_entry(
     raw_cache: &SharedRawCache,
     archive_path: &std::path::Path,
     index: usize,
+    password: Option<&str>,
 ) -> Result<Vec<u8>, String> {
     let key = RawCacheKey::zip(archive_path, index);
     if let Some(cached) = raw_cache.get(&key) {
@@ -689,7 +716,14 @@ fn read_zip_entry(
 
     let first_attempt = timing::time("read_zip_entry (cached)", || -> Result<Vec<u8>, String> {
         let archive = zip_cache.get_or_open(archive_path)?;
-        let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
+        let mut entry = match password {
+            Some(pw) => archive
+                .by_index_decrypt(index, pw.as_bytes())
+                .map_err(zip_password_error_message)?,
+            None => archive
+                .by_index(index)
+                .map_err(zip_password_error_message)?,
+        };
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut bytes)
             .map_err(|e| format!("failed to read zip entry: {e}"))?;
@@ -712,7 +746,14 @@ fn read_zip_entry(
             zip_cache.remove(archive_path);
             let bytes = timing::time("read_zip_entry (retry)", || -> Result<Vec<u8>, String> {
                 let archive = zip_cache.get_or_open(archive_path)?;
-                let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
+                let mut entry = match password {
+                    Some(pw) => archive
+                        .by_index_decrypt(index, pw.as_bytes())
+                        .map_err(zip_password_error_message)?,
+                    None => archive
+                        .by_index(index)
+                        .map_err(zip_password_error_message)?,
+                };
                 let mut bytes = Vec::new();
                 std::io::Read::read_to_end(&mut entry, &mut bytes)
                     .map_err(|e| format!("failed to read zip entry: {e}"))?;
@@ -729,10 +770,25 @@ fn read_zip_entry(
     }
 }
 
+/// Chinese, user-facing message for password-related zip failures; other
+/// errors keep the debug string. Page errors render this text in the reader.
+fn zip_password_error_message(e: zip::result::ZipError) -> String {
+    match &e {
+        zip::result::ZipError::UnsupportedArchive(msg)
+            if *msg == zip::result::ZipError::PASSWORD_REQUIRED =>
+        {
+            "该压缩包已加密，需要密码".to_string()
+        }
+        zip::result::ZipError::InvalidPassword => "压缩包密码错误".to_string(),
+        _ => e.to_string(),
+    }
+}
+
 fn read_page_bytes(
     source: &PageSource,
     zip_cache: &mut ZipCache,
     raw_cache: &SharedRawCache,
+    password: Option<&str>,
 ) -> Result<(Vec<u8>, Option<String>), String> {
     match source {
         PageSource::PdfPage { .. } => Err("PDF should be rendered on IO thread".to_string()),
@@ -753,7 +809,7 @@ fn read_page_bytes(
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(|s| s.to_lowercase());
-            let bytes = read_zip_entry(zip_cache, raw_cache, archive, *index)?;
+            let bytes = read_zip_entry(zip_cache, raw_cache, archive, *index, password)?;
             Ok((bytes, hint))
         }
         PageSource::RarEntry {
@@ -765,7 +821,7 @@ fn read_page_bytes(
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(|s| s.to_lowercase());
-            let bytes = read_rar_entry(raw_cache, archive, name, *header_position)?;
+            let bytes = read_rar_entry(raw_cache, archive, name, *header_position, password)?;
             Ok((bytes, hint))
         }
     }
@@ -776,6 +832,7 @@ fn read_rar_entry(
     archive_path: &Path,
     name: &str,
     header_position: usize,
+    password: Option<&str>,
 ) -> Result<Vec<u8>, String> {
     let key = RawCacheKey::rar(archive_path, name);
     if let Some(cached) = raw_cache.get(&key) {
@@ -787,34 +844,46 @@ fn read_rar_entry(
         return Ok(cached.to_vec());
     }
 
-    let mut archive = unrar::Archive::new(archive_path)
+    let builder = match password {
+        Some(pw) => unrar::Archive::with_password(archive_path, pw),
+        None => unrar::Archive::new(archive_path),
+    };
+    let mut archive = builder
         .open_for_processing()
-        .map_err(|e| e.to_string())?;
+        .map_err(rar_password_error_message)?;
 
     // Skip headers before the target position. For archives where pages are
     // ordered by filename, this turns a linear scan into a small constant
     // overhead once the parser has emitted header_position.
     let mut current_position: usize = 0;
     loop {
-        let maybe_entry = archive.read_header().map_err(|e| e.to_string())?;
+        let maybe_entry = archive.read_header().map_err(rar_password_error_message)?;
         let entry = match maybe_entry {
             Some(e) => e,
             None => break,
         };
         if current_position >= header_position {
             if entry.entry().filename.to_string_lossy() == name {
-                let (bytes, _archive) = entry.read().map_err(|e| e.to_string())?;
+                let (bytes, _archive) = entry.read().map_err(rar_password_error_message)?;
                 raw_cache.insert(key, bytes.clone());
                 return Ok(bytes);
             }
-            archive = entry.skip().map_err(|e| e.to_string())?;
+            archive = entry.skip().map_err(rar_password_error_message)?;
         } else {
-            archive = entry.skip().map_err(|e| e.to_string())?;
+            archive = entry.skip().map_err(rar_password_error_message)?;
             current_position += 1;
         }
     }
 
     Err(format!("rar entry not found: {name}"))
+}
+
+fn rar_password_error_message(e: unrar::error::UnrarError) -> String {
+    match e.code {
+        unrar::error::Code::MissingPassword => "该压缩包已加密，需要密码".to_string(),
+        unrar::error::Code::BadPassword => "压缩包密码错误".to_string(),
+        _ => e.to_string(),
+    }
 }
 
 pub(crate) const MAX_IMAGE_DIMENSION: u32 = 4096;
@@ -1529,6 +1598,7 @@ mod tests {
         let mut zip_cache = ZipCache::new();
         let raw_cache = SharedRawCache::new(64 * 1024 * 1024);
         let pdf_cache = PdfDocumentCache::new();
+        let passwords: SharedPasswords = Arc::new(RwLock::new(HashMap::new()));
 
         process_io_request(
             LoadRequest {
@@ -1545,6 +1615,7 @@ mod tests {
             &mut zip_cache,
             &raw_cache,
             &pdf_cache,
+            &passwords,
         );
 
         let result = result_receiver
@@ -1613,5 +1684,50 @@ mod tests {
             }
             _ => panic!("thumbnail should be a Color image"),
         }
+    }
+
+    #[test]
+    fn test_read_zip_entry_encrypted_requires_password() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("enc.cbz");
+        write_encrypted_zip(&path, "s3cret");
+        let raw_cache = SharedRawCache::new(1024 * 1024);
+        let mut zip_cache = ZipCache::new();
+        let err = read_zip_entry(&mut zip_cache, &raw_cache, &path, 0, None).unwrap_err();
+        assert!(err.contains("需要密码"), "got: {err}");
+    }
+
+    #[test]
+    fn test_read_zip_entry_encrypted_wrong_password() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("enc.cbz");
+        write_encrypted_zip(&path, "s3cret");
+        let raw_cache = SharedRawCache::new(1024 * 1024);
+        let mut zip_cache = ZipCache::new();
+        let err = read_zip_entry(&mut zip_cache, &raw_cache, &path, 0, Some("nope")).unwrap_err();
+        assert!(err.contains("密码错误"), "got: {err}");
+    }
+
+    #[test]
+    fn test_read_zip_entry_encrypted_correct_password() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("enc.cbz");
+        write_encrypted_zip(&path, "s3cret");
+        let raw_cache = SharedRawCache::new(1024 * 1024);
+        let mut zip_cache = ZipCache::new();
+        let bytes = read_zip_entry(&mut zip_cache, &raw_cache, &path, 0, Some("s3cret")).unwrap();
+        assert_eq!(bytes, b"fake-png");
+    }
+
+    fn write_encrypted_zip(path: &std::path::Path, password: &str) {
+        use std::io::Write;
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .with_aes_encryption(zip::AesMode::Aes256, password);
+        zip.start_file("01.png", options).unwrap();
+        zip.write_all(b"fake-png").unwrap();
+        zip.finish().unwrap();
     }
 }

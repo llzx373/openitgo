@@ -45,6 +45,13 @@ already embed it.
 
 - **Comic IDs** are generated deterministically from the file/folder path via
   `openitgo_parser::stable_comic_id`. Never use the filename alone.
+- **加密压缩包密码**：`parse_with_password(path, Option<&str>)` 是带密码入口
+  （`parse` 转调 None）；密码只存会话级 `ReaderApp.passwords`
+  （`HashMap<PathBuf, String>`，不落盘），经 `PageLoader::passwords()` 共享给
+  IO worker 用于 `by_index_decrypt` / `Archive::with_password` 解密读取；
+  AsyncOpener 错误串用 `\u{1}` 前缀标记密码类错误供 poll_opener 识别。
+  RAR 数据加密包（`rar -p`）列表可读，解析期靠首条目读探针分类
+  （`MissingPassword`/`BadPassword`/CRC `BadData` → 密码错误）。
 - **PageLoader** runs IO and decode workers in background threads; results are
   sent back to the UI thread via channels. The app also maintains a separate
   `cover_loader` for library cover thumbnails.
