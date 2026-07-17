@@ -21,4 +21,8 @@ pub struct PlayerState {
     /// `None` until the first async audio-device-list reply lands — keeps
     /// "not enumerated yet" distinct from a genuinely empty enumeration.
     pub audio_devices: Option<Vec<AudioDevice>>,
+    /// 当前章节索引（mpv `chapter` 属性观察，id 9）；无章节文件为 None。
+    pub chapter: Option<i64>,
+    /// 章节标题列表（异步 `chapter-list` 回复填充，userdata 101；空 = 无章节）。
+    pub chapters: Vec<String>,
 }

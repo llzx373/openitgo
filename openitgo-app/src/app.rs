@@ -961,6 +961,103 @@ impl ReaderApp {
         });
     }
 
+    /// 媒体视图菜单：倍速微调/循环播放/截图/AB 循环/章节导航。
+    fn render_media_menu(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        if ui.button("倍速 -0.25").clicked() {
+            self.adjust_media_speed(ctx, -0.25);
+            ui.close_menu();
+        }
+        if ui.button("倍速 +0.25").clicked() {
+            self.adjust_media_speed(ctx, 0.25);
+            ui.close_menu();
+        }
+        ui.separator();
+        let loop_on = self.media_view.loop_file;
+        if ui.selectable_label(loop_on, "循环播放").clicked() {
+            self.toggle_media_loop(ctx);
+            ui.close_menu();
+        }
+        if ui.button("截图").clicked() {
+            self.media_screenshot(ctx);
+            ui.close_menu();
+        }
+        ui.separator();
+        let ab_label = match self.media_view.ab_loop {
+            crate::views::media::AbLoop::None => "设置 A 点",
+            crate::views::media::AbLoop::ASet(_) => "设置 B 点",
+            crate::views::media::AbLoop::Both(..) => "取消 AB 循环",
+        };
+        if ui.button(ab_label).clicked() {
+            self.media_ab_advance(ctx);
+            ui.close_menu();
+        }
+        ui.separator();
+        let has_chapters = self
+            .media_view
+            .open
+            .as_ref()
+            .map(|o| !o.last.chapters.is_empty())
+            .unwrap_or(false);
+        if ui
+            .add_enabled(has_chapters, egui::Button::new("上一章"))
+            .clicked()
+        {
+            self.media_chapter_step(ctx, -1);
+            ui.close_menu();
+        }
+        if ui
+            .add_enabled(has_chapters, egui::Button::new("下一章"))
+            .clicked()
+        {
+            self.media_chapter_step(ctx, 1);
+            ui.close_menu();
+        }
+    }
+
+    fn adjust_media_speed(&mut self, ctx: &egui::Context, delta: f64) {
+        if let Some(v) = self.media_view.adjust_speed(delta) {
+            self.settings.media_speed = v;
+            self.media_view
+                .show_osd(ctx, crate::views::media::speed_fine_osd_text(v));
+        }
+    }
+
+    fn toggle_media_loop(&mut self, ctx: &egui::Context) {
+        if let Some(on) = self.media_view.toggle_loop_file() {
+            self.media_view.show_osd(
+                ctx,
+                if on {
+                    "循环播放 开".to_string()
+                } else {
+                    "循环播放 关".to_string()
+                },
+            );
+        }
+    }
+
+    fn media_screenshot(&mut self, ctx: &egui::Context) {
+        match self.media_view.take_screenshot() {
+            Ok(path) => self
+                .media_view
+                .show_osd(ctx, format!("已保存截图：{}", path.display())),
+            Err(e) => {
+                self.error_message = Some(format!("截图失败: {e}"));
+            }
+        }
+    }
+
+    fn media_ab_advance(&mut self, ctx: &egui::Context) {
+        if let Some(text) = self.media_view.advance_ab_loop() {
+            self.media_view.show_osd(ctx, text);
+        }
+    }
+
+    fn media_chapter_step(&mut self, ctx: &egui::Context, delta: i64) {
+        if let Some(text) = self.media_view.chapter_step(delta) {
+            self.media_view.show_osd(ctx, text);
+        }
+    }
+
     fn set_media_volume(&mut self, ctx: &egui::Context, v: f64) {
         let v = v.clamp(0.0, 100.0);
         self.media_view.set_volume(v);
@@ -1641,6 +1738,13 @@ impl ReaderApp {
                     });
                 });
 
+                let is_media = matches!(self.current_view, View::Media);
+                ui.add_enabled_ui(is_media, |ui| {
+                    ui.menu_button("播放", |ui| {
+                        self.render_media_menu(ctx, ui);
+                    });
+                });
+
                 ui.menu_button("工具", |ui| {
                     if ui.button("设置").clicked() {
                         self.current_view = View::Settings;
@@ -2176,6 +2280,15 @@ impl ReaderApp {
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::F)) {
                     self.toggle_fullscreen(ctx);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::OpenBracket)) {
+                    self.adjust_media_speed(ctx, -0.25);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::CloseBracket)) {
+                    self.adjust_media_speed(ctx, 0.25);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::A)) {
+                    self.media_ab_advance(ctx);
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                     let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));

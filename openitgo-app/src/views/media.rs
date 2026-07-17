@@ -26,6 +26,10 @@ pub struct MediaView {
     /// notice); consumed by open(). It must wait for the new media: shown
     /// earlier it would paint on the old native view, which the swap destroys.
     pub pending_open_osd: Option<String>,
+    /// 循环播放开关（mpv `loop-file` inf/no）；会话状态，不持久化。
+    pub loop_file: bool,
+    /// AB 循环状态机；随 open() 复位。
+    pub ab_loop: AbLoop,
 }
 
 pub struct OpenMedia {
@@ -58,6 +62,8 @@ impl MediaView {
         // the pending OSD up front so a failed open cannot leak it into a
         // later, unrelated open.
         self.auto_next_fired = false;
+        self.loop_file = false;
+        self.ab_loop = AbLoop::None;
         let pending_osd = self.pending_open_osd.take();
         let ctx2 = ctx.clone();
         let player =
@@ -347,6 +353,87 @@ impl MediaView {
         open.player.set_audio_device(name)
     }
 
+    /// 倍速微调 ±0.25；返回应用后的倍速供持久化/OSD。
+    pub fn adjust_speed(&mut self, delta: f64) -> Option<f64> {
+        let open = self.open.as_ref()?;
+        let target = adjust_speed_value(open.last.speed, delta);
+        let _ = open.player.set_speed(target);
+        Some(target)
+    }
+
+    /// 切换循环播放；返回新状态供 OSD。
+    pub fn toggle_loop_file(&mut self) -> Option<bool> {
+        let open = self.open.as_ref()?;
+        let next = !self.loop_file;
+        let _ = open.player.set_loop_file(next);
+        self.loop_file = next;
+        Some(next)
+    }
+
+    /// 推进 AB 循环状态机并同步 mpv 点位；返回 OSD 文本。
+    pub fn advance_ab_loop(&mut self) -> Option<String> {
+        let open = self.open.as_ref()?;
+        let next = ab_loop_advance(self.ab_loop, open.last.position_ms);
+        match next {
+            AbLoop::None => {
+                let _ = open.player.set_ab_loop_a(None);
+                let _ = open.player.set_ab_loop_b(None);
+            }
+            AbLoop::ASet(a) => {
+                let _ = open.player.set_ab_loop_a(Some(a));
+                let _ = open.player.set_ab_loop_b(None);
+            }
+            AbLoop::Both(_, b) => {
+                let _ = open.player.set_ab_loop_b(Some(b));
+            }
+        }
+        self.ab_loop = next;
+        Some(ab_loop_osd_text(next))
+    }
+
+    /// 上一章/下一章；无章节返回 None（调用方禁用入口）。
+    /// 返回乐观预计的章节标题供 OSD（mpv 会在边界处钳制）。
+    pub fn chapter_step(&mut self, delta: i64) -> Option<String> {
+        let open = self.open.as_ref()?;
+        if open.last.chapters.is_empty() {
+            return None;
+        }
+        let _ = open.player.add_chapter(delta);
+        let target = open
+            .last
+            .chapter
+            .map(|c| c + delta)
+            .filter(|&t| t >= 0 && (t as usize) < open.last.chapters.len());
+        Some(match target {
+            Some(t) => open.last.chapters[t as usize].clone(),
+            None => {
+                if delta > 0 {
+                    "下一章".to_string()
+                } else {
+                    "上一章".to_string()
+                }
+            }
+        })
+    }
+
+    /// 截图到图片目录；返回完整路径。mpv 编码/写盘失败经事件泵
+    /// error 反馈，本调用只保证命令已发出与目录存在。
+    pub fn take_screenshot(&mut self) -> Result<PathBuf, String> {
+        let Some(open) = self.open.as_ref() else {
+            return Err("未打开媒体".to_string());
+        };
+        let dir = screenshot_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建截图目录: {e}"))?;
+        let path = dir.join(screenshot_filename(
+            &open.title,
+            time::OffsetDateTime::now_utc(),
+        ));
+        open.player
+            .screenshot_to_file(&path)
+            .map_err(|e| e.to_string())?;
+        Ok(path)
+    }
+
     /// Shows an OSD message for ~1s. On video the CATextLayer sublayer fades
     /// in/out via CoreAnimation's implicit opacity animation; when the native
     /// view is parked (audio-only / error overlay), `ui` paints the stored
@@ -499,6 +586,113 @@ pub fn format_sub_delay(v: f64) -> String {
     } else {
         format!("{v:+.1}")
     }
+}
+
+/// 倍速微调步进（[ / ] 键与菜单项）：±0.25，clamp 到 mpv 允许的 0.1–16，
+/// 并去掉浮点累加尾差。
+pub fn adjust_speed_value(current: f64, delta: f64) -> f64 {
+    (((current + delta) * 100.0).round() / 100.0).clamp(0.1, 16.0)
+}
+
+/// 微调倍速 OSD：`倍速 1.25x`（两位小数内去掉尾随零）。
+pub fn speed_fine_osd_text(speed: f64) -> String {
+    let rounded = (speed * 100.0).round() / 100.0;
+    let mut s = format!("{rounded:.2}");
+    while s.contains('.') && s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.pop();
+    }
+    format!("倍速 {s}x")
+}
+
+/// AB 循环状态机（mpv `ab-loop-a`/`ab-loop-b` 属性，秒）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AbLoop {
+    None,
+    ASet(f64),
+    Both(f64, f64),
+}
+
+impl Default for AbLoop {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+/// 按一次 A 键/菜单项的状态迁移：`position_ms` 为当前播放位置。
+/// 已设 A 且当前位置在 A 之前时重设 A（mpv 不允许 B < A）。
+pub fn ab_loop_advance(current: AbLoop, position_ms: u64) -> AbLoop {
+    let secs = position_ms as f64 / 1000.0;
+    match current {
+        AbLoop::None => AbLoop::ASet(secs),
+        AbLoop::ASet(a) => {
+            if secs > a {
+                AbLoop::Both(a, secs)
+            } else {
+                AbLoop::ASet(secs)
+            }
+        }
+        AbLoop::Both(..) => AbLoop::None,
+    }
+}
+
+/// AB 循环 OSD 文本（复用媒体时间格式 `mm:ss`）。
+pub fn ab_loop_osd_text(state: AbLoop) -> String {
+    // 一小时内分钟补零到两位（`mm:ss`）；更长的时间回退媒体的 `h:mm:ss`。
+    let fmt = |secs: f64| {
+        let ms = (secs * 1000.0) as u64;
+        if ms >= 3_600_000 {
+            openitgo_media::time::format_time_ms(ms)
+        } else {
+            let total_secs = ms / 1000;
+            format!("{:02}:{:02}", total_secs / 60, total_secs % 60)
+        }
+    };
+    match state {
+        AbLoop::None => "已取消 AB 循环".to_string(),
+        AbLoop::ASet(a) => format!("A 点 {}", fmt(a)),
+        AbLoop::Both(a, b) => format!("AB 循环 {} - {}", fmt(a), fmt(b)),
+    }
+}
+
+/// 截图保存目录：系统图片目录下 `OpenItGo/`；取不到时退回配置目录的
+/// `screenshots/`（与 JsonStore 同根）。
+pub fn screenshot_dir() -> PathBuf {
+    if let Some(pictures) = dirs::picture_dir() {
+        return pictures.join("OpenItGo");
+    }
+    openitgo_storage::json_store::JsonStore::default_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("screenshots")
+}
+
+/// 截图文件名 `<标题>-<yyyyMMdd-HHmmss>.png`：非文件名字符替换为 `_`，
+/// 最长 40 字符。时间戳用 UTC——time 的 `local-offset` feature 未启用，
+/// 避免多线程下的 unsoundness；文件名只需可读且基本唯一。
+pub fn screenshot_filename(title: &str, dt: time::OffsetDateTime) -> String {
+    let safe: String = title
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(40)
+        .collect();
+    format!(
+        "{}-{:04}{:02}{:02}-{:02}{:02}{:02}.png",
+        safe,
+        dt.year(),
+        dt.month() as u8,
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second()
+    )
 }
 
 /// Toolbar/dropdown label for a track: `#2 简中 [zh]`, or `#1 轨道 3`
@@ -716,5 +910,72 @@ mod tests {
             ..t.clone()
         };
         assert_eq!(track_label(&t2, 0), "#1 轨道 3");
+    }
+
+    #[test]
+    fn adjust_speed_value_steps_and_clamps() {
+        assert!((adjust_speed_value(1.0, 0.25) - 1.25).abs() < 1e-9);
+        assert!((adjust_speed_value(1.0, -0.25) - 0.75).abs() < 1e-9);
+        // 浮点尾差被去掉
+        assert!((adjust_speed_value(1.25, 0.25) - 1.5).abs() < 1e-9);
+        // clamp 到 mpv 允许范围（与 settings.media_speed 校验一致）
+        assert!((adjust_speed_value(16.0, 0.25) - 16.0).abs() < 1e-9);
+        assert!((adjust_speed_value(0.1, -0.25) - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn speed_fine_osd_text_trims_trailing_zeros() {
+        assert_eq!(speed_fine_osd_text(1.25), "倍速 1.25x");
+        assert_eq!(speed_fine_osd_text(1.5), "倍速 1.5x");
+        assert_eq!(speed_fine_osd_text(2.0), "倍速 2x");
+        assert_eq!(speed_fine_osd_text(0.1), "倍速 0.1x");
+    }
+
+    #[test]
+    fn ab_loop_advance_state_machine() {
+        // 未设置 -> 设 A（当前秒）
+        assert_eq!(ab_loop_advance(AbLoop::None, 83_000), AbLoop::ASet(83.0));
+        // 已设 A，B 在 A 之后 -> A/B 齐全
+        assert_eq!(
+            ab_loop_advance(AbLoop::ASet(83.0), 95_000),
+            AbLoop::Both(83.0, 95.0)
+        );
+        // 已设 A，当前位置在 A 之前 -> 重设 A 到当前位置
+        assert_eq!(
+            ab_loop_advance(AbLoop::ASet(83.0), 10_000),
+            AbLoop::ASet(10.0)
+        );
+        // A/B 齐全 -> 取消
+        assert_eq!(
+            ab_loop_advance(AbLoop::Both(83.0, 95.0), 100_000),
+            AbLoop::None
+        );
+    }
+
+    #[test]
+    fn ab_loop_osd_text_formats_states() {
+        assert_eq!(ab_loop_osd_text(AbLoop::None), "已取消 AB 循环");
+        assert_eq!(ab_loop_osd_text(AbLoop::ASet(83.0)), "A 点 01:23");
+        assert_eq!(
+            ab_loop_osd_text(AbLoop::Both(83.0, 95.0)),
+            "AB 循环 01:23 - 01:35"
+        );
+    }
+
+    #[test]
+    fn screenshot_filename_sanitizes_title_and_stamps_utc() {
+        let dt = time::Date::from_calendar_date(2026, time::Month::July, 17)
+            .unwrap()
+            .with_hms(12, 30, 45)
+            .unwrap()
+            .assume_utc();
+        assert_eq!(
+            screenshot_filename("Episode 01", dt),
+            "Episode_01-20260717-123045.png"
+        );
+        assert_eq!(
+            screenshot_filename("第 1 集/最终话", dt),
+            "第_1_集_最终话-20260717-123045.png"
+        );
     }
 }

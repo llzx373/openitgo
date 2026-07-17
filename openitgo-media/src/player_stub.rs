@@ -86,4 +86,28 @@ impl MpvPlayer {
     pub fn set_audio_device(&self, _name: &str) -> Result<(), MediaError> {
         Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
     }
+
+    pub fn set_loop_file(&self, _enabled: bool) -> Result<(), MediaError> {
+        Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
+    }
+
+    pub fn screenshot_to_file(&self, _path: &Path) -> Result<(), MediaError> {
+        Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
+    }
+
+    pub fn set_ab_loop_a(&self, _secs: Option<f64>) -> Result<(), MediaError> {
+        Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
+    }
+
+    pub fn set_ab_loop_b(&self, _secs: Option<f64>) -> Result<(), MediaError> {
+        Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
+    }
+
+    pub fn add_chapter(&self, _delta: i64) -> Result<(), MediaError> {
+        Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
+    }
+
+    pub fn request_chapter_list(&self) -> Result<(), MediaError> {
+        Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
+    }
 }

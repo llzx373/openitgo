@@ -45,6 +45,8 @@ fn cstring(s: &str) -> CString {
 /// reply_userdata for the async `audio-device-list` query; observed
 /// properties use 1-8 (different event type, but keep namespaces distinct).
 const AUDIO_DEVICES_REPLY_USERDATA: u64 = 100;
+/// reply_userdata for the async `chapter-list` query.
+const CHAPTER_LIST_REPLY_USERDATA: u64 = 101;
 
 impl MpvPlayer {
     pub fn new(repaint: Box<dyn Fn() + Send + Sync>) -> Result<Self, MediaError> {
@@ -133,6 +135,12 @@ impl MpvPlayer {
                 8,
                 cstring("sub-delay").as_ptr(),
                 mpv::mpv_format_MPV_FORMAT_DOUBLE,
+            );
+            mpv::mpv_observe_property(
+                handle,
+                9,
+                cstring("chapter").as_ptr(),
+                mpv::mpv_format_MPV_FORMAT_INT64,
             );
         }
         // PlayerState::default() leaves volume/speed at 0.0; set sane initial
@@ -322,6 +330,67 @@ impl MpvPlayer {
         self.set_property_string("audio-device", name)
     }
 
+    /// `inf` loops the current file forever; `no` restores normal EOF
+    /// behavior (used by the auto-next feature).
+    pub fn set_loop_file(&self, enabled: bool) -> Result<(), MediaError> {
+        self.set_property_string("loop-file", if enabled { "inf" } else { "no" })
+    }
+
+    /// Saves a screenshot of the current video frame; mpv picks the encoder
+    /// from the file extension.
+    pub fn screenshot_to_file(&self, path: &Path) -> Result<(), MediaError> {
+        let s = path
+            .to_str()
+            .ok_or_else(|| MediaError::Load("路径包含非 UTF-8 字符".into()))?;
+        self.command(&["screenshot-to-file", s])
+    }
+
+    /// AB loop point A in seconds; `None` clears it (mpv `no`).
+    pub fn set_ab_loop_a(&self, secs: Option<f64>) -> Result<(), MediaError> {
+        match secs {
+            Some(v) => self.set_property_string("ab-loop-a", &format!("{v:.3}")),
+            None => self.set_property_string("ab-loop-a", "no"),
+        }
+    }
+
+    /// AB loop point B in seconds; `None` clears it (mpv `no`).
+    pub fn set_ab_loop_b(&self, secs: Option<f64>) -> Result<(), MediaError> {
+        match secs {
+            Some(v) => self.set_property_string("ab-loop-b", &format!("{v:.3}")),
+            None => self.set_property_string("ab-loop-b", "no"),
+        }
+    }
+
+    /// Relative chapter jump; mpv clamps at the first/last chapter.
+    pub fn add_chapter(&self, delta: i64) -> Result<(), MediaError> {
+        self.command(&["add", "chapter", &delta.to_string()])
+    }
+
+    /// Fires an async `chapter-list` query; the reply is parsed on the event
+    /// thread into `PlayerState::chapters` (same pattern as
+    /// `request_audio_devices`, distinct userdata).
+    pub fn request_chapter_list(&self) -> Result<(), MediaError> {
+        let name = cstring("chapter-list");
+        // SAFETY: handle is valid; name is a valid NUL-terminated string that
+        // outlives the call. The reply arrives as MPV_EVENT_GET_PROPERTY_REPLY
+        // carrying CHAPTER_LIST_REPLY_USERDATA.
+        let rc = unsafe {
+            mpv::mpv_get_property_async(
+                self.handle,
+                CHAPTER_LIST_REPLY_USERDATA,
+                name.as_ptr(),
+                mpv::mpv_format_MPV_FORMAT_NODE,
+            )
+        };
+        if rc < 0 {
+            return Err(MediaError::Command {
+                code: rc,
+                what: "get chapter-list".to_string(),
+            });
+        }
+        Ok(())
+    }
+
     fn spawn_event_thread(&self, repaint: Box<dyn Fn() + Send + Sync>) -> JoinHandle<()> {
         let handle = SendHandle(self.handle);
         let state = self.state.clone();
@@ -400,6 +469,22 @@ fn event_loop(
                     s.loaded = true;
                     s.ended = false;
                     s.error = None;
+                    s.chapter = None;
+                    s.chapters.clear();
+                }
+                // Kick the async chapter-list query for the new file; the
+                // reply lands as MPV_EVENT_GET_PROPERTY_REPLY with
+                // CHAPTER_LIST_REPLY_USERDATA.
+                let name = cstring("chapter-list");
+                // SAFETY: handle is valid for the lifetime of this loop; name
+                // is a valid NUL-terminated string that outlives the call.
+                unsafe {
+                    mpv::mpv_get_property_async(
+                        handle,
+                        CHAPTER_LIST_REPLY_USERDATA,
+                        name.as_ptr(),
+                        mpv::mpv_format_MPV_FORMAT_NODE,
+                    );
                 }
             }
             mpv::mpv_event_id_MPV_EVENT_END_FILE => {
@@ -441,6 +526,23 @@ fn event_loop(
                         }
                     }
                 }
+                if userdata == CHAPTER_LIST_REPLY_USERDATA {
+                    // SAFETY: for MPV_EVENT_GET_PROPERTY_REPLY, event data
+                    // points to a valid mpv_event_property owned by mpv.
+                    let prop = unsafe { (*event).data as *mut mpv::mpv_event_property };
+                    if !prop.is_null() {
+                        let (format, data) = unsafe { ((*prop).format, (*prop).data) };
+                        if format == mpv::mpv_format_MPV_FORMAT_NODE && !data.is_null() {
+                            // SAFETY: data points to a valid mpv_node owned by
+                            // mpv for the duration of the event; we only read.
+                            let raw = unsafe { read_chapter_list(data as *mut mpv::mpv_node) };
+                            if let Ok(mut s) = state.lock() {
+                                s.chapters = crate::chapters::parse_chapters(raw);
+                            }
+                            repaint();
+                        }
+                    }
+                }
             }
             mpv::mpv_event_id_MPV_EVENT_PROPERTY_CHANGE => {
                 // SAFETY: event is valid; reply_userdata is a plain value field
@@ -457,6 +559,7 @@ fn event_loop(
                     ((*prop).format, (*prop).data)
                 };
                 let mut should_repaint = false;
+                let mut kick_chapter_list = false;
                 if let Ok(mut s) = state.lock() {
                     match userdata {
                         1 => {
@@ -539,7 +642,29 @@ fn event_loop(
                                 should_repaint = true;
                             }
                         }
+                        9 => {
+                            if format == mpv::mpv_format_MPV_FORMAT_INT64 && !data.is_null() {
+                                // SAFETY: format guarantees data points to an i64.
+                                s.chapter = Some(unsafe { *(data as *mut i64) });
+                                should_repaint = true;
+                                kick_chapter_list = true;
+                            }
+                        }
                         _ => {}
+                    }
+                }
+                if kick_chapter_list {
+                    // chapter 变化时刷新 chapter-list（spec：保持标题列表新鲜）。
+                    let name = cstring("chapter-list");
+                    // SAFETY: handle is valid for the lifetime of this loop;
+                    // name is a valid NUL-terminated string outliving the call.
+                    unsafe {
+                        mpv::mpv_get_property_async(
+                            handle,
+                            CHAPTER_LIST_REPLY_USERDATA,
+                            name.as_ptr(),
+                            mpv::mpv_format_MPV_FORMAT_NODE,
+                        );
                     }
                 }
                 if should_repaint {
@@ -721,4 +846,62 @@ unsafe fn node_string(v: *mut mpv::mpv_node) -> String {
             .to_string_lossy()
             .into_owned()
     }
+}
+
+/// Walks a chapter-list NODE (list of maps with an optional string `title`
+/// key) into FFI-free records.
+/// # Safety: `node` must point to a valid mpv_node owned by the caller.
+unsafe fn read_chapter_list(node: *mut mpv::mpv_node) -> Vec<crate::chapters::RawChapter> {
+    let mut out = Vec::new();
+    // SAFETY: per caller, node points to a valid mpv_node owned by us.
+    if node.is_null() || unsafe { (*node).format } != mpv::mpv_format_MPV_FORMAT_NODE_ARRAY {
+        return out;
+    }
+    // SAFETY: format is NODE_ARRAY, so the list union member is valid.
+    let list = unsafe { (*node).u.list };
+    if list.is_null() {
+        return out;
+    }
+    // SAFETY: list points to a valid mpv_node_list owned by mpv; values has
+    // num entries.
+    let (num, values) = unsafe { ((*list).num, (*list).values) };
+    for i in 0..num {
+        // SAFETY: i < num, so values[i] is a valid mpv_node.
+        let entry = unsafe { values.offset(i as isize) };
+        // SAFETY: entry points to a valid mpv_node owned by mpv.
+        if entry.is_null() || unsafe { (*entry).format } != mpv::mpv_format_MPV_FORMAT_NODE_MAP {
+            continue;
+        }
+        // SAFETY: format is NODE_MAP, so the list union member is valid.
+        let map = unsafe { (*entry).u.list };
+        if map.is_null() {
+            continue;
+        }
+        // SAFETY: map points to a valid mpv_node_list; keys and values each
+        // have num entries.
+        let (mnum, mvalues, mkeys) = unsafe { ((*map).num, (*map).values, (*map).keys) };
+        let mut chapter = crate::chapters::RawChapter { title: None };
+        for j in 0..mnum {
+            // SAFETY: j < mnum, so keys[j] is a valid NUL-terminated string
+            // owned by the node.
+            let key = unsafe {
+                let k = mkeys.offset(j as isize);
+                if k.is_null() || (*k).is_null() {
+                    continue;
+                }
+                std::ffi::CStr::from_ptr(*k).to_string_lossy().into_owned()
+            };
+            // SAFETY: j < mnum, so values[j] is a valid mpv_node.
+            let v = unsafe { mvalues.offset(j as isize) };
+            if v.is_null() || unsafe { (*v).format } != mpv::mpv_format_MPV_FORMAT_STRING {
+                continue;
+            }
+            if key == "title" {
+                // SAFETY: format checked STRING above; node_string copies it.
+                chapter.title = Some(unsafe { node_string(v) });
+            }
+        }
+        out.push(chapter);
+    }
+    out
 }

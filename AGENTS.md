@@ -167,6 +167,10 @@ already embed it.
   window on media re-open (docs/superpowers/reports/2026-07-17-bug-notes-archived.md
   问题 A). The `audio-device-list`
   reply is parsed on the event thread into `PlayerState::audio_devices`.
+- **MpvPlayer observe/userdata 分配**：属性观察 id 1-9（9 = `chapter`），
+  异步查询 userdata 100（`audio-device-list`）/ 101（`chapter-list`）；
+  下一可用观察 id 10、userdata 102。`chapter-list` 在 FILE_LOADED 与
+  需要时经 `request_chapter_list` 拉取，解析入 `PlayerState.chapters`。
 - **MpvPlayer teardown** order matters: `Drop` sets a quit flag and joins the
   `mpv-events` thread (50ms `mpv_wait_event` timeout) *before*
   `mpv_terminate_destroy` — a `mpv_wait_event` call racing the handle free

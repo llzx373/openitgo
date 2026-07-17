@@ -1,3 +1,4 @@
+pub mod chapters;
 #[cfg(target_os = "macos")]
 pub mod cover;
 pub mod devices;

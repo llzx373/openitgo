@@ -23,6 +23,7 @@ time = "0.3"
 wry = "0.55"
 serde = { workspace = true }
 serde_json = { workspace = true }
+dirs = { workspace = true }
 percent-encoding = "2"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 unrar = "0.5"
