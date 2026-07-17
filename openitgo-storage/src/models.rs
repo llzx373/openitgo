@@ -526,4 +526,12 @@ mod tests {
         s.clamp();
         assert_eq!(s.ebook.font_family, "system-ui");
     }
+
+    #[test]
+    fn test_default_shortcuts_cover_ebook_actions() {
+        let s = Shortcuts::default();
+        assert!(s.back_to_library.contains(&"Escape".to_string()));
+        assert!(s.page_down.contains(&"PageDown".to_string()));
+        assert!(s.page_up.contains(&"PageUp".to_string()));
+    }
 }

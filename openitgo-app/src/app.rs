@@ -1857,11 +1857,28 @@ impl ReaderApp {
                 if ctx.input(|i| i.key_pressed(egui::Key::F) && i.modifiers.command) {
                     self.ebook_view.toggle_search();
                 }
-                if is_shortcut_pressed(ctx, &self.settings.shortcuts.next_page) {
-                    self.ebook_view.next_page();
+                // 文本框聚焦时不响应翻页类全局键，避免与输入冲突（如搜索框
+                // 里按 Space）。
+                if !ctx.wants_keyboard_input() {
+                    if is_shortcut_pressed(ctx, &self.settings.shortcuts.next_page) {
+                        self.ebook_view.next_page();
+                    }
+                    if is_shortcut_pressed(ctx, &self.settings.shortcuts.prev_page) {
+                        self.ebook_view.prev_page();
+                    }
+                    if is_shortcut_pressed(ctx, &self.settings.shortcuts.page_down) {
+                        self.ebook_view.next_page();
+                    }
+                    if is_shortcut_pressed(ctx, &self.settings.shortcuts.page_up) {
+                        self.ebook_view.prev_page();
+                    }
                 }
-                if is_shortcut_pressed(ctx, &self.settings.shortcuts.prev_page) {
-                    self.ebook_view.prev_page();
+                if is_shortcut_pressed(ctx, &self.settings.shortcuts.back_to_library) {
+                    if self.ebook_view.search_visible() {
+                        self.ebook_view.close_search();
+                    } else {
+                        self.current_view = View::Library;
+                    }
                 }
             }
             View::Media => {
