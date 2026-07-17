@@ -596,6 +596,7 @@ function setSearchActiveIndex(index) {{
     const offset = charOffsetOfElement(mark);
     goToCharOffset(offset);
   }}
+  sendIpc({{ type: 'search', count: ebookSearchHighlights.length, active: idx }});
 }}
 
 function findText(query) {{
@@ -639,7 +640,16 @@ function findText(query) {{
   }}
   if (ebookSearchHighlights.length > 0) {{
     setSearchActiveIndex(0);
+  }} else {{
+    sendIpc({{ type: 'search', count: 0, active: -1 }});
   }}
+}}
+
+// Re-run the active search after a relayout (settings change, resize, chapter
+// switch) replaced the chapter DOM and dropped all highlight marks.
+function restoreSearchAfterLayout() {{
+  if (!ebookSearchQuery) return;
+  findText(ebookSearchQuery);
 }}
 
 function findNext() {{
@@ -711,6 +721,7 @@ function applySettings(json) {{
       }}
       goToSpread(targetSpread);
     }}
+    restoreSearchAfterLayout();
   }}
 }}
 
@@ -781,6 +792,7 @@ async function loadChapter(index, charOffset) {{
     }}
     preloadChapter(currentChapter - 1);
     preloadChapter(currentChapter + 1);
+    restoreSearchAfterLayout();
   }} catch (e) {{
     columnContent.innerHTML = '<p>章节加载失败: ' + e + '</p>';
   }}
@@ -836,6 +848,7 @@ window.addEventListener('resize', () => {{
       if (viewportH === lastLayoutParams.height) return;
       recomputeTotalPages();
       goToSpread(paginatorState.currentSpread);
+      restoreSearchAfterLayout();
       return;
     }}
 
@@ -850,6 +863,7 @@ window.addEventListener('resize', () => {{
     }} else {{
       goToSpread(paginatorState.currentSpread);
     }}
+    restoreSearchAfterLayout();
   }}, RESIZE_DEBOUNCE_MS);
 }});
 
@@ -2638,6 +2652,76 @@ mod tests {
         assert!(
             fn_body.contains("querySelector('#' + CSS.escape(fragment))"),
             "resolveTocTarget should build a safe id selector"
+        );
+    }
+
+    #[test]
+    fn test_search_reports_ipc_and_replays_after_relayout() {
+        let html = reader_html(&EbookSettings::default(), 3);
+
+        let set_active = html
+            .split("function setSearchActiveIndex(index)")
+            .nth(1)
+            .expect("setSearchActiveIndex not found")
+            .split("function findText")
+            .next()
+            .expect("setSearchActiveIndex body not found");
+        assert!(
+            set_active.contains("type: 'search'"),
+            "setSearchActiveIndex should report search state via IPC"
+        );
+
+        let find_text = html
+            .split("function findText(query)")
+            .nth(1)
+            .expect("findText not found")
+            .split("function findNext")
+            .next()
+            .expect("findText body not found");
+        assert!(
+            find_text.contains("count: 0, active: -1"),
+            "findText should report zero matches via IPC"
+        );
+
+        assert!(
+            html.contains("function restoreSearchAfterLayout"),
+            "restoreSearchAfterLayout should exist"
+        );
+
+        let apply_settings = html
+            .split("function applySettings(json)")
+            .nth(1)
+            .expect("applySettings not found")
+            .split("// Lightweight adjacent-chapter preload")
+            .next()
+            .expect("applySettings body not found");
+        assert!(
+            apply_settings.contains("restoreSearchAfterLayout()"),
+            "applySettings should replay search after relayout"
+        );
+
+        let load_chapter = html
+            .split("async function loadChapter(index, charOffset)")
+            .nth(1)
+            .expect("loadChapter not found")
+            .split("function onWheel")
+            .next()
+            .expect("loadChapter body not found");
+        assert!(
+            load_chapter.contains("restoreSearchAfterLayout()"),
+            "loadChapter should replay search in the new chapter"
+        );
+
+        let resize = html
+            .split("window.addEventListener('resize', () => {")
+            .nth(1)
+            .expect("resize handler not found")
+            .split("loadChapter(0, 0);")
+            .next()
+            .expect("resize handler end not found");
+        assert!(
+            resize.contains("restoreSearchAfterLayout()"),
+            "resize handler should replay search after relayout"
         );
     }
 }

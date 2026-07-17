@@ -9,16 +9,50 @@ pub struct EbookView {
     pub show_toc: bool,
 }
 
+/// Ebook full-text search bar state. Kept separate from the renderer so the
+/// state machine is unit-testable without a WebView.
+#[derive(Default)]
+pub struct SearchState {
+    pub visible: bool,
+    pub query: String,
+    focus_pending: bool,
+}
+
+impl SearchState {
+    pub fn open(&mut self) {
+        self.visible = true;
+        self.focus_pending = true;
+    }
+
+    pub fn close(&mut self) {
+        self.visible = false;
+        self.query.clear();
+    }
+
+    pub fn toggle(&mut self) {
+        if self.visible {
+            self.close();
+        } else {
+            self.open();
+        }
+    }
+
+    /// Returns `true` exactly once after `open()` so the UI can focus the
+    /// search input on the first frame it appears.
+    pub fn take_focus_request(&mut self) -> bool {
+        std::mem::take(&mut self.focus_pending)
+    }
+}
+
 pub struct OpenEbook {
     pub ebook: Ebook,
     pub renderer: EbookRenderer,
     pub current_chapter: usize,
     pub current_spread: usize,
+    pub search: SearchState,
 }
 
 impl EbookView {
-    /// Opens an ebook. Reserved for the future ebook open flow.
-    #[allow(dead_code)]
     pub fn open(
         &mut self,
         ctx: &egui::Context,
@@ -34,6 +68,7 @@ impl EbookView {
             renderer,
             current_chapter: 0,
             current_spread: 0,
+            search: SearchState::default(),
         });
         Ok(())
     }
@@ -68,6 +103,41 @@ impl EbookView {
 
     pub fn toggle_toc(&mut self) {
         self.show_toc = !self.show_toc;
+    }
+
+    pub fn search_visible(&self) -> bool {
+        self.open
+            .as_ref()
+            .map(|o| o.search.visible)
+            .unwrap_or(false)
+    }
+
+    pub fn toggle_search(&mut self) {
+        if let Some(open) = self.open.as_mut() {
+            open.search.toggle();
+            if !open.search.visible {
+                open.renderer.clear_highlights();
+            }
+        }
+    }
+
+    pub fn close_search(&mut self) {
+        if let Some(open) = self.open.as_mut() {
+            open.search.close();
+            open.renderer.clear_highlights();
+        }
+    }
+
+    pub fn find_next(&mut self) {
+        if let Some(open) = self.open.as_ref() {
+            open.renderer.find_next();
+        }
+    }
+
+    pub fn find_prev(&mut self) {
+        if let Some(open) = self.open.as_ref() {
+            open.renderer.find_prev();
+        }
     }
 
     fn toc_fragment(href: &str) -> Option<String> {
@@ -215,6 +285,7 @@ mod tests {
                 renderer,
                 current_chapter: 0,
                 current_spread: 0,
+                search: SearchState::default(),
             };
             open.current_spread = 7;
             open.current_spread
@@ -259,5 +330,30 @@ mod tests {
             EbookView::toc_fragment("chapter.xhtml#section%"),
             Some("section%".to_string())
         );
+    }
+
+    #[test]
+    fn test_search_state_open_close_toggle() {
+        let mut s = SearchState::default();
+        assert!(!s.visible);
+        s.toggle();
+        assert!(s.visible);
+        assert!(s.take_focus_request());
+        assert!(!s.take_focus_request());
+        s.query = "test".to_string();
+        s.close();
+        assert!(!s.visible);
+        assert!(s.query.is_empty());
+    }
+
+    #[test]
+    fn test_ebook_view_search_methods_without_open_book() {
+        let mut view = EbookView::default();
+        assert!(!view.search_visible());
+        view.toggle_search();
+        view.close_search();
+        view.find_next();
+        view.find_prev();
+        assert!(!view.search_visible());
     }
 }

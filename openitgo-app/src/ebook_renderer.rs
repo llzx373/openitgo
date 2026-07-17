@@ -20,6 +20,8 @@ struct RendererState {
     current_spread: usize,
     total_spreads: usize,
     settings: EbookSettings,
+    search_count: usize,
+    search_active: i64,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -31,6 +33,8 @@ struct JsToRust {
     spread: Option<usize>,
     total_spreads: Option<usize>,
     error: Option<String>,
+    count: Option<usize>,
+    active: Option<i64>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -90,6 +94,8 @@ impl EbookRenderer {
             current_spread: 0,
             total_spreads: 1,
             settings,
+            search_count: 0,
+            search_active: -1,
         }));
 
         let ipc_state = state.clone();
@@ -202,9 +208,6 @@ impl EbookRenderer {
         }
     }
 
-    // Search helpers are public API surface for the future search UI; they are
-    // not yet wired to a toolbar in this phase.
-    #[allow(dead_code)]
     pub fn find_text(&self, query: &str) {
         let js = format!(
             "findText({});",
@@ -215,25 +218,29 @@ impl EbookRenderer {
         }
     }
 
-    #[allow(dead_code)]
     pub fn find_next(&self) {
         if let Err(e) = self.webview.evaluate_script("findNext();") {
             eprintln!("EbookRenderer::find_next failed: {e}");
         }
     }
 
-    #[allow(dead_code)]
     pub fn find_prev(&self) {
         if let Err(e) = self.webview.evaluate_script("findPrev();") {
             eprintln!("EbookRenderer::find_prev failed: {e}");
         }
     }
 
-    #[allow(dead_code)]
     pub fn clear_highlights(&self) {
         if let Err(e) = self.webview.evaluate_script("clearHighlights();") {
             eprintln!("EbookRenderer::clear_highlights failed: {e}");
         }
+    }
+
+    /// Current search state as reported by the webview: `(match count, active
+    /// index)`. `(0, -1)` when no search is active.
+    pub fn search_state(&self) -> (usize, i64) {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        (state.search_count, state.search_active)
     }
 }
 
@@ -246,6 +253,14 @@ fn handle_ipc_message(msg: JsToRust, state: &Arc<Mutex<RendererState>>, repaint:
     }
     if msg.kind.as_str() == "debug" {
         eprintln!("EbookRenderer: JS debug: {msg:?}");
+        return;
+    }
+    if msg.kind.as_str() == "search" {
+        if let Ok(mut state) = state.lock() {
+            state.search_count = msg.count.unwrap_or(0);
+            state.search_active = msg.active.unwrap_or(-1);
+        }
+        repaint.request_repaint();
         return;
     }
     if let Ok(mut state) = state.lock() {
@@ -491,6 +506,8 @@ mod tests {
             current_spread: 0,
             total_spreads: 1,
             settings: EbookSettings::default(),
+            search_count: 0,
+            search_active: -1,
         }));
         let msg: JsToRust = serde_json::from_str(
             r#"{"type":"position","chapter":2,"spread":5,"char_offset":120,"total_spreads":10}"#,
@@ -527,6 +544,8 @@ mod tests {
             current_spread: 0,
             total_spreads: 1,
             settings: EbookSettings::default(),
+            search_count: 0,
+            search_active: -1,
         }));
         let msg: JsToRust =
             serde_json::from_str(r#"{"type":"position","spread":15,"total_spreads":10}"#).unwrap();
@@ -559,6 +578,8 @@ mod tests {
             current_spread: 0,
             total_spreads: 1,
             settings: EbookSettings::default(),
+            search_count: 0,
+            search_active: -1,
         }));
         let msg: JsToRust =
             serde_json::from_str(r#"{"type":"position","spread":5,"total_spreads":10}"#).unwrap();
@@ -594,6 +615,8 @@ mod tests {
             current_spread: 0,
             total_spreads: 1,
             settings: EbookSettings::default(),
+            search_count: 0,
+            search_active: -1,
         }));
         // The column paginator sends the same position shape as the old paginator.
         let msg: JsToRust = serde_json::from_str(
@@ -637,5 +660,58 @@ mod tests {
             html.contains("translateX(${-offset + marginH}px)"),
             "single-page transform should be translateX(-currentPage * viewportW + marginH)"
         );
+    }
+
+    fn test_state() -> Arc<Mutex<RendererState>> {
+        use openitgo_core::ebook::EbookChapter;
+        use std::path::PathBuf;
+        let ebook = Ebook {
+            id: "t".to_string(),
+            title: "T".to_string(),
+            path: PathBuf::from("/tmp/t.epub"),
+            authors: Vec::new(),
+            language: None,
+            resources: Vec::new(),
+            spine: Vec::new(),
+            chapters: vec![EbookChapter {
+                index: 0,
+                id: "c".to_string(),
+                href: "c.xhtml".to_string(),
+                title: None,
+            }],
+        };
+        Arc::new(Mutex::new(RendererState {
+            ebook,
+            current_chapter: 0,
+            char_offset: 0,
+            current_spread: 0,
+            total_spreads: 1,
+            settings: EbookSettings::default(),
+            search_count: 0,
+            search_active: -1,
+        }))
+    }
+
+    #[test]
+    fn test_ipc_search_message_updates_state() {
+        let state = test_state();
+        let ctx = egui::Context::default();
+        let msg: JsToRust =
+            serde_json::from_str(r#"{"type":"search","count":5,"active":2}"#).unwrap();
+        handle_ipc_message(msg, &state, &ctx);
+        let s = state.lock().unwrap();
+        assert_eq!(s.search_count, 5);
+        assert_eq!(s.search_active, 2);
+    }
+
+    #[test]
+    fn test_ipc_search_message_defaults() {
+        let state = test_state();
+        let ctx = egui::Context::default();
+        let msg: JsToRust = serde_json::from_str(r#"{"type":"search"}"#).unwrap();
+        handle_ipc_message(msg, &state, &ctx);
+        let s = state.lock().unwrap();
+        assert_eq!(s.search_count, 0);
+        assert_eq!(s.search_active, -1);
     }
 }

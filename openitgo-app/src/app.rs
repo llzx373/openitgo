@@ -577,6 +577,7 @@ impl ReaderApp {
         if show_toolbar {
             self.render_ebook_toolbar(ctx);
         }
+        self.render_ebook_search_bar(ctx);
         if show_statusbar {
             self.render_ebook_statusbar(ctx);
         }
@@ -1137,6 +1138,9 @@ impl ReaderApp {
                 if ui.button("目录").clicked() {
                     self.ebook_view.toggle_toc();
                 }
+                if ui.button("搜索").clicked() {
+                    self.ebook_view.toggle_search();
+                }
                 if ui.button("上一章").clicked() {
                     self.ebook_view.prev_chapter();
                 }
@@ -1180,6 +1184,66 @@ impl ReaderApp {
                         self.current_view = View::Settings;
                     }
                 });
+            });
+        });
+    }
+
+    fn render_ebook_search_bar(&mut self, ctx: &egui::Context) {
+        if !self.ebook_view.search_visible() {
+            return;
+        }
+        egui::TopBottomPanel::top("ebook_search_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("搜索:");
+                let mut submitted = None::<bool>; // Some(true)=下一个, Some(false)=上一个
+                let mut close_requested = false;
+                if let Some(open) = self.ebook_view.open.as_mut() {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut open.search.query)
+                            .id(egui::Id::new("ebook_search_input"))
+                            .desired_width(240.0),
+                    );
+                    if open.search.take_focus_request() {
+                        response.request_focus();
+                    }
+                    if response.changed() {
+                        let q = open.search.query.clone();
+                        open.renderer.find_text(&q);
+                    }
+                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        submitted = Some(!ui.input(|i| i.modifiers.shift));
+                    }
+                    let (count, active) = open.renderer.search_state();
+                    let label = if count == 0 {
+                        "0/0".to_string()
+                    } else {
+                        format!("{}/{}", active.max(0) as usize + 1, count)
+                    };
+                    ui.label(label);
+                    if ui
+                        .add_enabled(count > 0, egui::Button::new("上一个"))
+                        .clicked()
+                    {
+                        open.renderer.find_prev();
+                    }
+                    if ui
+                        .add_enabled(count > 0, egui::Button::new("下一个"))
+                        .clicked()
+                    {
+                        open.renderer.find_next();
+                    }
+                    if ui.button("✕").clicked() {
+                        close_requested = true;
+                    }
+                }
+                if close_requested {
+                    self.ebook_view.close_search();
+                }
+                match submitted {
+                    Some(true) => self.ebook_view.find_next(),
+                    Some(false) => self.ebook_view.find_prev(),
+                    None => {}
+                }
             });
         });
     }
@@ -1790,6 +1854,9 @@ impl ReaderApp {
                 }
             }
             View::Ebook => {
+                if ctx.input(|i| i.key_pressed(egui::Key::F) && i.modifiers.command) {
+                    self.ebook_view.toggle_search();
+                }
                 if is_shortcut_pressed(ctx, &self.settings.shortcuts.next_page) {
                     self.ebook_view.next_page();
                 }
