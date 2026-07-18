@@ -1,6 +1,6 @@
 # OpenItGo
 
-一款使用 Rust + egui + wgpu 构建的跨平台桌面漫画/小说阅读器，支持国漫（左→右）、日漫（右→左）和韩漫/Webtoon（长条从上到下）三种漫画阅读模式，EPUB/TXT/MOBI/AZW3/Markdown 电子书阅读，以及基于内嵌 libmpv 的视频/音频播放。
+一款使用 Rust + egui + wgpu 构建的桌面漫画/小说阅读器（完整支持 macOS；Windows/Linux 可编译运行，文件关联打开已支持，媒体播放暂仅 macOS），支持国漫（左→右）、日漫（右→左）和韩漫/Webtoon（长条从上到下）三种漫画阅读模式，EPUB/TXT/MOBI/AZW3/Markdown 电子书阅读，以及基于内嵌 libmpv 的视频/音频播放。
 
 ## 功能
 
