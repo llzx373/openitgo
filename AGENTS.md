@@ -14,7 +14,8 @@ through an embedded `libmpv` backend.
 - `openitgo-storage/` — JSON persistence for settings, library, history, bookmarks,
   per-comic reading settings, and reading stats (`reading_stats.json`).
 - `openitgo-media/` — libmpv wrapper: commands, event pump, property observation,
-  OpenGL render context, and headless cover generation.
+  OpenGL render context, and headless cover generation. `args.rs`/`apply.rs`
+  为 FFI-free 纯函数模块（命令参数构造、事件状态迁移），ubuntu CI 可测。
 - `openitgo-app/` — egui application, cache, loader, and UI views.
 - `docs/` — audit reports, bug notes, and implementation plans.
 
@@ -186,7 +187,8 @@ already embed it.
   问题 A). The `audio-device-list`
   reply is parsed on the event thread into `PlayerState::audio_devices`.
 - **MpvPlayer observe/userdata 分配**：属性观察 id 1-9（9 = `chapter`），
-  异步查询 userdata 100（`audio-device-list`）/ 101（`chapter-list`）；
+  异步查询 userdata 100（`audio-device-list`）/ 101（`chapter-list`），
+  常量为 `apply.rs` 的 `AUDIO_DEVICES_REPLY_USERDATA`/`CHAPTER_LIST_REPLY_USERDATA`；
   下一可用观察 id 10、userdata 102。`chapter-list` 在 FILE_LOADED 与
   需要时经 `request_chapter_list` 拉取，解析入 `PlayerState.chapters`。
 - **MpvPlayer teardown** order matters: `Drop` sets a quit flag and joins the

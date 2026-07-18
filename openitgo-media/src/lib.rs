@@ -1,4 +1,6 @@
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) mod apply;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod args;
 pub mod chapters;
 #[cfg(target_os = "macos")]

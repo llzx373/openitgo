@@ -26,3 +26,20 @@ pub struct PlayerState {
     /// 章节标题列表（异步 `chapter-list` 回复填充，userdata 101；空 = 无章节）。
     pub chapters: Vec<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_state_is_idle() {
+        let s = PlayerState::default();
+        assert!(!s.loaded);
+        assert!(!s.ended);
+        assert!(s.error.is_none());
+        assert!(s.duration_ms.is_none());
+        assert!(s.audio_devices.is_none());
+        assert!(s.chapters.is_empty());
+        assert!(s.tracks.is_empty());
+    }
+}

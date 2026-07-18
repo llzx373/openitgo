@@ -5,10 +5,11 @@
 //! repaint callback injected at construction time so the egui UI refreshes
 //! immediately (same fix pattern as commit b071a7b).
 
+use crate::apply::{self, AUDIO_DEVICES_REPLY_USERDATA, CHAPTER_LIST_REPLY_USERDATA};
 use crate::args;
 use crate::error::MediaError;
 use crate::state::PlayerState;
-use crate::tracks::{has_real_video, parse_tracks, RawTrack};
+use crate::tracks::RawTrack;
 use libmpv_sys as mpv;
 use std::ffi::CString;
 use std::path::Path;
@@ -42,12 +43,6 @@ unsafe impl Send for SendHandle {}
 fn cstring(s: &str) -> CString {
     CString::new(s).unwrap_or_else(|_| CString::new("").unwrap())
 }
-
-/// reply_userdata for the async `audio-device-list` query; observed
-/// properties use 1-8 (different event type, but keep namespaces distinct).
-const AUDIO_DEVICES_REPLY_USERDATA: u64 = 100;
-/// reply_userdata for the async `chapter-list` query.
-const CHAPTER_LIST_REPLY_USERDATA: u64 = 101;
 
 impl MpvPlayer {
     pub fn new(repaint: Box<dyn Fn() + Send + Sync>) -> Result<Self, MediaError> {
@@ -455,11 +450,7 @@ fn event_loop(
             }
             mpv::mpv_event_id_MPV_EVENT_FILE_LOADED => {
                 if let Ok(mut s) = state.lock() {
-                    s.loaded = true;
-                    s.ended = false;
-                    s.error = None;
-                    s.chapter = None;
-                    s.chapters.clear();
+                    apply::apply_file_loaded(&mut s);
                 }
                 // Kick the async chapter-list query for the new file; the
                 // reply lands as MPV_EVENT_GET_PROPERTY_REPLY with
@@ -487,50 +478,53 @@ fn event_loop(
                         (*data).reason
                     }
                 };
+                let is_error = reason as u32 == mpv::mpv_end_file_reason_MPV_END_FILE_REASON_ERROR;
                 if let Ok(mut s) = state.lock() {
-                    s.ended = true;
-                    if reason as u32 == mpv::mpv_end_file_reason_MPV_END_FILE_REASON_ERROR {
-                        s.error = Some("无法播放该文件".to_string());
-                    }
+                    apply::apply_end_file(&mut s, is_error);
                 }
                 repaint();
             }
             mpv::mpv_event_id_MPV_EVENT_GET_PROPERTY_REPLY => {
                 // SAFETY: reply_userdata is a plain value field on the event.
                 let userdata = unsafe { (*event).reply_userdata };
-                if userdata == AUDIO_DEVICES_REPLY_USERDATA {
-                    // SAFETY: for MPV_EVENT_GET_PROPERTY_REPLY, event data
-                    // points to a valid mpv_event_property owned by mpv.
-                    let prop = unsafe { (*event).data as *mut mpv::mpv_event_property };
-                    if !prop.is_null() {
-                        let (format, data) = unsafe { ((*prop).format, (*prop).data) };
-                        if format == mpv::mpv_format_MPV_FORMAT_NODE && !data.is_null() {
-                            // SAFETY: data points to a valid mpv_node owned by
-                            // mpv for the duration of the event; we only read.
-                            let raw = unsafe { read_audio_device_list(data as *mut mpv::mpv_node) };
-                            if let Ok(mut s) = state.lock() {
-                                s.audio_devices = Some(crate::devices::parse_audio_devices(raw));
+                match apply::classify_reply(userdata) {
+                    apply::ReplyKind::AudioDevices => {
+                        // SAFETY: for MPV_EVENT_GET_PROPERTY_REPLY, event data
+                        // points to a valid mpv_event_property owned by mpv.
+                        let prop = unsafe { (*event).data as *mut mpv::mpv_event_property };
+                        if !prop.is_null() {
+                            let (format, data) = unsafe { ((*prop).format, (*prop).data) };
+                            if format == mpv::mpv_format_MPV_FORMAT_NODE && !data.is_null() {
+                                // SAFETY: data points to a valid mpv_node owned by
+                                // mpv for the duration of the event; we only read.
+                                let raw =
+                                    unsafe { read_audio_device_list(data as *mut mpv::mpv_node) };
+                                if let Ok(mut s) = state.lock() {
+                                    s.audio_devices =
+                                        Some(crate::devices::parse_audio_devices(raw));
+                                }
+                                repaint();
                             }
-                            repaint();
                         }
                     }
-                }
-                if userdata == CHAPTER_LIST_REPLY_USERDATA {
-                    // SAFETY: for MPV_EVENT_GET_PROPERTY_REPLY, event data
-                    // points to a valid mpv_event_property owned by mpv.
-                    let prop = unsafe { (*event).data as *mut mpv::mpv_event_property };
-                    if !prop.is_null() {
-                        let (format, data) = unsafe { ((*prop).format, (*prop).data) };
-                        if format == mpv::mpv_format_MPV_FORMAT_NODE && !data.is_null() {
-                            // SAFETY: data points to a valid mpv_node owned by
-                            // mpv for the duration of the event; we only read.
-                            let raw = unsafe { read_chapter_list(data as *mut mpv::mpv_node) };
-                            if let Ok(mut s) = state.lock() {
-                                s.chapters = crate::chapters::parse_chapters(raw);
+                    apply::ReplyKind::ChapterList => {
+                        // SAFETY: for MPV_EVENT_GET_PROPERTY_REPLY, event data
+                        // points to a valid mpv_event_property owned by mpv.
+                        let prop = unsafe { (*event).data as *mut mpv::mpv_event_property };
+                        if !prop.is_null() {
+                            let (format, data) = unsafe { ((*prop).format, (*prop).data) };
+                            if format == mpv::mpv_format_MPV_FORMAT_NODE && !data.is_null() {
+                                // SAFETY: data points to a valid mpv_node owned by
+                                // mpv for the duration of the event; we only read.
+                                let raw = unsafe { read_chapter_list(data as *mut mpv::mpv_node) };
+                                if let Ok(mut s) = state.lock() {
+                                    s.chapters = crate::chapters::parse_chapters(raw);
+                                }
+                                repaint();
                             }
-                            repaint();
                         }
                     }
+                    apply::ReplyKind::Other => {}
                 }
             }
             mpv::mpv_event_id_MPV_EVENT_PROPERTY_CHANGE => {
@@ -555,19 +549,19 @@ fn event_loop(
                             if format == mpv::mpv_format_MPV_FORMAT_DOUBLE && !data.is_null() {
                                 // SAFETY: format guarantees data points to an f64.
                                 let secs = unsafe { *(data as *mut f64) };
-                                s.position_ms = (secs * 1000.0).max(0.0) as u64;
+                                apply::apply_time_pos(&mut s, secs);
                                 should_repaint = true;
                             }
                         }
                         2 => {
-                            s.duration_ms =
+                            let secs_opt =
                                 if format == mpv::mpv_format_MPV_FORMAT_DOUBLE && !data.is_null() {
                                     // SAFETY: format guarantees data points to an f64.
-                                    let secs = unsafe { *(data as *mut f64) };
-                                    Some((secs * 1000.0).max(0.0) as u64)
+                                    Some(unsafe { *(data as *mut f64) })
                                 } else {
                                     None
                                 };
+                            apply::apply_duration(&mut s, secs_opt);
                             should_repaint = true;
                         }
                         3 => {
@@ -599,21 +593,9 @@ fn event_loop(
                                 let raw = unsafe { read_track_list(data as *mut mpv::mpv_node) };
                                 // Task 4 review convention: parsed tracks and raw
                                 // tracks passed to has_real_video must come from
-                                // this single track-list read.
-                                s.tracks = parse_tracks(raw.clone());
-                                s.current_sub = s
-                                    .tracks
-                                    .iter()
-                                    .find(|t| t.kind == crate::tracks::TrackKind::Sub && t.selected)
-                                    .map(|t| t.id);
-                                s.current_audio = s
-                                    .tracks
-                                    .iter()
-                                    .find(|t| {
-                                        t.kind == crate::tracks::TrackKind::Audio && t.selected
-                                    })
-                                    .map(|t| t.id);
-                                s.has_video = has_real_video(&s.tracks, &raw);
+                                // this single track-list read (enforced inside
+                                // apply_track_list).
+                                apply::apply_track_list(&mut s, raw);
                                 should_repaint = true;
                             }
                         }
