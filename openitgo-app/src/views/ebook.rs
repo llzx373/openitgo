@@ -1,6 +1,6 @@
 use crate::ebook_renderer::EbookRenderer;
 use openitgo_core::ebook::Ebook;
-use openitgo_storage::models::EbookSettings;
+use openitgo_storage::models::{EbookSettings, EbookTheme};
 use wry::Rect;
 
 #[derive(Default)]
@@ -50,6 +50,8 @@ pub struct OpenEbook {
     pub current_chapter: usize,
     pub current_spread: usize,
     pub search: SearchState,
+    /// 菜单停放状态：true 时 webview 已 set_visible(false) 隐藏。
+    pub webview_hidden: bool,
 }
 
 impl EbookView {
@@ -69,6 +71,7 @@ impl EbookView {
             current_chapter: 0,
             current_spread: 0,
             search: SearchState::default(),
+            webview_hidden: false,
         });
         Ok(())
     }
@@ -81,6 +84,27 @@ impl EbookView {
         if let Some(open) = self.open.as_ref() {
             open.renderer.set_bounds(bounds);
         }
+    }
+
+    /// 菜单/浮层打开时隐藏 webview（停放方案）：egui 弹层画不进原生
+    /// webview 区域，只能把 webview 藏起来，区域由 egui 以阅读背景色填充。
+    /// 状态去重：仅可见性变化时才发 wry IPC。
+    pub fn set_webview_hidden(&mut self, hidden: bool) {
+        if let Some(open) = self.open.as_mut() {
+            let Some(new) = visibility_transition(open.webview_hidden, hidden) else {
+                return;
+            };
+            open.webview_hidden = new;
+            open.renderer.set_visible(!new);
+        }
+    }
+
+    #[allow(dead_code)] // bin 内未调用；诊断探针（lib 消费者）与测试使用
+    pub fn webview_hidden(&self) -> bool {
+        self.open
+            .as_ref()
+            .map(|o| o.webview_hidden)
+            .unwrap_or(false)
     }
 
     pub fn apply_settings(&mut self, settings: &EbookSettings) {
@@ -225,6 +249,20 @@ impl EbookView {
     }
 }
 
+/// 状态去重：可见性真的变化才返回 Some(新状态)，否则 None（不发 IPC）。
+pub fn visibility_transition(applied_hidden: bool, want_hidden: bool) -> Option<bool> {
+    (applied_hidden != want_hidden).then_some(want_hidden)
+}
+
+/// 电子书主题的阅读背景色（与 ebook_renderer.rs JsSettings 的 bg 值一致）。
+pub fn ebook_theme_bg(theme: EbookTheme) -> egui::Color32 {
+    match theme {
+        EbookTheme::Light => egui::Color32::from_rgb(0xff, 0xff, 0xff),
+        EbookTheme::Dark => egui::Color32::from_rgb(0x1a, 0x1a, 0x1a),
+        EbookTheme::Sepia => egui::Color32::from_rgb(0xf4, 0xec, 0xd8),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +324,7 @@ mod tests {
                 current_chapter: 0,
                 current_spread: 0,
                 search: SearchState::default(),
+                webview_hidden: false,
             };
             open.current_spread = 7;
             open.current_spread
@@ -355,5 +394,39 @@ mod tests {
         view.find_next();
         view.find_prev();
         assert!(!view.search_visible());
+    }
+
+    #[test]
+    fn test_visibility_transition_only_fires_on_change() {
+        assert_eq!(visibility_transition(false, true), Some(true));
+        assert_eq!(visibility_transition(true, false), Some(false));
+        assert_eq!(visibility_transition(false, false), None);
+        assert_eq!(visibility_transition(true, true), None);
+    }
+
+    #[test]
+    fn test_ebook_theme_bg_matches_js_settings() {
+        // 与 ebook_renderer.rs JsSettings 的 bg 值保持一致
+        assert_eq!(
+            ebook_theme_bg(EbookTheme::Light),
+            egui::Color32::from_rgb(0xff, 0xff, 0xff)
+        );
+        assert_eq!(
+            ebook_theme_bg(EbookTheme::Dark),
+            egui::Color32::from_rgb(0x1a, 0x1a, 0x1a)
+        );
+        assert_eq!(
+            ebook_theme_bg(EbookTheme::Sepia),
+            egui::Color32::from_rgb(0xf4, 0xec, 0xd8)
+        );
+    }
+
+    #[test]
+    fn test_set_webview_hidden_without_open_book_is_noop() {
+        let mut view = EbookView::default();
+        view.set_webview_hidden(true);
+        assert!(!view.webview_hidden());
+        view.set_webview_hidden(false);
+        assert!(!view.webview_hidden());
     }
 }

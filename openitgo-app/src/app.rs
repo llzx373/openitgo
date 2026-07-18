@@ -748,7 +748,20 @@ impl ReaderApp {
             }
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // 菜单/弹层打开时隐藏 wry webview（停放方案）：egui 弹层无法穿透
+        // 原生 webview，隐藏期间正文区以当前主题的阅读背景色填充，
+        // 关闭即恢复。menu_overlay_open 与媒体视图共用同一判定，互不影响。
+        let menu_open = menu_overlay_open(ctx);
+        self.ebook_view.set_webview_hidden(menu_open);
+
+        let frame = if menu_open {
+            egui::Frame::central_panel(&ctx.style()).fill(crate::views::ebook::ebook_theme_bg(
+                self.settings.ebook.theme,
+            ))
+        } else {
+            egui::Frame::central_panel(&ctx.style())
+        };
+        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             let rect = ui.max_rect();
             let bounds = wry::Rect {
                 position: wry::dpi::LogicalPosition::new(rect.min.x, rect.min.y).into(),

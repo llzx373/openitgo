@@ -126,6 +126,14 @@ impl EbookRenderer {
         }
     }
 
+    /// Shows or hides the webview. Used by the menu-parking workaround: egui
+    /// overlays cannot punch through the native webview, so menus hide it.
+    pub fn set_visible(&self, visible: bool) {
+        if let Err(e) = self.webview.set_visible(visible) {
+            eprintln!("EbookRenderer::set_visible failed: {e}");
+        }
+    }
+
     pub fn apply_settings(&self, settings: &EbookSettings) {
         if let Ok(mut state) = self.state.lock() {
             state.settings = settings.clone();

@@ -99,6 +99,12 @@ already embed it.
   and never appears in `uri().path()`, so resource discriminators must live in
   the path (`/res/<archive-path>`) or query (`?chapter=N`) — never expect a host
   segment to show up in the path.
+  **EbookRenderer menu parking（#52）**：egui 弹层无法穿透原生 webview，
+  菜单/浮层打开时 `render_ebook` 用 `menu_overlay_open(ctx)`（与媒体视图
+  同一判定）驱动 `EbookView::set_webview_hidden` 调 wry `set_visible(false)`，
+  正文区以 `ebook_theme_bg(theme)` 填充；状态去重（`visibility_transition`）
+  避免每帧重复 IPC，关闭即恢复。诊断探针：
+  `cargo run -p openitgo-app --example probe_ebook_menu -- <epub路径>`。
 - **EbookRenderer position preservation** distinguishes settings changes from window
   resize: font/size/margin/theme changes re-layout and preserve the approximate
   character offset, while window resize debounces and preserves the scroll ratio
