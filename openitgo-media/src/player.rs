@@ -5,6 +5,7 @@
 //! repaint callback injected at construction time so the egui UI refreshes
 //! immediately (same fix pattern as commit b071a7b).
 
+use crate::args;
 use crate::error::MediaError;
 use crate::state::PlayerState;
 use crate::tracks::{has_real_video, parse_tracks, RawTrack};
@@ -235,7 +236,7 @@ impl MpvPlayer {
     }
 
     pub fn set_paused(&self, paused: bool) -> Result<(), MediaError> {
-        self.set_property_string("pause", if paused { "yes" } else { "no" })
+        self.set_property_string("pause", args::yes_no(paused))
     }
 
     pub fn seek_rel_sec(&self, secs: f64) -> Result<(), MediaError> {
@@ -246,27 +247,21 @@ impl MpvPlayer {
     /// previous keyframe to the exact frame); without it mpv snaps to the
     /// nearest keyframe, which keeps interactive slider drags responsive.
     pub fn seek_abs_ms(&self, ms: u64, exact: bool) -> Result<(), MediaError> {
-        let secs = format!("{:.3}", ms as f64 / 1000.0);
-        if exact {
-            self.command(&["seek", &secs, "absolute", "exact"])
-        } else {
-            self.command(&["seek", &secs, "absolute"])
-        }
+        let argv = args::seek_abs_args(ms, exact);
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        self.command(&refs)
     }
 
     pub fn set_volume(&self, volume: f64) -> Result<(), MediaError> {
-        self.set_property_string("volume", &format!("{:.1}", volume.clamp(0.0, 100.0)))
+        self.set_property_string("volume", &args::format_volume_arg(volume))
     }
 
     pub fn set_speed(&self, speed: f64) -> Result<(), MediaError> {
-        self.set_property_string("speed", &format!("{:.2}", speed.clamp(0.1, 16.0)))
+        self.set_property_string("speed", &args::format_speed_arg(speed))
     }
 
     pub fn set_sub_track(&self, id: Option<i64>) -> Result<(), MediaError> {
-        match id {
-            Some(id) => self.set_property_string("sid", &id.to_string()),
-            None => self.set_property_string("sid", "no"),
-        }
+        self.set_property_string("sid", &args::sid_arg(id))
     }
 
     /// Loads an external subtitle file and selects it immediately (`select`
@@ -294,7 +289,7 @@ impl MpvPlayer {
     }
 
     pub fn set_muted(&self, muted: bool) -> Result<(), MediaError> {
-        self.set_property_string("mute", if muted { "yes" } else { "no" })
+        self.set_property_string("mute", args::yes_no(muted))
     }
 
     /// Fires an async `audio-device-list` query; the reply is parsed on the
@@ -333,7 +328,7 @@ impl MpvPlayer {
     /// `inf` loops the current file forever; `no` restores normal EOF
     /// behavior (used by the auto-next feature).
     pub fn set_loop_file(&self, enabled: bool) -> Result<(), MediaError> {
-        self.set_property_string("loop-file", if enabled { "inf" } else { "no" })
+        self.set_property_string("loop-file", args::loop_file_arg(enabled))
     }
 
     /// Saves a screenshot of the current video frame; mpv picks the encoder
@@ -347,18 +342,12 @@ impl MpvPlayer {
 
     /// AB loop point A in seconds; `None` clears it (mpv `no`).
     pub fn set_ab_loop_a(&self, secs: Option<f64>) -> Result<(), MediaError> {
-        match secs {
-            Some(v) => self.set_property_string("ab-loop-a", &format!("{v:.3}")),
-            None => self.set_property_string("ab-loop-a", "no"),
-        }
+        self.set_property_string("ab-loop-a", &args::ab_loop_arg(secs))
     }
 
     /// AB loop point B in seconds; `None` clears it (mpv `no`).
     pub fn set_ab_loop_b(&self, secs: Option<f64>) -> Result<(), MediaError> {
-        match secs {
-            Some(v) => self.set_property_string("ab-loop-b", &format!("{v:.3}")),
-            None => self.set_property_string("ab-loop-b", "no"),
-        }
+        self.set_property_string("ab-loop-b", &args::ab_loop_arg(secs))
     }
 
     /// Relative chapter jump; mpv clamps at the first/last chapter.
@@ -904,4 +893,19 @@ unsafe fn read_chapter_list(node: *mut mpv::mpv_node) -> Vec<crate::chapters::Ra
         out.push(chapter);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cstring_passes_through_normal_strings() {
+        assert_eq!(cstring("hello").to_str().unwrap(), "hello");
+    }
+
+    #[test]
+    fn cstring_falls_back_to_empty_on_interior_nul() {
+        assert_eq!(cstring("a\0b").to_str().unwrap(), "");
+    }
 }
