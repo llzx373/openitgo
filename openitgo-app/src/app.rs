@@ -490,6 +490,7 @@ impl ReaderApp {
             let mut delete_bookmark_idx: Option<usize> = None;
             let mut update_bookmark: Option<(usize, Option<String>)> = None;
             let mut update_title: Option<(usize, String)> = None;
+            let mut update_tags: Option<(usize, Vec<String>)> = None;
             let mut delete_library_idx: Option<usize> = None;
             let mut clear_history = false;
             let mut delete_history_idx: Option<usize> = None;
@@ -507,6 +508,7 @@ impl ReaderApp {
                     on_delete_bookmark: &mut |idx| delete_bookmark_idx = Some(idx),
                     on_update_bookmark: &mut |idx, note| update_bookmark = Some((idx, note)),
                     on_update_title: &mut |idx, title| update_title = Some((idx, title)),
+                    on_update_tags: &mut |idx, tags| update_tags = Some((idx, tags)),
                     on_delete_library: &mut |idx| delete_library_idx = Some(idx),
                     on_clear_history: &mut || clear_history = true,
                     on_delete_history: &mut |idx| delete_history_idx = Some(idx),
@@ -534,6 +536,11 @@ impl ReaderApp {
             if let Some((idx, title)) = update_title {
                 if let Some(entry) = self.library_view.library.entries.get_mut(idx) {
                     entry.title = title;
+                }
+            }
+            if let Some((idx, tags)) = update_tags {
+                if let Some(entry) = self.library_view.library.entries.get_mut(idx) {
+                    entry.tags = tags;
                 }
             }
             if let Some(idx) = delete_library_idx {
@@ -2790,6 +2797,7 @@ impl ReaderApp {
                     cover_path: None,
                     added_at,
                     media_type: media_type_for_path(path),
+                    tags: Vec::new(),
                 });
         }
     }
@@ -2820,6 +2828,7 @@ impl ReaderApp {
                     cover_path: None,
                     added_at,
                     media_type,
+                    tags: Vec::new(),
                 });
         }
     }
@@ -2854,6 +2863,7 @@ impl ReaderApp {
                 cover_path: None,
                 added_at,
                 media_type,
+                tags: Vec::new(),
             });
     }
 
@@ -4061,6 +4071,7 @@ mod tests {
                 cover_path: None,
                 added_at: 0,
                 media_type: MediaType::Video,
+                tags: Vec::new(),
             });
         let cover = PathBuf::from("/tmp/covers/clip.jpg");
         app.media_cover_tx.send((id, cover.clone())).unwrap();
@@ -4093,6 +4104,7 @@ mod tests {
                 cover_path: None,
                 added_at: 0,
                 media_type: MediaType::Video,
+                tags: Vec::new(),
             });
         let covers_dir = tmp.path().join("covers");
         std::fs::create_dir_all(&covers_dir).unwrap();

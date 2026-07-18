@@ -18,6 +18,10 @@ pub struct LibraryView {
     edit_buffer: Option<(usize, String)>,
     pending_delete: Option<usize>,
     cover_textures: HashMap<String, egui::TextureHandle>,
+    /// 标签过滤 chips 的当前选择（None = 全部）。
+    pub tag_filter: Option<String>,
+    /// 标签编辑对话框状态：(条目索引, 输入缓冲)。
+    tag_edit_buffer: Option<(usize, String)>,
 }
 
 impl Default for LibraryView {
@@ -29,6 +33,8 @@ impl Default for LibraryView {
             edit_buffer: None,
             pending_delete: None,
             cover_textures: HashMap::new(),
+            tag_filter: None,
+            tag_edit_buffer: None,
         }
     }
 }
@@ -45,6 +51,7 @@ pub struct LibraryCallbacks<'a> {
     pub on_delete_library: &'a mut dyn FnMut(usize),
     pub on_clear_history: &'a mut dyn FnMut(),
     pub on_delete_history: &'a mut dyn FnMut(usize),
+    pub on_update_tags: &'a mut dyn FnMut(usize, Vec<String>),
 }
 
 impl LibraryView {
@@ -121,6 +128,56 @@ impl LibraryView {
                 }
             });
         });
+
+        if matches!(self.mode, LibraryMode::Library | LibraryMode::Ebooks) {
+            let tags = collect_unique_tags(&self.library.entries);
+            if !tags.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("标签:");
+                    if ui
+                        .selectable_label(self.tag_filter.is_none(), "全部")
+                        .clicked()
+                    {
+                        self.tag_filter = None;
+                    }
+                    for tag in tags {
+                        let selected = self.tag_filter.as_deref() == Some(tag.as_str());
+                        if ui.selectable_label(selected, &tag).clicked() {
+                            self.tag_filter = if selected { None } else { Some(tag.clone()) };
+                        }
+                    }
+                });
+                ui.separator();
+            }
+        }
+
+        if let Some((idx, buffer)) = self.tag_edit_buffer.as_mut() {
+            let idx = *idx;
+            let mut save = false;
+            let mut cancel = false;
+            egui::Window::new("编辑标签")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ui.ctx(), |ui| {
+                    ui.label("多个标签用逗号分隔：");
+                    ui.add(egui::TextEdit::singleline(buffer).desired_width(280.0));
+                    ui.horizontal(|ui| {
+                        if ui.button("保存").clicked() {
+                            save = true;
+                        }
+                        if ui.button("取消").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            if save {
+                (callbacks.on_update_tags)(idx, parse_tags_input(buffer));
+                self.tag_edit_buffer = None;
+            } else if cancel {
+                self.tag_edit_buffer = None;
+            }
+        }
 
         match self.mode {
             LibraryMode::Library | LibraryMode::Ebooks => {
@@ -300,6 +357,12 @@ impl LibraryView {
                             self.pending_delete = None;
                             ui.close_menu();
                         }
+                        if ui.button("编辑标签…").clicked() {
+                            self.tag_edit_buffer = Some((original_idx, entry.tags.join(", ")));
+                            self.pending_delete = None;
+                            self.edit_buffer = None;
+                            ui.close_menu();
+                        }
                         if self.pending_delete == Some(original_idx) {
                             ui.label("确定删除？");
                             if ui.button("是").clicked() {
@@ -351,7 +414,9 @@ impl LibraryView {
                     ),
                     _ => true,
                 };
-                media_ok && (query.is_empty() || e.title.to_lowercase().contains(&query))
+                media_ok
+                    && entry_matches_tag_filter(e, &self.tag_filter)
+                    && entry_matches_query(e, &query)
             })
             .map(|(i, e)| (i, e.clone()))
             .collect();
@@ -545,6 +610,45 @@ fn sort_label(sort: LibrarySort) -> &'static str {
     }
 }
 
+/// 解析逗号分隔的标签输入（中英文逗号均可）：去空白、去重、去空项。
+pub fn parse_tags_input(input: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    input
+        .split([',', '，'])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .filter(|s| seen.insert(s.clone()))
+        .collect()
+}
+
+/// 全库去重排序后的标签集合（chips 行数据源）。
+pub fn collect_unique_tags(entries: &[LibraryEntry]) -> Vec<String> {
+    let mut tags: Vec<String> = entries
+        .iter()
+        .flat_map(|e| e.tags.iter().cloned())
+        .collect();
+    tags.sort();
+    tags.dedup();
+    tags
+}
+
+/// 搜索匹配：标题或任一标签包含查询串（大小写不敏感；空串恒真）。
+pub fn entry_matches_query(entry: &LibraryEntry, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    entry.title.to_lowercase().contains(query)
+        || entry.tags.iter().any(|t| t.to_lowercase().contains(query))
+}
+
+/// 标签过滤：None 不过滤；Some(tag) 要求条目含该标签。
+pub fn entry_matches_tag_filter(entry: &LibraryEntry, filter: &Option<String>) -> bool {
+    match filter {
+        None => true,
+        Some(tag) => entry.tags.iter().any(|t| t == tag),
+    }
+}
+
 fn format_timestamp(ts: u64) -> String {
     if ts == 0 {
         return "-".to_string();
@@ -578,6 +682,7 @@ mod tests {
                 cover_path: None,
                 added_at: 0,
                 media_type: MediaType::Comic,
+                tags: Vec::new(),
             }],
         }
     }
@@ -617,6 +722,7 @@ mod tests {
                         cover_path: None,
                         added_at: 1,
                         media_type: MediaType::Comic,
+                        tags: Vec::new(),
                     },
                     LibraryEntry {
                         comic_id: "b".to_string(),
@@ -625,6 +731,7 @@ mod tests {
                         cover_path: None,
                         added_at: 2,
                         media_type: MediaType::Comic,
+                        tags: Vec::new(),
                     },
                 ],
             },
@@ -648,6 +755,7 @@ mod tests {
                         cover_path: None,
                         added_at: 0,
                         media_type: MediaType::Comic,
+                        tags: Vec::new(),
                     },
                     LibraryEntry {
                         comic_id: "a".to_string(),
@@ -656,6 +764,7 @@ mod tests {
                         cover_path: None,
                         added_at: 0,
                         media_type: MediaType::Comic,
+                        tags: Vec::new(),
                     },
                 ],
             },
@@ -678,6 +787,7 @@ mod tests {
                         cover_path: None,
                         added_at: 100,
                         media_type: MediaType::Comic,
+                        tags: Vec::new(),
                     },
                     LibraryEntry {
                         comic_id: "new".to_string(),
@@ -686,6 +796,7 @@ mod tests {
                         cover_path: None,
                         added_at: 200,
                         media_type: MediaType::Comic,
+                        tags: Vec::new(),
                     },
                 ],
             },
@@ -708,6 +819,7 @@ mod tests {
                         cover_path: None,
                         added_at: 0,
                         media_type: MediaType::Comic,
+                        tags: Vec::new(),
                     },
                     LibraryEntry {
                         comic_id: "old".to_string(),
@@ -716,6 +828,7 @@ mod tests {
                         cover_path: None,
                         added_at: 0,
                         media_type: MediaType::Comic,
+                        tags: Vec::new(),
                     },
                 ],
             },
@@ -758,6 +871,7 @@ mod tests {
                         cover_path: None,
                         added_at: 0,
                         media_type: MediaType::Comic,
+                        tags: Vec::new(),
                     },
                     LibraryEntry {
                         comic_id: "ebook-1".to_string(),
@@ -766,6 +880,7 @@ mod tests {
                         cover_path: None,
                         added_at: 0,
                         media_type: MediaType::Ebook,
+                        tags: Vec::new(),
                     },
                 ],
             },
@@ -792,6 +907,7 @@ mod tests {
             cover_path: None,
             added_at: 0,
             media_type,
+            tags: Vec::new(),
         };
         let library = Library {
             entries: vec![
@@ -809,5 +925,54 @@ mod tests {
         let filtered = view.filtered_entries(&History::default(), LibrarySort::Title);
         let ids: Vec<&str> = filtered.iter().map(|(_, e)| e.comic_id.as_str()).collect();
         assert_eq!(ids, ["audio", "comic", "video"]);
+    }
+
+    #[test]
+    fn test_parse_tags_input_splits_trims_dedupes() {
+        assert_eq!(
+            parse_tags_input("热血, 连载中 ,热血，完结"),
+            vec!["热血", "连载中", "完结"]
+        );
+        assert!(parse_tags_input(" , ,").is_empty());
+        assert!(parse_tags_input("").is_empty());
+    }
+
+    #[test]
+    fn test_collect_unique_tags_sorted_deduped() {
+        let entries = vec![
+            LibraryEntry {
+                tags: vec!["b".to_string(), "a".to_string()],
+                ..Default::default()
+            },
+            LibraryEntry {
+                tags: vec!["a".to_string(), "c".to_string()],
+                ..Default::default()
+            },
+        ];
+        assert_eq!(collect_unique_tags(&entries), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_entry_matches_query_matches_title_or_tag() {
+        let entry = LibraryEntry {
+            title: "One Piece".to_string(),
+            tags: vec!["热血".to_string()],
+            ..Default::default()
+        };
+        assert!(entry_matches_query(&entry, "piece"));
+        assert!(entry_matches_query(&entry, "热血"));
+        assert!(entry_matches_query(&entry, ""));
+        assert!(!entry_matches_query(&entry, "火影"));
+    }
+
+    #[test]
+    fn test_entry_matches_tag_filter() {
+        let entry = LibraryEntry {
+            tags: vec!["热血".to_string()],
+            ..Default::default()
+        };
+        assert!(entry_matches_tag_filter(&entry, &None));
+        assert!(entry_matches_tag_filter(&entry, &Some("热血".to_string())));
+        assert!(!entry_matches_tag_filter(&entry, &Some("完结".to_string())));
     }
 }

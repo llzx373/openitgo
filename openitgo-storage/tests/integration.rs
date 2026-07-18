@@ -35,6 +35,7 @@ fn test_library_roundtrip() {
             cover_path: Some(PathBuf::from("/tmp/cover.jpg")),
             added_at: 123,
             media_type: MediaType::Comic,
+            tags: Vec::new(),
         }],
     };
     store.save_library(&library).unwrap();

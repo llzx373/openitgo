@@ -278,6 +278,7 @@ pub struct LibraryEntry {
     pub cover_path: Option<PathBuf>,
     pub added_at: u64,
     pub media_type: MediaType,
+    pub tags: Vec<String>,
 }
 
 impl Default for LibraryEntry {
@@ -289,6 +290,7 @@ impl Default for LibraryEntry {
             cover_path: None,
             added_at: 0,
             media_type: MediaType::Comic,
+            tags: Vec::new(),
         }
     }
 }
@@ -396,6 +398,26 @@ mod tests {
     }
 
     #[test]
+    fn test_library_entry_deserializes_missing_tags_as_empty() {
+        // 旧版 library.json 不含 tags 字段
+        let json =
+            r#"{"comic_id":"id","title":"Test","path":"/tmp","cover_path":null,"added_at":0}"#;
+        let entry: LibraryEntry = serde_json::from_str(json).unwrap();
+        assert!(entry.tags.is_empty());
+    }
+
+    #[test]
+    fn test_library_entry_tags_roundtrip() {
+        let entry = LibraryEntry {
+            tags: vec!["热血".to_string(), "连载中".to_string()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let loaded: LibraryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.tags, vec!["热血", "连载中"]);
+    }
+
+    #[test]
     fn test_settings_default() {
         let s = Settings::default();
         assert!(matches!(s.theme, Theme::System));
@@ -431,6 +453,7 @@ mod tests {
                 cover_path: None,
                 added_at: 0,
                 media_type: MediaType::Comic,
+                tags: Vec::new(),
             }],
         };
         let json = serde_json::to_string(&lib).unwrap();
