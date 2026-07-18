@@ -65,6 +65,8 @@ img {{ max-width: 100%; max-height: calc(100vh - var(--margin-v) * 2); height: a
   max-width: 100%;
   max-height: calc(100% - 2 * var(--margin-v));
 }}
+#column-content td, #column-content th {{ overflow-wrap: anywhere; }}
+#column-content pre {{ overflow-x: auto; }}
 body.scroll #column-view {{
   overflow-x: hidden;
   overflow-y: scroll;
@@ -2730,6 +2732,63 @@ mod tests {
         assert!(
             resize.contains("restoreSearchAfterLayout()"),
             "resize handler should replay search after relayout"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_tall_image_constraints_present() {
+        // #53 固化现有规则：超高图缩放而非拆分——全局按视口限高，
+        // column 内再按栏高限高且 break-inside: avoid。
+        let html = reader_html(&EbookSettings::default(), 1);
+        let global_img = html
+            .split("img {")
+            .nth(1)
+            .expect("global img rule not found")
+            .split('}')
+            .next()
+            .expect("global img rule end not found");
+        assert!(
+            global_img.contains("max-height: calc(100vh - var(--margin-v) * 2)"),
+            "global img should be viewport-height constrained: {global_img}"
+        );
+        assert!(
+            global_img.contains("object-fit: contain"),
+            "global img should scale down whole: {global_img}"
+        );
+        let column_block = html
+            .split("#column-content img, #column-content table, #column-content figure, #column-content pre, #column-content blockquote {")
+            .nth(1)
+            .expect("column combined rule not found")
+            .split('}')
+            .next()
+            .expect("column combined rule end not found");
+        assert!(
+            column_block.contains("break-inside: avoid"),
+            "{column_block}"
+        );
+        assert!(
+            column_block.contains("max-height: calc(100% - 2 * var(--margin-v))"),
+            "{column_block}"
+        );
+    }
+
+    #[test]
+    fn test_reader_html_table_and_pre_overflow_rules() {
+        let html = reader_html(&EbookSettings::default(), 1);
+        let style = html
+            .split("<style>")
+            .nth(1)
+            .expect("style block not found")
+            .split("</style>")
+            .next()
+            .expect("style block end not found");
+        assert!(
+            style.contains("#column-content td, #column-content th { overflow-wrap: anywhere; }"),
+            "td/th overflow-wrap rule missing: {style}"
+        );
+        assert!(
+            style.contains("#column-content pre { overflow-x: auto; }"),
+            "pre overflow-x rule missing: {style}"
         );
     }
 }

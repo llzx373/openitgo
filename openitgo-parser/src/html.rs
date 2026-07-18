@@ -55,7 +55,13 @@ pub fn render_chapter_html(ebook: &Ebook, chapter_index: usize) -> Result<String
         let html = doc
             .get_resource_str_by_path(&chapter_path)
             .ok_or(ParseError::NoPages)?;
-        let rewritten = rewrite_epub_urls(&sanitize_epub_html(&html), &chapter_path);
+        let (sanitized, stripped) = sanitize_epub_html_with_report(&html);
+        if stripped > 0 {
+            eprintln!(
+                "sanitize: stripped {stripped} conflicting style declaration(s) in chapter {chapter_index}"
+            );
+        }
+        let rewritten = rewrite_epub_urls(&sanitized, &chapter_path);
         let fonts = extract_font_face_css(ebook, &mut doc);
         if fonts.is_empty() {
             Ok(rewritten)
@@ -75,6 +81,14 @@ fn split_txt(text: &str) -> Vec<(Option<String>, String)> {
 /// Removes `<base>` tags (which would change the shell's base URL and cause
 /// reloads), scripts, stylesheet links, and disables anchor navigation.
 pub fn sanitize_epub_html(html: &str) -> String {
+    sanitize_epub_html_with_report(html).0
+}
+
+/// Sanitize EPUB chapter HTML like [`sanitize_epub_html`], additionally
+/// returning how many paginator-conflicting `style` declarations
+/// (`column-*` / `columns` / `position: fixed|absolute`) were stripped.
+pub fn sanitize_epub_html_with_report(html: &str) -> (String, usize) {
+    let mut stripped = 0usize;
     let mut out = String::with_capacity(html.len());
     let chars: Vec<(usize, char)> = html.char_indices().collect();
     let mut i = 0;
@@ -142,15 +156,20 @@ pub fn sanitize_epub_html(html: &str) -> String {
             // Drop these tags entirely.
         } else if is_anchor_open_tag(&lower) {
             out.push_str("<span");
-            strip_attributes(&lower, tag, &mut out, &["href", "onclick"]);
+            let (rewritten, n) = sanitize_tag_style(tag, &lower);
+            stripped += n;
+            let lower_rewritten = rewritten.to_ascii_lowercase();
+            strip_attributes(&lower_rewritten, &rewritten, &mut out, &["href", "onclick"]);
         } else if is_anchor_close_tag(&lower) {
             out.push_str("</span>");
         } else {
-            out.push_str(tag);
+            let (rewritten, n) = sanitize_tag_style(tag, &lower);
+            stripped += n;
+            out.push_str(&rewritten);
         }
         i = end_j + 1;
     }
-    out
+    (out, stripped)
 }
 
 fn is_anchor_open_tag(lower: &str) -> bool {
@@ -216,6 +235,134 @@ fn strip_attributes(lower_tag: &str, original_tag: &str, out: &mut String, names
         i = j;
     }
     out.push('>');
+}
+
+/// Strip paginator-conflicting declarations from a `style` attribute value:
+/// `column-*` / the `columns` shorthand / `position: fixed|absolute`.
+/// Returns the remaining declarations and how many were dropped.
+pub fn strip_conflicting_declarations(style: &str) -> (String, usize) {
+    // Quote-aware split on ';' — url(...) and data: URIs may contain ';'.
+    let mut decls: Vec<&str> = Vec::new();
+    let mut start = 0usize;
+    let mut in_quote = None::<u8>;
+    let bytes = style.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b >= 0x80 {
+            continue; // UTF-8 续字节不可能是引号或分号
+        }
+        match in_quote {
+            Some(q) => {
+                if b == q {
+                    in_quote = None;
+                }
+            }
+            None => match b {
+                b'"' | b'\'' => in_quote = Some(b),
+                b';' => {
+                    decls.push(&style[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            },
+        }
+    }
+    decls.push(&style[start..]);
+
+    let mut kept: Vec<&str> = Vec::new();
+    let mut dropped = 0usize;
+    for decl in decls {
+        let decl = decl.trim();
+        if decl.is_empty() {
+            continue;
+        }
+        let name = decl
+            .split(':')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let value = decl
+            .split(':')
+            .nth(1)
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let conflicting = name.starts_with("column-")
+            || name == "columns"
+            || (name == "position" && (value == "fixed" || value == "absolute"));
+        if conflicting {
+            dropped += 1;
+        } else {
+            kept.push(decl);
+        }
+    }
+    (kept.join("; "), dropped)
+}
+
+/// Rewrite a tag's quoted `style="..."` / `style='...'` attribute, dropping
+/// paginator-conflicting declarations. Unquoted style values are left
+/// untouched (rare and harmless). Returns the (possibly unchanged) tag and
+/// the dropped-declaration count. 清空后的 style 属性保留为空串（最小改动）。
+fn sanitize_tag_style(tag: &str, lower_tag: &str) -> (String, usize) {
+    let bytes = lower_tag.as_bytes();
+    let mut i = 0usize;
+    let mut in_quote = None::<u8>;
+    while i < lower_tag.len() {
+        let b = bytes[i];
+        match in_quote {
+            Some(q) => {
+                if b == q {
+                    in_quote = None;
+                }
+                i += 1;
+            }
+            None => match b {
+                b'"' | b'\'' => {
+                    in_quote = Some(b);
+                    i += 1;
+                }
+                b'>' => break,
+                _ => {
+                    // 属性名边界：前一字符必须是空白或 '/'（避免把
+                    // data-style= 或属性值里的 style 误识别）。
+                    let boundary =
+                        i > 0 && (bytes[i - 1].is_ascii_whitespace() || bytes[i - 1] == b'/');
+                    if boundary && lower_tag[i..].starts_with("style") {
+                        let rest = &lower_tag[i + 5..];
+                        let rest_trimmed = rest.trim_start();
+                        if let Some(eq_rest) = rest_trimmed.strip_prefix('=') {
+                            let after_eq = eq_rest.trim_start();
+                            let eq_offset = lower_tag.len() - after_eq.len();
+                            let Some(&q) = after_eq.as_bytes().first() else {
+                                return (tag.to_string(), 0);
+                            };
+                            if q != b'"' && q != b'\'' {
+                                return (tag.to_string(), 0);
+                            }
+                            let value_start = eq_offset + 1;
+                            let mut j = value_start;
+                            while j < tag.len() && tag.as_bytes()[j] != q {
+                                j += 1;
+                            }
+                            let end = j.min(tag.len());
+                            let value = &tag[value_start..end];
+                            let (new_value, dropped) = strip_conflicting_declarations(value);
+                            if dropped == 0 {
+                                return (tag.to_string(), 0);
+                            }
+                            let mut out = String::with_capacity(tag.len());
+                            out.push_str(&tag[..value_start]);
+                            out.push_str(&new_value);
+                            out.push_str(&tag[end..]);
+                            return (out, dropped);
+                        }
+                    }
+                    i += 1;
+                }
+            },
+        }
+    }
+    (tag.to_string(), 0)
 }
 
 fn txt_is_heading(line: &str) -> bool {
@@ -915,5 +1062,66 @@ mod tests {
     fn test_extract_font_faces_unbalanced_block_stops() {
         let css = "@font-face { src: url(a.ttf); ";
         assert_eq!(extract_font_faces(css, "s.css"), "");
+    }
+
+    #[test]
+    fn test_strip_conflicting_declarations() {
+        assert_eq!(
+            strip_conflicting_declarations("color: red; column-width: 20em; margin: 0"),
+            ("color: red; margin: 0".to_string(), 1)
+        );
+        assert_eq!(
+            strip_conflicting_declarations("position: fixed; top: 0"),
+            ("top: 0".to_string(), 1)
+        );
+        assert_eq!(
+            strip_conflicting_declarations("position: absolute"),
+            (String::new(), 1)
+        );
+        assert_eq!(
+            strip_conflicting_declarations("columns: 2; COLUMN-COUNT: 3"),
+            (String::new(), 2)
+        );
+        assert_eq!(
+            strip_conflicting_declarations("position: relative; float: left"),
+            ("position: relative; float: left".to_string(), 0)
+        );
+        assert_eq!(strip_conflicting_declarations(""), (String::new(), 0));
+    }
+
+    #[test]
+    fn test_strip_conflicting_declarations_respects_quoted_semicolons() {
+        // url/data URI 里的分号不是声明分隔符
+        assert_eq!(
+            strip_conflicting_declarations("background: url('a;b.png'); column-gap: 2em"),
+            ("background: url('a;b.png')".to_string(), 1)
+        );
+    }
+
+    #[test]
+    fn test_sanitize_epub_html_strips_conflicting_style_attrs() {
+        let html = r#"<p style="column-width: 20em; color: red">x</p><div style="position: fixed">y</div>"#;
+        let (out, n) = sanitize_epub_html_with_report(html);
+        assert_eq!(n, 2);
+        assert!(!out.contains("column-width"), "got: {out}");
+        assert!(!out.contains("position: fixed"), "got: {out}");
+        assert!(out.contains("color: red"), "got: {out}");
+    }
+
+    #[test]
+    fn test_sanitize_epub_html_keeps_harmless_style_attrs() {
+        let html = r#"<p style="margin: 0 auto; position: relative">x</p>"#;
+        let (out, n) = sanitize_epub_html_with_report(html);
+        assert_eq!(n, 0);
+        assert_eq!(out, html);
+    }
+
+    #[test]
+    fn test_sanitize_epub_html_style_single_quotes() {
+        let html = "<div style='column-rule: 1px; padding: 4px'>x</div>";
+        let (out, n) = sanitize_epub_html_with_report(html);
+        assert_eq!(n, 1);
+        assert!(out.contains("padding: 4px"), "got: {out}");
+        assert!(!out.contains("column-rule"), "got: {out}");
     }
 }
