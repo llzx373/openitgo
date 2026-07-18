@@ -202,6 +202,10 @@ pub struct ReaderApp {
     pub skipped_encrypted_imports: usize,
     /// 最近一次 open_comic 的目标路径（供密码错误标记关联对话框）。
     pub opening_path: Option<PathBuf>,
+    /// 每本书的累计阅读时长（comic_id -> ReadingStat），30s 粒度落盘。
+    pub reading_stats: HashMap<String, openitgo_storage::models::ReadingStat>,
+    /// 当前阅读会话：(comic_id, 上次结算时刻)。视图切换/退出时结算并重启。
+    pub stats_session: Option<(String, std::time::Instant)>,
 }
 
 impl Default for ReaderApp {
@@ -209,6 +213,7 @@ impl Default for ReaderApp {
         let store = JsonStore::new(JsonStore::default_dir().unwrap_or_else(|| PathBuf::from(".")));
         let (settings, settings_error) = load_settings_with_error(&store);
         let (comic_settings, comic_settings_error) = load_comic_settings_with_error(&store);
+        let reading_stats = store.load_reading_stats().unwrap_or_default();
         let library = store.load_library().unwrap_or_default();
         let mut history = store.load_history().unwrap_or_default();
         let mut bookmarks = store.load_bookmarks().unwrap_or_default();
@@ -262,6 +267,8 @@ impl Default for ReaderApp {
             pending_password_imports: Vec::new(),
             skipped_encrypted_imports: 0,
             opening_path: None,
+            reading_stats,
+            stats_session: None,
         }
     }
 }
@@ -279,6 +286,7 @@ impl eframe::App for ReaderApp {
         self.record_reader_history();
         self.record_ebook_history();
         self.record_media_history();
+        self.flush_reading_stats();
         self.reader_view.close();
         let _ = self.store.save_settings(&self.settings);
         let _ = self.store.save_library(&self.library_view.library);
@@ -352,6 +360,7 @@ impl eframe::App for ReaderApp {
         self.render_shortcuts_window(ctx);
         self.render_password_dialog(ctx);
         self.maybe_save_comic_settings();
+        self.tick_reading_stats();
     }
 }
 
@@ -499,6 +508,7 @@ impl ReaderApp {
                 &self.history,
                 &self.bookmarks,
                 &mut self.settings.library_sort,
+                &self.reading_stats,
                 LibraryCallbacks {
                     on_open_library: &mut |idx| open_idx = Some(idx),
                     on_open_path: &mut |path| open_path = Some(path),
@@ -2527,6 +2537,64 @@ impl ReaderApp {
         self.last_saved_comic_settings = Some(snapshot);
     }
 
+    /// 当前打开中的读物 id（漫画/电子书/媒体都算），无则 None。
+    fn current_reading_id(&self) -> Option<String> {
+        match self.current_view {
+            View::Reader => self.reader_view.open.as_ref().map(|r| r.comic.id.clone()),
+            View::Ebook => self.ebook_view.open.as_ref().map(|e| e.ebook.id.clone()),
+            View::Media => self
+                .media_view
+                .open
+                .as_ref()
+                .map(|o| openitgo_parser::stable_comic_id(&o.path)),
+            _ => None,
+        }
+    }
+
+    /// 每帧调用：维护阅读会话，满 30s 或换书/合书时结算增量并落盘。
+    /// 退出丢失最后 <30s 的增量，可接受（spec 风险表）。
+    fn tick_reading_stats(&mut self) {
+        const STATS_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+        let current = self.current_reading_id();
+        match (&self.stats_session, current.clone()) {
+            (Some((id, since)), Some(cur)) if *id == cur => {
+                if since.elapsed() >= STATS_FLUSH_INTERVAL {
+                    self.flush_reading_stats();
+                }
+            }
+            (Some(_), _) => {
+                self.flush_reading_stats();
+                self.stats_session = current.map(|id| (id, std::time::Instant::now()));
+            }
+            (None, Some(cur)) => {
+                self.stats_session = Some((cur, std::time::Instant::now()));
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// 把当前会话经过的时间计入 reading_stats 并落盘，然后以原 id 重启会话。
+    fn flush_reading_stats(&mut self) {
+        let Some((id, since)) = self.stats_session.take() else {
+            return;
+        };
+        let seconds = since.elapsed().as_secs();
+        if seconds > 0 {
+            let now_ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            self.reading_stats
+                .entry(id.clone())
+                .or_default()
+                .accumulate(seconds, now_ts);
+            if let Err(e) = self.store.save_reading_stats(&self.reading_stats) {
+                self.error_message = Some(format!("无法保存阅读统计: {}", e));
+            }
+        }
+        self.stats_session = Some((id, std::time::Instant::now()));
+    }
+
     fn record_reader_history(&mut self) {
         if let Some(reader) = self.reader_view.open.as_ref() {
             let comic_id = reader.comic.id.clone();
@@ -3463,6 +3531,8 @@ mod tests {
                 pending_password_imports: Vec::new(),
                 skipped_encrypted_imports: 0,
                 opening_path: None,
+                reading_stats: HashMap::new(),
+                stats_session: None,
             }
         }
     }
@@ -4335,5 +4405,40 @@ mod tests {
             Some(dir.join("c.mkv"))
         );
         assert_eq!(next_media_in_dir(&dir.join("c.mkv")), None);
+    }
+
+    #[test]
+    fn test_flush_reading_stats_credits_elapsed_seconds() {
+        let (mut app, _tmp) = app_with_temp_store();
+        app.stats_session = Some((
+            "comic-1".to_string(),
+            std::time::Instant::now() - std::time::Duration::from_secs(40),
+        ));
+        app.flush_reading_stats();
+        let stat = app.reading_stats.get("comic-1").expect("stat should exist");
+        assert!(stat.total_seconds >= 39, "got {}", stat.total_seconds);
+        assert_ne!(stat.first_read_at, 0);
+        assert_eq!(stat.first_read_at, stat.last_read_at);
+        // flush 后会话以原 id 重启（仍在读），不会丢书
+        assert!(matches!(&app.stats_session, Some((id, _)) if id == "comic-1"));
+    }
+
+    #[test]
+    fn test_current_reading_id_tracks_open_views() {
+        let (mut app, _tmp) = app_with_temp_store();
+        assert_eq!(app.current_reading_id(), None);
+        let comic = dummy_comic();
+        let comic_id = comic.id.clone();
+        let ctx = egui::Context::default();
+        app.reader_view.open(
+            &ctx,
+            comic,
+            ReadingState::new(ReadingMode::Ltr, 10),
+            &PageLoader::default(),
+            1.4,
+            true,
+        );
+        app.current_view = View::Reader;
+        assert_eq!(app.current_reading_id(), Some(comic_id));
     }
 }

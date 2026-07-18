@@ -1,4 +1,4 @@
-use crate::models::{Bookmarks, ComicReadingSettings, History, Library, Settings};
+use crate::models::{Bookmarks, ComicReadingSettings, History, Library, ReadingStat, Settings};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -93,6 +93,17 @@ impl JsonStore {
         &self,
     ) -> Result<HashMap<String, ComicReadingSettings>, StorageError> {
         self.read_json_with_backup("comic_settings.json")
+    }
+
+    pub fn save_reading_stats(
+        &self,
+        stats: &HashMap<String, ReadingStat>,
+    ) -> Result<(), StorageError> {
+        self.write_json("reading_stats.json", stats)
+    }
+
+    pub fn load_reading_stats(&self) -> Result<HashMap<String, ReadingStat>, StorageError> {
+        self.read_json_with_backup("reading_stats.json")
     }
 
     /// Write a JSON file atomically:
@@ -222,6 +233,44 @@ mod tests {
         store.save_comic_settings(&sample_comic_settings()).unwrap();
         store.save_comic_settings(&HashMap::new()).unwrap();
         assert!(tmp.path().join("comic_settings.json.bak").exists());
+    }
+
+    #[test]
+    fn test_roundtrip_reading_stats() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = JsonStore::new(tmp.path());
+        let mut map: HashMap<String, crate::models::ReadingStat> = HashMap::new();
+        map.insert(
+            "comic-1".to_string(),
+            crate::models::ReadingStat {
+                total_seconds: 120,
+                first_read_at: 1000,
+                last_read_at: 2000,
+            },
+        );
+        store.save_reading_stats(&map).unwrap();
+        let loaded = store.load_reading_stats().unwrap();
+        assert_eq!(map, loaded);
+    }
+
+    #[test]
+    fn test_load_reading_stats_missing_file_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = JsonStore::new(tmp.path());
+        assert!(store.load_reading_stats().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_reading_stats_load_falls_back_to_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = JsonStore::new(tmp.path());
+        let mut map: HashMap<String, crate::models::ReadingStat> = HashMap::new();
+        map.insert("comic-1".to_string(), crate::models::ReadingStat::default());
+        store.save_reading_stats(&map).unwrap();
+        store.save_reading_stats(&HashMap::new()).unwrap(); // 生成 .bak
+        std::fs::write(tmp.path().join("reading_stats.json"), "not json").unwrap();
+        let loaded = store.load_reading_stats().unwrap();
+        assert!(loaded.contains_key("comic-1"));
     }
 
     #[test]

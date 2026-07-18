@@ -12,7 +12,7 @@ through an embedded `libmpv` backend.
 - `openitgo-core/` — shared models, reading-state machine, and layout math.
 - `openitgo-parser/` — archive/folder/PDF parsers and comic ID generation.
 - `openitgo-storage/` — JSON persistence for settings, library, history, bookmarks,
-  and per-comic reading settings.
+  per-comic reading settings, and reading stats (`reading_stats.json`).
 - `openitgo-media/` — libmpv wrapper: commands, event pump, property observation,
   OpenGL render context, and headless cover generation.
 - `openitgo-app/` — egui application, cache, loader, and UI views.

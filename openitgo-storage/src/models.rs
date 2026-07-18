@@ -358,6 +358,37 @@ pub struct ComicReadingSettings {
     pub rotation: u16,
 }
 
+/// 每本书的累计阅读时长（自本功能启用起累计，不回填历史）。
+/// 以 comic_id 为 key 存于 reading_stats.json。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReadingStat {
+    pub total_seconds: u64,
+    pub first_read_at: u64,
+    pub last_read_at: u64,
+}
+
+impl ReadingStat {
+    /// 累加一次阅读增量；`now_ts` 为 unix 秒。首次累计时记录 first_read_at。
+    pub fn accumulate(&mut self, seconds: u64, now_ts: u64) {
+        if self.first_read_at == 0 {
+            self.first_read_at = now_ts;
+        }
+        self.last_read_at = now_ts;
+        self.total_seconds += seconds;
+    }
+}
+
+/// 时长展示格式：不足一小时 `Y 分钟`，否则 `X 小时 Y 分`。
+pub fn format_reading_duration(total_seconds: u64) -> String {
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    if hours > 0 {
+        format!("{} 小时 {} 分", hours, minutes)
+    } else {
+        format!("{} 分钟", minutes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -625,5 +656,28 @@ mod tests {
         assert_eq!(s.next_page, vec!["ArrowRight".to_string()]);
         assert_eq!(s.first_page, vec!["Home".to_string()]);
         assert_eq!(s.last_page, vec!["End".to_string()]);
+    }
+
+    #[test]
+    fn test_reading_stat_accumulate_sets_first_and_last() {
+        let mut stat = ReadingStat::default();
+        stat.accumulate(30, 1_000);
+        assert_eq!(stat.total_seconds, 30);
+        assert_eq!(stat.first_read_at, 1_000);
+        assert_eq!(stat.last_read_at, 1_000);
+        stat.accumulate(45, 2_000);
+        assert_eq!(stat.total_seconds, 75);
+        assert_eq!(stat.first_read_at, 1_000); // 首次不变
+        assert_eq!(stat.last_read_at, 2_000);
+    }
+
+    #[test]
+    fn test_format_reading_duration() {
+        assert_eq!(format_reading_duration(0), "0 分钟");
+        assert_eq!(format_reading_duration(59), "0 分钟");
+        assert_eq!(format_reading_duration(60), "1 分钟");
+        assert_eq!(format_reading_duration(3_599), "59 分钟");
+        assert_eq!(format_reading_duration(3_600), "1 小时 0 分");
+        assert_eq!(format_reading_duration(5_460), "1 小时 31 分");
     }
 }

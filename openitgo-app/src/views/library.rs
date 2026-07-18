@@ -9,6 +9,7 @@ pub enum LibraryMode {
     Ebooks,
     History,
     Bookmarks,
+    Stats,
 }
 
 pub struct LibraryView {
@@ -69,6 +70,7 @@ impl LibraryView {
         history: &History,
         bookmarks: &Bookmarks,
         library_sort: &mut LibrarySort,
+        stats: &HashMap<String, openitgo_storage::models::ReadingStat>,
         callbacks: LibraryCallbacks<'_>,
     ) {
         ui.horizontal(|ui| {
@@ -97,6 +99,12 @@ impl LibraryView {
                 .clicked()
             {
                 self.mode = LibraryMode::Bookmarks;
+            }
+            if ui
+                .selectable_label(self.mode == LibraryMode::Stats, "统计")
+                .clicked()
+            {
+                self.mode = LibraryMode::Stats;
             }
             if matches!(self.mode, LibraryMode::Library | LibraryMode::Ebooks) {
                 ui.separator();
@@ -185,6 +193,7 @@ impl LibraryView {
             }
             LibraryMode::History => self.render_history(ui, history, callbacks),
             LibraryMode::Bookmarks => self.render_bookmarks(ui, bookmarks, callbacks),
+            LibraryMode::Stats => self.render_stats(ui, stats),
         }
     }
 
@@ -567,6 +576,43 @@ impl LibraryView {
                 ui.end_row();
             }
         });
+    }
+
+    /// 阅读统计：总时长、条目数、每书时长排行（附标题，按时长降序）。
+    fn render_stats(
+        &mut self,
+        ui: &mut egui::Ui,
+        stats: &HashMap<String, openitgo_storage::models::ReadingStat>,
+    ) {
+        if stats.is_empty() {
+            ui.label("暂无阅读统计。阅读漫画、电子书或媒体时会自动累计时长。");
+            return;
+        }
+        let total_seconds: u64 = stats.values().map(|s| s.total_seconds).sum();
+        ui.label(format!(
+            "共 {} 本读物，累计阅读 {}",
+            stats.len(),
+            openitgo_storage::models::format_reading_duration(total_seconds)
+        ));
+        ui.separator();
+        let mut rows: Vec<(&String, &openitgo_storage::models::ReadingStat)> =
+            stats.iter().collect();
+        rows.sort_by(|a, b| b.1.total_seconds.cmp(&a.1.total_seconds));
+        egui::Grid::new("reading_stats_grid")
+            .striped(true)
+            .show(ui, |ui| {
+                for (comic_id, stat) in rows {
+                    let title = self
+                        .find_by_id(comic_id)
+                        .map(|e| e.title.clone())
+                        .unwrap_or_else(|| comic_id.clone());
+                    ui.label(title);
+                    ui.label(openitgo_storage::models::format_reading_duration(
+                        stat.total_seconds,
+                    ));
+                    ui.end_row();
+                }
+            });
     }
 }
 

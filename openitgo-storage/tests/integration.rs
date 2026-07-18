@@ -108,10 +108,12 @@ fn test_all_persisted_files_are_created() {
     store.save_history(&History::default()).unwrap();
     store.save_bookmarks(&Bookmarks::default()).unwrap();
     store.save_comic_settings(&HashMap::new()).unwrap();
+    store.save_reading_stats(&HashMap::new()).unwrap();
 
     assert!(tmp.path().join("settings.json").exists());
     assert!(tmp.path().join("library.json").exists());
     assert!(tmp.path().join("history.json").exists());
     assert!(tmp.path().join("bookmarks.json").exists());
     assert!(tmp.path().join("comic_settings.json").exists());
+    assert!(tmp.path().join("reading_stats.json").exists());
 }
