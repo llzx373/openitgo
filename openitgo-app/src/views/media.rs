@@ -638,7 +638,8 @@ pub fn ab_loop_advance(current: AbLoop, position_ms: u64) -> AbLoop {
     }
 }
 
-/// AB 循环 OSD 文本（复用媒体时间格式 `mm:ss`）。
+/// AB 循环 OSD 文本。一小时内分钟补零到两位（`mm:ss`，与进度条的 `m:ss`
+/// 格式刻意不同）；更长的时间回退媒体的 `h:mm:ss`。
 pub fn ab_loop_osd_text(state: AbLoop) -> String {
     // 一小时内分钟补零到两位（`mm:ss`）；更长的时间回退媒体的 `h:mm:ss`。
     let fmt = |secs: f64| {

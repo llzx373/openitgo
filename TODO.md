@@ -239,26 +239,26 @@
 
 - [x] 43. 同目录下一集自动续播：消费 `ended` 标志，EOF 后按自然排序打开同目录下一集并 OSD 提示（播放列表面板出范围，未做）
 - [x] 44. 外部字幕加载（`sub-add`，srt/ass/ssa/vtt）与字幕延迟调节（菜单 ±0.1s/重置 + Z/X 快捷键，OSD 反馈）
-- [ ] 45. 媒体杂项增强：截图、AB 循环、mpv 章节导航、循环播放、倍速微调（现仅 0.5/1/1.5/2 四档）
+- [x] 45. 媒体杂项增强：截图、AB 循环（A 键）、mpv 章节导航、循环播放、倍速微调（`[`/`]` ±0.25，原四档保留）；入口聚合于"播放"菜单
 
 ### P2 — 漫画与书架增强
 
-- [ ] 46. 加密 ZIP/RAR 密码支持：zip 无 aes-crypto 特性、unrar 未用 `with_password`，需密码输入 UI
-- [ ] 47. 图片旋转（90° 步进，含宽页检测联动）
+- [x] 46. 加密 ZIP/RAR 密码支持：zip 启用 aes-crypto + `by_index_decrypt`，unrar 用 `Archive::with_password`；打开弹密码对话框，密码仅会话内缓存，批量导入可跳过
+- [x] 47. 图片旋转（90° 步进，宽页检测与双页布局按旋转后宽高联动，角度随 `ComicReadingSettings.rotation` 每书持久化）
 - [x] 48. 每本书的阅读设置记忆（模式/双页/缩放按 comic_id 存入 `comic_settings.json`，打开时优先于全局默认）
-- [ ] 49. 书架分组/标签、阅读统计、书签缩略图
+- [x] 49. 书架标签（右键编辑 + chips 过滤 + 搜索匹配；层级分组按 YAGNI 不做）、阅读统计（时长累计 + 统计 tab 排行）、书签缩略图（创建时生成页缩略图，回退封面/占位）
 
 ### P2 — 设置与快捷键
 
 - [x] 50. 首页/末页快捷键：`Shortcuts` 新增 `first_page`/`last_page`（默认 Home/End，可在设置中自定义）
-- [ ] 51. 快捷键一览/帮助面板（键位可自定义却无处查看）
+- [x] 51. 快捷键一览/帮助面板（帮助菜单打开只读窗口：可配置键位 + 内置阅读/媒体键分区展示）
 
 ### P2 — 电子书已知限制（CSS columns，见 `docs/superpowers/reports/2026-06-26-css-columns-test-plan.md`）
 
-- [ ] 52. 电子书模式下 egui 菜单/弹层被 wry webview 遮盖（mpv 视频层下沉方案明确排除电子书，需单独方案）
-- [ ] 53. 排版边缘情况：超高图片跨页拆分、宽表格溢出、EPUB 自带 `column-*`/`position:fixed` 样式冲突
-- [ ] 54. 执行 CSS columns 手动测试矩阵（6 类书 × 9 项操作，验收勾选至今为空）
-- [ ] 55. 大章节分段加载评估（原 32.4，Phase 5 遗留）
+- [x] 52. 电子书模式下 egui 菜单/弹层被 wry webview 遮盖：停放方案——菜单打开时 `set_visible(false)` 隐藏 webview 并以主题背景色填充，关闭恢复（状态去重，诊断探针 `probe_ebook_menu.rs`）
+- [x] 53. 排版边缘情况：超高图片经注入 CSS 约束缩放（不拆分位图）、宽表格 td/th 折行 + pre 横滚防溢出、EPUB 内联 `column-*`/`position:fixed` 样式剥离（计数日志可观测）；`!important`/厂商前缀形态留作观察项
+- [x] 54. CSS columns 手动测试矩阵：验收清单已生成（`docs/superpowers/reports/2026-07-17-css-columns-acceptance-checklist.md`，6 类书 × 9 项操作 + #52/#53 专项），真机走查由用户执行勾选
+- [x] 55. 大章节分段加载评估（原 32.4，Phase 5 遗留）：实测 930KB/8000 段样本首布局 328ms、重排 211–545ms、内存线性无异常，两项阈值均未触发，结论**不做**（`docs/superpowers/reports/2026-07-17-large-chapter-loading-eval.md`）
 
 ### P3 — 工程化
 

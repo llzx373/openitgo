@@ -80,6 +80,8 @@ fn split_txt(text: &str) -> Vec<(Option<String>, String)> {
 /// Sanitizes EPUB chapter HTML for display inside a controlled WebView shell.
 /// Removes `<base>` tags (which would change the shell's base URL and cause
 /// reloads), scripts, stylesheet links, and disables anchor navigation.
+/// Also strips paginator-conflicting inline `style` declarations
+/// (`column-*` / `position: fixed|absolute`); see [`sanitize_epub_html_with_report`].
 pub fn sanitize_epub_html(html: &str) -> String {
     sanitize_epub_html_with_report(html).0
 }

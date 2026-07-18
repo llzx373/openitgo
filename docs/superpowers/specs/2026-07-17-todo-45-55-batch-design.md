@@ -101,7 +101,7 @@ TODO/CHANGELOG 由控制器统一收尾。
 - 渲染：reader 绘制时对纹理做 90° 步进旋转（egui UV/Shape 旋转，参照现有
   fit 计算的宽高互换）；宽页检测与 double-page 布局用旋转后的有效宽高。
 - 入口：工具栏 + 阅读菜单"旋转 90°"；显示当前角度。
-- 持久化：`ComicReadingSettings` 加 `rotation: u8`（serde default 0）；
+- 持久化：`ComicReadingSettings` 加 `rotation: u16`（serde default 0；实现期由 u8 改 u16——270 超出 u8 范围，见实现记录）；
   打开应用与快照保存沿用 #48 机制（apply 顺序：mode → double_page → fit → rotation）。
 - 测试：角度步进/取模、旋转后宽高比互换对宽页判定影响、旧 comic_settings.json
   无 rotation 字段反序列化兼容。
@@ -175,7 +175,7 @@ TODO/CHANGELOG 由控制器统一收尾。
 |---|---|---|
 | `settings.json` | 无 | — |
 | `library.json` | `LibraryEntry.tags: Vec<String>` | `#[serde(default)]` |
-| `comic_settings.json` | `ComicReadingSettings.rotation: u8` | `#[serde(default)]`（需逐字段确认） |
+| `comic_settings.json` | `ComicReadingSettings.rotation: u16` | `#[serde(default)]`（需逐字段确认） |
 | `reading_stats.json` | 新增 | 新文件 |
 | `covers/bookmarks/` | 新目录 | 新目录 |
 | 密码缓存 | App 内存 `HashMap<PathBuf, String>` | 不持久化 |

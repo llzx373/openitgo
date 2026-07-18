@@ -2,7 +2,7 @@
 """Generate a synthetic EPUB with one very large chapter (TODO #55 sample).
 
 Usage: python3 scripts/make-big-chapter-epub.py [paragraphs] [output.epub]
-Default: 4000 paragraphs -> ~520KB single-chapter HTML.
+Default: 4000 paragraphs -> ~465KB single-chapter HTML.
 """
 import os
 import sys

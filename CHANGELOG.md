@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 媒体播放：外部字幕加载（字幕菜单"加载外部字幕…"，支持 srt/ass/ssa/vtt）与字幕延迟调节（菜单 ±0.1s/重置，Z/X 快捷键，OSD 反馈当前延迟）。
 - 阅读器：首页/末页快捷键（默认 Home/End，可在设置面板自定义，不随 RTL 翻转）。
 - 漫画：每本书的阅读设置记忆——模式/双页/缩放按 `comic_id` 存入 `comic_settings.json`，重新打开时优先于全局默认恢复；无记录的书籍行为不变。
+- 媒体播放：倍速微调（`[` / `]` 键 ±0.25，原四档与数字键直选保留）、循环播放开关、截图（保存至图片目录）、AB 循环（A 键设 A 点/B 点/取消）、mpv 章节导航（上一章/下一章，无章节禁用）；以上入口聚合于媒体视图的"播放"菜单。
+- 阅读器：图片 90° 步进旋转（阅读菜单/工具栏），宽页检测与双页布局按旋转后宽高计算，角度随每本书记忆持久化。
+- 漫画：加密 ZIP/RAR 密码支持——打开加密压缩包弹出密码输入框（AES 与传统 ZipCrypto 均可），密码仅会话内记忆不落盘，批量导入可跳过加密文件并汇总提示。
+- 书架：条目标签——右键菜单"编辑标签…"，顶部标签过滤 chips（单选），搜索框同时匹配标签。
+- 书架：阅读统计 tab——按书累计阅读时长（30s 粒度，存 `reading_stats.json`），显示总时长、条目数与每书时长排行。
+- 书签：创建时生成页缩略图并在书签列表行首显示（回退：封面 → 占位色块），删除书签/书籍时联动清理缩略图文件。
+- 帮助菜单：快捷键一览面板——可配置键位（当前生效值）与内置阅读/媒体键分区只读展示。
 
 ### Changed
 
@@ -59,10 +66,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 项目更名为 OpenItGo：workspace 各 crate 由 `rust-reader-*` 更名为 `openitgo-*`，窗口标题、关于框、`.app` 包名、bundle id（`com.liu.openitgo`）与环境变量前缀（`OPENITGO_*`）同步更新；配置目录改为 `~/.config/openitgo`（开发阶段均为新用户，不提供旧 `rust-reader` 目录迁移）。
 - CI：ubuntu job 安装 `libwebkit2gtk-4.1-dev` 修复 wry 构建；新增 macOS job（brew mpv + check/clippy/test）覆盖媒体路径。
 - 清理：删除 `probe_overlay.rs` 诊断示例；`docs/bug.md` 归档至 `docs/superpowers/reports/2026-07-17-bug-notes-archived.md`；AGENTS.md 登记 5 个 profiling/smoke 示例；`docs/superpowers/README.md` 索引补全。
+- 大章节分段加载评估完成：实测 930KB / 8000 段样本首布局 328ms、resize 重排 211–545ms、内存线性增长，未达分段阈值，结论暂不实现（评估见 `docs/superpowers/reports/2026-07-17-large-chapter-loading-eval.md`）。
 
 ### Fixed
 
 - 修复非 macOS 平台编译失败：`player_stub` 补齐 `request_audio_devices` / `sub_add` / `adjust_sub_delay` / `reset_sub_delay`（其中 `request_audio_devices` 为既有缺口），ubuntu CI 由此可用。
+- 电子书：修复菜单栏菜单/弹层被 wry webview 遮盖不可见的问题——菜单/弹层打开时临时 `set_visible(false)` 隐藏 webview 并以当前阅读主题背景色填充，关闭即恢复（可见性变更按状态去重，不逐帧 IPC）。
+- 电子书排版：修复宽表格溢出（td/th 强制折行）与 pre 块溢出（横向滚动）；超高图片经注入 CSS 约束缩放至视口内；剥离 EPUB 内联 `column-*` / `position: fixed|absolute` 样式声明（数量经日志可观测），避免与 CSS columns 分页器冲突。
 
 - 电子书：修复 calibre 风格 EPUB（如《朱颜血》）封面/简介等章节渲染报 "No pages found" 的问题；根因是 NCX 中的 href 带 `#fragment` 或未归一化的 `../`（相对 OPF 目录），zip 精确匹配查找失败，查找前新增归一化（去 fragment、解析 `.`/`..`）。
 
