@@ -23,6 +23,8 @@ pub struct LibraryView {
     pub tag_filter: Option<String>,
     /// 标签编辑对话框状态：(条目索引, 输入缓冲)。
     tag_edit_buffer: Option<(usize, String)>,
+    /// 封面根目录（书签缩略图在 covers/bookmarks/ 下）；测试可为 None。
+    pub covers_dir: Option<PathBuf>,
 }
 
 impl Default for LibraryView {
@@ -36,6 +38,7 @@ impl Default for LibraryView {
             cover_textures: HashMap::new(),
             tag_filter: None,
             tag_edit_buffer: None,
+            covers_dir: None,
         }
     }
 }
@@ -467,6 +470,37 @@ impl LibraryView {
         Some(handle)
     }
 
+    /// 书签行缩略图纹理：书签页缩略图 → 封面 → None（调用方画占位色块）。
+    /// 纹理缓存 key 用 `bm_<comic_id>_<page>` 命名空间，避免与封面冲突。
+    fn bookmark_thumb_texture(
+        &mut self,
+        ctx: &egui::Context,
+        comic_id: &str,
+        page_index: usize,
+        cover_path: Option<&PathBuf>,
+    ) -> Option<egui::TextureHandle> {
+        let key = format!("bm_{}_{}", comic_id, page_index);
+        if let Some(handle) = self.cover_textures.get(&key) {
+            return Some(handle.clone());
+        }
+        if let Some(dir) = &self.covers_dir {
+            let path = dir
+                .join("bookmarks")
+                .join(format!("{}-p{}.jpg", comic_id, page_index));
+            if path.exists() {
+                let image = image::open(&path).ok()?;
+                let size = [image.width() as usize, image.height() as usize];
+                let rgba = image.to_rgba8().into_raw();
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
+                let handle =
+                    ctx.load_texture(key.clone(), color_image, egui::TextureOptions::LINEAR);
+                self.cover_textures.insert(key, handle.clone());
+                return Some(handle);
+            }
+        }
+        self.cover_texture(ctx, comic_id, cover_path)
+    }
+
     fn render_history(
         &mut self,
         ui: &mut egui::Ui,
@@ -522,10 +556,34 @@ impl LibraryView {
         }
         egui::Grid::new("bookmarks_grid").show(ui, |ui| {
             for (idx, entry) in bookmarks.entries.iter().enumerate() {
-                let (title, path) = match self.find_by_id(&entry.comic_id) {
-                    Some(lib) => (lib.title.clone(), Some(lib.path.clone())),
-                    None => (entry.comic_id.clone(), None),
+                let (title, path, cover_path) = match self.find_by_id(&entry.comic_id) {
+                    Some(lib) => (
+                        lib.title.clone(),
+                        Some(lib.path.clone()),
+                        lib.cover_path.clone(),
+                    ),
+                    None => (entry.comic_id.clone(), None, None),
                 };
+                let ctx = ui.ctx().clone();
+                match self.bookmark_thumb_texture(
+                    &ctx,
+                    &entry.comic_id,
+                    entry.page_index,
+                    cover_path.as_ref(),
+                ) {
+                    Some(texture) => {
+                        ui.add(
+                            egui::Image::new(&texture).fit_to_exact_size(egui::vec2(40.0, 60.0)),
+                        );
+                    }
+                    None => {
+                        // 无缩略图且无封面：占位色块
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(40.0, 60.0), egui::Sense::hover());
+                        ui.painter()
+                            .rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
+                    }
+                }
                 ui.label(&title);
                 ui.label(format!("第 {} 页", entry.page_index + 1));
                 if self.edit_buffer.as_ref().map(|b| b.0) == Some(idx) {

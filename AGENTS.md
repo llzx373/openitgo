@@ -83,6 +83,10 @@ already embed it.
 - **Library covers** are generated asynchronously from the first page and saved
   to `covers/`. Missing covers are re-requested on demand, and entries whose
   source file no longer exist are marked as deleted.
+  Bookmark thumbnails live in `covers/bookmarks/<comic_id>-p<page>.jpg`,
+  generated on bookmark creation through the cover_loader channel and removed
+  with the bookmark/book (comic bookmarks only; ebook bookmarks fall back to
+  the cover in the bookmark list).
 - **EbookRenderer** hosts a `wry` child webview and serves a small HTML reader
   shell over the custom `ebook://` protocol. Chapter content is fetched via
   `ebook://reader?chapter=N` and rendered by `openitgo_parser::html::render_chapter_html`.

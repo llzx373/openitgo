@@ -206,6 +206,8 @@ pub struct ReaderApp {
     pub reading_stats: HashMap<String, openitgo_storage::models::ReadingStat>,
     /// 当前阅读会话：(comic_id, 上次结算时刻)。视图切换/退出时结算并重启。
     pub stats_session: Option<(String, std::time::Instant)>,
+    /// 书签缩略图请求在途：epoch -> (comic_id, page_index)。
+    pub pending_bookmark_thumbs: HashMap<crate::loader::Epoch, (String, usize)>,
 }
 
 impl Default for ReaderApp {
@@ -220,6 +222,7 @@ impl Default for ReaderApp {
         let mut library_view = LibraryView::default();
         library_view.library = library;
         let covers_dir = store.dir().join("covers");
+        library_view.covers_dir = Some(covers_dir.clone());
         if migrate_library_ids(
             &mut library_view.library,
             &mut history,
@@ -269,6 +272,7 @@ impl Default for ReaderApp {
             opening_path: None,
             reading_stats,
             stats_session: None,
+            pending_bookmark_thumbs: HashMap::new(),
         }
     }
 }
@@ -554,7 +558,10 @@ impl ReaderApp {
                 }
             }
             if let Some(idx) = delete_library_idx {
-                self.library_view.library.entries.remove(idx);
+                if idx < self.library_view.library.entries.len() {
+                    let removed = self.library_view.library.entries.remove(idx);
+                    remove_bookmark_thumbs(&self.covers_dir(), &removed.comic_id, None);
+                }
             }
             if let Some((idx, note)) = update_bookmark {
                 if let Some(entry) = self.bookmarks.entries.get_mut(idx) {
@@ -562,7 +569,17 @@ impl ReaderApp {
                 }
             }
             if let Some(idx) = delete_bookmark_idx {
-                self.bookmarks.entries.remove(idx);
+                if idx < self.bookmarks.entries.len() {
+                    let removed = self.bookmarks.entries.remove(idx);
+                    if removed.char_offset.is_none() {
+                        // 漫画书签才有缩略图（电子书书签不生成）
+                        remove_bookmark_thumbs(
+                            &self.covers_dir(),
+                            &removed.comic_id,
+                            Some(removed.page_index),
+                        );
+                    }
+                }
             }
             if clear_history {
                 self.history.entries.clear();
@@ -2719,6 +2736,13 @@ impl ReaderApp {
             if !result.thumbnail || result.dropped {
                 continue;
             }
+            if let Some((comic_id, page_index)) = self.pending_bookmark_thumbs.remove(&result.epoch)
+            {
+                if let Ok(crate::loader::LoadedImage::Color(img)) = result.image {
+                    save_bookmark_thumb(&self.covers_dir(), &comic_id, page_index, &img);
+                }
+                continue;
+            }
             let (comic_id, _path) = match self.pending_covers.remove(&result.epoch) {
                 Some(v) => v,
                 None => continue,
@@ -2979,12 +3003,31 @@ impl ReaderApp {
                 self.bookmarks
                     .entries
                     .push(openitgo_storage::models::Bookmark {
-                        comic_id,
+                        comic_id: comic_id.clone(),
                         volume_index: 0,
                         page_index,
                         char_offset: None,
                         note: None,
                     });
+                // 生成书签页缩略图（走封面同款缩略图通道，结果在
+                // poll_cover_results 里落盘）。电子书书签走 add_ebook_bookmark，
+                // 不经过这里，天然跳过。
+                if let Some(page) = reader
+                    .comic
+                    .volumes
+                    .first()
+                    .and_then(|v| v.pages.get(page_index))
+                {
+                    let epoch = self.cover_loader.next_epoch();
+                    if self.cover_loader.request_thumbnail_high(
+                        epoch,
+                        page_index,
+                        page.source.clone(),
+                    ) {
+                        self.pending_bookmark_thumbs
+                            .insert(epoch, (comic_id, page_index));
+                    }
+                }
             }
         }
     }
@@ -3333,9 +3376,9 @@ fn is_supported_comic_file(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-fn cover_filename(comic_id: &str) -> String {
-    let safe: String = comic_id
-        .chars()
+/// comic_id 的文件系统安全形式（非字母数字/-/下划线一律替换为 _）。
+fn sanitize_id_component(id: &str) -> String {
+    id.chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' {
                 c
@@ -3343,7 +3386,11 @@ fn cover_filename(comic_id: &str) -> String {
                 '_'
             }
         })
-        .collect();
+        .collect()
+}
+
+fn cover_filename(comic_id: &str) -> String {
+    let safe = sanitize_id_component(comic_id);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     comic_id.hash(&mut hasher);
     let hash = hasher.finish();
@@ -3361,6 +3408,70 @@ fn save_cover_image(
 ) -> Option<PathBuf> {
     std::fs::create_dir_all(covers_dir).ok()?;
     let path = cover_path_for_comic_id(covers_dir, comic_id);
+    let rgba: Vec<u8> = image
+        .pixels
+        .iter()
+        .flat_map(|c| [c.r(), c.g(), c.b(), c.a()])
+        .collect();
+    let img = image::RgbaImage::from_raw(image.width() as u32, image.height() as u32, rgba)?;
+    let rgb = image::DynamicImage::ImageRgba8(img).to_rgb8();
+    rgb.save_with_format(&path, image::ImageFormat::Jpeg).ok()?;
+    Some(path)
+}
+
+/// 书签缩略图目录：covers/bookmarks/。
+fn bookmark_thumb_dir(covers_dir: &Path) -> PathBuf {
+    covers_dir.join("bookmarks")
+}
+
+/// 书签缩略图路径：covers/bookmarks/<comic_id>-p<page>.jpg。
+fn bookmark_thumb_path(covers_dir: &Path, comic_id: &str, page_index: usize) -> PathBuf {
+    bookmark_thumb_dir(covers_dir).join(format!(
+        "{}-p{}.jpg",
+        sanitize_id_component(comic_id),
+        page_index
+    ))
+}
+
+/// 删除书签缩略图：`page_index` 为 Some 时只删该页，None 删整本书的全部
+/// 书签缩略图（删除书籍时用）。返回删除的文件数；目录缺失视为 0。
+fn remove_bookmark_thumbs(covers_dir: &Path, comic_id: &str, page_index: Option<usize>) -> usize {
+    match page_index {
+        Some(page) => {
+            let path = bookmark_thumb_path(covers_dir, comic_id, page);
+            std::fs::remove_file(path).ok().map(|_| 1).unwrap_or(0)
+        }
+        None => {
+            let prefix = format!("{}-p", sanitize_id_component(comic_id));
+            let Ok(entries) = std::fs::read_dir(bookmark_thumb_dir(covers_dir)) else {
+                return 0;
+            };
+            let mut removed = 0;
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if name.starts_with(&prefix)
+                    && name.ends_with(".jpg")
+                    && std::fs::remove_file(entry.path()).is_ok()
+                {
+                    removed += 1;
+                }
+            }
+            removed
+        }
+    }
+}
+
+/// 把解码后的页缩略图落盘为 JPEG（与 save_cover_image 同一格式约定）。
+fn save_bookmark_thumb(
+    covers_dir: &Path,
+    comic_id: &str,
+    page_index: usize,
+    image: &egui::ColorImage,
+) -> Option<PathBuf> {
+    let dir = bookmark_thumb_dir(covers_dir);
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = bookmark_thumb_path(covers_dir, comic_id, page_index);
     let rgba: Vec<u8> = image
         .pixels
         .iter()
@@ -3494,6 +3605,7 @@ mod tests {
             let bookmarks = store.load_bookmarks().unwrap_or_default();
             let mut library_view = LibraryView::default();
             library_view.library = library;
+            library_view.covers_dir = Some(dir.join("covers"));
             let page_loader = PageLoader::new_with_compress(
                 settings.compress_images,
                 settings.decode_threads as usize,
@@ -3533,6 +3645,7 @@ mod tests {
                 opening_path: None,
                 reading_stats: HashMap::new(),
                 stats_session: None,
+                pending_bookmark_thumbs: HashMap::new(),
             }
         }
     }
@@ -4440,5 +4553,57 @@ mod tests {
         );
         app.current_view = View::Reader;
         assert_eq!(app.current_reading_id(), Some(comic_id));
+    }
+
+    #[test]
+    fn test_bookmark_thumb_path_layout() {
+        let dir = std::path::Path::new("/tmp/covers");
+        assert_eq!(
+            bookmark_thumb_path(dir, "abc123", 7),
+            std::path::PathBuf::from("/tmp/covers/bookmarks/abc123-p7.jpg")
+        );
+        // 特殊字符清洗
+        assert_eq!(
+            bookmark_thumb_path(dir, "a/b\\c:d", 0),
+            std::path::PathBuf::from("/tmp/covers/bookmarks/a_b_c_d-p0.jpg")
+        );
+    }
+
+    #[test]
+    fn test_remove_bookmark_thumbs_single_page() {
+        let tmp = tempfile::tempdir().unwrap();
+        let covers = tmp.path();
+        let thumbs = bookmark_thumb_dir(covers);
+        std::fs::create_dir_all(&thumbs).unwrap();
+        let p1 = bookmark_thumb_path(covers, "id1", 1);
+        let p2 = bookmark_thumb_path(covers, "id1", 2);
+        let other = bookmark_thumb_path(covers, "id2", 1);
+        for p in [&p1, &p2, &other] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        assert_eq!(remove_bookmark_thumbs(covers, "id1", Some(1)), 1);
+        assert!(!p1.exists());
+        assert!(p2.exists());
+        assert!(other.exists());
+    }
+
+    #[test]
+    fn test_remove_bookmark_thumbs_whole_book() {
+        let tmp = tempfile::tempdir().unwrap();
+        let covers = tmp.path();
+        let thumbs = bookmark_thumb_dir(covers);
+        std::fs::create_dir_all(&thumbs).unwrap();
+        let p1 = bookmark_thumb_path(covers, "id1", 1);
+        let p2 = bookmark_thumb_path(covers, "id1", 2);
+        let other = bookmark_thumb_path(covers, "id2", 1);
+        for p in [&p1, &p2, &other] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        assert_eq!(remove_bookmark_thumbs(covers, "id1", None), 2);
+        assert!(!p1.exists());
+        assert!(!p2.exists());
+        assert!(other.exists());
+        // 目录不存在时不报错
+        assert_eq!(remove_bookmark_thumbs(covers, "nope", None), 0);
     }
 }
