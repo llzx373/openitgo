@@ -182,7 +182,7 @@
   - [x] 32.1 相邻章节预加载
   - [x] 32.2 缓存页数计算结果
   - [x] 32.3 减少 resize 时重新布局开销
-  - [ ] 32.4 评估大章节分段加载
+  - [x] 32.4 评估大章节分段加载（结论：不做，见 #55 与 `docs/superpowers/reports/2026-07-17-large-chapter-loading-eval.md`）
 
 ## P2 — 媒体播放（内嵌 libmpv）
 
