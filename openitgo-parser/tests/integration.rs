@@ -1,4 +1,5 @@
 use openitgo_parser::parse;
+use openitgo_parser::traits::ParseError;
 use std::fs;
 use std::io::Write;
 use zip::write::SimpleFileOptions;
@@ -57,4 +58,13 @@ fn test_parse_sample_pdf() {
     let comic = parse(&pdf).unwrap();
     assert!(!comic.volumes.is_empty());
     assert!(!comic.volumes[0].pages.is_empty());
+}
+
+#[test]
+fn test_parse_corrupt_pdf_returns_invalid_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("corrupt.pdf");
+    std::fs::write(&path, b"definitely not a pdf").unwrap();
+    let err = parse(&path).unwrap_err();
+    assert!(matches!(err, ParseError::InvalidArchive(_)));
 }

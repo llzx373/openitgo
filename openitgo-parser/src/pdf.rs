@@ -1,5 +1,6 @@
 use crate::traits::{ParseError, Parser};
 use openitgo_core::models::{Comic, Page, PageSource, Volume};
+use pdf_syntax::Pdf;
 use std::path::Path;
 
 pub struct PdfParser;
@@ -13,11 +14,11 @@ impl Parser for PdfParser {
     }
 
     fn parse(path: &Path) -> Result<Comic, ParseError> {
-        let file = pdf::file::FileOptions::cached()
-            .open(path)
-            .map_err(map_pdf_error)?;
+        let data = std::fs::read(path).map_err(ParseError::Io)?;
+        // LoadPdfError 只实现 Debug（无 Display），用 {:?} 记录。
+        let pdf = Pdf::new(data).map_err(|e| ParseError::InvalidArchive(format!("{e:?}")))?;
 
-        let num_pages = file.num_pages() as usize;
+        let num_pages = pdf.pages().len();
         if num_pages == 0 {
             return Err(ParseError::NoPages);
         }
@@ -48,13 +49,6 @@ impl Parser for PdfParser {
                 pages,
             }],
         })
-    }
-}
-
-fn map_pdf_error(err: pdf::PdfError) -> ParseError {
-    match err {
-        pdf::PdfError::Io { source } => ParseError::Io(source),
-        other => ParseError::InvalidArchive(other.to_string()),
     }
 }
 
