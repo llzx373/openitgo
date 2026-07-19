@@ -371,8 +371,9 @@ impl MpvNativeView {
                 // Below-egui anchoring needs the CAMetalLayer sibling; the
                 // index-0 fallback (expected only in probe windows without
                 // wgpu) stacks the video ABOVE the egui surface, so log it.
-                let cls: *const i8 = msg_send![view_layer, className];
-                let cls = std::ffi::CStr::from_ptr(cls).to_string_lossy();
+                // view_layer is non-null (checked above) and alive; class()
+                // is object_getClass, name() is class_getName.
+                let cls = (&*view_layer).class().name().to_string_lossy();
                 eprintln!(
                     "[mpv_view] view layer is {cls}, not CAMetalLayer; layer structure may \
                      have changed — using insertSublayer:atIndex:0 fallback (video will \

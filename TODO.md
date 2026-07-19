@@ -267,4 +267,4 @@
 - [x] 58. `openitgo-media` 核心（player/render）单元测试，现仅靠手动 probe
 - [x] 59. 跨平台补全：Windows/Linux `env::args` 文件关联打开（现全仓无 argv 处理）、媒体播放非 macOS 实现、对应打包脚本；README "跨平台" 措辞与实际对齐（轻量部分完成；非 macOS 媒体播放 + 打包脚本出范围，未做）
 - [x] 60. 清理：`probe_overlay.rs` 已删（AGENTS.md 已同步）；5 个 examples 已登记；`docs/bug.md` 已归档至 `docs/superpowers/reports/2026-07-17-bug-notes-archived.md`；`docs/superpowers/README.md` 索引已补全
-- [ ] 61. mpv_view index-0 fallback 分支把 `NSString*`（className）当 CStr 读取的预存 bug（objc 0.2 时代遗留，仅影响 probe 回退路径一行诊断日志；修法：先收 `*mut AnyObject` 再发 `UTF8String`，或改用 `(&*view_layer).class().name()`）
+- [x] 61. mpv_view index-0 fallback 分支把 `NSString*`（className）当 CStr 读取的预存 bug——已改用 `(&*view_layer).class().name()`（objc2 类型化 API：`AnyObject::class` = object_getClass，`AnyClass::name` = class_getName，返回 `&CStr`），日志文案与 fallback 行为不变
