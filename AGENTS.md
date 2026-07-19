@@ -237,8 +237,9 @@ builds on unpinned stable.
   on `objc2` 0.6 + `objc2-core-foundation` (CGRect `Encode` impls) — do not
   reintroduce the unmaintained `objc` 0.2 crate. `msg_send!` picks the
   correct `objc_msgSend` variant (incl. stret) from the return type's
-  encoding, so the layer code is arch-neutral (aarch64 and x86_64); wgpu-hal
-  still pulls in `objc` 0.2 transitively via `metal`, which is expected.
+  encoding, so the layer code is arch-neutral (aarch64 and x86_64); `objc`
+  0.2 has been fully removed from the dependency tree (wgpu-hal 29 also
+  switched to objc2) and must not be reintroduced.
   备查：`mpv_view` 的部分 objc2 写法用了宽松编码（`*mut c_void` 收
   `CGColor`、`*const c_char` 收 `UTF8String`），依赖 wry 链带入的 objc2
   `disable-encoding-assertions` feature 才不触发 debug 编码校验；该 feature

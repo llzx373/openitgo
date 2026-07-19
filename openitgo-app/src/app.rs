@@ -4661,6 +4661,14 @@ mod tests {
         std::fs::write(&arg_file, b"x").unwrap();
         assert_eq!(
             initial_open_path(None, Some(arg_file.clone())),
+            Some(arg_file.clone())
+        );
+        // env 设置了但不存在 → 回退到 argv
+        assert_eq!(
+            initial_open_path(
+                Some(std::path::PathBuf::from("/nonexistent/env.cbz")),
+                Some(arg_file.clone()),
+            ),
             Some(arg_file)
         );
         assert_eq!(
