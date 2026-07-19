@@ -220,6 +220,12 @@ already embed it.
   app creator in `main.rs`) stores an `egui::Context` that `enqueue_paths`
   calls `request_repaint()` on after every enqueue. Removing the wake
   re-introduces the "dock-opened files stall until the next repaint" bug.
+  The macOS platform layer (`dock_open`, `mpv_view`, probe examples) is built
+  on `objc2` 0.6 + `objc2-core-foundation` (CGRect `Encode` impls) — do not
+  reintroduce the unmaintained `objc` 0.2 crate. `msg_send!` picks the
+  correct `objc_msgSend` variant (incl. stret) from the return type's
+  encoding, so the layer code is arch-neutral (aarch64 and x86_64); wgpu-hal
+  still pulls in `objc` 0.2 transitively via `metal`, which is expected.
 
 ## Commits
 

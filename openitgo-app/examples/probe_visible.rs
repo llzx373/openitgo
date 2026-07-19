@@ -3,13 +3,12 @@
 //! CoreAnimation draw + compositing path can be verified with a screenshot.
 //! Usage: cargo run -p openitgo-app --example probe_visible -- <video-file> [seconds]
 
-// objc 0.2's sel_impl macro carries a stale `cfg(feature = "cargo-clippy")`.
-#![allow(unexpected_cfgs)]
-
 #[cfg(target_os = "macos")]
 fn main() {
-    use objc::runtime::{Object, NO, YES};
-    use objc::{class, msg_send, sel, sel_impl};
+    use objc2::rc::{Allocated, Retained};
+    use objc2::runtime::{AnyObject, Bool};
+    use objc2::{class, msg_send};
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
     use openitgo_app::platform::macos::mpv_view::MpvNativeView;
     use openitgo_media::MpvPlayer;
     use std::ffi::c_void;
@@ -34,32 +33,31 @@ fn main() {
     // SAFETY: all messages go to valid AppKit objects on the main thread;
     // selectors match the receivers' classes.
     let (content_view, _window) = unsafe {
-        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
         let () = msg_send![app, setActivationPolicy: 0i64]; // NSApplicationActivationPolicyRegular
-        let rect = core_graphics::geometry::CGRect::new(
-            &core_graphics::geometry::CGPoint::new(200.0, 200.0),
-            &core_graphics::geometry::CGSize::new(640.0, 480.0),
-        );
-        let window: *mut Object = msg_send![class!(NSWindow), alloc];
+        let rect = CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(640.0, 480.0));
+        let window: Allocated<AnyObject> = msg_send![class!(NSWindow), alloc];
         let style: usize = (1 << 0) | (1 << 1) | (1 << 2); // titled|closable|miniaturizable
-        let window: *mut Object = msg_send![window,
-            initWithContentRect: rect
-            styleMask: style
-            backing: 2usize // NSBackingStoreBuffered
-            defer: NO
+        let window: Option<Retained<AnyObject>> = msg_send![window,
+            initWithContentRect: rect,
+            styleMask: style,
+            backing: 2usize, // NSBackingStoreBuffered
+            defer: Bool::NO
         ];
-        let title: *mut Object = msg_send![class!(NSString), alloc];
-        let title: *mut Object =
+        let window = Retained::into_raw(window.expect("NSWindow init failed"));
+        let title: Allocated<AnyObject> = msg_send![class!(NSString), alloc];
+        let title: Option<Retained<AnyObject>> =
             msg_send![title, initWithUTF8String: c"OPENITGO_PROBE_VISIBLE".as_ptr()];
-        let () = msg_send![window, setTitle: title];
-        let () = msg_send![window, makeKeyAndOrderFront: std::ptr::null_mut::<Object>()];
-        let () = msg_send![app, activateIgnoringOtherApps: YES];
-        let content_view: *mut Object = msg_send![window, contentView];
+        let title = title.expect("NSString init failed");
+        let () = msg_send![window, setTitle: &*title];
+        let () = msg_send![window, makeKeyAndOrderFront: std::ptr::null_mut::<AnyObject>()];
+        let () = msg_send![app, activateIgnoringOtherApps: Bool::YES];
+        let content_view: *mut AnyObject = msg_send![window, contentView];
         (content_view, window)
     };
     assert!(!content_view.is_null(), "NSWindow contentView is null");
 
-    struct Parent(*mut Object);
+    struct Parent(*mut AnyObject);
     impl wry::raw_window_handle::HasWindowHandle for Parent {
         fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
             let view = std::ptr::NonNull::new(self.0 as *mut c_void)
@@ -97,8 +95,9 @@ fn main() {
         // Pump the main runloop for ~500ms so CA commits and draws happen.
         // SAFETY: runUntilDate: on the main run loop from the main thread.
         unsafe {
-            let run_loop: *mut Object = msg_send![class!(NSRunLoop), mainRunLoop];
-            let date: *mut Object = msg_send![class!(NSDate), dateWithTimeIntervalSinceNow: 0.5f64];
+            let run_loop: *mut AnyObject = msg_send![class!(NSRunLoop), mainRunLoop];
+            let date: *mut AnyObject =
+                msg_send![class!(NSDate), dateWithTimeIntervalSinceNow: 0.5f64];
             let () = msg_send![run_loop, runUntilDate: date];
         }
         let s = state.lock().unwrap();

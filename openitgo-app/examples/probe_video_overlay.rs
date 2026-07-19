@@ -12,13 +12,10 @@
 //! over it, the bars are fully opaque.
 //! Usage: cargo run -p openitgo-app --example probe_video_overlay -- <video-file>
 
-// objc 0.2's sel_impl macro carries a stale `cfg(feature = "cargo-clippy")`.
-#![allow(unexpected_cfgs)]
-
 #[cfg(target_os = "macos")]
 mod imp {
-    use objc::runtime::Object;
-    use objc::{msg_send, sel, sel_impl};
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
     use openitgo_app::platform::macos::mpv_view::MpvNativeView;
     use openitgo_media::MpvPlayer;
     use wry::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -38,9 +35,9 @@ mod imp {
 
     /// # Safety
     /// `obj` must be a live NSObject.
-    unsafe fn class_name(obj: *mut Object) -> String {
+    unsafe fn class_name(obj: *mut AnyObject) -> String {
         unsafe {
-            let name: *mut Object = msg_send![obj, className];
+            let name: *mut AnyObject = msg_send![obj, className];
             let c: *const std::os::raw::c_char = msg_send![name, UTF8String];
             std::ffi::CStr::from_ptr(c).to_string_lossy().into_owned()
         }
@@ -48,9 +45,9 @@ mod imp {
 
     /// # Safety
     /// `layer` must be a live CALayer.
-    unsafe fn sublayers_of(layer: *mut Object) -> Vec<*mut Object> {
+    unsafe fn sublayers_of(layer: *mut AnyObject) -> Vec<*mut AnyObject> {
         unsafe {
-            let subs: *mut Object = msg_send![layer, sublayers];
+            let subs: *mut AnyObject = msg_send![layer, sublayers];
             if subs.is_null() {
                 return Vec::new();
             }
@@ -80,9 +77,9 @@ mod imp {
         ///
         /// # Safety
         /// `view_layer` must be a live layer on the UI thread.
-        unsafe fn dump_layer_tree(view_layer: *mut Object) {
+        unsafe fn dump_layer_tree(view_layer: *mut AnyObject) {
             unsafe {
-                let sup: *mut Object = msg_send![view_layer, superlayer];
+                let sup: *mut AnyObject = msg_send![view_layer, superlayer];
                 if sup.is_null() {
                     println!("[layer-diag] superlayer = nil");
                     return;
@@ -155,8 +152,8 @@ mod imp {
                         else {
                             return;
                         };
-                        let ns_view = h.ns_view.as_ptr() as *mut Object;
-                        let view_layer: *mut Object = msg_send![ns_view, layer];
+                        let ns_view = h.ns_view.as_ptr() as *mut AnyObject;
+                        let view_layer: *mut AnyObject = msg_send![ns_view, layer];
                         Self::dump_layer_tree(view_layer);
                     }
                 }

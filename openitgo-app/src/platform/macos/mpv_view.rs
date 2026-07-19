@@ -39,21 +39,14 @@
 //! animation provides the fade, so `setOpacity` calls must stay outside
 //! the disabled-actions transactions used for geometry changes.
 
-// objc 0.2's sel_impl macro carries a stale `cfg(feature = "cargo-clippy")`;
-// same allow as platform.rs's dock_open module.
-#![allow(unexpected_cfgs)]
+// objc2's msg_send! picks the correct objc_msgSend variant (incl. stret)
+// from the return type's Encode signature, so this compiles on both
+// aarch64 and x86_64 — the old objc 0.2 code was aarch64-only.
 
-// `msg_send![this, bounds]` returns CGRect through plain objc_msgSend; the
-// arm64 ABI handles struct returns uniformly, x86_64 would need
-// objc_msgSend_stret. Fail the build instead of silently miscompiling.
-#[cfg(not(target_arch = "aarch64"))]
-compile_error!(
-    "mpv_view assumes the arm64 objc_msgSend struct-return ABI (CGRect); Intel macOS needs stret handling"
-);
-
-use objc::declare::ClassDecl;
-use objc::runtime::{Class, Object, Sel, BOOL, NO, YES};
-use objc::{class, msg_send, sel, sel_impl};
+use objc2::rc::{Allocated, Retained};
+use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Ivar, Sel};
+use objc2::{class, ffi, msg_send, sel};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use openitgo_media::render::RenderContext;
 use std::ffi::c_void;
 use std::sync::Mutex;
@@ -90,8 +83,8 @@ struct LayerState {
 /// by `layer` as its sublayer. `state` points at the layer-owned
 /// `Box<LayerState>` (freed in the layer's `dealloc`).
 pub struct MpvNativeView {
-    layer: *mut Object,
-    osd_layer: *mut Object,
+    layer: *mut AnyObject,
+    osd_layer: *mut AnyObject,
     state: *mut LayerState,
 }
 
@@ -99,59 +92,61 @@ pub struct MpvNativeView {
 // owns this value; moving ownership between threads does not alias them.
 unsafe impl Send for MpvNativeView {}
 
-fn layer_class() -> &'static Class {
+fn layer_class() -> &'static AnyClass {
     use std::sync::OnceLock;
-    static CLS: OnceLock<&'static Class> = OnceLock::new();
+    static CLS: OnceLock<&'static AnyClass> = OnceLock::new();
     CLS.get_or_init(|| {
-        let superclass = Class::get("CAOpenGLLayer").expect("CAOpenGLLayer missing");
-        let mut decl =
-            ClassDecl::new("OpenItGoMpvLayer", superclass).expect("failed to declare layer");
-        decl.add_ivar::<usize>("_rsState");
+        let superclass = AnyClass::get(c"CAOpenGLLayer").expect("CAOpenGLLayer missing");
+        let mut builder =
+            ClassBuilder::new(c"OpenItGoMpvLayer", superclass).expect("failed to declare layer");
+        builder.add_ivar::<usize>(c"_rsState");
         // SAFETY: each selector matches the CAOpenGLLayer delegate method
         // signature we register; the fn pointers use the C ABI and the types
-        // are layout-compatible with the Objective-C declarations.
+        // are layout-compatible with the Objective-C declarations. The `_`
+        // placeholders let inference pick a concrete receiver lifetime (the
+        // fully-written `&AnyObject` form is "not general enough" for
+        // MethodImplementation's HRTB).
         unsafe {
-            decl.add_method(
+            builder.add_method(
                 sel!(copyCGLPixelFormatForDisplayMask:),
-                copy_pixel_format as extern "C" fn(&Object, Sel, u32) -> *mut c_void,
+                copy_pixel_format as extern "C" fn(_, _, _) -> _,
             );
-            decl.add_method(
+            builder.add_method(
                 sel!(copyCGLContextForPixelFormat:),
-                copy_context as extern "C" fn(&Object, Sel, *mut c_void) -> *mut c_void,
+                copy_context as extern "C" fn(_, _, _) -> _,
             );
-            decl.add_method(
+            builder.add_method(
                 sel!(canDrawInCGLContext:pixelFormat:forLayerTime:displayTime:),
-                can_draw
-                    as extern "C" fn(
-                        &Object,
-                        Sel,
-                        *mut c_void,
-                        *mut c_void,
-                        f64,
-                        *const c_void,
-                    ) -> BOOL,
+                can_draw as extern "C" fn(_, _, _, _, _, _) -> _,
             );
-            decl.add_method(
+            builder.add_method(
                 sel!(drawInCGLContext:pixelFormat:forLayerTime:displayTime:),
-                draw_in
-                    as extern "C" fn(&Object, Sel, *mut c_void, *mut c_void, f64, *const c_void),
+                draw_in as extern "C" fn(_, _, _, _, _, _),
             );
-            decl.add_method(
-                sel!(rsDriveUpdate),
-                drive_update as extern "C" fn(&Object, Sel),
-            );
-            decl.add_method(sel!(dealloc), dealloc as extern "C" fn(&Object, Sel));
+            builder.add_method(sel!(rsDriveUpdate), drive_update as extern "C" fn(_, _));
+            builder.add_method(sel!(dealloc), dealloc as extern "C" fn(_, _));
         }
-        decl.register()
+        builder.register()
+    })
+}
+
+/// The `_rsState` ivar descriptor, cached alongside the class.
+fn rs_state_ivar() -> &'static Ivar {
+    use std::sync::OnceLock;
+    static IVAR: OnceLock<&'static Ivar> = OnceLock::new();
+    IVAR.get_or_init(|| {
+        layer_class()
+            .instance_variable(c"_rsState")
+            .expect("_rsState ivar missing")
     })
 }
 
 /// Reads the `_rsState` ivar. Returns `None` only after `dealloc` has run
 /// (which cannot race a live method call on the layer).
-fn state_from_ivar(this: &Object) -> Option<&LayerState> {
+fn state_from_ivar(this: &AnyObject) -> Option<&LayerState> {
     // SAFETY: `this` is a OpenItGoMpvLayer instance; the ivar was declared
-    // with usize layout.
-    let ptr: usize = unsafe { *this.get_ivar("_rsState") };
+    // with usize layout on this exact class.
+    let ptr: usize = unsafe { *rs_state_ivar().load::<usize>(this) };
     if ptr == 0 {
         return None;
     }
@@ -203,7 +198,7 @@ fn create_pixel_format() -> Option<cgl::CGLPixelFormatObj> {
     }
 }
 
-extern "C" fn copy_pixel_format(this: &Object, _sel: Sel, _mask: u32) -> *mut c_void {
+extern "C" fn copy_pixel_format(this: &AnyObject, _sel: Sel, _mask: u32) -> *mut c_void {
     match state_from_ivar(this) {
         // +1 retain: copy semantics transfer ownership of the returned object
         // to the layer.
@@ -212,7 +207,7 @@ extern "C" fn copy_pixel_format(this: &Object, _sel: Sel, _mask: u32) -> *mut c_
     }
 }
 
-extern "C" fn copy_context(this: &Object, _sel: Sel, _pf: *mut c_void) -> *mut c_void {
+extern "C" fn copy_context(this: &AnyObject, _sel: Sel, _pf: *mut c_void) -> *mut c_void {
     match state_from_ivar(this) {
         // +1 retain: copy semantics transfer ownership of the returned object
         // to the layer.
@@ -222,18 +217,18 @@ extern "C" fn copy_context(this: &Object, _sel: Sel, _pf: *mut c_void) -> *mut c
 }
 
 extern "C" fn can_draw(
-    _this: &Object,
+    _this: &AnyObject,
     _sel: Sel,
     _ctx: *mut c_void,
     _pf: *mut c_void,
     _t: f64,
     _ts: *const c_void,
-) -> BOOL {
-    YES
+) -> Bool {
+    Bool::YES
 }
 
 extern "C" fn draw_in(
-    this: &Object,
+    this: &AnyObject,
     _sel: Sel,
     _ctx: *mut c_void,
     _pf: *mut c_void,
@@ -260,7 +255,7 @@ extern "C" fn draw_in(
     // SAFETY: `this` is a valid CALayer; `bounds`/`contentsScale` are plain
     // getters that don't transfer ownership. glGetIntegerv is safe with a
     // current context.
-    let bounds: core_graphics::geometry::CGRect = unsafe { msg_send![this, bounds] };
+    let bounds: CGRect = unsafe { msg_send![this, bounds] };
     let scale: f64 = unsafe { msg_send![this, contentsScale] };
     let w = (bounds.size.width * scale) as i32;
     let h = (bounds.size.height * scale) as i32;
@@ -276,7 +271,7 @@ extern "C" fn draw_in(
 /// update callback). Answers every update callback with
 /// `mpv_render_context_update()` — a hard requirement with advanced control,
 /// independent of whether CoreAnimation schedules a draw (hidden windows).
-extern "C" fn drive_update(this: &Object, _sel: Sel) {
+extern "C" fn drive_update(this: &AnyObject, _sel: Sel) {
     let Some(state) = state_from_ivar(this) else {
         return;
     };
@@ -298,9 +293,9 @@ extern "C" fn drive_update(this: &Object, _sel: Sel) {
     }
 }
 
-extern "C" fn dealloc(this: &Object, _sel: Sel) {
+extern "C" fn dealloc(this: &AnyObject, _sel: Sel) {
     // SAFETY: `this` is a OpenItGoMpvLayer; the ivar was declared as usize.
-    let ptr: usize = unsafe { *this.get_ivar("_rsState") };
+    let ptr: usize = unsafe { *rs_state_ivar().load::<usize>(this) };
     if ptr != 0 {
         // SAFETY: ptr came from Box::into_raw in MpvNativeView::new; dealloc
         // runs at most once, so the box is reclaimed exactly once. No draw can
@@ -325,7 +320,7 @@ extern "C" fn dealloc(this: &Object, _sel: Sel) {
             .class()
             .superclass()
             .expect("CAOpenGLLayer superclass missing");
-        msg_send![super(this, superclass), dealloc]
+        let () = msg_send![super(this, superclass), dealloc];
     }
 }
 
@@ -342,7 +337,7 @@ impl MpvNativeView {
             .window_handle()
             .map_err(|e| format!("无法获取窗口句柄: {e:?}"))?;
         let ns_view = match handle.as_raw() {
-            RawWindowHandle::AppKit(h) => h.ns_view.as_ptr() as *mut Object,
+            RawWindowHandle::AppKit(h) => h.ns_view.as_ptr() as *mut AnyObject,
             _ => return Err("媒体播放暂仅支持 macOS".to_string()),
         };
         // The winit view's layer IS wgpu's CAMetalLayer (wgpu-hal adopts it
@@ -358,14 +353,14 @@ impl MpvNativeView {
         // SAFETY: ns_view is the parent window's live view, messaged on the
         // UI thread that owns it; selectors match the receivers' classes.
         let (metal_layer, parent_layer, is_metal) = unsafe {
-            let () = msg_send![ns_view, setWantsLayer: YES];
-            let view_layer: *mut Object = msg_send![ns_view, layer];
+            let () = msg_send![ns_view, setWantsLayer: Bool::YES];
+            let view_layer: *mut AnyObject = msg_send![ns_view, layer];
             if view_layer.is_null() {
                 return Err("父 view 尚无 layer（setWantsLayer 未生效），请重试".to_string());
             }
             let is_metal: bool = msg_send![view_layer, isKindOfClass: class!(CAMetalLayer)];
-            let parent_layer: *mut Object = if is_metal {
-                let parent: *mut Object = msg_send![view_layer, superlayer];
+            let parent_layer: *mut AnyObject = if is_metal {
+                let parent: *mut AnyObject = msg_send![view_layer, superlayer];
                 if parent.is_null() {
                     return Err(
                         "winit view 尚未挂入窗口层树（superlayer 为 nil），请重试".to_string()
@@ -429,13 +424,14 @@ impl MpvNativeView {
         // (freshly allocated, or the layer-tree anchors validated above),
         // and selectors match the receivers' classes.
         let (layer, osd_layer) = unsafe {
-            let layer: *mut Object = msg_send![layer_class(), alloc];
-            let layer: *mut Object = msg_send![layer, init];
-            (*layer).set_ivar::<usize>("_rsState", state_ptr as usize);
-            let () = msg_send![layer, setAsynchronous: YES];
-            let () = msg_send![layer, setNeedsDisplayOnBoundsChange: YES];
+            let layer: Allocated<AnyObject> = msg_send![layer_class(), alloc];
+            let layer: Option<Retained<AnyObject>> = msg_send![layer, init];
+            let layer = Retained::into_raw(layer.expect("OpenItGoMpvLayer init failed"));
+            *rs_state_ivar().load_ptr::<usize>(&*layer) = state_ptr as usize;
+            let () = msg_send![layer, setAsynchronous: Bool::YES];
+            let () = msg_send![layer, setNeedsDisplayOnBoundsChange: Bool::YES];
             // Retina: match the window's backing scale.
-            let window: *mut Object = msg_send![ns_view, window];
+            let window: *mut AnyObject = msg_send![ns_view, window];
             let scale: f64 = msg_send![window, backingScaleFactor];
             let () = msg_send![layer, setContentsScale: scale];
             // Bare layers animate geometry changes implicitly; the video
@@ -444,23 +440,24 @@ impl MpvNativeView {
             // set_bounds/set_osd). The OSD opacity fade lives on osd_layer
             // and is unaffected.
             let () = msg_send![class!(CATransaction), begin];
-            let () = msg_send![class!(CATransaction), setDisableActions: YES];
+            let () = msg_send![class!(CATransaction), setDisableActions: Bool::YES];
             let () = msg_send![layer, setFrame: make_frame(&bounds)];
             let () = if is_metal {
-                msg_send![parent_layer, insertSublayer: layer below: metal_layer]
+                msg_send![parent_layer, insertSublayer: layer, below: metal_layer]
             } else {
-                msg_send![parent_layer, insertSublayer: layer atIndex: 0u32]
+                msg_send![parent_layer, insertSublayer: layer, atIndex: 0u32]
             };
             let () = msg_send![class!(CATransaction), commit];
             // OSD text layer: a sublayer of the CAOpenGLLayer, hidden until
             // the first set_osd. Retained by us (+1), released in Drop.
-            let osd_layer: *mut Object = msg_send![class!(CATextLayer), alloc];
-            let osd_layer: *mut Object = msg_send![osd_layer, init];
+            let osd_layer: Allocated<AnyObject> = msg_send![class!(CATextLayer), alloc];
+            let osd_layer: Option<Retained<AnyObject>> = msg_send![osd_layer, init];
+            let osd_layer = Retained::into_raw(osd_layer.expect("CATextLayer init failed"));
             let () = msg_send![osd_layer, setFontSize: 20.0f64];
-            let fg: *mut Object = msg_send![class!(NSColor), colorWithRed: 1.0f64 green: 1.0f64 blue: 1.0f64 alpha: 1.0f64];
+            let fg: *mut AnyObject = msg_send![class!(NSColor), colorWithRed: 1.0f64, green: 1.0f64, blue: 1.0f64, alpha: 1.0f64];
             let fg_cg: *mut c_void = msg_send![fg, CGColor];
             let () = msg_send![osd_layer, setForegroundColor: fg_cg];
-            let bg: *mut Object = msg_send![class!(NSColor), colorWithRed: 0.0f64 green: 0.0f64 blue: 0.0f64 alpha: 0.6f64];
+            let bg: *mut AnyObject = msg_send![class!(NSColor), colorWithRed: 0.0f64, green: 0.0f64, blue: 0.0f64, alpha: 0.6f64];
             let bg_cg: *mut c_void = msg_send![bg, CGColor];
             let () = msg_send![osd_layer, setBackgroundColor: bg_cg];
             let () = msg_send![osd_layer, setCornerRadius: 8.0f64];
@@ -485,15 +482,15 @@ impl MpvNativeView {
                 // RenderContext::drop, in MpvNativeView::drop) before the
                 // layer is released, and performSelectorOnMainThread retains
                 // the receiver until delivery.
-                let layer = layer_addr as *mut Object;
+                let layer = layer_addr as *mut AnyObject;
                 // SAFETY: per the lifetime note above, layer is valid;
                 // rsDriveUpdate takes no arguments and transfers nothing.
                 unsafe {
                     let () = msg_send![
                         layer,
-                        performSelectorOnMainThread: sel!(rsDriveUpdate)
-                        withObject: std::ptr::null_mut::<Object>()
-                        waitUntilDone: NO
+                        performSelectorOnMainThread: sel!(rsDriveUpdate),
+                        withObject: std::ptr::null_mut::<AnyObject>(),
+                        waitUntilDone: Bool::NO
                     ];
                 }
             });
@@ -512,10 +509,10 @@ impl MpvNativeView {
         // goes through a disabled-actions transaction (see new()).
         unsafe {
             let () = msg_send![class!(CATransaction), begin];
-            let () = msg_send![class!(CATransaction), setDisableActions: YES];
+            let () = msg_send![class!(CATransaction), setDisableActions: Bool::YES];
             let () = msg_send![self.layer, setFrame: make_frame(&bounds)];
-            let lbounds: core_graphics::geometry::CGRect = msg_send![self.layer, bounds];
-            let cur: core_graphics::geometry::CGRect = msg_send![self.osd_layer, frame];
+            let lbounds: CGRect = msg_send![self.layer, bounds];
+            let cur: CGRect = msg_send![self.osd_layer, frame];
             let () = msg_send![
                 self.osd_layer,
                 setFrame: osd_frame(lbounds.size.width, lbounds.size.height, cur.size.width, cur.size.height)
@@ -532,15 +529,15 @@ impl MpvNativeView {
         // SAFETY: all objects are live instances owned by us, messaged on the
         // UI thread; selectors match the receivers' classes.
         unsafe {
-            let ns: *mut Object = msg_send![class!(NSString), alloc];
-            let ns: *mut Object = msg_send![ns, initWithUTF8String: ctext.as_ptr()];
-            let () = msg_send![self.osd_layer, setString: ns];
-            let () = msg_send![ns, release];
-            let text: core_graphics::geometry::CGSize =
-                msg_send![self.osd_layer, preferredFrameSize];
-            let lbounds: core_graphics::geometry::CGRect = msg_send![self.layer, bounds];
+            let ns: Allocated<AnyObject> = msg_send![class!(NSString), alloc];
+            let ns: Option<Retained<AnyObject>> = msg_send![ns, initWithUTF8String: ctext.as_ptr()];
+            let ns = ns.expect("NSString initWithUTF8String failed");
+            let () = msg_send![self.osd_layer, setString: &*ns];
+            // `ns` drops (releases) here; the layer retains its string copy.
+            let text: CGSize = msg_send![self.osd_layer, preferredFrameSize];
+            let lbounds: CGRect = msg_send![self.layer, bounds];
             let () = msg_send![class!(CATransaction), begin];
-            let () = msg_send![class!(CATransaction), setDisableActions: YES];
+            let () = msg_send![class!(CATransaction), setDisableActions: Bool::YES];
             let () = msg_send![
                 self.osd_layer,
                 setFrame: osd_frame(
@@ -603,19 +600,19 @@ impl Drop for MpvNativeView {
         // video layer also retained it as a sublayer until the video layer's
         // dealloc below.
         unsafe {
-            let () = msg_send![self.osd_layer, release];
+            ffi::objc_release(self.osd_layer);
         }
         // SAFETY: balanced release for the alloc/init retain in new(). The
         // layer's dealloc reclaims the Box<LayerState> and the base CGL
         // references; the superlayer's retain was already dropped by the
         // removeFromSuperlayer above.
         unsafe {
-            let () = msg_send![self.layer, release];
+            ffi::objc_release(self.layer);
         }
     }
 }
 
-fn make_frame(bounds: &wry::Rect) -> core_graphics::geometry::CGRect {
+fn make_frame(bounds: &wry::Rect) -> CGRect {
     use wry::dpi::{Position, Size};
     let (x, y) = match bounds.position {
         Position::Logical(p) => (p.x, p.y),
@@ -625,30 +622,19 @@ fn make_frame(bounds: &wry::Rect) -> core_graphics::geometry::CGRect {
         Size::Logical(s) => (s.width, s.height),
         Size::Physical(s) => (s.width as f64, s.height as f64),
     };
-    core_graphics::geometry::CGRect::new(
-        &core_graphics::geometry::CGPoint::new(x, y),
-        &core_graphics::geometry::CGSize::new(w, h),
-    )
+    CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
 }
 
 /// Top-right anchor in the layer's bottom-left-origin coordinate space (the
 /// bare CAOpenGLLayer has default, unflipped geometry — the reason the video
 /// needs FLIP_Y). `text_w` is clamped so long device names cannot run off
 /// the left edge.
-fn osd_frame(
-    view_w: f64,
-    view_h: f64,
-    text_w: f64,
-    text_h: f64,
-) -> core_graphics::geometry::CGRect {
+fn osd_frame(view_w: f64, view_h: f64, text_w: f64, text_h: f64) -> CGRect {
     const MARGIN: f64 = 16.0;
     let w = text_w.min((view_w - 2.0 * MARGIN).max(0.0));
     let x = (view_w - w - MARGIN).max(MARGIN);
     let y = (view_h - text_h - MARGIN).max(MARGIN);
-    core_graphics::geometry::CGRect::new(
-        &core_graphics::geometry::CGPoint::new(x, y),
-        &core_graphics::geometry::CGSize::new(w, text_h),
-    )
+    CGRect::new(CGPoint::new(x, y), CGSize::new(w, text_h))
 }
 
 #[cfg(test)]

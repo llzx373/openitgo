@@ -263,7 +263,7 @@
 ### P3 — 工程化
 
 - [x] 56. CI 修复与扩展：ubuntu job 安装 `libwebkit2gtk-4.1-dev` 修复 wry 构建；新增 macOS job（brew mpv + check/clippy/test）覆盖媒体路径；同步补齐 `player_stub` 非 macOS 编译缺口（ubuntu 首跑结果待 CI 确认）
-- [ ] 57. 依赖升级评估：egui 0.29 → 上游 0.33+（牵动 wgpu 与既有 API workaround）；跟踪 `pdf-render` beta 迭代；合并双 PDF 栈（parser `pdf 0.9` 取页数 + app `pdf-render` 渲染）（PDF 栈已合并）；`objc 0.2` → objc2
+- [ ] 57. 依赖升级评估：egui 0.29 → 上游 0.33+（牵动 wgpu 与既有 API workaround）；跟踪 `pdf-render` beta 迭代；合并双 PDF 栈（parser `pdf 0.9` 取页数 + app `pdf-render` 渲染）（PDF 栈已合并）；`objc 0.2` → objc2（objc2 迁移已完成：openitgo-app 直接依赖改为 objc2 0.6 + objc2-core-foundation 0.3，aarch64-only 限制已解除，x86_64 交叉 check 通过；wgpu-hal/metal 仍传递依赖 objc 0.2）
 - [x] 58. `openitgo-media` 核心（player/render）单元测试，现仅靠手动 probe
 - [x] 59. 跨平台补全：Windows/Linux `env::args` 文件关联打开（现全仓无 argv 处理）、媒体播放非 macOS 实现、对应打包脚本；README "跨平台" 措辞与实际对齐（轻量部分完成；非 macOS 媒体播放 + 打包脚本出范围，未做）
 - [x] 60. 清理：`probe_overlay.rs` 已删（AGENTS.md 已同步）；5 个 examples 已登记；`docs/bug.md` 已归档至 `docs/superpowers/reports/2026-07-17-bug-notes-archived.md`；`docs/superpowers/README.md` 索引已补全
