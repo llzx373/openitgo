@@ -34,6 +34,9 @@ Media playback requires libmpv from Homebrew (`brew install mpv`) to build
 `openitgo-media` and to run the app from source; packaged `.app` bundles
 already embed it.
 
+egui 0.35 requires rustc ≥ 1.92; local development uses 1.97.1 and CI
+builds on unpinned stable.
+
 ## Coding Conventions
 
 - Use `cargo fmt` for formatting.
@@ -225,7 +228,7 @@ already embed it.
 - **Dock open (macOS)**: `platform::macos::dock_open` swizzles the
   NSApplication delegate to queue files from `application:openURLs:` /
   `application:openFiles:` / `application:openFile:` into `OPEN_QUEUE`, drained
-  once per frame in `App::update`. An idle egui app does not repaint, so the
+  once per frame in `App::ui`. An idle egui app does not repaint, so the
   callbacks must wake the event loop: `set_wake_context` (registered from the
   app creator in `main.rs`) stores an `egui::Context` that `enqueue_paths`
   calls `request_repaint()` on after every enqueue. Removing the wake
@@ -236,6 +239,16 @@ already embed it.
   correct `objc_msgSend` variant (incl. stret) from the return type's
   encoding, so the layer code is arch-neutral (aarch64 and x86_64); wgpu-hal
   still pulls in `objc` 0.2 transitively via `metal`, which is expected.
+  备查：`mpv_view` 的部分 objc2 写法用了宽松编码（`*mut c_void` 收
+  `CGColor`、`*const c_char` 收 `UTF8String`），依赖 wry 链带入的 objc2
+  `disable-encoding-assertions` feature 才不触发 debug 编码校验；该 feature
+  若从依赖树消失，debug 构建会 panic，届时开启 objc2 的
+  `relax-void-encoding` feature 缓释（细节见
+  `.superpowers/sdd/task-5-report.md`）。
+- **Startup open (non-macOS)**: 启动时 `initial_open_path`（app.rs）从
+  `OPENITGO_OPEN` 环境变量（优先）或 `argv[1]`（`args_os`，Windows/Linux
+  文件关联经此传入）取路径，由 `ReaderApp::new` 经 `open_path` 打开；
+  `exists()` 检查天然过滤无效参数（如 macOS 偶发的 `-psn_*`）。
 
 ## Commits
 

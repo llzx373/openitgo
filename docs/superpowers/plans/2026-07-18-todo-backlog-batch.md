@@ -583,7 +583,7 @@ fn initial_open_path_prefers_env_over_argv() {
     std::fs::write(&env_file, b"x").unwrap();
     std::fs::write(&arg_file, b"x").unwrap();
     assert_eq!(
-        initial_open_path(env_file.to_str(), arg_file.to_str()),
+        initial_open_path(Some(env_file.clone()), Some(arg_file)),
         Some(env_file)
     );
 }
@@ -593,18 +593,40 @@ fn initial_open_path_falls_back_to_argv_and_skips_missing() {
     let dir = tempfile::tempdir().unwrap();
     let arg_file = dir.path().join("arg.cbz");
     std::fs::write(&arg_file, b"x").unwrap();
-    assert_eq!(initial_open_path(None, arg_file.to_str()), Some(arg_file));
-    assert_eq!(initial_open_path(None, Some("/nonexistent/xx.cbz")), None);
+    assert_eq!(
+        initial_open_path(None, Some(arg_file.clone())),
+        Some(arg_file)
+    );
+    assert_eq!(
+        initial_open_path(None, Some(std::path::PathBuf::from("/nonexistent/xx.cbz"))),
+        None
+    );
     assert_eq!(initial_open_path(None, None), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn initial_open_path_accepts_non_utf8_argv() {
+    use std::os::unix::ffi::OsStringExt;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("comic.cbz");
+    std::fs::write(&file, b"x").unwrap();
+    // 非 UTF-8 字节序列构成的 argv 不再 panic（回归：env::args() 会 panic）
+    let raw = std::ffi::OsString::from_vec(b"\xff\xfe.cbz".to_vec());
+    assert_eq!(initial_open_path(None, Some(file.clone())), Some(file));
+    assert_eq!(
+        initial_open_path(None, Some(std::path::PathBuf::from(raw))),
+        None
+    );
 }
 ```
 
-（`tempfile` 已在 openitgo-app 的 dev-dependencies；`Path::to_str` 返回 `Option<&str>`，与参数类型匹配。）
+（`tempfile` 已在 openitgo-app 的 dev-dependencies；参数为修订后的 `Option<PathBuf>`，第 3 个测试是任务尾部"修订"注所述 args_os 审查修复补的非 UTF-8 argv 回归（`#[cfg(unix)]`）。）
 
 - [ ] **Step 3: 跑测试**
 
 Run: `cargo test -p openitgo-app initial_open_path`
-Expected: 2 个新测试 PASS。
+Expected: 3 个新测试 PASS。
 
 - [ ] **Step 4: README.md 措辞对齐**
 

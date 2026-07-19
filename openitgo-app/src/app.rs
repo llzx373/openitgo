@@ -1254,8 +1254,9 @@ impl ReaderApp {
         egui::Panel::bottom("media_seekbar").show(ui, |ui| {
             ui.vertical(|ui| {
                 // Row 1: full-width seek bar with a hover-time tooltip.
-                // egui 0.29 Slider always allocates spacing().slider_width
-                // (100px) and ignores add_sized, so override the width in a
+                // egui 0.35 Slider still allocates spacing().slider_width
+                // (100px) and ignores add_sized (egui-0.35.0
+                // widgets/slider.rs:652-653), so override the width in a
                 // scoped Ui — without leaking it to the row-2 volume slider.
                 match dur {
                     Some(d) if d > 0 => {

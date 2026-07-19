@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 书架：阅读统计 tab——按书累计阅读时长（30s 粒度，存 `reading_stats.json`），显示总时长、条目数与每书时长排行。
 - 书签：创建时生成页缩略图并在书签列表行首显示（回退：封面 → 占位色块），删除书签/书籍时联动清理缩略图文件。
 - 帮助菜单：快捷键一览面板——可配置键位（当前生效值）与内置阅读/媒体键分区只读展示。
+- 非 macOS 平台启动时支持 argv 文件关联打开：首个命令行参数经 `args_os` 读取（非 UTF-8 参数不再 panic），存在性检查过滤无效参数，`OPENITGO_OPEN` 环境变量仍优先（#59 轻量部分；非 macOS 媒体播放与打包脚本出范围，未做）。
 
 ### Changed
 
@@ -66,7 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 项目更名为 OpenItGo：workspace 各 crate 由 `rust-reader-*` 更名为 `openitgo-*`，窗口标题、关于框、`.app` 包名、bundle id（`com.liu.openitgo`）与环境变量前缀（`OPENITGO_*`）同步更新；配置目录改为 `~/.config/openitgo`（开发阶段均为新用户，不提供旧 `rust-reader` 目录迁移）。
 - CI：ubuntu job 安装 `libwebkit2gtk-4.1-dev` 修复 wry 构建；新增 macOS job（brew mpv + check/clippy/test）覆盖媒体路径。
 - 清理：删除 `probe_overlay.rs` 诊断示例；`docs/bug.md` 归档至 `docs/superpowers/reports/2026-07-17-bug-notes-archived.md`；AGENTS.md 登记 5 个 profiling/smoke 示例；`docs/superpowers/README.md` 索引补全。
-- 大章节分段加载评估完成：实测 930KB / 8000 段样本首布局 328ms、resize 重排 211–545ms、内存线性增长，未达分段阈值，结论暂不实现（评估见 `docs/superpowers/reports/2026-07-17-large-chapter-loading-eval.md`）。
+- 大章节分段加载评估完成（TODO 32.4 勾选归档）：实测 930KB / 8000 段样本首布局 328ms、resize 重排 211–545ms、内存线性增长，未达分段阈值，结论暂不实现（评估见 #55 与 `docs/superpowers/reports/2026-07-17-large-chapter-loading-eval.md`）。
+- openitgo-media：命令参数构造与事件状态迁移抽为 FFI-free 纯函数模块（`args.rs` / `apply.rs`）并补单元测试，非 macOS 平台（ubuntu CI）亦可运行（#58）。
+- README 平台措辞与实际对齐：完整支持 macOS；Windows/Linux 可编译运行，文件关联打开已支持，媒体播放暂仅 macOS。
+- parser PDF 页数解析从 `pdf` 0.9 迁到 `pdf-syntax` 0.5，与渲染链（pdf-render）共用同一解析栈，消除双解析栈，净删 27 个依赖包（#57）。
+- macOS 平台层（dock_open / mpv_view / probe 示例）从 `objc` 0.2 迁移到 `objc2` 0.6，删除 aarch64-only 编译守卫，解除 Intel macOS 编译限制（#57）。
+- egui/eframe 0.29 → 0.35.0：图标库由 egui-phosphor 换为 egui_phosphor_icons 0.4；wgpu 22 → 29 连带升级；要求 rustc ≥ 1.92（#57）。
 
 ### Fixed
 
