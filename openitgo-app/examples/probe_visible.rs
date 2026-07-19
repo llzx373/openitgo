@@ -21,11 +21,13 @@ fn main() {
     #[link(name = "AppKit", kind = "framework")]
     extern "C" {}
 
-    let path = std::env::args()
+    let path = std::env::args_os()
         .nth(1)
+        .map(std::path::PathBuf::from)
         .expect("usage: probe_visible <video-file> [seconds]");
-    let seconds: u64 = std::env::args()
+    let seconds: u64 = std::env::args_os()
         .nth(2)
+        .and_then(|s| s.into_string().ok())
         .and_then(|s| s.parse().ok())
         .unwrap_or(8);
 
@@ -84,7 +86,7 @@ fn main() {
         size: LogicalSize::new(640.0, 480.0).into(),
     };
     let view = MpvNativeView::new(&parent, bounds, &player).expect("MpvNativeView::new failed");
-    println!("visible probe: view created, loading {path}");
+    println!("visible probe: view created, loading {}", path.display());
 
     player
         .load_file(std::path::Path::new(&path))

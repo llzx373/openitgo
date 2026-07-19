@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 fn main() -> eframe::Result<()> {
-    let path = std::env::args()
+    let path = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)
         .expect("usage: cargo run --example probe_ebook_menu -- <ebook-file>");

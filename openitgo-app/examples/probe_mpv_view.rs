@@ -23,8 +23,9 @@ fn main() {
     #[link(name = "AppKit", kind = "framework")]
     extern "C" {}
 
-    let path = std::env::args()
+    let path = std::env::args_os()
         .nth(1)
+        .map(std::path::PathBuf::from)
         .expect("usage: probe_mpv_view <video-file>");
 
     // Offscreen window + content view; no event loop is needed for creation.

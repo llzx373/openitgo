@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 fn main() {
     std::env::set_var("OPENITGO_LOG", "1");
 
-    let path = std::env::args()
+    let path = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)
         .expect("usage: cargo run --example flip_through -- <path-to-archive>");

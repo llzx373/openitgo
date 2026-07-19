@@ -29,7 +29,7 @@ mod imp {
     struct ProbeApp {
         player: Option<MpvPlayer>,
         video: Option<MpvNativeView>,
-        path: String,
+        path: std::path::PathBuf,
         attach_retries: u32,
     }
 
@@ -209,7 +209,7 @@ mod imp {
         }
     }
 
-    pub fn run(path: String) {
+    pub fn run(path: std::path::PathBuf) {
         let viewport = egui::ViewportBuilder::default()
             .with_inner_size([700.0, 480.0])
             .with_transparent(true);
@@ -237,8 +237,9 @@ mod imp {
 fn main() {
     #[cfg(target_os = "macos")]
     {
-        let path = std::env::args()
+        let path = std::env::args_os()
             .nth(1)
+            .map(std::path::PathBuf::from)
             .expect("usage: probe_video_overlay <video-file>");
         imp::run(path);
     }

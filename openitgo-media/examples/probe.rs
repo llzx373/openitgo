@@ -5,7 +5,10 @@ use openitgo_media::player::MpvPlayer;
 use std::sync::{Arc, Mutex};
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: probe <media-file>");
+    let path = std::env::args_os()
+        .nth(1)
+        .map(std::path::PathBuf::from)
+        .expect("usage: probe <media-file>");
     let last = Arc::new(Mutex::new(String::new()));
     let last2 = last.clone();
     let player = MpvPlayer::new(Box::new(move || {

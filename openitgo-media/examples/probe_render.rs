@@ -12,8 +12,9 @@ fn main() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    let path = std::env::args()
+    let path = std::env::args_os()
         .nth(1)
+        .map(std::path::PathBuf::from)
         .expect("usage: probe_render <media-file>");
 
     // Offscreen GL: mpv_render_context_create requires a current GL context.

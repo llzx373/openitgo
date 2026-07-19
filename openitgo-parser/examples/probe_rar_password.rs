@@ -73,10 +73,13 @@ fn list_and_read(path: &Path, password: Option<&str>) {
 }
 
 fn main() {
-    let path = std::env::args()
+    let path = std::env::args_os()
         .nth(1)
+        .map(std::path::PathBuf::from)
         .expect("usage: probe_rar_password <rar-file> [password]");
-    let password = std::env::args().nth(2);
+    let password = std::env::args_os()
+        .nth(2)
+        .and_then(|s| s.into_string().ok());
     println!("== {:?} ==", password);
     list_and_read(Path::new(&path), password.as_deref());
 }
