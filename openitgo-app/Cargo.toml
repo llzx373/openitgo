@@ -36,7 +36,6 @@ foreign-types = "0.5"
 # objc2-core-foundation provides CGRect/CGPoint/CGSize with objc2::Encode impls.
 objc2 = "0.6"
 objc2-core-foundation = { version = "0.3", features = ["objc2"] }
-libc = "0.2"
 cgl = "0.3"
 
 [dev-dependencies]

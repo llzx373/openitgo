@@ -3579,7 +3579,6 @@ dependencies = [
  "egui_phosphor_icons",
  "foreign-types",
  "image",
- "libc",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "openitgo-core",
