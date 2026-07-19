@@ -31,7 +31,8 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "OpenItGo ebook parking probe",
         options,
-        Box::new(|_cc| {
+        Box::new(|cc| {
+            openitgo_app::fonts::setup_fonts(&cc.egui_ctx);
             Ok(Box::new(ParkingProbe {
                 app,
                 start: Instant::now(),
@@ -48,8 +49,9 @@ struct ParkingProbe {
 }
 
 impl eframe::App for ParkingProbe {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        self.app.update(ctx, frame);
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.app.ui(ui, frame);
+        let ctx = ui.ctx();
         ctx.request_repaint_after(Duration::from_millis(100));
         if self.app.ebook_view.open.is_none() {
             return;

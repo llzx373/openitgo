@@ -40,13 +40,13 @@ pub fn comic_progress_bar(
 fn draw_empty_bar(ui: &mut egui::Ui, rect: egui::Rect) {
     ui.painter().rect_filled(
         rect,
-        egui::Rounding::same(2.0),
+        egui::CornerRadius::same(2),
         ui.visuals().extreme_bg_color,
     );
 }
 
 fn draw_filled_bar(ui: &mut egui::Ui, rect: egui::Rect, current_page: usize, total_pages: usize) {
-    let rounding = egui::Rounding::same(2.0);
+    let rounding = egui::CornerRadius::same(2);
     let bg_color = ui.visuals().extreme_bg_color;
     ui.painter().rect_filled(rect, rounding, bg_color);
 

@@ -33,16 +33,22 @@ pub fn setup_fonts(ctx: &egui::Context) {
         .find(|p| p.exists())
     {
         if let Ok(bytes) = std::fs::read(&path) {
-            fonts
-                .font_data
-                .insert("cjk".to_owned(), FontData::from_owned(bytes));
+            fonts.font_data.insert(
+                "cjk".to_owned(),
+                std::sync::Arc::new(FontData::from_owned(bytes)),
+            );
             if let Some(proportional) = fonts.families.get_mut(&FontFamily::Proportional) {
                 proportional.push("cjk".to_owned());
             }
         }
     }
 
-    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    egui_phosphor_icons::add_fonts(&mut fonts);
+    // Allow icon codepoints to render inline with normal text (e.g. "icon + label"
+    // strings) by appending the regular icon font as a Proportional fallback.
+    if let Some(proportional) = fonts.families.get_mut(&FontFamily::Proportional) {
+        proportional.push("phosphor-icons".to_owned());
+    }
 
     ctx.set_fonts(fonts);
 }

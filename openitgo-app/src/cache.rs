@@ -77,11 +77,7 @@ impl PageCache {
             .filter(|e| e.image.is_some() || e.handle.is_some())
             .map(|e| e.size_bytes)
             .fold((0usize, 0usize), |(c, b), s| (c + 1, b + s));
-        if count == 0 {
-            0
-        } else {
-            bytes / count
-        }
+        bytes.checked_div(count).unwrap_or(0)
     }
 
     pub fn contains_thumbnail(&self, page_index: usize) -> bool {
@@ -278,7 +274,7 @@ mod tests {
     use std::collections::HashSet;
 
     fn make_image(width: usize, height: usize) -> LoadedImage {
-        LoadedImage::Color(ColorImage::new([width, height], egui::Color32::WHITE))
+        LoadedImage::Color(ColorImage::filled([width, height], egui::Color32::WHITE))
     }
 
     fn make_compressed(width: u32, height: u32) -> LoadedImage {

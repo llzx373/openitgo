@@ -362,18 +362,18 @@ impl LibraryView {
                     card_response.context_menu(|ui| {
                         if ui.button("打开").clicked() {
                             (callbacks.on_open_library)(original_idx);
-                            ui.close_menu();
+                            ui.close();
                         }
                         if ui.button("编辑标题").clicked() {
                             self.edit_buffer = Some((original_idx, entry.title.clone()));
                             self.pending_delete = None;
-                            ui.close_menu();
+                            ui.close();
                         }
                         if ui.button("编辑标签…").clicked() {
                             self.tag_edit_buffer = Some((original_idx, entry.tags.join(", ")));
                             self.pending_delete = None;
                             self.edit_buffer = None;
-                            ui.close_menu();
+                            ui.close();
                         }
                         if self.pending_delete == Some(original_idx) {
                             ui.label("确定删除？");
@@ -381,15 +381,15 @@ impl LibraryView {
                                 (callbacks.on_delete_library)(original_idx);
                                 self.pending_delete = None;
                                 self.edit_buffer = None;
-                                ui.close_menu();
+                                ui.close();
                             }
                             if ui.button("否").clicked() {
                                 self.pending_delete = None;
-                                ui.close_menu();
+                                ui.close();
                             }
                         } else if ui.button("删除").clicked() {
                             self.pending_delete = Some(original_idx);
-                            ui.close_menu();
+                            ui.close();
                         }
                     });
                 }
@@ -655,7 +655,7 @@ impl LibraryView {
         ui.separator();
         let mut rows: Vec<(&String, &openitgo_storage::models::ReadingStat)> =
             stats.iter().collect();
-        rows.sort_by(|a, b| b.1.total_seconds.cmp(&a.1.total_seconds));
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1.total_seconds));
         egui::Grid::new("reading_stats_grid")
             .striped(true)
             .show(ui, |ui| {

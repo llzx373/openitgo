@@ -25,7 +25,7 @@ pub fn page_thumbnail_tooltip(
         // Maintain aspect ratio and letter-box inside the tooltip rect.
         ui.put(rect, egui::Image::new(&handle).max_size(rect.size()));
     } else {
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
             ui.with_layout(
                 egui::Layout::centered_and_justified(egui::Direction::TopDown),
                 |ui| {
@@ -43,6 +43,7 @@ pub fn page_thumbnail_tooltip(
         rect,
         0.0,
         egui::Stroke::new(1.0, ui.visuals().window_stroke.color),
+        egui::StrokeKind::Inside,
     );
 
     response

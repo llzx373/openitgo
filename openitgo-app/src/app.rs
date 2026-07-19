@@ -9,7 +9,7 @@ use crate::views::{
     media::{media_overlay, MediaOverlay, MediaView},
     reader::ReaderView,
 };
-use egui_phosphor::regular;
+use egui_phosphor_icons::{icons, Icon};
 use openitgo_core::ebook::Ebook;
 use openitgo_core::models::{Comic, FitMode, PageSource, ReadingMode};
 use openitgo_core::state::ReadingState;
@@ -298,7 +298,8 @@ impl eframe::App for ReaderApp {
         let _ = self.store.save_bookmarks(&self.bookmarks);
     }
 
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         if matches!(self.last_view, View::Reader) && !matches!(self.current_view, View::Reader) {
             self.record_reader_history();
             self.reader_view.clear_cache();
@@ -314,26 +315,26 @@ impl eframe::App for ReaderApp {
         self.last_view = self.current_view.clone();
 
         if self.settings.theme != self.current_theme {
-            self.apply_theme(ctx);
+            self.apply_theme(&ctx);
             self.current_theme = self.settings.theme.clone();
         }
 
-        self.handle_global_input(ctx);
+        self.handle_global_input(&ctx);
 
         if ctx.input(|i| i.key_pressed(egui::Key::O) && i.modifiers.ctrl) {
             if let Some(path) = rfd::FileDialog::new().pick_folder() {
                 self.add_folder_to_library(path);
             }
         }
-        self.handle_dropped_files(ctx);
+        self.handle_dropped_files(&ctx);
         #[cfg(target_os = "macos")]
         {
             let dock_paths = crate::platform::macos::dock_open::take_dock_open_paths();
             self.handle_open_paths(dock_paths);
         }
-        self.poll_opener(ctx);
-        self.poll_ebook_opener(ctx, frame);
-        self.poll_media_open(ctx, frame);
+        self.poll_opener(&ctx);
+        self.poll_ebook_opener(&ctx, frame);
+        self.poll_media_open(&ctx, frame);
         if self.media_view.take_startup_device_invalid() {
             // 保存的音频设备已拔出：已回退 auto，同步清除持久化设置。
             self.settings.media_audio_device.clear();
@@ -342,7 +343,7 @@ impl eframe::App for ReaderApp {
         let cache_size_mb = self.settings.cache_size_mb as usize;
         self.page_loader.set_compress(self.settings.compress_images);
         self.reader_view
-            .update(ctx, &self.page_loader, cache_size_mb);
+            .update(&ctx, &self.page_loader, cache_size_mb);
         self.reader_view.request_preloads(
             &self.page_loader,
             cache_size_mb,
@@ -351,18 +352,18 @@ impl eframe::App for ReaderApp {
         self.poll_cover_results();
         self.poll_media_covers();
 
-        self.render_menu_bar(ctx);
+        self.render_menu_bar(ui);
 
         match self.current_view.clone() {
-            View::Library => self.render_library(ctx),
-            View::Reader => self.render_reader(ctx),
-            View::Ebook => self.render_ebook(ctx),
-            View::Media => self.render_media(ctx),
-            View::Settings => self.render_settings(ctx),
-            View::Loading(path) => self.render_loading(ctx, path),
+            View::Library => self.render_library(ui),
+            View::Reader => self.render_reader(ui),
+            View::Ebook => self.render_ebook(ui),
+            View::Media => self.render_media(ui),
+            View::Settings => self.render_settings(ui),
+            View::Loading(path) => self.render_loading(ui, path),
         }
-        self.render_shortcuts_window(ctx);
-        self.render_password_dialog(ctx);
+        self.render_shortcuts_window(&ctx);
+        self.render_password_dialog(&ctx);
         self.maybe_save_comic_settings();
         self.tick_reading_stats();
     }
@@ -385,20 +386,20 @@ enum BarEdge {
 
 fn toolbar_button(
     ui: &mut egui::Ui,
-    icon: &str,
+    icon: Icon,
     text: &str,
     mode: ToolbarDisplayMode,
 ) -> egui::Response {
     match mode {
         ToolbarDisplayMode::IconOnly => ui.button(icon).on_hover_text(text),
         ToolbarDisplayMode::TextOnly => ui.button(text),
-        ToolbarDisplayMode::IconAndText => ui.button(format!("{} {}", icon, text)),
+        ToolbarDisplayMode::IconAndText => ui.button(format!("{} {}", icon.as_str(), text)),
     }
 }
 
 fn toolbar_selectable(
     ui: &mut egui::Ui,
-    icon: &str,
+    icon: Icon,
     text: &str,
     active: bool,
     mode: ToolbarDisplayMode,
@@ -406,7 +407,9 @@ fn toolbar_selectable(
     let label = match mode {
         ToolbarDisplayMode::IconOnly => egui::WidgetText::from(icon),
         ToolbarDisplayMode::TextOnly => egui::WidgetText::from(text),
-        ToolbarDisplayMode::IconAndText => egui::WidgetText::from(format!("{} {}", icon, text)),
+        ToolbarDisplayMode::IconAndText => {
+            egui::WidgetText::from(format!("{} {}", icon.as_str(), text))
+        }
     };
     ui.selectable_label(active, label).on_hover_text(text)
 }
@@ -501,8 +504,8 @@ impl ReaderApp {
         }
     }
 
-    fn render_library(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn render_library(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default().show(ui, |ui| {
             if let Some(err) = &self.error_message {
                 ui.colored_label(ui.visuals().error_fg_color, err);
             }
@@ -601,7 +604,8 @@ impl ReaderApp {
         });
     }
 
-    fn render_reader(&mut self, ctx: &egui::Context) {
+    fn render_reader(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let Some(reader) = self.reader_view.open.as_ref() else {
             self.current_view = View::Library;
             return;
@@ -615,7 +619,7 @@ impl ReaderApp {
             (
                 i.viewport().fullscreen.unwrap_or(false),
                 i.pointer.latest_pos(),
-                i.screen_rect().size(),
+                i.content_rect().size(),
             )
         });
         if Self::should_show_bar(
@@ -625,7 +629,7 @@ impl ReaderApp {
             screen_size,
             BarEdge::Top,
         ) {
-            self.render_reader_toolbar(ctx, total_pages, current_page, mode, zoom);
+            self.render_reader_toolbar(ui, total_pages, current_page, mode, zoom);
         }
         let (progress_bar_rect, hovered_page) = if Self::should_show_bar(
             self.settings.show_statusbar,
@@ -634,21 +638,21 @@ impl ReaderApp {
             screen_size,
             BarEdge::Bottom,
         ) {
-            self.render_reader_statusbar(ctx)
+            self.render_reader_statusbar(ui)
         } else {
             (None, None)
         };
 
         let bg = self.settings.background_color;
-        let frame = egui::Frame::central_panel(&ctx.style())
+        let frame = egui::Frame::central_panel(&ctx.global_style())
             .fill(egui::Color32::from_rgb(bg[0], bg[1], bg[2]));
-        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
-            let response = self.reader_view.ui(ctx, ui, &self.page_loader);
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+            let response = self.reader_view.ui(&ctx, ui, &self.page_loader);
 
             // Floating thumbnail tooltip above the cursor when hovering the progress bar.
             if progress_bar_rect.is_some() {
                 self.reader_view
-                    .render_progress_thumbnail(ctx, ui, hovered_page);
+                    .render_progress_thumbnail(&ctx, ui, hovered_page);
             }
 
             // Right-click context menu on the page area.
@@ -677,7 +681,7 @@ impl ReaderApp {
             }
 
             // Scroll wheel navigation.
-            let mut scroll = ui.input(|i| i.raw_scroll_delta.y);
+            let mut scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if self.settings.invert_scroll {
                 scroll = -scroll;
             }
@@ -716,7 +720,8 @@ impl ReaderApp {
         });
     }
 
-    fn render_ebook(&mut self, ctx: &egui::Context) {
+    fn render_ebook(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         if self.ebook_view.open.is_none() {
             self.current_view = View::Library;
             return;
@@ -726,7 +731,7 @@ impl ReaderApp {
             (
                 i.viewport().fullscreen.unwrap_or(false),
                 i.pointer.latest_pos(),
-                i.screen_rect().size(),
+                i.content_rect().size(),
             )
         });
         let show_toolbar = Self::should_show_bar(
@@ -744,17 +749,17 @@ impl ReaderApp {
             BarEdge::Bottom,
         );
         if show_toolbar {
-            self.render_ebook_toolbar(ctx);
+            self.render_ebook_toolbar(ui);
         }
-        self.render_ebook_search_bar(ctx);
+        self.render_ebook_search_bar(ui);
         if show_statusbar {
-            self.render_ebook_statusbar(ctx);
+            self.render_ebook_statusbar(ui);
         }
 
         // Render the TOC side panel before the central panel so that the
         // WebView bounds shrink to avoid covering the panel.
         if self.ebook_view.show_toc {
-            if let Some((chapter, fragment)) = self.ebook_view.render_toc(ctx) {
+            if let Some((chapter, fragment)) = self.ebook_view.render_toc(ui) {
                 self.ebook_view.goto_toc(chapter, fragment);
             }
         }
@@ -762,24 +767,24 @@ impl ReaderApp {
         // 菜单/弹层打开时隐藏 wry webview（停放方案）：egui 弹层无法穿透
         // 原生 webview，隐藏期间正文区以当前主题的阅读背景色填充，
         // 关闭即恢复。menu_overlay_open 与媒体视图共用同一判定，互不影响。
-        let menu_open = menu_overlay_open(ctx);
+        let menu_open = menu_overlay_open(&ctx);
         self.ebook_view.set_webview_hidden(menu_open);
 
         let frame = if menu_open {
-            egui::Frame::central_panel(&ctx.style()).fill(crate::views::ebook::ebook_theme_bg(
-                self.settings.ebook.theme,
-            ))
+            egui::Frame::central_panel(&ctx.global_style()).fill(
+                crate::views::ebook::ebook_theme_bg(self.settings.ebook.theme),
+            )
         } else {
-            egui::Frame::central_panel(&ctx.style())
+            egui::Frame::central_panel(&ctx.global_style())
         };
-        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             let rect = ui.max_rect();
             let bounds = wry::Rect {
                 position: wry::dpi::LogicalPosition::new(rect.min.x, rect.min.y).into(),
                 size: wry::dpi::LogicalSize::new(rect.width(), rect.height()).into(),
             };
             self.ebook_view.update_bounds(bounds);
-            self.ebook_view.ui(ctx, ui);
+            self.ebook_view.ui(&ctx, ui);
         });
     }
 
@@ -817,22 +822,23 @@ impl ReaderApp {
         }
     }
 
-    fn render_media(&mut self, ctx: &egui::Context) {
+    fn render_media(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         if self.media_view.open.is_none() {
             self.current_view = View::Library;
             return;
         }
         self.media_view.sync_state();
-        self.maybe_auto_next_media(ctx);
-        self.media_view.tick_osd(ctx);
+        self.maybe_auto_next_media(&ctx);
+        self.media_view.tick_osd(&ctx);
 
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         let mouse_pos = ctx.input(|i| i.pointer.hover_pos());
-        let screen_size = ctx.screen_rect().size();
+        let screen_size = ctx.content_rect().size();
         // While a menu/dropdown is open, keep the toolbar up (otherwise the
         // dropdown self-dismisses in fullscreen when the pointer leaves the
         // top edge).
-        let menu_open = menu_overlay_open(ctx);
+        let menu_open = menu_overlay_open(&ctx);
         let show_toolbar = Self::should_show_bar(
             self.settings.show_toolbar,
             fullscreen,
@@ -848,10 +854,10 @@ impl ReaderApp {
             BarEdge::Bottom,
         );
         if show_toolbar {
-            self.render_media_toolbar(ctx);
+            self.render_media_toolbar(ui);
         }
         if show_seekbar {
-            self.render_media_seekbar(ctx);
+            self.render_media_seekbar(ui);
         }
 
         // Transparent frame: the video layer composites below the egui
@@ -859,19 +865,19 @@ impl ReaderApp {
         // video to show through. Audio-only/error states still get an opaque
         // black fill from MediaView::ui.
         egui::CentralPanel::default()
-            .frame(egui::Frame::none())
-            .show(ctx, |ui| {
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
                 let rect = ui.max_rect();
                 // Scroll-wheel volume over the video area. Skipped while an egui
                 // popup (字幕/音轨/输出 dropdown) is open under the pointer, so
                 // scrolling the popup list does not also change the volume.
                 let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                if scroll != 0.0 && ui.rect_contains_pointer(rect) && !ctx.is_pointer_over_area() {
+                if scroll != 0.0 && ui.rect_contains_pointer(rect) && !ctx.is_pointer_over_egui() {
                     let (acc, steps) =
                         crate::views::media::accumulate_scroll(self.media_view.scroll_acc, scroll);
                     self.media_view.scroll_acc = acc;
                     if steps != 0 {
-                        self.adjust_media_volume(ctx, steps as f64 * 5.0);
+                        self.adjust_media_volume(&ctx, steps as f64 * 5.0);
                     }
                 }
                 let overlay = self
@@ -896,11 +902,12 @@ impl ReaderApp {
                     }
                 };
                 self.media_view.update_bounds(bounds);
-                self.media_view.ui(ctx, ui);
+                self.media_view.ui(&ctx, ui);
             });
     }
 
-    fn render_media_toolbar(&mut self, ctx: &egui::Context) {
+    fn render_media_toolbar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let (title, tracks, current_sub, current_audio, speed, paused) = self
             .media_view
             .open
@@ -924,7 +931,7 @@ impl ReaderApp {
             .map(|ds| ds.iter().map(|d| (d.name.clone(), d.label())).collect())
             .unwrap_or_default();
         let current_device = self.settings.media_audio_device.clone();
-        egui::TopBottomPanel::top("media_toolbar").show(ctx, |ui| {
+        egui::Panel::top("media_toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("书架").clicked() {
                     self.current_view = View::Library;
@@ -934,17 +941,17 @@ impl ReaderApp {
                     self.media_view.toggle_pause();
                 }
                 if ui.button("-10s").clicked() {
-                    self.seek_media_rel(ctx, -10.0);
+                    self.seek_media_rel(&ctx, -10.0);
                 }
                 if ui.button("+10s").clicked() {
-                    self.seek_media_rel(ctx, 10.0);
+                    self.seek_media_rel(&ctx, 10.0);
                 }
                 ui.separator();
                 if ui.button(format!("{:.1}x", speed)).clicked() {
                     if let Some(target) = self.media_view.cycle_speed() {
                         self.settings.media_speed = target;
                         self.media_view
-                            .show_osd(ctx, crate::views::media::speed_osd_text(target));
+                            .show_osd(&ctx, crate::views::media::speed_osd_text(target));
                     }
                 }
                 ui.separator();
@@ -975,17 +982,17 @@ impl ReaderApp {
                         }
                         ui.separator();
                         if ui.button("加载外部字幕…").clicked() {
-                            self.load_external_subtitle(ctx);
+                            self.load_external_subtitle(&ctx);
                         }
                         ui.separator();
                         if ui.button("字幕延迟 -0.1s").clicked() {
-                            self.adjust_media_sub_delay(ctx, -0.1);
+                            self.adjust_media_sub_delay(&ctx, -0.1);
                         }
                         if ui.button("字幕延迟 +0.1s").clicked() {
-                            self.adjust_media_sub_delay(ctx, 0.1);
+                            self.adjust_media_sub_delay(&ctx, 0.1);
                         }
                         if ui.button("重置字幕延迟").clicked() {
-                            self.reset_media_sub_delay(ctx);
+                            self.reset_media_sub_delay(&ctx);
                         }
                     });
                 let audios: Vec<(i64, String)> = tracks
@@ -1027,20 +1034,20 @@ impl ReaderApp {
                             .selectable_label(current_device.is_empty(), "自动")
                             .clicked()
                         {
-                            self.set_media_audio_device(ctx, String::new(), "自动".to_string());
+                            self.set_media_audio_device(&ctx, String::new(), "自动".to_string());
                         }
                         for (name, label) in &devices {
                             if ui
                                 .selectable_label(current_device == *name, label)
                                 .clicked()
                             {
-                                self.set_media_audio_device(ctx, name.clone(), label.clone());
+                                self.set_media_audio_device(&ctx, name.clone(), label.clone());
                             }
                         }
                     });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("全屏").clicked() {
-                        self.toggle_fullscreen(ctx);
+                        self.toggle_fullscreen(&ctx);
                     }
                     ui.label(title);
                 });
@@ -1052,21 +1059,21 @@ impl ReaderApp {
     fn render_media_menu(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         if ui.button("倍速 -0.25").clicked() {
             self.adjust_media_speed(ctx, -0.25);
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("倍速 +0.25").clicked() {
             self.adjust_media_speed(ctx, 0.25);
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         let loop_on = self.media_view.loop_file;
         if ui.selectable_label(loop_on, "循环播放").clicked() {
             self.toggle_media_loop(ctx);
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("截图").clicked() {
             self.media_screenshot(ctx);
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         let ab_label = match self.media_view.ab_loop {
@@ -1076,7 +1083,7 @@ impl ReaderApp {
         };
         if ui.button(ab_label).clicked() {
             self.media_ab_advance(ctx);
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         let has_chapters = self
@@ -1090,14 +1097,14 @@ impl ReaderApp {
             .clicked()
         {
             self.media_chapter_step(ctx, -1);
-            ui.close_menu();
+            ui.close();
         }
         if ui
             .add_enabled(has_chapters, egui::Button::new("下一章"))
             .clicked()
         {
             self.media_chapter_step(ctx, 1);
-            ui.close_menu();
+            ui.close();
         }
     }
 
@@ -1229,7 +1236,8 @@ impl ReaderApp {
         );
     }
 
-    fn render_media_seekbar(&mut self, ctx: &egui::Context) {
+    fn render_media_seekbar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let (pos, dur, volume, muted) = self
             .media_view
             .open
@@ -1243,7 +1251,7 @@ impl ReaderApp {
                 )
             })
             .unwrap_or((0, None, 100.0, false));
-        egui::TopBottomPanel::bottom("media_seekbar").show(ctx, |ui| {
+        egui::Panel::bottom("media_seekbar").show(ui, |ui| {
             ui.vertical(|ui| {
                 // Row 1: full-width seek bar with a hover-time tooltip.
                 // egui 0.29 Slider always allocates spacing().slider_width
@@ -1304,10 +1312,10 @@ impl ReaderApp {
                             )
                             .changed()
                         {
-                            self.set_media_volume(ctx, vol as f64);
+                            self.set_media_volume(&ctx, vol as f64);
                         }
                         if ui.button(if muted { "取消静音" } else { "静音" }).clicked() {
-                            self.toggle_media_mute(ctx);
+                            self.toggle_media_mute(&ctx);
                         }
                     });
                 });
@@ -1317,24 +1325,25 @@ impl ReaderApp {
 
     fn render_reader_toolbar(
         &mut self,
-        ctx: &egui::Context,
+        ui: &mut egui::Ui,
         total_pages: usize,
         current_page: usize,
         mode: ReadingMode,
         zoom: f32,
     ) {
+        let ctx = ui.ctx().clone();
         let display_mode = self.settings.toolbar_display_mode;
-        egui::TopBottomPanel::top("reader_toolbar").show(ctx, |ui| {
+        egui::Panel::top("reader_toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                if toolbar_button(ui, regular::HOUSE, "书架", display_mode).clicked() {
+                if toolbar_button(ui, icons::HOUSE, "书架", display_mode).clicked() {
                     self.current_view = View::Library;
                 }
                 ui.separator();
 
                 let modes = [
-                    (ReadingMode::Ltr, regular::ARROW_RIGHT, "国漫"),
-                    (ReadingMode::Rtl, regular::ARROW_LEFT, "日漫"),
-                    (ReadingMode::Webtoon, regular::ARROW_DOWN, "韩漫"),
+                    (ReadingMode::Ltr, icons::ARROW_RIGHT, "国漫"),
+                    (ReadingMode::Rtl, icons::ARROW_LEFT, "日漫"),
+                    (ReadingMode::Webtoon, icons::ARROW_DOWN, "韩漫"),
                 ];
                 for (m, icon, label) in modes {
                     if toolbar_selectable(ui, icon, label, mode == m, display_mode).clicked() {
@@ -1352,7 +1361,7 @@ impl ReaderApp {
                         .as_ref()
                         .map(|r| r.state.double_page)
                         .unwrap_or(self.settings.double_page);
-                    if toolbar_selectable(ui, regular::BOOK_OPEN, "双页", double_page, display_mode)
+                    if toolbar_selectable(ui, icons::BOOK_OPEN, "双页", double_page, display_mode)
                         .on_hover_text("切换到双页模式")
                         .clicked()
                     {
@@ -1366,20 +1375,20 @@ impl ReaderApp {
                     ui.separator();
                 }
 
-                if toolbar_button(ui, regular::MINUS, "", display_mode).clicked() {
+                if toolbar_button(ui, icons::MINUS, "", display_mode).clicked() {
                     if let Some(reader) = self.reader_view.open.as_mut() {
                         reader.zoom_out();
                     }
                 }
                 ui.label(format!("{:.0}%", zoom * 100.0));
-                if toolbar_button(ui, regular::PLUS, "", display_mode).clicked() {
+                if toolbar_button(ui, icons::PLUS, "", display_mode).clicked() {
                     if let Some(reader) = self.reader_view.open.as_mut() {
                         reader.zoom_in();
                     }
                 }
                 if toolbar_button(
                     ui,
-                    regular::ARROWS_OUT_LINE_HORIZONTAL,
+                    icons::ARROWS_OUT_LINE_HORIZONTAL,
                     "适应宽度",
                     display_mode,
                 )
@@ -1391,7 +1400,7 @@ impl ReaderApp {
                 }
                 if toolbar_button(
                     ui,
-                    regular::ARROWS_OUT_LINE_VERTICAL,
+                    icons::ARROWS_OUT_LINE_VERTICAL,
                     "适应高度",
                     display_mode,
                 )
@@ -1401,13 +1410,13 @@ impl ReaderApp {
                         reader.request_fit(FitMode::Height);
                     }
                 }
-                if toolbar_button(ui, regular::FRAME_CORNERS, "自动适应", display_mode).clicked()
+                if toolbar_button(ui, icons::FRAME_CORNERS, "自动适应", display_mode).clicked()
                 {
                     if let Some(reader) = self.reader_view.open.as_mut() {
                         reader.request_fit(FitMode::Page);
                     }
                 }
-                if toolbar_button(ui, regular::ARROW_CLOCKWISE, "旋转", display_mode)
+                if toolbar_button(ui, icons::ARROW_CLOCKWISE, "旋转", display_mode)
                     .on_hover_text("顺时针旋转 90°")
                     .clicked()
                 {
@@ -1417,7 +1426,7 @@ impl ReaderApp {
                 }
                 ui.separator();
 
-                if toolbar_button(ui, regular::CARET_LEFT, "上一页", display_mode).clicked() {
+                if toolbar_button(ui, icons::CARET_LEFT, "上一页", display_mode).clicked() {
                     self.reader_prev_page();
                 }
                 let mut displayed_page = current_page + 1;
@@ -1439,24 +1448,23 @@ impl ReaderApp {
                     }
                 }
                 ui.label(format!("/ {}", total_pages));
-                if toolbar_button(ui, regular::CARET_RIGHT, "下一页", display_mode).clicked() {
+                if toolbar_button(ui, icons::CARET_RIGHT, "下一页", display_mode).clicked() {
                     self.reader_next_page();
                 }
                 ui.separator();
 
-                if toolbar_button(ui, regular::BOOKMARK, "添加书签", display_mode).clicked() {
+                if toolbar_button(ui, icons::BOOKMARK, "添加书签", display_mode).clicked() {
                     self.add_bookmark(current_page);
                 }
-                if toolbar_button(ui, regular::ARROWS_OUT_SIMPLE, "全屏", display_mode).clicked()
-                {
-                    self.toggle_fullscreen(ctx);
+                if toolbar_button(ui, icons::ARROWS_OUT_SIMPLE, "全屏", display_mode).clicked() {
+                    self.toggle_fullscreen(&ctx);
                 }
-                if toolbar_button(ui, regular::GEAR, "设置", display_mode).clicked() {
+                if toolbar_button(ui, icons::GEAR, "设置", display_mode).clicked() {
                     self.current_view = View::Settings;
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(regular::X).on_hover_text("隐藏工具栏").clicked() {
+                    if ui.button(icons::X).on_hover_text("隐藏工具栏").clicked() {
                         self.settings.show_toolbar = false;
                     }
                 });
@@ -1466,11 +1474,11 @@ impl ReaderApp {
 
     fn render_reader_statusbar(
         &mut self,
-        ctx: &egui::Context,
+        ui: &mut egui::Ui,
     ) -> (Option<egui::Rect>, Option<usize>) {
         let mut progress_rect = None;
         let mut hovered_page = None;
-        egui::TopBottomPanel::bottom("reader_statusbar").show(ctx, |ui| {
+        egui::Panel::bottom("reader_statusbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 let bar_response = self.reader_view.render_progress_bar(ui);
                 hovered_page = bar_response.hovered_page;
@@ -1486,7 +1494,7 @@ impl ReaderApp {
         (progress_rect, hovered_page)
     }
 
-    fn render_ebook_toolbar(&mut self, ctx: &egui::Context) {
+    fn render_ebook_toolbar(&mut self, ui: &mut egui::Ui) {
         self.ebook_view.sync_position();
         let (total, current, current_spread, total_spreads) = self
             .ebook_view
@@ -1502,7 +1510,7 @@ impl ReaderApp {
             })
             .unwrap_or((0, 0, 0, 0));
 
-        egui::TopBottomPanel::top("ebook_toolbar").show(ctx, |ui| {
+        egui::Panel::top("ebook_toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("书架").clicked() {
                     self.current_view = View::Library;
@@ -1561,11 +1569,11 @@ impl ReaderApp {
         });
     }
 
-    fn render_ebook_search_bar(&mut self, ctx: &egui::Context) {
+    fn render_ebook_search_bar(&mut self, ui: &mut egui::Ui) {
         if !self.ebook_view.search_visible() {
             return;
         }
-        egui::TopBottomPanel::top("ebook_search_bar").show(ctx, |ui| {
+        egui::Panel::top("ebook_search_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("搜索:");
                 let mut submitted = None::<bool>; // Some(true)=下一个, Some(false)=上一个
@@ -1649,7 +1657,7 @@ impl ReaderApp {
         (title, progress)
     }
 
-    fn render_ebook_statusbar(&mut self, ctx: &egui::Context) {
+    fn render_ebook_statusbar(&mut self, ui: &mut egui::Ui) {
         self.ebook_view.sync_position();
         let (title, progress) = self
             .ebook_view
@@ -1671,7 +1679,7 @@ impl ReaderApp {
             })
             .unwrap_or_else(|| ("".to_string(), "".to_string()));
 
-        egui::TopBottomPanel::bottom("ebook_statusbar").show(ctx, |ui| {
+        egui::Panel::bottom("ebook_statusbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(title);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1681,9 +1689,9 @@ impl ReaderApp {
         });
     }
 
-    fn render_settings(&mut self, ctx: &egui::Context) {
+    fn render_settings(&mut self, ui: &mut egui::Ui) {
         let from_ebook = self.ebook_view.open.is_some();
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("← 返回").clicked() {
                     self.current_view = if self.reader_view.open.is_some() {
@@ -1707,8 +1715,8 @@ impl ReaderApp {
         }
     }
 
-    fn render_loading(&mut self, ctx: &egui::Context, path: PathBuf) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn render_loading(&mut self, ui: &mut egui::Ui, path: PathBuf) {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.with_layout(
                 egui::Layout::centered_and_justified(egui::Direction::TopDown),
                 |ui| {
@@ -1735,15 +1743,16 @@ impl ReaderApp {
         });
     }
 
-    fn render_menu_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
+    fn render_menu_bar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        egui::Panel::top("menu_bar").show(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("文件", |ui| {
                     if ui.button("打开文件夹").clicked() {
                         if let Some(path) = rfd::FileDialog::new().pick_folder() {
                             self.add_folder_to_library(path);
                         }
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.menu_button("打开最近", |ui| {
                         let recent: Vec<_> = self
@@ -1762,7 +1771,7 @@ impl ReaderApp {
                             for (title, path) in recent {
                                 if ui.button(&title).clicked() {
                                     self.open_path(path);
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             }
                         }
@@ -1774,7 +1783,7 @@ impl ReaderApp {
                         .clicked()
                     {
                         self.current_view = View::Library;
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
 
@@ -1786,7 +1795,7 @@ impl ReaderApp {
                     };
                     if ui.button(toolbar_label).clicked() {
                         self.settings.show_toolbar = !self.settings.show_toolbar;
-                        ui.close_menu();
+                        ui.close();
                     }
                     let statusbar_label = if self.settings.show_statusbar {
                         "隐藏状态栏"
@@ -1795,12 +1804,12 @@ impl ReaderApp {
                     };
                     if ui.button(statusbar_label).clicked() {
                         self.settings.show_statusbar = !self.settings.show_statusbar;
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     if ui.button("全屏").clicked() {
-                        self.toggle_fullscreen(ctx);
-                        ui.close_menu();
+                        self.toggle_fullscreen(&ctx);
+                        ui.close();
                     }
                     ui.separator();
                     ui.menu_button("主题", |ui| {
@@ -1815,7 +1824,7 @@ impl ReaderApp {
                                 .clicked()
                             {
                                 self.settings.theme = theme;
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                     });
@@ -1836,28 +1845,28 @@ impl ReaderApp {
                 let is_media = matches!(self.current_view, View::Media);
                 ui.add_enabled_ui(is_media, |ui| {
                     ui.menu_button("播放", |ui| {
-                        self.render_media_menu(ctx, ui);
+                        self.render_media_menu(&ctx, ui);
                     });
                 });
 
                 ui.menu_button("工具", |ui| {
                     if ui.button("设置").clicked() {
                         self.current_view = View::Settings;
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
 
                 ui.menu_button("帮助", |ui| {
                     if ui.button("快捷键一览").clicked() {
                         self.show_shortcuts = true;
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("关于 OpenItGo").clicked() {
                         self.error_message = Some(format!(
                             "OpenItGo v{}\n一个用 Rust 写的漫画阅读器。",
                             env!("CARGO_PKG_VERSION")
                         ));
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
             });
@@ -2018,31 +2027,31 @@ impl ReaderApp {
     fn render_reader_menu(&mut self, ui: &mut egui::Ui) {
         if ui.button("上一页").clicked() {
             self.reader_prev_page();
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("下一页").clicked() {
             self.reader_next_page();
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         if ui.button("首页").clicked() {
             if let Some(reader) = self.reader_view.open.as_mut() {
                 reader.first_page();
             }
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("末页").clicked() {
             if let Some(reader) = self.reader_view.open.as_mut() {
                 reader.last_page();
             }
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         if ui.button("添加书签").clicked() {
             if let Some(reader) = self.reader_view.open.as_ref() {
                 self.add_bookmark(reader.state.current_page);
             }
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         ui.menu_button("模式", |ui| {
@@ -2067,7 +2076,7 @@ impl ReaderApp {
                     if let Some(reader) = self.reader_view.open.as_mut() {
                         reader.state.set_mode(m, total_pages);
                     }
-                    ui.close_menu();
+                    ui.close();
                 }
             }
         });
@@ -2101,7 +2110,7 @@ impl ReaderApp {
                 reader.state.set_double_page(new_double, total);
                 reader.pending_fit = Some(FitMode::Page);
             }
-            ui.close_menu();
+            ui.close();
         }
         let rotation = self
             .reader_view
@@ -2116,7 +2125,7 @@ impl ReaderApp {
             if let Some(reader) = self.reader_view.open.as_mut() {
                 reader.rotate_cw();
             }
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         ui.menu_button("缩放", |ui| {
@@ -2124,32 +2133,32 @@ impl ReaderApp {
                 if let Some(reader) = self.reader_view.open.as_mut() {
                     reader.zoom_in();
                 }
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("缩小").clicked() {
                 if let Some(reader) = self.reader_view.open.as_mut() {
                     reader.zoom_out();
                 }
-                ui.close_menu();
+                ui.close();
             }
             ui.separator();
             if ui.button("适应宽度").clicked() {
                 if let Some(reader) = self.reader_view.open.as_mut() {
                     reader.request_fit(FitMode::Width);
                 }
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("适应高度").clicked() {
                 if let Some(reader) = self.reader_view.open.as_mut() {
                     reader.request_fit(FitMode::Height);
                 }
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("自动适应").clicked() {
                 if let Some(reader) = self.reader_view.open.as_mut() {
                     reader.request_fit(FitMode::Page);
                 }
-                ui.close_menu();
+                ui.close();
             }
         });
     }
@@ -2186,11 +2195,11 @@ impl ReaderApp {
                 let label = note.unwrap_or(title);
                 if ui.button(label).clicked() {
                     self.ebook_view.goto_chapter(chapter);
-                    ui.close_menu();
+                    ui.close();
                 }
                 if ui.small_button("删除").clicked() {
                     self.bookmarks.entries.remove(idx);
-                    ui.close_menu();
+                    ui.close();
                 }
             }
         });
@@ -2199,41 +2208,41 @@ impl ReaderApp {
     fn render_ebook_menu(&mut self, ui: &mut egui::Ui) {
         if ui.button("上一章").clicked() {
             self.ebook_view.prev_chapter();
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("下一章").clicked() {
             self.ebook_view.next_chapter();
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("上一页").clicked() {
             self.ebook_view.prev_page();
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("下一页").clicked() {
             self.ebook_view.next_page();
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         if ui.button("目录").clicked() {
             self.ebook_view.toggle_toc();
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         if ui.button("添加书签").clicked() {
             self.add_ebook_bookmark();
-            ui.close_menu();
+            ui.close();
         }
         self.render_ebook_bookmarks(ui);
         ui.separator();
         if ui.button("增大字体").clicked() {
             self.settings.ebook.font_size = (self.settings.ebook.font_size + 1).min(72);
             self.ebook_view.apply_settings(&self.settings.ebook);
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("减小字体").clicked() {
             self.settings.ebook.font_size = self.settings.ebook.font_size.saturating_sub(1).max(10);
             self.ebook_view.apply_settings(&self.settings.ebook);
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         if ui.button("切换主题").clicked() {
@@ -2243,42 +2252,42 @@ impl ReaderApp {
                 EbookTheme::Sepia => EbookTheme::Light,
             };
             self.ebook_view.apply_settings(&self.settings.ebook);
-            ui.close_menu();
+            ui.close();
         }
     }
 
     fn context_menu_items(&mut self, ui: &mut egui::Ui) {
         if ui.button("下一页").clicked() {
             self.reader_next_page();
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("上一页").clicked() {
             self.reader_prev_page();
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         if ui.button("首页").clicked() {
             if let Some(reader) = self.reader_view.open.as_mut() {
                 reader.first_page();
             }
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("末页").clicked() {
             if let Some(reader) = self.reader_view.open.as_mut() {
                 reader.last_page();
             }
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         if ui.button("添加书签").clicked() {
             if let Some(reader) = self.reader_view.open.as_ref() {
                 self.add_bookmark(reader.state.current_page);
             }
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("全屏").clicked() {
             self.toggle_fullscreen(ui.ctx());
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         let toolbar_label = if self.settings.show_toolbar {
@@ -2288,7 +2297,7 @@ impl ReaderApp {
         };
         if ui.button(toolbar_label).clicked() {
             self.settings.show_toolbar = !self.settings.show_toolbar;
-            ui.close_menu();
+            ui.close();
         }
         let statusbar_label = if self.settings.show_statusbar {
             "隐藏状态栏"
@@ -2297,12 +2306,12 @@ impl ReaderApp {
         };
         if ui.button(statusbar_label).clicked() {
             self.settings.show_statusbar = !self.settings.show_statusbar;
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         if ui.button("返回书架").clicked() {
             self.current_view = View::Library;
-            ui.close_menu();
+            ui.close();
         }
     }
 
@@ -2420,7 +2429,7 @@ impl ReaderApp {
                 }
                 // 文本框聚焦时不响应翻页类全局键，避免与输入冲突（如搜索框
                 // 里按 Space）。
-                if !ctx.wants_keyboard_input() {
+                if !ctx.egui_wants_keyboard_input() {
                     if is_shortcut_pressed(ctx, &self.settings.shortcuts.next_page) {
                         self.ebook_view.next_page();
                     }
@@ -3176,7 +3185,7 @@ impl ReaderApp {
         let Some(path) = self.pending_media_open.take() else {
             return;
         };
-        let screen = ctx.screen_rect();
+        let screen = ctx.content_rect();
         let bounds = wry::Rect {
             position: wry::dpi::LogicalPosition::new(screen.min.x, screen.min.y).into(),
             size: wry::dpi::LogicalSize::new(screen.width(), screen.height()).into(),
@@ -3214,7 +3223,7 @@ impl ReaderApp {
             OpenStatus::Loading => self.ebook_opener = Some(opener),
             OpenStatus::Ready(result) => match result {
                 Ok(ebook) => {
-                    let screen = ctx.screen_rect();
+                    let screen = ctx.content_rect();
                     let bounds = wry::Rect {
                         position: wry::dpi::LogicalPosition::new(screen.min.x, screen.min.y).into(),
                         size: wry::dpi::LogicalSize::new(screen.width(), screen.height()).into(),
@@ -4437,7 +4446,7 @@ mod tests {
     }
 
     fn run_frame_with_area(ctx: &egui::Context, order: egui::Order) {
-        let _ = ctx.run(Default::default(), |ctx| {
+        let _ = ctx.run_ui(Default::default(), |ctx| {
             egui::Area::new(egui::Id::new("test_overlay"))
                 .order(order)
                 .show(ctx, |ui| {
@@ -4449,7 +4458,7 @@ mod tests {
     #[test]
     fn test_menu_overlay_open_detects_popup_like_areas() {
         let ctx = egui::Context::default();
-        let _ = ctx.run(Default::default(), |_| {});
+        let _ = ctx.run_ui(Default::default(), |_| {});
         assert!(!menu_overlay_open(&ctx), "no areas -> no overlay");
 
         run_frame_with_area(&ctx, egui::Order::Foreground);

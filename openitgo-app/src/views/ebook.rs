@@ -224,13 +224,13 @@ impl EbookView {
 
     /// Renders the table-of-contents side panel. Call this *before* the
     /// central panel so the webview bounds can avoid the panel area.
-    pub fn render_toc(&self, ctx: &egui::Context) -> Option<(usize, Option<String>)> {
+    pub fn render_toc(&self, ui: &mut egui::Ui) -> Option<(usize, Option<String>)> {
         let open = self.open.as_ref()?;
         let mut jump_to: Option<(usize, Option<String>)> = None;
-        egui::SidePanel::left("ebook_toc")
-            .default_width(240.0)
+        egui::Panel::left("ebook_toc")
+            .default_size(240.0)
             .resizable(true)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.heading("目录");
                 ui.separator();
                 egui::ScrollArea::vertical().show(ui, |ui| {

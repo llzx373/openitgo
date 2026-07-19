@@ -267,7 +267,11 @@ pub mod macos {
                 chunk[0], chunk[1], chunk[2], chunk[3],
             ));
         }
-        ColorImage { size, pixels: out }
+        ColorImage {
+            size,
+            source_size: egui::Vec2::new(width as f32, height as f32),
+            pixels: out,
+        }
     }
 
     fn unpremultiply_rgba(pixels: &mut [u8]) {

@@ -28,7 +28,8 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "OpenItGo UI smoke",
         options,
-        Box::new(|_cc| {
+        Box::new(|cc| {
+            openitgo_app::fonts::setup_fonts(&cc.egui_ctx);
             Ok(Box::new(SmokeApp {
                 app,
                 start: Instant::now(),
@@ -43,8 +44,13 @@ struct SmokeApp {
 }
 
 impl eframe::App for SmokeApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        self.app.update(ctx, frame);
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.app.ui(ui, frame);
+        let ctx = ui.ctx();
+        // An idle egui app does not repaint, so poll explicitly: without this
+        // the loader results are never drained when run headless (no input
+        // events), and the smoke would stall before reaching the checks below.
+        ctx.request_repaint_after(Duration::from_millis(100));
 
         if let Some(reader) = self.app.reader_view.open.as_ref() {
             let current = reader.state.current_page;

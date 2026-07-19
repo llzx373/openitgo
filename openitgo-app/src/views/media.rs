@@ -608,17 +608,12 @@ pub fn speed_fine_osd_text(speed: f64) -> String {
 }
 
 /// AB 循环状态机（mpv `ab-loop-a`/`ab-loop-b` 属性，秒）。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum AbLoop {
+    #[default]
     None,
     ASet(f64),
     Both(f64, f64),
-}
-
-impl Default for AbLoop {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// 按一次 A 键/菜单项的状态迁移：`position_ms` 为当前播放位置。

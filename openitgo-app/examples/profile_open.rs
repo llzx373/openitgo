@@ -23,14 +23,14 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
         renderer: eframe::Renderer::Wgpu,
-        hardware_acceleration: eframe::HardwareAcceleration::Required,
         ..Default::default()
     };
 
     eframe::run_native(
         "OpenItGo profile open",
         options,
-        Box::new(|_cc| {
+        Box::new(|cc| {
+            openitgo_app::fonts::setup_fonts(&cc.egui_ctx);
             Ok(Box::new(ProfileApp {
                 app,
                 start: Instant::now(),
@@ -45,8 +45,10 @@ struct ProfileApp {
 }
 
 impl eframe::App for ProfileApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        self.app.update(ctx, frame);
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.app.ui(ui, frame);
+        // Keep polling while idle so the snapshot timer fires headless.
+        ui.ctx().request_repaint_after(Duration::from_millis(100));
 
         if self.start.elapsed() > Duration::from_secs(10) {
             if let Some(reader) = self.app.reader_view.open.as_ref() {
@@ -65,7 +67,7 @@ impl eframe::App for ProfileApp {
                     self.start.elapsed().as_secs_f64()
                 );
             }
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
 }

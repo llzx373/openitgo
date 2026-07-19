@@ -1,7 +1,6 @@
 mod app;
 mod cache;
 mod ebook_renderer;
-mod fonts;
 mod loader;
 mod opener;
 mod platform;
@@ -40,15 +39,16 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport,
         // Force the wgpu/Metal backend on macOS instead of falling back to glow/OpenGL.
+        // eframe 0.35 removed `hardware_acceleration`; the wgpu adapter default
+        // power preference is already HighPerformance (see egui-wgpu setup.rs).
         renderer: eframe::Renderer::Wgpu,
-        hardware_acceleration: eframe::HardwareAcceleration::Required,
         ..Default::default()
     };
     eframe::run_native(
         "OpenItGo",
         options,
         Box::new(|cc| {
-            fonts::setup_fonts(&cc.egui_ctx);
+            openitgo_app::fonts::setup_fonts(&cc.egui_ctx);
             #[cfg(target_os = "macos")]
             {
                 crate::platform::macos::dock_open::install_dock_open_handler();

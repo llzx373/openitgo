@@ -606,20 +606,16 @@ fn event_loop(
                                 should_repaint = true;
                             }
                         }
-                        8 => {
-                            if format == mpv::mpv_format_MPV_FORMAT_DOUBLE && !data.is_null() {
-                                // SAFETY: format guarantees data points to an f64.
-                                s.sub_delay = unsafe { *(data as *mut f64) };
-                                should_repaint = true;
-                            }
+                        8 if format == mpv::mpv_format_MPV_FORMAT_DOUBLE && !data.is_null() => {
+                            // SAFETY: format guarantees data points to an f64.
+                            s.sub_delay = unsafe { *(data as *mut f64) };
+                            should_repaint = true;
                         }
-                        9 => {
-                            if format == mpv::mpv_format_MPV_FORMAT_INT64 && !data.is_null() {
-                                // SAFETY: format guarantees data points to an i64.
-                                s.chapter = Some(unsafe { *(data as *mut i64) });
-                                should_repaint = true;
-                                kick_chapter_list = true;
-                            }
+                        9 if format == mpv::mpv_format_MPV_FORMAT_INT64 && !data.is_null() => {
+                            // SAFETY: format guarantees data points to an i64.
+                            s.chapter = Some(unsafe { *(data as *mut i64) });
+                            should_repaint = true;
+                            kick_chapter_list = true;
                         }
                         _ => {}
                     }

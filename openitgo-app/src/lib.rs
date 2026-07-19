@@ -1,6 +1,7 @@
 pub mod app;
 pub mod cache;
 pub mod ebook_renderer;
+pub mod fonts;
 pub mod loader;
 pub mod opener;
 pub mod platform;

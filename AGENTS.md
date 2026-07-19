@@ -150,8 +150,9 @@ already embed it.
   naturally render above the video. `menu_overlay_open(ctx)` (visible
   `Order::Middle`/`Order::Foreground` areas) is still used to keep the media
   toolbar from auto-hiding in fullscreen while a menu is open. The media
-  seek bar needs a scoped `ui.spacing_mut().slider_width` override: egui 0.29
-  `Slider` always allocates `slider_width` (100px) and ignores `add_sized`.
+  seek bar needs a scoped `ui.spacing_mut().slider_width` override: egui 0.35
+  `Slider` still allocates `slider_width` (100px) by default (verified in
+  egui-0.35.0 `widgets/slider.rs`).
   The diagnostic examples `probe_visible.rs` (bare window without an egui
   surface — exercises the index-0 fallback) and `probe_video_overlay.rs`
   (real video compositing below the transparent egui surface) verify the
@@ -208,6 +209,15 @@ already embed it.
   - `profile_open.rs`：带 UI 打开漫画，10 秒后打印缓存快照（总页数/缩略图/全尺寸页数）并自动退出（打开性能剖析）。
   - `profile_view.rs`：同 `profile_open.rs` 但持续运行，每 10 秒打印一次缓存快照（浏览期缓存观察）。
   - `ui_smoke.rs`：带 UI 打开漫画，当前页进入缓存即自动退出（30 秒超时），UI 启动冒烟。
+- **图标字体（egui_phosphor_icons）**：图标经 `icons::X`（`Icon`）以
+  `FontFamily::Name("phosphor-regular")` 渲染，并由
+  `fonts::setup_fonts` 把 `phosphor-icons` 追加进 Proportional 回退链以支持
+  "图标+文字" 混排字符串。**字体未注册时 epaint 0.35 直接 panic**（旧
+  egui-phosphor 是静默豆腐块），所以任何构造 `ReaderApp` 的 example
+  都必须在 `run_native` creator 里先调 `openitgo_app::fonts::setup_fonts`
+  （`fonts` 模块为此在 lib.rs 公开）。带 UI 的 example 还需每帧
+  `request_repaint_after` 轮询：无头运行时 egui 不重绘，loader 结果不会被
+  排空（ui_smoke/profile_* 已内置该轮询）。
 - **Packaging**: `scripts/package-macos.sh` runs `bundle_mpv` before signing,
   copying libmpv and its Homebrew dependencies into `Contents/Frameworks` and
   rewriting their install names to `@rpath`, so the bundled app runs without a

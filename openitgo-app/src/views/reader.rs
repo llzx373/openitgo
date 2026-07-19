@@ -901,7 +901,7 @@ impl ReaderView {
         }
 
         // Apply scroll wheel input.
-        let scroll_delta = ui.input(|i| i.raw_scroll_delta.y);
+        let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll_delta != 0.0 {
             reader.webtoon_scroll_offset =
                 (reader.webtoon_scroll_offset - scroll_delta * 3.0).clamp(0.0, max_offset);
@@ -1301,7 +1301,7 @@ fn render_error_placeholder(
     mut retry: impl FnMut(),
 ) -> egui::Response {
     let response = ui.allocate_rect(rect, egui::Sense::click());
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.with_layout(
             egui::Layout::centered_and_justified(egui::Direction::TopDown),
             |ui| {
@@ -1328,7 +1328,7 @@ fn render_thumbnail_error_placeholder(
     mut retry: impl FnMut(),
 ) -> egui::Response {
     let response = ui.allocate_rect(rect, egui::Sense::click());
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.with_layout(
             egui::Layout::centered_and_justified(egui::Direction::TopDown),
             |ui| {
@@ -1345,7 +1345,7 @@ fn render_thumbnail_error_placeholder(
 
 fn render_loading_placeholder(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Response {
     let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.with_layout(
             egui::Layout::centered_and_justified(egui::Direction::TopDown),
             |ui| {

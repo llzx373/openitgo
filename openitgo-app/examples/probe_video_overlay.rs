@@ -60,7 +60,7 @@ mod imp {
 
     impl ProbeApp {
         fn hole_bounds(ctx: &egui::Context) -> wry::Rect {
-            let screen = ctx.screen_rect();
+            let screen = ctx.content_rect();
             wry::Rect {
                 position: wry::dpi::LogicalPosition::new(0.0, BAR_MARGIN_PT).into(),
                 size: wry::dpi::LogicalSize::new(
@@ -175,31 +175,30 @@ mod imp {
             [0.0, 0.0, 0.0, 0.0]
         }
 
-        fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-            self.attach_video(ctx, frame);
+        fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+            let ctx = ui.ctx().clone();
+            self.attach_video(&ctx, frame);
             if let Some(view) = self.video.as_ref() {
-                view.set_bounds(Self::hole_bounds(ctx));
+                view.set_bounds(Self::hole_bounds(&ctx));
             }
-            let bar = egui::Frame::none().fill(egui::Color32::from_rgb(30, 60, 160));
-            egui::TopBottomPanel::top("probe_top")
+            let bar = egui::Frame::NONE.fill(egui::Color32::from_rgb(30, 60, 160));
+            egui::Panel::top("probe_top").frame(bar).show(ui, |ui| {
+                ui.label("opaque top bar (must fully cover the video)");
+            });
+            egui::Panel::bottom("probe_bottom")
                 .frame(bar)
-                .show(ctx, |ui| {
-                    ui.label("opaque top bar (must fully cover the video)");
-                });
-            egui::TopBottomPanel::bottom("probe_bottom")
-                .frame(bar)
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     ui.label("opaque bottom bar");
                 });
             egui::CentralPanel::default()
-                .frame(egui::Frame::none())
-                .show(ctx, |_ui| {});
+                .frame(egui::Frame::NONE)
+                .show(ui, |_ui| {});
             // Semi-transparent popup inside the hole, like a dropdown menu.
             egui::Area::new(egui::Id::new("probe_popup"))
                 .order(egui::Order::Foreground)
                 .fixed_pos(egui::pos2(120.0, 120.0))
-                .show(ctx, |ui| {
-                    egui::Frame::none()
+                .show(&ctx, |ui| {
+                    egui::Frame::NONE
                         .fill(egui::Color32::from_rgba_unmultiplied(0, 255, 0, 128))
                         .show(ui, |ui| {
                             ui.set_min_size(egui::vec2(220.0, 90.0));
@@ -217,7 +216,6 @@ mod imp {
         let options = eframe::NativeOptions {
             viewport,
             renderer: eframe::Renderer::Wgpu,
-            hardware_acceleration: eframe::HardwareAcceleration::Required,
             ..Default::default()
         };
         eframe::run_native(
