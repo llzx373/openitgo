@@ -414,20 +414,21 @@ fn toolbar_selectable(
 /// 启动时要打开的路径：优先 `OPENITGO_OPEN` 环境变量，其次第一个命令行参数
 /// （Windows/Linux 文件关联经 argv 传入；macOS 走 Apple Event，argv 无路径，
 /// 偶发的 `-psn_*` 等系统参数会被 `exists()` 检查天然过滤）。
-fn initial_open_path(env_open: Option<&str>, arg1: Option<&str>) -> Option<std::path::PathBuf> {
-    [env_open, arg1]
-        .into_iter()
-        .flatten()
-        .map(std::path::PathBuf::from)
-        .find(|p| p.exists())
+fn initial_open_path(
+    env_open: Option<std::path::PathBuf>,
+    arg1: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    [env_open, arg1].into_iter().flatten().find(|p| p.exists())
 }
 
 impl ReaderApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let mut app = Self::default();
-        let env_open = std::env::var("OPENITGO_OPEN").ok();
-        let arg1 = std::env::args().nth(1);
-        if let Some(path) = initial_open_path(env_open.as_deref(), arg1.as_deref()) {
+        let env_open = std::env::var("OPENITGO_OPEN")
+            .ok()
+            .map(std::path::PathBuf::from);
+        let arg1 = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+        if let Some(path) = initial_open_path(env_open, arg1) {
             app.open_path(path);
         }
         app
@@ -4638,7 +4639,7 @@ mod tests {
         std::fs::write(&env_file, b"x").unwrap();
         std::fs::write(&arg_file, b"x").unwrap();
         assert_eq!(
-            initial_open_path(env_file.to_str(), arg_file.to_str()),
+            initial_open_path(Some(env_file.clone()), Some(arg_file)),
             Some(env_file)
         );
     }
@@ -4648,8 +4649,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let arg_file = dir.path().join("arg.cbz");
         std::fs::write(&arg_file, b"x").unwrap();
-        assert_eq!(initial_open_path(None, arg_file.to_str()), Some(arg_file));
-        assert_eq!(initial_open_path(None, Some("/nonexistent/xx.cbz")), None);
+        assert_eq!(
+            initial_open_path(None, Some(arg_file.clone())),
+            Some(arg_file)
+        );
+        assert_eq!(
+            initial_open_path(None, Some(std::path::PathBuf::from("/nonexistent/xx.cbz"))),
+            None
+        );
         assert_eq!(initial_open_path(None, None), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn initial_open_path_accepts_non_utf8_argv() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("comic.cbz");
+        std::fs::write(&file, b"x").unwrap();
+        // 非 UTF-8 字节序列构成的 argv 不再 panic（回归：env::args() 会 panic）
+        let raw = std::ffi::OsString::from_vec(b"\xff\xfe.cbz".to_vec());
+        assert_eq!(initial_open_path(None, Some(file.clone())), Some(file));
+        assert_eq!(
+            initial_open_path(None, Some(std::path::PathBuf::from(raw))),
+            None
+        );
     }
 }
