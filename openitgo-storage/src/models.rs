@@ -20,6 +20,8 @@ pub struct Settings {
     pub show_toolbar: bool,
     pub show_statusbar: bool,
     pub invert_scroll: bool,
+    /// 滚轮翻页触发阈值（pt）：累计滚动这么多距离翻一页。越小越灵敏。
+    pub page_scroll_threshold: f32,
     pub background_color: [u8; 3],
     pub shortcuts: Shortcuts,
     pub library_sort: LibrarySort,
@@ -47,6 +49,7 @@ impl Default for Settings {
             show_toolbar: true,
             show_statusbar: true,
             invert_scroll: false,
+            page_scroll_threshold: 12.0,
             background_color: [30, 30, 30],
             shortcuts: Shortcuts::default(),
             library_sort: LibrarySort::default(),
@@ -85,6 +88,12 @@ impl Settings {
             return Err(format!(
                 "wide_page_threshold must be between 1.0 and 3.0, got {}",
                 self.wide_page_threshold
+            ));
+        }
+        if !(1.0..=40.0).contains(&self.page_scroll_threshold) {
+            return Err(format!(
+                "page_scroll_threshold must be between 1.0 and 40.0, got {}",
+                self.page_scroll_threshold
             ));
         }
         if self.window_size.0 <= 0.0 || self.window_size.1 <= 0.0 {
@@ -142,6 +151,7 @@ impl Settings {
         self.cache_size_mb = self.cache_size_mb.clamp(100, 16384);
         self.real_image_cache_pages = self.real_image_cache_pages.clamp(1, 500);
         self.wide_page_threshold = self.wide_page_threshold.clamp(1.0, 3.0);
+        self.page_scroll_threshold = self.page_scroll_threshold.clamp(1.0, 40.0);
         self.window_size.0 = self.window_size.0.max(100.0);
         self.window_size.1 = self.window_size.1.max(100.0);
         self.ebook.font_size = self.ebook.font_size.clamp(10, 72);
@@ -458,6 +468,37 @@ mod tests {
         assert!(!s.invert_scroll);
         assert_eq!(s.background_color, [30, 30, 30]);
         assert!((s.wide_page_threshold - 1.4).abs() < f32::EPSILON);
+        assert!((s.page_scroll_threshold - 12.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_settings_page_scroll_threshold_validate_and_clamp() {
+        let s = Settings::default();
+        assert!(s.validate().is_ok());
+        let mut s = Settings {
+            page_scroll_threshold: 0.5,
+            ..Default::default()
+        };
+        assert!(s.validate().is_err());
+        s.clamp();
+        assert!((s.page_scroll_threshold - 1.0).abs() < f32::EPSILON);
+        assert!(s.validate().is_ok());
+        let mut s = Settings {
+            page_scroll_threshold: 100.0,
+            ..Default::default()
+        };
+        assert!(s.validate().is_err());
+        s.clamp();
+        assert!((s.page_scroll_threshold - 40.0).abs() < f32::EPSILON);
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn test_settings_deserialize_missing_page_scroll_threshold() {
+        // 旧版 settings.json 无此字段 → 取默认值
+        let json = r#"{"theme":"Dark"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert!((s.page_scroll_threshold - 12.0).abs() < f32::EPSILON);
     }
 
     #[test]

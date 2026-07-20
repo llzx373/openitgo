@@ -158,6 +158,45 @@ fn media_type_for_path(path: &std::path::Path) -> MediaType {
     }
 }
 
+/// Line 单位滚轮增量换算为点(pt)。取 egui 原生默认值
+/// （`InputOptions::default().line_scroll_speed`，非 web 平台为 40）。
+const WHEEL_LINE_SCROLL_PX: f32 = 40.0;
+
+/// 汇总一帧内全部滚轮事件的纵向增量（pt），等价于 egui 0.35 移除的
+/// `raw_scroll_delta.y`。翻页/缩放这类离散操作必须用它而不是
+/// `smooth_scroll_delta` —— 后者把一次滚轮刻度按指数曲线摊到多帧，
+/// 按帧设阈值会同时造成“滚了不动”（小增量摊薄后每帧都低于阈值）和
+/// “一跳多页”（大增量连续多帧高于阈值，每帧翻一页）。
+fn raw_wheel_delta_y(events: &[egui::Event]) -> f32 {
+    events
+        .iter()
+        .map(|e| match e {
+            egui::Event::MouseWheel { unit, delta, .. } => match unit {
+                egui::MouseWheelUnit::Point => delta.y,
+                egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => {
+                    delta.y * WHEEL_LINE_SCROLL_PX
+                }
+            },
+            _ => 0.0,
+        })
+        .sum()
+}
+
+/// 把滚轮增量累加为翻页步数（±1 或 0）。`threshold`（pt）来自设置项
+/// `page_scroll_threshold`：macOS 鼠标一格约 14pt，阈值小于它才能一格一页；
+/// 小刻度鼠标调小阈值。跨帧保留未达阈值的余量，触发后清零：
+/// 小幅滚动攒够阈值总能翻页，单帧巨幅增量也只翻一页。
+fn accumulate_page_turn(acc: f32, delta: f32, threshold: f32) -> (f32, i32) {
+    let acc = acc + delta;
+    if acc >= threshold {
+        (0.0, 1)
+    } else if acc <= -threshold {
+        (0.0, -1)
+    } else {
+        (acc, 0)
+    }
+}
+
 pub struct ReaderApp {
     pub current_view: View,
     pub last_view: View,
@@ -208,6 +247,8 @@ pub struct ReaderApp {
     pub stats_session: Option<(String, std::time::Instant)>,
     /// 书签缩略图请求在途：epoch -> (comic_id, page_index)。
     pub pending_bookmark_thumbs: HashMap<crate::loader::Epoch, (String, usize)>,
+    /// 滚轮翻页累加器（pt）：跨帧累计未达阈值的滚轮增量，触发翻页后清零。
+    pub page_scroll_acc: f32,
 }
 
 impl Default for ReaderApp {
@@ -273,6 +314,7 @@ impl Default for ReaderApp {
             reading_stats,
             stats_session: None,
             pending_bookmark_thumbs: HashMap::new(),
+            page_scroll_acc: 0.0,
         }
     }
 }
@@ -681,7 +723,7 @@ impl ReaderApp {
             }
 
             // Scroll wheel navigation.
-            let mut scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            let mut scroll = ui.input(|i| raw_wheel_delta_y(&i.events));
             if self.settings.invert_scroll {
                 scroll = -scroll;
             }
@@ -696,9 +738,15 @@ impl ReaderApp {
                     }
                 }
             } else if mode != ReadingMode::Webtoon {
-                if scroll > 2.0 {
+                let (acc, turns) = accumulate_page_turn(
+                    self.page_scroll_acc,
+                    scroll,
+                    self.settings.page_scroll_threshold,
+                );
+                self.page_scroll_acc = acc;
+                if turns > 0 {
                     self.reader_page_down();
-                } else if scroll < -2.0 {
+                } else if turns < 0 {
                     self.reader_page_up();
                 }
             }
@@ -3680,6 +3728,7 @@ mod tests {
                 reading_stats: HashMap::new(),
                 stats_session: None,
                 pending_bookmark_thumbs: HashMap::new(),
+                page_scroll_acc: 0.0,
             }
         }
     }
@@ -4692,5 +4741,89 @@ mod tests {
             initial_open_path(None, Some(std::path::PathBuf::from(raw))),
             None
         );
+    }
+
+    fn wheel_event(unit: egui::MouseWheelUnit, y: f32) -> egui::Event {
+        egui::Event::MouseWheel {
+            unit,
+            delta: egui::Vec2::new(0.0, y),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    #[test]
+    fn raw_wheel_delta_y_sums_point_events_in_frame() {
+        let events = vec![
+            wheel_event(egui::MouseWheelUnit::Point, 6.0),
+            wheel_event(egui::MouseWheelUnit::Point, 8.0),
+        ];
+        assert_eq!(raw_wheel_delta_y(&events), 14.0);
+    }
+
+    #[test]
+    fn raw_wheel_delta_y_converts_line_units_to_points() {
+        // Windows 滚轮一格 = 1 line，按 egui 原生默认换算为 40pt
+        let events = vec![wheel_event(egui::MouseWheelUnit::Line, 1.0)];
+        assert_eq!(raw_wheel_delta_y(&events), 40.0);
+    }
+
+    #[test]
+    fn raw_wheel_delta_y_ignores_non_wheel_events() {
+        let events = vec![egui::Event::Text("a".into())];
+        assert_eq!(raw_wheel_delta_y(&events), 0.0);
+    }
+
+    #[test]
+    fn page_turn_accumulator_one_notch_one_page() {
+        // macOS 鼠标一格 ≈ 14pt：恰好翻一页并清零，不多翻
+        let (acc, turns) = accumulate_page_turn(0.0, 14.0, 12.0);
+        assert_eq!(turns, 1);
+        assert_eq!(acc, 0.0);
+    }
+
+    #[test]
+    fn page_turn_accumulator_small_drags_add_up() {
+        // 触控板轻微拖动分多帧到达，跨帧累加后仍能翻页（修复“滚了不动”）
+        let (acc, turns) = accumulate_page_turn(0.0, 5.0, 12.0);
+        assert_eq!(turns, 0);
+        let (acc, turns) = accumulate_page_turn(acc, 5.0, 12.0);
+        assert_eq!(turns, 0);
+        let (_acc, turns) = accumulate_page_turn(acc, 5.0, 12.0);
+        assert_eq!(turns, 1);
+    }
+
+    #[test]
+    fn page_turn_accumulator_big_flick_turns_once() {
+        // 惯性猛滑一帧 100pt 也只翻一页且清零（修复“一跳很多页”）
+        let (acc, turns) = accumulate_page_turn(0.0, 100.0, 12.0);
+        assert_eq!(turns, 1);
+        assert_eq!(acc, 0.0);
+    }
+
+    #[test]
+    fn page_turn_accumulator_reverse_scroll_cancels() {
+        // 反向滚动抵消累计值
+        let (acc, turns) = accumulate_page_turn(8.0, -8.0, 12.0);
+        assert_eq!(turns, 0);
+        assert_eq!(acc, 0.0);
+        let (_acc, turns) = accumulate_page_turn(0.0, -14.0, 12.0);
+        assert_eq!(turns, -1);
+    }
+
+    #[test]
+    fn page_turn_accumulator_custom_threshold_sensitive() {
+        // 阈值调小后，5pt 小刻度鼠标也能一格一页
+        let (acc, turns) = accumulate_page_turn(0.0, 5.0, 4.0);
+        assert_eq!(turns, 1);
+        assert_eq!(acc, 0.0);
+    }
+
+    #[test]
+    fn page_turn_accumulator_custom_threshold_heavy() {
+        // 阈值调大后，14pt 一格不再翻页，余量保留
+        let (acc, turns) = accumulate_page_turn(0.0, 14.0, 30.0);
+        assert_eq!(turns, 0);
+        assert_eq!(acc, 14.0);
     }
 }

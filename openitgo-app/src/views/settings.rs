@@ -51,6 +51,15 @@ impl SettingsView {
             "反转滚轮方向（适用于 macOS 自然滚动）",
         );
 
+        ui.horizontal(|ui| {
+            ui.label("滚轮翻页阈值 (pt):");
+            ui.add(egui::Slider::new(
+                &mut settings.page_scroll_threshold,
+                1.0..=40.0,
+            ));
+            ui.label("（滚一格不翻页就调小，容易误翻就调大）");
+        });
+
         ui.checkbox(
             &mut settings.compress_images,
             "DXT5 纹理压缩（节省显存，但打开时 CPU 占用高）",

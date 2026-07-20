@@ -68,6 +68,7 @@ builds on unpinned stable.
   `wide_page_threshold`, `enable_page_animation`, `compress_images`,
   `decode_threads`, `cache_size_mb`, `real_image_cache_pages`,
   `show_toolbar`, `show_statusbar`, `invert_scroll`, `library_sort`,
+  `page_scroll_threshold`,
   `media_volume`, `media_speed`, and `media_audio_device`.
 - **History entries** store both `comic_id` and `path` for robust matching.
 - **Per-comic reading settings** (`comic_settings.json`,
@@ -205,6 +206,17 @@ builds on unpinned stable.
   video layer compositing verification), and
   `openitgo-media/examples/{probe,probe_render}.rs` (headless player/render
   context). `OPENITGO_MPV_LOG=1` enables mpv debug logs on stderr.
+- **滚轮翻页（漫画）**：egui 0.35 移除了 `raw_scroll_delta`，而
+  `smooth_scroll_delta` 会把一次滚轮刻度按指数曲线摊到多帧——按帧阈值
+  判定离散翻页会同时导致“滚了不动”（小增量摊薄后每帧都低于阈值）和
+  “一跳多页”（大增量连续多帧高于阈值，每帧翻一页）。`render_reader`
+  改用 `raw_wheel_delta_y(&i.events)` 汇总本帧滚轮事件增量（Line/Page
+  单位 × 40pt），再经 `accumulate_page_turn` 累加：满阈值翻一页并
+  清零，单帧巨幅增量也只翻一页；余量跨帧保留，反向滚动自然抵消。
+  阈值即设置项 `page_scroll_threshold`（pt，默认 12 ≈ macOS 鼠标一格
+  14pt 以下，1–40 可调，validate/clamp 在 storage models.rs）。
+  Ctrl/Cmd+滚轮缩放沿用同一事件和 + ±2.0 阈值。改滚轮代码不要回退到
+  `smooth_scroll_delta`（webtoon 连续滚动除外，那里平滑值是正确的）。
 - **Reader diagnostic examples** (`openitgo-app/examples/`，用法均为
   `cargo run -p openitgo-app --example <name> -- <漫画路径>`)：
   - `flip_through.rs`：逐页顺序请求整本漫画，报告每页成功/错误/超时（PageLoader 全页遍历冒烟）。
