@@ -28,6 +28,51 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// 阅读中历史/书签落盘节流间隔；离开视图与书签增删改不受此限制。
 const HISTORY_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
 
+/// 待打开的媒体请求；`force_start` 为 true 时跳过历史续播（自动续播下一集）。
+pub struct PendingMediaOpen {
+    pub path: PathBuf,
+    pub force_start: bool,
+}
+
+/// 计算打开媒体时的 resume 毫秒：自动续播强制从头，手动打开沿用历史进度。
+fn media_resume_ms(force_start: bool, history_ms: Option<u64>) -> Option<u64> {
+    if force_start {
+        None
+    } else {
+        history_ms
+    }
+}
+
+/// 换片前是否应写入当前媒体进度：已有打开媒体且路径与下一集不同。
+fn should_record_media_before_open(current: Option<&Path>, next: &Path) -> bool {
+    current.is_some_and(|cur| cur != next)
+}
+
+/// 将媒体播放进度写入（或更新）history；`char_offset` 存毫秒。
+fn upsert_media_history_entry(history: &mut History, path: PathBuf, position_ms: u64, now: u64) {
+    let media_id = openitgo_parser::stable_comic_id(&path);
+    if let Some(entry) = history
+        .entries
+        .iter_mut()
+        .find(|h| history_matches(h, &media_id, &path))
+    {
+        entry.comic_id = media_id;
+        entry.path = path;
+        entry.page_index = 0;
+        entry.char_offset = Some(position_ms as usize);
+        entry.last_read_at = now;
+    } else {
+        history.entries.push(HistoryEntry {
+            comic_id: media_id,
+            path,
+            volume_index: 0,
+            page_index: 0,
+            char_offset: Some(position_ms as usize),
+            last_read_at: now,
+        });
+    }
+}
+
 /// 脏且距上次落盘已满 `min_interval`（或尚无落盘记录）时返回 true。
 fn history_persist_due(
     dirty: bool,
@@ -233,7 +278,7 @@ pub struct ReaderApp {
     pub cover_loader: PageLoader,
     pub opener: Option<AsyncOpener<Comic>>,
     pub ebook_opener: Option<AsyncOpener<Ebook>>,
-    pub pending_media_open: Option<PathBuf>,
+    pub pending_media_open: Option<PendingMediaOpen>,
     /// Cover requests in flight: epoch -> (comic_id, comic_path).
     pub pending_covers: HashMap<crate::loader::Epoch, (String, PathBuf)>,
     /// Comic ids for which a cover generation has already been requested.
@@ -887,7 +932,7 @@ impl ReaderApp {
 
     /// 播放正常结束（ended 且无 error）时自动续播同目录自然排序的下一集，
     /// 每个打开的媒体只触发一次（auto_next_fired 守卫，open() 时复位）。
-    /// 有下一集时经 open_media 走正常打开流程（含历史续播的默认行为），
+    /// 有下一集时先写入当前集进度，再以 force_start 打开下一集（从头播放），
     /// OSD 通过 pending_open_osd 由 MediaView::open 在新媒体就绪后显示。
     fn maybe_auto_next_media(&mut self, ctx: &egui::Context) {
         let should_fire = match self.media_view.open.as_ref() {
@@ -910,8 +955,9 @@ impl ReaderApp {
                     .and_then(|s| s.to_str())
                     .unwrap_or("未知媒体")
                     .to_string();
+                self.record_media_history();
                 self.media_view.pending_open_osd = Some(format!("自动播放下一集：{title}"));
-                self.open_media(next);
+                self.open_media_with(next, true);
             }
             None => {
                 self.media_view.show_osd(ctx, "已是最后一集".to_string());
@@ -2857,34 +2903,16 @@ impl ReaderApp {
     /// milliseconds and `page_index` stays 0 (mirrors the ebook pattern).
     fn record_media_history(&mut self) {
         if let Some(open) = self.media_view.open.as_ref() {
-            let media_id = openitgo_parser::stable_comic_id(&open.path);
-            let path = open.path.clone();
-            let position_ms = open.last.position_ms;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            if let Some(entry) = self
-                .history
-                .entries
-                .iter_mut()
-                .find(|h| history_matches(h, &media_id, &path))
-            {
-                entry.comic_id = media_id;
-                entry.path = path;
-                entry.page_index = 0;
-                entry.char_offset = Some(position_ms as usize);
-                entry.last_read_at = now;
-            } else {
-                self.history.entries.push(HistoryEntry {
-                    comic_id: media_id,
-                    path,
-                    volume_index: 0,
-                    page_index: 0,
-                    char_offset: Some(position_ms as usize),
-                    last_read_at: now,
-                });
-            }
+            upsert_media_history_entry(
+                &mut self.history,
+                open.path.clone(),
+                open.last.position_ms,
+                now,
+            );
             self.history_dirty = true;
         }
     }
@@ -3169,9 +3197,10 @@ impl ReaderApp {
             return;
         };
         let comic_id = reader.comic.id.clone();
-        let exists = self.bookmarks.entries.iter().any(|b| {
-            b.comic_id == comic_id && b.volume_index == 0 && b.page_index == page_index
-        });
+        let exists =
+            self.bookmarks.entries.iter().any(|b| {
+                b.comic_id == comic_id && b.volume_index == 0 && b.page_index == page_index
+            });
         if exists {
             return;
         }
@@ -3332,26 +3361,36 @@ impl ReaderApp {
     }
 
     fn open_media(&mut self, path: std::path::PathBuf) {
-        timing::log(&format!("open_media {:?}", path));
-        self.pending_media_open = Some(path);
+        self.open_media_with(path, false);
+    }
+
+    fn open_media_with(&mut self, path: std::path::PathBuf, force_start: bool) {
+        timing::log(&format!("open_media {:?} force_start={force_start}", path));
+        self.pending_media_open = Some(PendingMediaOpen { path, force_start });
     }
 
     fn poll_media_open(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        let Some(path) = self.pending_media_open.take() else {
+        let Some(PendingMediaOpen { path, force_start }) = self.pending_media_open.take() else {
             return;
         };
+        let current_path = self.media_view.open.as_ref().map(|o| o.path.as_path());
+        if should_record_media_before_open(current_path, &path) {
+            self.record_media_history();
+            self.persist_history_bookmarks();
+        }
         let screen = ctx.content_rect();
         let bounds = wry::Rect {
             position: wry::dpi::LogicalPosition::new(screen.min.x, screen.min.y).into(),
             size: wry::dpi::LogicalSize::new(screen.width(), screen.height()).into(),
         };
         let media_id = openitgo_parser::stable_comic_id(&path);
-        let resume_ms = self
+        let history_ms = self
             .history
             .entries
             .iter()
             .find(|h| history_matches(h, &media_id, &path))
             .and_then(|h| h.char_offset.map(|ms| ms as u64));
+        let resume_ms = media_resume_ms(force_start, history_ms);
         match self.media_view.open(ctx, frame, bounds, path, resume_ms) {
             Ok(()) => {
                 self.media_view.refresh_audio_devices();
@@ -4031,7 +4070,10 @@ mod tests {
         let new_cover = cover_path_for_comic_id(&covers, &expected);
         assert!(new_cover.exists(), "cover should be renamed to new id");
         assert!(!old_cover.exists(), "old cover path should be gone");
-        assert_eq!(library.entries[0].cover_path.as_deref(), Some(new_cover.as_path()));
+        assert_eq!(
+            library.entries[0].cover_path.as_deref(),
+            Some(new_cover.as_path())
+        );
     }
 
     #[test]
@@ -4197,6 +4239,50 @@ mod tests {
             msg.contains("历史"),
             "expected Chinese history save error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn record_media_history_before_switching_file() {
+        let old = PathBuf::from("/tmp/ep1.mp4");
+        let new = PathBuf::from("/tmp/ep2.mp4");
+        assert!(
+            should_record_media_before_open(Some(old.as_path()), &new),
+            "different path must record"
+        );
+        assert!(
+            !should_record_media_before_open(Some(old.as_path()), &old),
+            "same path must not record"
+        );
+        assert!(
+            !should_record_media_before_open(None, &new),
+            "no current media must not record"
+        );
+
+        // 模拟 poll_media_open 换片前：记录旧片进度后 history 含切换前 position_ms。
+        let position_ms = 12_345u64;
+        let mut history = History::default();
+        if should_record_media_before_open(Some(old.as_path()), &new) {
+            upsert_media_history_entry(&mut history, old.clone(), position_ms, 100);
+        }
+        let entry = history
+            .entries
+            .iter()
+            .find(|h| h.path == old)
+            .expect("old path history entry");
+        assert_eq!(entry.char_offset, Some(position_ms as usize));
+        assert_eq!(entry.page_index, 0);
+    }
+
+    #[test]
+    fn auto_next_forces_resume_from_start() {
+        assert_eq!(media_resume_ms(true, Some(5000)), None);
+        assert_eq!(media_resume_ms(true, None), None);
+    }
+
+    #[test]
+    fn manual_open_still_resumes_from_history() {
+        assert_eq!(media_resume_ms(false, Some(5000)), Some(5000));
+        assert_eq!(media_resume_ms(false, None), None);
     }
 
     #[test]
