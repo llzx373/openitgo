@@ -607,6 +607,7 @@ impl ReaderApp {
                     }
                     let comic_id = comic.id.clone();
                     let page_count = comic.total_pages();
+                    let archive_password = self.passwords.get(&password_key(&comic.path)).cloned();
                     self.reader_view.open(
                         ctx,
                         comic,
@@ -614,6 +615,7 @@ impl ReaderApp {
                         &self.page_loader,
                         self.settings.wide_page_threshold,
                         self.settings.enable_page_animation,
+                        archive_password.as_deref(),
                     );
                     self.update_library_page_count(&comic_id, page_count);
                     self.current_view = View::Reader;
@@ -3057,12 +3059,26 @@ impl ReaderApp {
         // If the selected path is not a comic itself, recursively scan it for
         // supported archives/folders and ebooks and import everything found.
         let mut found = 0;
+        let mut other_failed = 0;
         for entry in walk_supported_files(&path) {
-            self.add_file_to_library(entry);
-            found += 1;
+            match classify_import_result(&entry, &self.passwords) {
+                ImportAttempt::AddedComic | ImportAttempt::AddedEbookOrMedia => {
+                    self.add_file_to_library(entry);
+                    found += 1;
+                }
+                ImportAttempt::NeedsPassword => {
+                    self.add_file_to_library(entry);
+                    found += 1;
+                }
+                ImportAttempt::OtherError => {
+                    other_failed += 1;
+                }
+            }
         }
-        if found == 0 {
+        if found == 0 && other_failed == 0 {
             self.error_message = Some(format!("无法添加文件或文件夹: {}", path.display()));
+        } else if let Some(msg) = import_failure_summary(other_failed) {
+            self.error_message = Some(msg);
         }
     }
 
@@ -3580,6 +3596,43 @@ fn password_dialog_on_confirm(input: &str) -> PasswordConfirmOutcome {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportAttempt {
+    AddedComic,
+    AddedEbookOrMedia,
+    NeedsPassword,
+    OtherError,
+}
+
+fn classify_import_result(path: &Path, passwords: &HashMap<PathBuf, String>) -> ImportAttempt {
+    if is_ebook_file(path) || is_media_file(path) {
+        return ImportAttempt::AddedEbookOrMedia;
+    }
+    let password = passwords
+        .get(&password_key(path))
+        .cloned()
+        .or_else(|| passwords.get(path).cloned());
+    match openitgo_parser::parse_with_password(path, password.as_deref()) {
+        Ok(_) => ImportAttempt::AddedComic,
+        Err(openitgo_parser::traits::ParseError::PasswordRequired)
+        | Err(openitgo_parser::traits::ParseError::PasswordIncorrect) => {
+            ImportAttempt::NeedsPassword
+        }
+        Err(_) => ImportAttempt::OtherError,
+    }
+}
+
+/// Summarize non-password import failures for a batch folder scan.
+fn import_failure_summary(other_failed: usize) -> Option<String> {
+    if other_failed == 0 {
+        None
+    } else {
+        Some(format!(
+            "已跳过 {other_failed} 个无法解析的文件（损坏或不支持的格式）"
+        ))
+    }
+}
+
 /// 加密压缩包密码输入对话框状态（会话内有效，不落盘）。
 pub struct PasswordDialog {
     path: PathBuf,
@@ -4028,6 +4081,14 @@ mod tests {
     }
 
     #[test]
+    fn import_failure_summary_counts_non_password_errors() {
+        assert_eq!(import_failure_summary(0), None);
+        let msg = import_failure_summary(3).expect("summary");
+        assert!(msg.contains('3'), "{msg}");
+        assert!(msg.contains("无法解析"), "{msg}");
+    }
+
+    #[test]
     fn open_comic_resets_page_scroll_acc() {
         let (mut app, tmp) = app_with_temp_store();
         app.page_scroll_acc = 99.0;
@@ -4049,6 +4110,7 @@ mod tests {
             &PageLoader::default(),
             1.4,
             true,
+            None,
         );
         app.page_scroll_acc = 12.0;
         app.apply_reading_mode(ReadingMode::Webtoon);
@@ -4203,6 +4265,7 @@ mod tests {
             &PageLoader::default(),
             1.4,
             true,
+            None,
         );
         app.reader_view.open.as_mut().unwrap().state.current_page = 5;
         app.record_reader_history();
@@ -4228,6 +4291,7 @@ mod tests {
             &PageLoader::default(),
             1.4,
             true,
+            None,
         );
         app.reader_view.open.as_mut().unwrap().state.current_page = 7;
         // 模拟离开 Reader：record + 立即 persist（与 ui 离开路径一致）。
@@ -4256,6 +4320,7 @@ mod tests {
             &PageLoader::default(),
             1.4,
             true,
+            None,
         );
         app.add_bookmark(3);
         assert!(!app.bookmarks_dirty);
@@ -4573,6 +4638,7 @@ mod tests {
             &PageLoader::default(),
             1.4,
             true,
+            None,
         );
         // 模拟 poll_opener 打开时记录的快照。
         let initial = {
@@ -4616,6 +4682,7 @@ mod tests {
             &PageLoader::default(),
             1.4,
             true,
+            None,
         );
         let initial = {
             let reader = app.reader_view.open.as_ref().unwrap();
@@ -4695,6 +4762,7 @@ mod tests {
             &PageLoader::default(),
             1.4,
             true,
+            None,
         );
         app.last_saved_comic_settings = Some(comic_reading_settings_snapshot(
             &comic_id,
@@ -5268,6 +5336,7 @@ mod tests {
             &PageLoader::default(),
             1.4,
             true,
+            None,
         );
         app.current_view = View::Reader;
         assert_eq!(app.current_reading_id(), Some(comic_id));

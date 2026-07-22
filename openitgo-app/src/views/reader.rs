@@ -323,7 +323,7 @@ impl OpenReader {
     /// Eagerly seed the page cache with the dimensions of the spread that will
     /// be visible first. This lets `apply_pending_fit` compute the correct zoom
     /// on the very first frame instead of waiting for the background decoder.
-    pub fn seed_spread_dimensions(&mut self) {
+    pub fn seed_spread_dimensions(&mut self, archive_password: Option<&str>) {
         let total = self.total_pages();
         if total == 0 {
             return;
@@ -342,7 +342,7 @@ impl OpenReader {
             let Some(source) = self.comic.page_source(idx) else {
                 continue;
             };
-            if let Some(dim) = sync_page_dimensions(source) {
+            if let Some(dim) = sync_page_dimensions(source, archive_password) {
                 timing::log(&format!("seeded dimensions for page {}: {:?}", idx, dim));
                 self.cache.insert_dimensions(idx, dim);
             }
@@ -476,6 +476,7 @@ impl OpenReader {
 
 impl ReaderView {
     /// Open a new comic, clearing any previous reader's cache first.
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         &mut self,
         ctx: &egui::Context,
@@ -484,6 +485,7 @@ impl ReaderView {
         loader: &PageLoader,
         wide_page_threshold: f32,
         enable_page_animation: bool,
+        archive_password: Option<&str>,
     ) {
         let _ = ctx;
         timing::log(&format!(
@@ -514,7 +516,7 @@ impl ReaderView {
             enable_page_animation,
         };
         reader.bump_epoch(loader);
-        reader.seed_spread_dimensions();
+        reader.seed_spread_dimensions(archive_password);
         self.open = Some(reader);
     }
 
@@ -1149,7 +1151,7 @@ fn request_page_thumbnail(loader: &PageLoader, reader: &mut OpenReader, page_ind
 /// the full image. This is used when opening a comic so the first frame can
 /// apply the correct fit zoom immediately. Only the image header is read,
 /// so this is much cheaper than a full decode.
-fn sync_page_dimensions(source: &PageSource) -> Option<[u32; 2]> {
+fn sync_page_dimensions(source: &PageSource, archive_password: Option<&str>) -> Option<[u32; 2]> {
     fn dimensions_from_bytes(bytes: &[u8]) -> Option<[u32; 2]> {
         image::ImageReader::new(std::io::Cursor::new(bytes))
             .with_guessed_format()
@@ -1164,7 +1166,10 @@ fn sync_page_dimensions(source: &PageSource) -> Option<[u32; 2]> {
         PageSource::ZipEntry { archive, index, .. } => {
             let file = std::fs::File::open(archive).ok()?;
             let mut zip = zip::ZipArchive::new(file).ok()?;
-            let mut entry = zip.by_index(*index).ok()?;
+            let mut entry = match archive_password {
+                Some(pw) => zip.by_index_decrypt(*index, pw.as_bytes()).ok()?,
+                None => zip.by_index(*index).ok()?,
+            };
             // Read a bounded prefix; image headers are small, but keep the limit
             // generous for formats with large metadata segments.
             const LIMIT: usize = 256 * 1024;
@@ -1185,7 +1190,11 @@ fn sync_page_dimensions(source: &PageSource) -> Option<[u32; 2]> {
             name,
             header_position,
         } => {
-            let open_archive = unrar::Archive::new(archive).open_for_processing().ok()?;
+            let builder = match archive_password {
+                Some(pw) => unrar::Archive::with_password(archive, pw),
+                None => unrar::Archive::new(archive),
+            };
+            let open_archive = builder.open_for_processing().ok()?;
             let mut current = 0usize;
             let mut archive = open_archive;
             loop {
@@ -1511,8 +1520,68 @@ mod tests {
         let mut reader = dummy_reader();
         reader.comic.volumes[0].pages[0].source = PageSource::File(path);
         reader.state.set_double_page(false, 10);
-        reader.seed_spread_dimensions();
+        reader.seed_spread_dimensions(None);
 
         assert_eq!(reader.cache.get_original_size(0), Some([100, 200]));
+    }
+
+    #[test]
+    fn sync_page_dimensions_zip_encrypted_with_password() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("enc.cbz");
+        let img = image::RgbaImage::from_pixel(32, 48, image::Rgba([1, 2, 3, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        {
+            use std::io::Write;
+            let file = std::fs::File::create(&path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .with_aes_encryption(zip::AesMode::Aes256, "s3cret");
+            zip.start_file("01.png", options).unwrap();
+            zip.write_all(&png).unwrap();
+            zip.finish().unwrap();
+        }
+        let source = PageSource::ZipEntry {
+            archive: path.clone(),
+            name: "01.png".into(),
+            index: 0,
+        };
+        assert_eq!(
+            sync_page_dimensions(&source, Some("s3cret")),
+            Some([32, 48])
+        );
+    }
+
+    #[test]
+    fn sync_page_dimensions_zip_encrypted_wrong_password_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("enc.cbz");
+        let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        {
+            use std::io::Write;
+            let file = std::fs::File::create(&path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .with_aes_encryption(zip::AesMode::Aes256, "s3cret");
+            zip.start_file("01.png", options).unwrap();
+            zip.write_all(&png).unwrap();
+            zip.finish().unwrap();
+        }
+        let source = PageSource::ZipEntry {
+            archive: path,
+            name: "01.png".into(),
+            index: 0,
+        };
+        assert_eq!(sync_page_dimensions(&source, Some("wrong")), None);
+        assert_eq!(sync_page_dimensions(&source, None), None);
     }
 }
