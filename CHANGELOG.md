@@ -76,6 +76,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 隐藏缺陷批次（TODO #62–#71）：`stable_comic_id` 改用 blake3 并启动迁移；历史/书签离开视图与变更时及时落盘（阅读中 30s 节流）；媒体换片写进度且自动续播强制从头；双页末页不再跳封面；Webtoon 清除双页标志并重置滚轮累加器；`SharedRawCache` 重复插入账本；PDF 文档缓存 256MiB LRU；密码路径 canonicalize 与空密码不重试；加密包首帧尺寸探测带密码；批量导入非密码错误汇总提示。
+- 书架卡片显示真实阅读进度（`LibraryEntry.page_count`，打开/导入时写入）。
+
 - 修复非 macOS 平台编译失败：`player_stub` 补齐 `request_audio_devices` / `sub_add` / `adjust_sub_delay` / `reset_sub_delay`（其中 `request_audio_devices` 为既有缺口），ubuntu CI 由此可用。
 - 电子书：修复菜单栏菜单/弹层被 wry webview 遮盖不可见的问题——菜单/弹层打开时临时 `set_visible(false)` 隐藏 webview 并以当前阅读主题背景色填充，关闭即恢复（可见性变更按状态去重，不逐帧 IPC）。
 - 电子书排版：修复宽表格溢出（td/th 强制折行）与 pre 块溢出（横向滚动）；超高图片经注入 CSS 约束缩放至视口内；剥离 EPUB 内联 `column-*` / `position: fixed|absolute` 样式声明（数量经日志可观测），避免与 CSS columns 分页器冲突。

@@ -29,17 +29,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 | ID | Bug | 主测 crate | 状态 |
 |---|---|---|---|
-| B1 / #62 | `DefaultHasher` comic_id 跨版本不稳定 | openitgo-parser + app/storage | ☐ |
-| B2 / #63 | 历史/书签几乎只在退出落盘 | openitgo-app | ☐ |
-| B3 / #64 | 媒体→媒体换片不写进度；续播从中间起 | openitgo-app | ☐ |
-| B4 / #65 | 双页 `clamp_page` 越界跳封面 | openitgo-core | ☐ |
-| B5 / #66 | Webtoon 残留双页；滚轮累加器跨书残留 | openitgo-core + openitgo-app | ☐ |
-| B6 / #67 | `SharedRawCache` 重复插入双计字节 | openitgo-app | ☐ |
-| B7 / #68 | PDF 文档缓存无界增长 | openitgo-app | ☐ |
-| B8 / #69 | 密码 path 未规范化；空密码仍重试 | openitgo-app | ☐ |
-| B9 / #70 | 加密包尺寸探测无密码；导入错误静默 | openitgo-app | ☐ |
-| B10 / #71 | 书架进度永远 0% | openitgo-storage + openitgo-app | ☐ |
-| B11 / #72 | 文档/CHANGELOG/勾选收尾 | docs | ☐ |
+| B1 / #62 | `DefaultHasher` comic_id 跨版本不稳定 | openitgo-parser + app/storage | ☑ |
+| B2 / #63 | 历史/书签几乎只在退出落盘 | openitgo-app | ☑ |
+| B3 / #64 | 媒体→媒体换片不写进度；续播从中间起 | openitgo-app | ☑ |
+| B4 / #65 | 双页 `clamp_page` 越界跳封面 | openitgo-core | ☑ |
+| B5 / #66 | Webtoon 残留双页；滚轮累加器跨书残留 | openitgo-core + openitgo-app | ☑ |
+| B6 / #67 | `SharedRawCache` 重复插入双计字节 | openitgo-app | ☑ |
+| B7 / #68 | PDF 文档缓存无界增长 | openitgo-app | ☑ |
+| B8 / #69 | 密码 path 未规范化；空密码仍重试 | openitgo-app | ☑ |
+| B9 / #70 | 加密包尺寸探测无密码；导入错误静默 | openitgo-app | ☑ |
+| B10 / #71 | 书架进度永远 0% | openitgo-storage + openitgo-app | ☑ |
+| B11 / #72 | 文档/CHANGELOG/勾选收尾 | docs | ☑ |
 
 ---
 

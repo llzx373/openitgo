@@ -277,20 +277,20 @@
 
 ### P0 — 数据与导航
 
-- [ ] 62. B1：`stable_comic_id` → blake3 + 启动迁移（测：`stable_comic_id_*` / `migrate_comic_ids_*`）
-- [ ] 63. B2：历史/书签及时落盘与保存失败提示（测：`persist_history_*` / `persist_bookmarks_*` / `history_dirty_throttle_*`）
-- [ ] 64. B3：媒体换片写进度；自动续播强制从头（测：`record_media_history_before_*` / `auto_next_forces_*` / `manual_open_still_resumes_*`）
-- [ ] 65. B4：双页 `clamp_page` 越界对齐末 spread（测：`go_to_page_past_last_anchor_*` 等）
+- [x] 62. B1：`stable_comic_id` → blake3 + 启动迁移（测：`stable_comic_id_*` / `migrate_comic_ids_*`）
+- [x] 63. B2：历史/书签及时落盘与保存失败提示（测：`persist_history_*` / `persist_bookmarks_*` / `history_dirty_throttle_*`）
+- [x] 64. B3：媒体换片写进度；自动续播强制从头（测：`record_media_history_before_*` / `auto_next_forces_*` / `manual_open_still_resumes_*`）
+- [x] 65. B4：双页 `clamp_page` 越界对齐末 spread（测：`go_to_page_past_last_anchor_*` 等）
 
 ### P1 — 体验与缓存
 
-- [ ] 66. B5：Webtoon 清双页标志；滚轮累加器清零（测：`set_mode_to_webtoon_*` / `page_scroll_acc_*`）
-- [ ] 67. B6：`SharedRawCache` 重复插入账本（测：`shared_raw_cache_reinsert_*`）
-- [ ] 68. B7：PDF 文档缓存 LRU 上限（测：`pdf_document_cache_*`）
-- [ ] 69. B8：密码 key canonicalize；空密码不重试（测：`password_key_*` / `empty_password_confirm_*`）
-- [ ] 70. B9：加密尺寸探测带密码；导入错误汇总（测：`sync_page_dimensions_zip_encrypted_*` / `import_failure_summary_*`）
-- [ ] 71. B10：`LibraryEntry.page_count` + 真实书架进度（测：`library_progress_*` / `page_count_roundtrip_*`）
+- [x] 66. B5：Webtoon 清双页标志；滚轮累加器清零（测：`set_mode_to_webtoon_*` / `page_scroll_acc_*`）
+- [x] 67. B6：`SharedRawCache` 重复插入账本（测：`shared_raw_cache_reinsert_*`）
+- [x] 68. B7：PDF 文档缓存 LRU 上限（测：`pdf_document_cache_*`）
+- [x] 69. B8：密码 key canonicalize；空密码不重试（测：`password_key_*` / `empty_password_confirm_*`）
+- [x] 70. B9：加密尺寸探测带密码；导入错误汇总（测：`sync_page_dimensions_zip_encrypted_*` / `import_failure_summary_*`）
+- [x] 71. B10：`LibraryEntry.page_count` + 真实书架进度（测：`library_progress_*` / `page_count_roundtrip_*`）
 
 ### P2 — 收尾
 
-- [ ] 72. B11：CHANGELOG/README/计划与本表 #62–#72 勾选门禁
+- [x] 72. B11：CHANGELOG/README/计划与本表 #62–#72 勾选门禁
