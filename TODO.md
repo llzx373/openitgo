@@ -268,3 +268,29 @@
 - [x] 59. 跨平台补全：Windows/Linux `env::args` 文件关联打开（现全仓无 argv 处理）、媒体播放非 macOS 实现、对应打包脚本；README "跨平台" 措辞与实际对齐（轻量部分完成；非 macOS 媒体播放 + 打包脚本出范围，未做）
 - [x] 60. 清理：`probe_overlay.rs` 已删（AGENTS.md 已同步）；5 个 examples 已登记；`docs/bug.md` 已归档至 `docs/superpowers/reports/2026-07-17-bug-notes-archived.md`；`docs/superpowers/README.md` 索引已补全
 - [x] 61. mpv_view index-0 fallback 分支把 `NSString*`（className）当 CStr 读取的预存 bug——已改用 `(&*view_layer).class().name()`（objc2 类型化 API：`AnyObject::class` = object_getClass，`AnyClass::name` = class_getName，返回 `&CStr`），日志文案与 fallback 行为不变
+
+## 隐藏 Bug 修复批次（2026-07-22）
+
+来源：全仓审查确认的数据正确性 / 导航 / 缓存 / 密码会话 / 书架进度缺口。
+权威计划（含**每个 Bug 的强制验证用例**）：`docs/superpowers/plans/2026-07-22-hidden-bug-fix-batch.md`。
+规则：先红灯测试 → 修复 → 绿灯 → 再勾选；未通过计划内测试名不得勾选。
+
+### P0 — 数据与导航
+
+- [ ] 62. B1：`stable_comic_id` → blake3 + 启动迁移（测：`stable_comic_id_*` / `migrate_comic_ids_*`）
+- [ ] 63. B2：历史/书签及时落盘与保存失败提示（测：`persist_history_*` / `persist_bookmarks_*` / `history_dirty_throttle_*`）
+- [ ] 64. B3：媒体换片写进度；自动续播强制从头（测：`record_media_history_before_*` / `auto_next_forces_*` / `manual_open_still_resumes_*`）
+- [ ] 65. B4：双页 `clamp_page` 越界对齐末 spread（测：`go_to_page_past_last_anchor_*` 等）
+
+### P1 — 体验与缓存
+
+- [ ] 66. B5：Webtoon 清双页标志；滚轮累加器清零（测：`set_mode_to_webtoon_*` / `page_scroll_acc_*`）
+- [ ] 67. B6：`SharedRawCache` 重复插入账本（测：`shared_raw_cache_reinsert_*`）
+- [ ] 68. B7：PDF 文档缓存 LRU 上限（测：`pdf_document_cache_*`）
+- [ ] 69. B8：密码 key canonicalize；空密码不重试（测：`password_key_*` / `empty_password_confirm_*`）
+- [ ] 70. B9：加密尺寸探测带密码；导入错误汇总（测：`sync_page_dimensions_zip_encrypted_*` / `import_failure_summary_*`）
+- [ ] 71. B10：`LibraryEntry.page_count` + 真实书架进度（测：`library_progress_*` / `page_count_roundtrip_*`）
+
+### P2 — 收尾
+
+- [ ] 72. B11：CHANGELOG/README/计划与本表 #62–#72 勾选门禁

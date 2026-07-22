@@ -35,7 +35,10 @@
 | `plans/2026-07-17-ebook-polish.md` | 已实现 | 电子书收尾（编码检测/EPUB 图片与字体/字体设置/搜索/快捷键，TODO 36–42） |
 | `specs/2026-07-17-ebook-polish-design.md` | 已实现 | 对应设计文档 |
 | `reports/2026-07-17-bug-notes-archived.md` | 已归档（全部修复） | 原 `docs/bug.md`：快速翻页加载死锁与媒体播放已知问题笔记 |
+| `plans/2026-07-18-todo-backlog-batch.md` | 已实现 | TODO #57/#58/#59 轻量：media 纯函数测试、argv 打开、PDF 栈合并、objc2、egui 0.35 |
+| `plans/2026-07-22-hidden-bug-fix-batch.md` | 进行中 | 隐藏 bug 修复（B1–B11 / TODO #62–#72）；**每项含强制自动化验证用例**（红→绿→勾选） |
 
 阅读建议：
 - 想了解当前功能与交互，请优先查看根目录 `README.md`、`CHANGELOG.md`、`TODO.md`。
+- 进行中的修复勾选以 `plans/2026-07-22-hidden-bug-fix-batch.md` 为准。
 - 想了解某次重构的历史上下文，再查阅对应日期的计划/设计文档。
