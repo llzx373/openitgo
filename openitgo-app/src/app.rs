@@ -23,7 +23,26 @@ use openitgo_storage::{
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// 阅读中历史/书签落盘节流间隔；离开视图与书签增删改不受此限制。
+const HISTORY_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
+
+/// 脏且距上次落盘已满 `min_interval`（或尚无落盘记录）时返回 true。
+fn history_persist_due(
+    dirty: bool,
+    last_flush: Option<Instant>,
+    now: Instant,
+    min_interval: Duration,
+) -> bool {
+    if !dirty {
+        return false;
+    }
+    match last_flush {
+        None => true,
+        Some(prev) => now.saturating_duration_since(prev) >= min_interval,
+    }
+}
 
 fn is_ebook_file(path: &std::path::Path) -> bool {
     path.extension()
@@ -249,6 +268,12 @@ pub struct ReaderApp {
     pub pending_bookmark_thumbs: HashMap<crate::loader::Epoch, (String, usize)>,
     /// 滚轮翻页累加器（pt）：跨帧累计未达阈值的滚轮增量，触发翻页后清零。
     pub page_scroll_acc: f32,
+    /// 历史有未落盘变更。
+    pub history_dirty: bool,
+    /// 书签有未落盘变更。
+    pub bookmarks_dirty: bool,
+    /// 上次成功将历史落盘的时刻（用于阅读中 30s 节流）。
+    pub last_history_flush: Option<Instant>,
 }
 
 impl Default for ReaderApp {
@@ -320,6 +345,9 @@ impl Default for ReaderApp {
             stats_session: None,
             pending_bookmark_thumbs: HashMap::new(),
             page_scroll_acc: 0.0,
+            history_dirty: false,
+            bookmarks_dirty: false,
+            last_history_flush: None,
         }
     }
 }
@@ -341,22 +369,29 @@ impl eframe::App for ReaderApp {
         self.reader_view.close();
         let _ = self.store.save_settings(&self.settings);
         let _ = self.store.save_library(&self.library_view.library);
-        let _ = self.store.save_history(&self.history);
-        let _ = self.store.save_bookmarks(&self.bookmarks);
+        if let Err(e) = self.store.save_history(&self.history) {
+            self.error_message = Some(format!("无法保存历史记录: {}", e));
+        }
+        if let Err(e) = self.store.save_bookmarks(&self.bookmarks) {
+            self.error_message = Some(format!("无法保存书签: {}", e));
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if matches!(self.last_view, View::Reader) && !matches!(self.current_view, View::Reader) {
             self.record_reader_history();
+            self.persist_history_bookmarks();
             self.reader_view.clear_cache();
         }
         if matches!(self.last_view, View::Ebook) && !matches!(self.current_view, View::Ebook) {
             self.record_ebook_history();
+            self.persist_history_bookmarks();
             self.ebook_view.close();
         }
         if matches!(self.last_view, View::Media) && !matches!(self.current_view, View::Media) {
             self.record_media_history();
+            self.persist_history_bookmarks();
             self.media_view.close();
         }
         self.last_view = self.current_view.clone();
@@ -413,6 +448,7 @@ impl eframe::App for ReaderApp {
         self.render_password_dialog(&ctx);
         self.maybe_save_comic_settings();
         self.tick_reading_stats();
+        self.tick_persist_history_bookmarks();
     }
 }
 
@@ -627,6 +663,8 @@ impl ReaderApp {
             if let Some((idx, note)) = update_bookmark {
                 if let Some(entry) = self.bookmarks.entries.get_mut(idx) {
                     entry.note = note;
+                    self.bookmarks_dirty = true;
+                    self.persist_history_bookmarks();
                 }
             }
             if let Some(idx) = delete_bookmark_idx {
@@ -640,13 +678,19 @@ impl ReaderApp {
                             Some(removed.page_index),
                         );
                     }
+                    self.bookmarks_dirty = true;
+                    self.persist_history_bookmarks();
                 }
             }
             if clear_history {
                 self.history.entries.clear();
+                self.history_dirty = true;
+                self.persist_history_bookmarks();
             }
             if let Some(idx) = delete_history_idx {
                 self.history.entries.remove(idx);
+                self.history_dirty = true;
+                self.persist_history_bookmarks();
             }
         });
     }
@@ -2243,6 +2287,8 @@ impl ReaderApp {
                 }
                 if ui.small_button("删除").clicked() {
                     self.bookmarks.entries.remove(idx);
+                    self.bookmarks_dirty = true;
+                    self.persist_history_bookmarks();
                     ui.close();
                 }
             }
@@ -2689,6 +2735,51 @@ impl ReaderApp {
         self.stats_session = Some((id, std::time::Instant::now()));
     }
 
+    /// 每帧：阅读中刷新内存历史，脏且满 30s 则落盘（离开视图走立即 flush）。
+    fn tick_persist_history_bookmarks(&mut self) {
+        match self.current_view {
+            View::Reader => self.record_reader_history(),
+            View::Ebook => self.record_ebook_history(),
+            View::Media => self.record_media_history(),
+            _ => {}
+        }
+        self.persist_history_bookmarks_if_due(Instant::now(), HISTORY_FLUSH_INTERVAL);
+    }
+
+    /// 将脏的历史/书签立即写盘；失败时设置中文 `error_message`。
+    fn persist_history_bookmarks(&mut self) {
+        if self.history_dirty {
+            match self.store.save_history(&self.history) {
+                Ok(()) => {
+                    self.history_dirty = false;
+                    self.last_history_flush = Some(Instant::now());
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("无法保存历史记录: {}", e));
+                }
+            }
+        }
+        if self.bookmarks_dirty {
+            match self.store.save_bookmarks(&self.bookmarks) {
+                Ok(()) => {
+                    self.bookmarks_dirty = false;
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("无法保存书签: {}", e));
+                }
+            }
+        }
+    }
+
+    /// 阅读中节流落盘：脏且距上次 ≥ `min_interval` 才写；离开视图请直接调
+    /// [`persist_history_bookmarks`]。
+    fn persist_history_bookmarks_if_due(&mut self, now: Instant, min_interval: Duration) {
+        let dirty = self.history_dirty || self.bookmarks_dirty;
+        if history_persist_due(dirty, self.last_history_flush, now, min_interval) {
+            self.persist_history_bookmarks();
+        }
+    }
+
     fn record_reader_history(&mut self) {
         if let Some(reader) = self.reader_view.open.as_ref() {
             let comic_id = reader.comic.id.clone();
@@ -2718,6 +2809,7 @@ impl ReaderApp {
                     last_read_at: now,
                 });
             }
+            self.history_dirty = true;
         }
     }
 
@@ -2753,6 +2845,7 @@ impl ReaderApp {
                     last_read_at: now,
                 });
             }
+            self.history_dirty = true;
         }
     }
 
@@ -2792,6 +2885,7 @@ impl ReaderApp {
                     last_read_at: now,
                 });
             }
+            self.history_dirty = true;
         }
     }
 
@@ -3071,40 +3165,44 @@ impl ReaderApp {
     }
 
     fn add_bookmark(&mut self, page_index: usize) {
-        if let Some(reader) = self.reader_view.open.as_ref() {
-            let comic_id = reader.comic.id.clone();
-            let exists = self.bookmarks.entries.iter().any(|b| {
-                b.comic_id == comic_id && b.volume_index == 0 && b.page_index == page_index
+        let Some(reader) = self.reader_view.open.as_ref() else {
+            return;
+        };
+        let comic_id = reader.comic.id.clone();
+        let exists = self.bookmarks.entries.iter().any(|b| {
+            b.comic_id == comic_id && b.volume_index == 0 && b.page_index == page_index
+        });
+        if exists {
+            return;
+        }
+        let thumb_source = reader
+            .comic
+            .volumes
+            .first()
+            .and_then(|v| v.pages.get(page_index))
+            .map(|p| p.source.clone());
+        self.bookmarks
+            .entries
+            .push(openitgo_storage::models::Bookmark {
+                comic_id: comic_id.clone(),
+                volume_index: 0,
+                page_index,
+                char_offset: None,
+                note: None,
             });
-            if !exists {
-                self.bookmarks
-                    .entries
-                    .push(openitgo_storage::models::Bookmark {
-                        comic_id: comic_id.clone(),
-                        volume_index: 0,
-                        page_index,
-                        char_offset: None,
-                        note: None,
-                    });
-                // 生成书签页缩略图（走封面同款缩略图通道，结果在
-                // poll_cover_results 里落盘）。电子书书签走 add_ebook_bookmark，
-                // 不经过这里，天然跳过。
-                if let Some(page) = reader
-                    .comic
-                    .volumes
-                    .first()
-                    .and_then(|v| v.pages.get(page_index))
-                {
-                    let epoch = self.cover_loader.next_epoch();
-                    if self.cover_loader.request_thumbnail_high(
-                        epoch,
-                        page_index,
-                        page.source.clone(),
-                    ) {
-                        self.pending_bookmark_thumbs
-                            .insert(epoch, (comic_id, page_index));
-                    }
-                }
+        self.bookmarks_dirty = true;
+        self.persist_history_bookmarks();
+        // 生成书签页缩略图（走封面同款缩略图通道，结果在
+        // poll_cover_results 里落盘）。电子书书签走 add_ebook_bookmark，
+        // 不经过这里，天然跳过。
+        if let Some(source) = thumb_source {
+            let epoch = self.cover_loader.next_epoch();
+            if self
+                .cover_loader
+                .request_thumbnail_high(epoch, page_index, source)
+            {
+                self.pending_bookmark_thumbs
+                    .insert(epoch, (comic_id, page_index));
             }
         }
     }
@@ -3128,6 +3226,8 @@ impl ReaderApp {
                         char_offset: Some(char_offset),
                         note: None,
                     });
+                self.bookmarks_dirty = true;
+                self.persist_history_bookmarks();
             }
         }
     }
@@ -3779,6 +3879,9 @@ mod tests {
                 stats_session: None,
                 pending_bookmark_thumbs: HashMap::new(),
                 page_scroll_acc: 0.0,
+                history_dirty: false,
+                bookmarks_dirty: false,
+                last_history_flush: None,
             }
         }
     }
@@ -3977,6 +4080,123 @@ mod tests {
             .find(|h| h.comic_id == comic.id)
             .expect("history entry should exist");
         assert_eq!(entry.page_index, 5);
+        assert!(app.history_dirty);
+    }
+
+    #[test]
+    fn persist_history_on_leave_reader_writes_store() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let comic = dummy_comic();
+        let ctx = egui::Context::default();
+        app.reader_view.open(
+            &ctx,
+            comic.clone(),
+            ReadingState::new(ReadingMode::Ltr, 10),
+            &PageLoader::default(),
+            1.4,
+            true,
+        );
+        app.reader_view.open.as_mut().unwrap().state.current_page = 7;
+        // 模拟离开 Reader：record + 立即 persist（与 ui 离开路径一致）。
+        app.record_reader_history();
+        app.persist_history_bookmarks();
+        assert!(!app.history_dirty);
+
+        let reloaded = app.store.load_history().unwrap();
+        let entry = reloaded
+            .entries
+            .iter()
+            .find(|h| h.comic_id == comic.id)
+            .expect("disk history should contain comic");
+        assert_eq!(entry.page_index, 7);
+    }
+
+    #[test]
+    fn persist_bookmarks_on_add_writes_store() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let comic = dummy_comic();
+        let ctx = egui::Context::default();
+        app.reader_view.open(
+            &ctx,
+            comic.clone(),
+            ReadingState::new(ReadingMode::Ltr, 10),
+            &PageLoader::default(),
+            1.4,
+            true,
+        );
+        app.add_bookmark(3);
+        assert!(!app.bookmarks_dirty);
+
+        let reloaded = app.store.load_bookmarks().unwrap();
+        assert!(
+            reloaded
+                .entries
+                .iter()
+                .any(|b| b.comic_id == comic.id && b.page_index == 3),
+            "disk bookmarks should contain the new entry"
+        );
+    }
+
+    #[test]
+    fn history_dirty_throttle_skips_flush_within_30s() {
+        let (mut app, _tmp) = app_with_temp_store();
+        app.history.entries.push(HistoryEntry {
+            comic_id: "id".into(),
+            path: PathBuf::from("/tmp/x"),
+            volume_index: 0,
+            page_index: 1,
+            char_offset: None,
+            last_read_at: 0,
+        });
+        app.history_dirty = true;
+        let now = Instant::now();
+        app.last_history_flush = Some(now);
+
+        // 节流路径：距上次 < 30s → 不写盘，保持 dirty。
+        app.persist_history_bookmarks_if_due(now, HISTORY_FLUSH_INTERVAL);
+        assert!(app.history_dirty);
+        assert!(
+            !app.store.dir().join("history.json").exists(),
+            "throttled path must not write within interval"
+        );
+
+        // 离开视图路径不受节流：立即写盘。
+        app.persist_history_bookmarks();
+        assert!(!app.history_dirty);
+        let reloaded = app.store.load_history().unwrap();
+        assert_eq!(reloaded.entries.len(), 1);
+        assert_eq!(reloaded.entries[0].page_index, 1);
+
+        // 纯辅助：间隔未满为 false，满间隔为 true。
+        assert!(!history_persist_due(
+            true,
+            Some(now),
+            now,
+            HISTORY_FLUSH_INTERVAL
+        ));
+        assert!(history_persist_due(
+            true,
+            Some(now),
+            now + HISTORY_FLUSH_INTERVAL,
+            HISTORY_FLUSH_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn on_exit_save_failure_sets_error_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = ReaderApp::with_store_dir(tmp.path());
+        // 把 store 指到一个普通文件路径，ensure_dir/写盘会失败。
+        let bad = tmp.path().join("not-a-directory");
+        std::fs::write(&bad, b"x").unwrap();
+        app.store = JsonStore::new(&bad);
+        app.history_dirty = true;
+        app.persist_history_bookmarks();
+        let msg = app.error_message.expect("error_message should be set");
+        assert!(
+            msg.contains("历史"),
+            "expected Chinese history save error, got: {msg}"
+        );
     }
 
     #[test]
