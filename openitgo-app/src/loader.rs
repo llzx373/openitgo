@@ -708,7 +708,9 @@ fn process_io_request(
         _ => {
             let password = match &req.source {
                 PageSource::ZipEntry { archive, .. } | PageSource::RarEntry { archive, .. } => {
-                    passwords.read().unwrap().get(archive).cloned()
+                    let map = passwords.read().unwrap();
+                    let key = archive.canonicalize().unwrap_or_else(|_| archive.clone());
+                    map.get(&key).cloned().or_else(|| map.get(archive).cloned())
                 }
                 _ => None,
             };

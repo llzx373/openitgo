@@ -342,7 +342,7 @@ impl LibraryView {
                                             );
                                         }
 
-                                        let progress = library_progress(history, &entry.comic_id);
+                                        let progress = library_progress(history, &entry);
                                         if progress.total > 0 {
                                             ui.add(egui::ProgressBar::new(progress.ratio()).text(
                                                 format!("{}/{}", progress.read, progress.total),
@@ -690,10 +690,23 @@ impl Progress {
     }
 }
 
-fn library_progress(_history: &History, _comic_id: &str) -> Progress {
-    // Placeholder: the storage models don't track total pages yet, so we show
-    // a 0 % bar until P3-23 adds richer metadata.
-    Progress::default()
+/// 书架进度：`read = max(history.page_index) + 1`（1-based 已读页），
+/// `total = entry.page_count`；无有效总页数时返回 0%（不显示进度条）。
+fn library_progress(history: &History, entry: &LibraryEntry) -> Progress {
+    let Some(total) = entry.page_count.filter(|t| *t > 0) else {
+        return Progress::default();
+    };
+    let read = history
+        .entries
+        .iter()
+        .filter(|h| h.comic_id == entry.comic_id)
+        .map(|h| h.page_index.saturating_add(1))
+        .max()
+        .unwrap_or(0);
+    Progress {
+        read: read.min(total),
+        total,
+    }
 }
 
 fn last_read_at(history: &History, comic_id: &str) -> u64 {
@@ -787,6 +800,7 @@ mod tests {
                 added_at: 0,
                 media_type: MediaType::Comic,
                 tags: Vec::new(),
+                page_count: None,
             }],
         }
     }
@@ -827,6 +841,7 @@ mod tests {
                         added_at: 1,
                         media_type: MediaType::Comic,
                         tags: Vec::new(),
+                        page_count: None,
                     },
                     LibraryEntry {
                         comic_id: "b".to_string(),
@@ -836,6 +851,7 @@ mod tests {
                         added_at: 2,
                         media_type: MediaType::Comic,
                         tags: Vec::new(),
+                        page_count: None,
                     },
                 ],
             },
@@ -860,6 +876,7 @@ mod tests {
                         added_at: 0,
                         media_type: MediaType::Comic,
                         tags: Vec::new(),
+                        page_count: None,
                     },
                     LibraryEntry {
                         comic_id: "a".to_string(),
@@ -869,6 +886,7 @@ mod tests {
                         added_at: 0,
                         media_type: MediaType::Comic,
                         tags: Vec::new(),
+                        page_count: None,
                     },
                 ],
             },
@@ -892,6 +910,7 @@ mod tests {
                         added_at: 100,
                         media_type: MediaType::Comic,
                         tags: Vec::new(),
+                        page_count: None,
                     },
                     LibraryEntry {
                         comic_id: "new".to_string(),
@@ -901,6 +920,7 @@ mod tests {
                         added_at: 200,
                         media_type: MediaType::Comic,
                         tags: Vec::new(),
+                        page_count: None,
                     },
                 ],
             },
@@ -924,6 +944,7 @@ mod tests {
                         added_at: 0,
                         media_type: MediaType::Comic,
                         tags: Vec::new(),
+                        page_count: None,
                     },
                     LibraryEntry {
                         comic_id: "old".to_string(),
@@ -933,6 +954,7 @@ mod tests {
                         added_at: 0,
                         media_type: MediaType::Comic,
                         tags: Vec::new(),
+                        page_count: None,
                     },
                 ],
             },
@@ -976,6 +998,7 @@ mod tests {
                         added_at: 0,
                         media_type: MediaType::Comic,
                         tags: Vec::new(),
+                        page_count: None,
                     },
                     LibraryEntry {
                         comic_id: "ebook-1".to_string(),
@@ -985,6 +1008,7 @@ mod tests {
                         added_at: 0,
                         media_type: MediaType::Ebook,
                         tags: Vec::new(),
+                        page_count: None,
                     },
                 ],
             },
@@ -1012,6 +1036,7 @@ mod tests {
             added_at: 0,
             media_type,
             tags: Vec::new(),
+            page_count: None,
         };
         let library = Library {
             entries: vec![
@@ -1078,5 +1103,47 @@ mod tests {
         assert!(entry_matches_tag_filter(&entry, &None));
         assert!(entry_matches_tag_filter(&entry, &Some("热血".to_string())));
         assert!(!entry_matches_tag_filter(&entry, &Some("完结".to_string())));
+    }
+
+    /// 公式：`read = max(page_index)+1`，`ratio = read / page_count`。
+    /// page_index=2、page_count=10 → read=3 → 0.3。
+    #[test]
+    fn library_progress_uses_page_count_and_history() {
+        let entry = LibraryEntry {
+            comic_id: "c1".to_string(),
+            page_count: Some(10),
+            ..Default::default()
+        };
+        let history = History {
+            entries: vec![HistoryEntry {
+                comic_id: "c1".to_string(),
+                page_index: 2,
+                ..Default::default()
+            }],
+        };
+        let progress = library_progress(&history, &entry);
+        assert_eq!(progress.read, 3);
+        assert_eq!(progress.total, 10);
+        assert!((progress.ratio() - 0.3).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn library_progress_zero_when_no_page_count() {
+        let entry = LibraryEntry {
+            comic_id: "c1".to_string(),
+            page_count: None,
+            ..Default::default()
+        };
+        let history = History {
+            entries: vec![HistoryEntry {
+                comic_id: "c1".to_string(),
+                page_index: 5,
+                ..Default::default()
+            }],
+        };
+        let progress = library_progress(&history, &entry);
+        assert_eq!(progress.read, 0);
+        assert_eq!(progress.total, 0);
+        assert_eq!(progress.ratio(), 0.0);
     }
 }

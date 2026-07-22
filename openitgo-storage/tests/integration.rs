@@ -36,6 +36,7 @@ fn test_library_roundtrip() {
             added_at: 123,
             media_type: MediaType::Comic,
             tags: Vec::new(),
+            page_count: Some(10),
         }],
     };
     store.save_library(&library).unwrap();

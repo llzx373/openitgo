@@ -289,6 +289,9 @@ pub struct LibraryEntry {
     pub added_at: u64,
     pub media_type: MediaType,
     pub tags: Vec<String>,
+    /// Total pages (comics) or chapters (ebooks). Media leaves `None`.
+    #[serde(default)]
+    pub page_count: Option<usize>,
 }
 
 impl Default for LibraryEntry {
@@ -301,6 +304,7 @@ impl Default for LibraryEntry {
             added_at: 0,
             media_type: MediaType::Comic,
             tags: Vec::new(),
+            page_count: None,
         }
     }
 }
@@ -459,6 +463,22 @@ mod tests {
     }
 
     #[test]
+    fn library_entry_page_count_roundtrip_json() {
+        let entry = LibraryEntry {
+            page_count: Some(12),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let loaded: LibraryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.page_count, Some(12));
+
+        // 旧版 library.json 无 page_count → None，不炸
+        let old = r#"{"comic_id":"id","title":"Test","path":"/tmp","cover_path":null,"added_at":0}"#;
+        let legacy: LibraryEntry = serde_json::from_str(old).unwrap();
+        assert_eq!(legacy.page_count, None);
+    }
+
+    #[test]
     fn test_settings_default() {
         let s = Settings::default();
         assert!(matches!(s.theme, Theme::System));
@@ -526,6 +546,7 @@ mod tests {
                 added_at: 0,
                 media_type: MediaType::Comic,
                 tags: Vec::new(),
+                page_count: None,
             }],
         };
         let json = serde_json::to_string(&lib).unwrap();

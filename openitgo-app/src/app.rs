@@ -605,6 +605,8 @@ impl ReaderApp {
                     {
                         state.go_to_page(h.page_index, total);
                     }
+                    let comic_id = comic.id.clone();
+                    let page_count = comic.total_pages();
                     self.reader_view.open(
                         ctx,
                         comic,
@@ -613,6 +615,7 @@ impl ReaderApp {
                         self.settings.wide_page_threshold,
                         self.settings.enable_page_animation,
                     );
+                    self.update_library_page_count(&comic_id, page_count);
                     self.current_view = View::Reader;
                     self.error_message = None;
                 }
@@ -2112,12 +2115,17 @@ impl ReaderApp {
                 });
             });
         if confirm {
+            let Some(dialog) = self.password_dialog.as_ref() else {
+                return;
+            };
+            let PasswordConfirmOutcome::Proceed(pw) = password_dialog_on_confirm(&dialog.input)
+            else {
+                // 空密码：保留对话框，不重试打开/导入
+                return;
+            };
             let dialog = self.password_dialog.take().unwrap();
-            let pw = dialog.input.trim().to_string();
-            if !pw.is_empty() {
-                self.passwords.insert(dialog.path.clone(), pw);
-                self.sync_passwords_to_loaders();
-            }
+            self.passwords.insert(password_key(&dialog.path), pw);
+            self.sync_passwords_to_loaders();
             if self.pending_password_imports.contains(&dialog.path) {
                 self.retry_password_import(dialog.path);
             } else {
@@ -3089,6 +3097,7 @@ impl ReaderApp {
                     added_at,
                     media_type: media_type_for_path(path),
                     tags: Vec::new(),
+                    page_count: Some(comic.total_pages()),
                 });
         }
     }
@@ -3102,6 +3111,7 @@ impl ReaderApp {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let media_type = media_type_for_path(&path);
+        let page_count = Some(ebook.total_chapters());
         if !self
             .library_view
             .library
@@ -3120,6 +3130,7 @@ impl ReaderApp {
                     added_at,
                     media_type,
                     tags: Vec::new(),
+                    page_count,
                 });
         }
     }
@@ -3155,7 +3166,26 @@ impl ReaderApp {
                 added_at,
                 media_type,
                 tags: Vec::new(),
+                page_count: None,
             });
+    }
+
+    /// Write total pages/chapters onto a matching library entry (no-op if absent).
+    fn update_library_page_count(&mut self, comic_id: &str, page_count: usize) {
+        let Some(entry) = self
+            .library_view
+            .library
+            .entries
+            .iter_mut()
+            .find(|e| e.comic_id == comic_id)
+        else {
+            return;
+        };
+        if entry.page_count == Some(page_count) {
+            return;
+        }
+        entry.page_count = Some(page_count);
+        let _ = self.store.save_library(&self.library_view.library);
     }
 
     fn add_file_to_library(&mut self, path: std::path::PathBuf) {
@@ -3275,7 +3305,7 @@ impl ReaderApp {
         if !self.requested_cover_ids.insert(entry.comic_id.clone()) {
             return;
         }
-        let password = self.passwords.get(&entry.path).cloned();
+        let password = self.passwords.get(&password_key(&entry.path)).cloned();
         let comic = match openitgo_parser::parse_with_password(&entry.path, password.as_deref()) {
             Ok(c) => c,
             Err(_) => {
@@ -3445,6 +3475,7 @@ impl ReaderApp {
                             }
                             self.current_view = View::Ebook;
                             self.error_message = None;
+                            self.update_library_page_count(&ebook.id, ebook.total_chapters());
                         }
                         Err(e) => {
                             self.error_message = Some(format!("无法创建阅读器: {}", e));
@@ -3474,7 +3505,7 @@ impl ReaderApp {
             self.add_folder_to_library(path.clone());
         }
         if let Some(path) = paths.first() {
-            let password = self.passwords.get(path).cloned();
+            let password = self.passwords.get(&password_key(path)).cloned();
             let probe = openitgo_parser::parse_with_password(path, password.as_deref());
             let openable = probe.is_ok()
                 || matches!(
@@ -3525,6 +3556,27 @@ fn password_prompt_kind(err: &str) -> Option<PasswordPromptKind> {
         Some(PasswordPromptKind::Incorrect)
     } else {
         None
+    }
+}
+
+/// Normalize password-map keys so relative/symlink paths resolve to one entry.
+fn password_key(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Confirm 分支：trim 后为空则保留对话框（不打开/不导入）；非空则携带密码继续。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PasswordConfirmOutcome {
+    KeepDialog,
+    Proceed(String),
+}
+
+fn password_dialog_on_confirm(input: &str) -> PasswordConfirmOutcome {
+    let password = input.trim();
+    if password.is_empty() {
+        PasswordConfirmOutcome::KeepDialog
+    } else {
+        PasswordConfirmOutcome::Proceed(password.to_string())
     }
 }
 
@@ -3939,6 +3991,43 @@ mod tests {
     }
 
     #[test]
+    fn password_key_canonicalizes_existing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("enc.cbz");
+        std::fs::write(&file, b"x").unwrap();
+        let abs = file.canonicalize().unwrap();
+        // Same file via a `.` component — canonicalize collapses both to one key.
+        let with_dot = tmp.path().join(".").join("enc.cbz");
+        assert_eq!(password_key(&with_dot), abs);
+        assert_eq!(password_key(&abs), abs);
+        assert_eq!(password_key(&with_dot), password_key(&abs));
+    }
+
+    #[test]
+    fn empty_password_confirm_does_not_open_path() {
+        assert_eq!(
+            password_dialog_on_confirm(""),
+            PasswordConfirmOutcome::KeepDialog
+        );
+        assert_eq!(
+            password_dialog_on_confirm("   \t\n"),
+            PasswordConfirmOutcome::KeepDialog
+        );
+    }
+
+    #[test]
+    fn non_empty_password_confirm_stores_and_retries() {
+        assert_eq!(
+            password_dialog_on_confirm("secret"),
+            PasswordConfirmOutcome::Proceed("secret".to_string())
+        );
+        assert_eq!(
+            password_dialog_on_confirm("  secret  "),
+            PasswordConfirmOutcome::Proceed("secret".to_string())
+        );
+    }
+
+    #[test]
     fn open_comic_resets_page_scroll_acc() {
         let (mut app, tmp) = app_with_temp_store();
         app.page_scroll_acc = 99.0;
@@ -3985,6 +4074,7 @@ mod tests {
                 added_at: 0,
                 media_type: MediaType::Comic,
                 tags: vec![],
+                page_count: None,
             }],
         };
         let mut history = History {
@@ -4053,6 +4143,7 @@ mod tests {
                 added_at: 0,
                 media_type: MediaType::Comic,
                 tags: vec![],
+                page_count: None,
             }],
         };
         let mut history = History::default();
@@ -4320,6 +4411,57 @@ mod tests {
             .expect("reader should be open");
         assert_eq!(reader.comic.id, comic_id);
         assert_eq!(reader.state.current_page, 1);
+    }
+
+    #[test]
+    fn open_comic_updates_library_page_count() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        write_dummy_image(tmp_dir.path(), "page0.png");
+        write_dummy_image(tmp_dir.path(), "page1.png");
+        write_dummy_image(tmp_dir.path(), "page2.png");
+
+        let comic_id = openitgo_parser::stable_comic_id(tmp_dir.path());
+        app.library_view
+            .library
+            .entries
+            .push(openitgo_storage::models::LibraryEntry {
+                comic_id: comic_id.clone(),
+                title: "Dummy".to_string(),
+                path: tmp_dir.path().to_path_buf(),
+                cover_path: None,
+                added_at: 0,
+                media_type: MediaType::Comic,
+                tags: Vec::new(),
+                page_count: None,
+            });
+
+        app.open_comic(tmp_dir.path().to_path_buf());
+        let ctx = egui::Context::default();
+        for _ in 0..100 {
+            app.poll_opener(&ctx);
+            if app.current_view == View::Reader {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(app.current_view, View::Reader);
+        let total = app
+            .reader_view
+            .open
+            .as_ref()
+            .expect("reader should be open")
+            .comic
+            .total_pages();
+        assert_eq!(total, 3);
+        assert_eq!(
+            app.library_view.library.entries[0].page_count,
+            Some(total),
+            "poll_opener should write comic.total_pages into LibraryEntry.page_count"
+        );
+        let saved = app.store.load_library().unwrap();
+        assert_eq!(saved.entries[0].page_count, Some(total));
     }
 
     #[test]
@@ -4829,6 +4971,7 @@ mod tests {
                 added_at: 0,
                 media_type: MediaType::Video,
                 tags: Vec::new(),
+                page_count: None,
             });
         let cover = PathBuf::from("/tmp/covers/clip.jpg");
         app.media_cover_tx.send((id, cover.clone())).unwrap();
@@ -4862,6 +5005,7 @@ mod tests {
                 added_at: 0,
                 media_type: MediaType::Video,
                 tags: Vec::new(),
+                page_count: None,
             });
         let covers_dir = tmp.path().join("covers");
         std::fs::create_dir_all(&covers_dir).unwrap();
