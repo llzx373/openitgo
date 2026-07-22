@@ -83,6 +83,9 @@ impl ReadingState {
 
     pub fn set_mode(&mut self, mode: ReadingMode, total_pages: usize) {
         self.mode = mode;
+        if mode.is_webtoon() {
+            self.double_page = false;
+        }
         self.fit_mode = default_fit_mode(mode);
         self.zoom = 1.0;
         self.pan = Vec2::ZERO;
@@ -153,8 +156,13 @@ impl ReadingState {
             return;
         }
         let last = self.last_anchor(total_pages);
-        if self.current_page == 0 || self.current_page > last {
-            self.current_page = 0;
+        // Cover is always a valid single-page anchor.
+        if self.current_page == 0 {
+            return;
+        }
+        // Past the last spread: snap to the last spread, not the cover.
+        if self.current_page > last {
+            self.current_page = last;
             return;
         }
         // Align to the nearest odd-numbered anchor.
@@ -322,12 +330,74 @@ mod tests {
     }
 
     #[test]
+    fn go_to_page_past_last_anchor_clamps_to_last_spread() {
+        let mut state = ReadingState::new(ReadingMode::Ltr, 7);
+        state.set_double_page(true, 7);
+        // total=7 → last_anchor=5; page 6 must snap to last spread, not cover.
+        state.go_to_page(6, 7);
+        assert_eq!(state.current_page, 5);
+    }
+
+    #[test]
+    fn go_to_page_last_anchor_unchanged() {
+        let mut state = ReadingState::new(ReadingMode::Ltr, 7);
+        state.set_double_page(true, 7);
+        state.go_to_page(5, 7);
+        assert_eq!(state.current_page, 5);
+    }
+
+    #[test]
+    fn go_to_page_cover_stays_zero() {
+        let mut state = ReadingState::new(ReadingMode::Ltr, 7);
+        state.set_double_page(true, 7);
+        state.go_to_page(3, 7);
+        state.go_to_page(0, 7);
+        assert_eq!(state.current_page, 0);
+    }
+
+    #[test]
+    fn go_to_page_even_total_last_page() {
+        let mut state = ReadingState::new(ReadingMode::Ltr, 6);
+        state.set_double_page(true, 6);
+        state.go_to_page(5, 6);
+        assert_eq!(state.current_page, 5);
+    }
+
+    #[test]
+    fn go_to_page_aligns_even_index_to_odd_anchor() {
+        let mut state = ReadingState::new(ReadingMode::Ltr, 10);
+        state.set_double_page(true, 10);
+        state.go_to_page(4, 10);
+        assert_eq!(state.current_page, 3);
+    }
+
+    #[test]
     fn test_webtoon_ignores_double_page() {
         let mut state = ReadingState::new(ReadingMode::Webtoon, 10);
         state.set_double_page(true, 10);
         assert!(!state.double_page);
         state.next_page(10);
         assert_eq!(state.current_page, 1);
+    }
+
+    #[test]
+    fn set_mode_to_webtoon_clears_double_page_flag() {
+        let mut state = ReadingState::new(ReadingMode::Ltr, 10);
+        state.set_double_page(true, 10);
+        assert!(state.double_page);
+        state.set_mode(ReadingMode::Webtoon, 10);
+        assert!(!state.double_page);
+        assert!(!state.is_double_page());
+    }
+
+    #[test]
+    fn webtoon_then_ltr_does_not_restore_double_page() {
+        let mut state = ReadingState::new(ReadingMode::Ltr, 10);
+        state.set_double_page(true, 10);
+        state.set_mode(ReadingMode::Webtoon, 10);
+        state.set_mode(ReadingMode::Ltr, 10);
+        assert!(!state.is_double_page());
+        assert!(!state.double_page);
     }
 
     #[test]

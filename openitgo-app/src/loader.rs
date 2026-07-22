@@ -144,6 +144,10 @@ impl SharedRawCache {
         if len > inner.max_bytes {
             return;
         }
+        if let Some(old) = inner.map.remove(&key) {
+            inner.bytes = inner.bytes.saturating_sub(old.len());
+            inner.order.retain(|k| k != &key);
+        }
         while inner.bytes + len > inner.max_bytes && !inner.order.is_empty() {
             let oldest = inner.order.pop_front().unwrap();
             if let Some(data) = inner.map.remove(&oldest) {
@@ -153,6 +157,11 @@ impl SharedRawCache {
         inner.bytes += len;
         inner.order.push_back(key.clone());
         inner.map.insert(key, Arc::new(bytes));
+    }
+
+    #[cfg(test)]
+    fn bytes_used(&self) -> usize {
+        self.inner.read().unwrap().bytes
     }
 }
 
@@ -1717,6 +1726,42 @@ mod tests {
         let mut zip_cache = ZipCache::new();
         let bytes = read_zip_entry(&mut zip_cache, &raw_cache, &path, 0, Some("s3cret")).unwrap();
         assert_eq!(bytes, b"fake-png");
+    }
+
+    #[test]
+    fn shared_raw_cache_reinsert_same_key_does_not_double_count() {
+        let cache = SharedRawCache::new(1024);
+        let key = RawCacheKey::zip(std::path::Path::new("/a.cbz"), 0);
+        cache.insert(key.clone(), vec![1u8; 100]);
+        cache.insert(key, vec![2u8; 100]);
+        assert_eq!(cache.bytes_used(), 100);
+    }
+
+    #[test]
+    fn shared_raw_cache_reinsert_replaces_content() {
+        let cache = SharedRawCache::new(1024);
+        let key = RawCacheKey::zip(std::path::Path::new("/a.cbz"), 1);
+        cache.insert(key.clone(), b"aaa".to_vec());
+        cache.insert(key.clone(), b"bbbb".to_vec());
+        let got = cache.get(&key).expect("replaced entry");
+        assert_eq!(got.as_slice(), b"bbbb");
+        assert_eq!(cache.bytes_used(), 4);
+    }
+
+    #[test]
+    fn shared_raw_cache_reinsert_then_evict_accounts_correctly() {
+        let cache = SharedRawCache::new(150);
+        let key_a = RawCacheKey::zip(std::path::Path::new("/a.cbz"), 0);
+        let key_b = RawCacheKey::zip(std::path::Path::new("/b.cbz"), 0);
+        cache.insert(key_a.clone(), vec![1u8; 100]);
+        // Re-insert A (must not inflate bytes to 200).
+        cache.insert(key_a.clone(), vec![2u8; 100]);
+        // B (100) should fit by evicting A; if bytes were double-counted, insert would fail to free space.
+        cache.insert(key_b.clone(), vec![3u8; 100]);
+        assert!(cache.get(&key_a).is_none());
+        let got = cache.get(&key_b).expect("evicted A, kept B");
+        assert_eq!(got.as_slice(), vec![3u8; 100].as_slice());
+        assert_eq!(cache.bytes_used(), 100);
     }
 
     fn write_encrypted_zip(path: &std::path::Path, password: &str) {

@@ -1396,9 +1396,7 @@ impl ReaderApp {
                 ];
                 for (m, icon, label) in modes {
                     if toolbar_selectable(ui, icon, label, mode == m, display_mode).clicked() {
-                        if let Some(reader) = self.reader_view.open.as_mut() {
-                            reader.state.set_mode(m, total_pages);
-                        }
+                        self.apply_reading_mode(m);
                     }
                 }
                 ui.separator();
@@ -2110,21 +2108,13 @@ impl ReaderApp {
                 .as_ref()
                 .map(|r| r.state.mode)
                 .unwrap_or(self.settings.default_mode);
-            let total_pages = self
-                .reader_view
-                .open
-                .as_ref()
-                .map(|r| r.total_pages())
-                .unwrap_or(0);
             for (m, label) in [
                 (ReadingMode::Ltr, "国漫（从左到右）"),
                 (ReadingMode::Rtl, "日漫（从右到左）"),
                 (ReadingMode::Webtoon, "韩漫（条漫）"),
             ] {
                 if ui.selectable_label(mode == m, label).clicked() {
-                    if let Some(reader) = self.reader_view.open.as_mut() {
-                        reader.state.set_mode(m, total_pages);
-                    }
+                    self.apply_reading_mode(m);
                     ui.close();
                 }
             }
@@ -3189,6 +3179,7 @@ impl ReaderApp {
 
     fn open_comic(&mut self, path: std::path::PathBuf) {
         timing::log(&format!("open_comic {:?}", path));
+        self.page_scroll_acc = 0.0;
         let password = self.passwords.get(&path).cloned();
         self.opener = Some(AsyncOpener::open(path.clone(), move |p| {
             openitgo_parser::parse_with_password(p, password.as_deref()).map_err(|e| match e {
@@ -3204,6 +3195,16 @@ impl ReaderApp {
         self.opening_path = Some(path.clone());
         self.current_view = View::Loading(path);
         self.error_message = None;
+    }
+
+    /// Switch reading mode and clear the wheel page-turn accumulator so a
+    /// leftover partial threshold cannot flip a page after the mode change.
+    fn apply_reading_mode(&mut self, mode: ReadingMode) {
+        self.page_scroll_acc = 0.0;
+        if let Some(reader) = self.reader_view.open.as_mut() {
+            let total_pages = reader.total_pages();
+            reader.state.set_mode(mode, total_pages);
+        }
     }
 
     fn open_ebook(&mut self, path: std::path::PathBuf) {
@@ -3744,6 +3745,38 @@ mod tests {
             Some(PasswordPromptKind::Incorrect)
         ));
         assert!(password_prompt_kind("无法打开漫画: io error").is_none());
+    }
+
+    #[test]
+    fn open_comic_resets_page_scroll_acc() {
+        let (mut app, tmp) = app_with_temp_store();
+        app.page_scroll_acc = 99.0;
+        let path = tmp.path().join("dummy.cbz");
+        std::fs::write(&path, b"not-a-real-archive").unwrap();
+        app.open_comic(path);
+        assert_eq!(app.page_scroll_acc, 0.0);
+    }
+
+    #[test]
+    fn set_reading_mode_resets_page_scroll_acc() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let comic = dummy_comic();
+        let ctx = egui::Context::default();
+        app.reader_view.open(
+            &ctx,
+            comic,
+            ReadingState::new(ReadingMode::Ltr, 10),
+            &PageLoader::default(),
+            1.4,
+            true,
+        );
+        app.page_scroll_acc = 12.0;
+        app.apply_reading_mode(ReadingMode::Webtoon);
+        assert_eq!(app.page_scroll_acc, 0.0);
+        assert_eq!(
+            app.reader_view.open.as_ref().unwrap().state.mode,
+            ReadingMode::Webtoon
+        );
     }
 
     #[test]
