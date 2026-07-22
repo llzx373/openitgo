@@ -13,29 +13,86 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
+/// Default PDF document cache budget (256 MiB).
+const PDF_DOCUMENT_CACHE_DEFAULT_MAX_BYTES: usize = 256 * 1024 * 1024;
+
 /// Cache of parsed PDF documents, keyed by file path.
 ///
 /// PDF rendering currently parses the full file on every page read. Keeping a
 /// shared parsed document around avoids repeated disk reads and xref parsing for
-/// the same comic.
+/// the same comic. Bounded by total byte size with LRU eviction — a single
+/// document larger than `max_bytes` is not cached (same policy as
+/// [`SharedRawCache`]).
 #[derive(Clone)]
 struct PdfDocumentCache {
-    inner: Arc<Mutex<HashMap<std::path::PathBuf, Arc<Vec<u8>>>>>,
+    inner: Arc<Mutex<PdfDocumentCacheInner>>,
+}
+
+struct PdfDocumentCacheInner {
+    map: HashMap<PathBuf, Arc<Vec<u8>>>,
+    order: VecDeque<PathBuf>,
+    bytes: usize,
+    max_bytes: usize,
 }
 
 impl PdfDocumentCache {
     fn new() -> Self {
+        Self::new_with_max(PDF_DOCUMENT_CACHE_DEFAULT_MAX_BYTES)
+    }
+
+    fn new_with_max(max_bytes: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
+            inner: Arc::new(Mutex::new(PdfDocumentCacheInner {
+                map: HashMap::new(),
+                order: VecDeque::new(),
+                bytes: 0,
+                max_bytes,
+            })),
         }
     }
 
-    fn get(&self, path: &std::path::Path) -> Option<Arc<Vec<u8>>> {
-        self.inner.lock().unwrap().get(path).cloned()
+    fn get(&self, path: &Path) -> Option<Arc<Vec<u8>>> {
+        let mut inner = self.inner.lock().unwrap();
+        let data = inner.map.get(path).cloned()?;
+        // Refresh LRU: move accessed path to the back (most recently used).
+        if let Some(pos) = inner.order.iter().position(|p| p == path) {
+            if let Some(p) = inner.order.remove(pos) {
+                inner.order.push_back(p);
+            }
+        }
+        Some(data)
     }
 
-    fn insert(&self, path: std::path::PathBuf, data: Arc<Vec<u8>>) {
-        self.inner.lock().unwrap().insert(path, data);
+    fn insert(&self, path: PathBuf, data: Arc<Vec<u8>>) {
+        let len = data.len();
+        let mut inner = self.inner.lock().unwrap();
+        // Skip items that can never fit — same policy as SharedRawCache.
+        if len > inner.max_bytes {
+            return;
+        }
+        if let Some(old) = inner.map.remove(&path) {
+            inner.bytes = inner.bytes.saturating_sub(old.len());
+            inner.order.retain(|p| p != &path);
+        }
+        while inner.bytes + len > inner.max_bytes && !inner.order.is_empty() {
+            let oldest = inner.order.pop_front().unwrap();
+            if let Some(evicted) = inner.map.remove(&oldest) {
+                inner.bytes -= evicted.len();
+            }
+        }
+        inner.bytes += len;
+        inner.order.push_back(path.clone());
+        inner.map.insert(path, data);
+    }
+
+    #[cfg(test)]
+    fn bytes_used(&self) -> usize {
+        self.inner.lock().unwrap().bytes
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.inner.lock().unwrap().map.len()
     }
 }
 
@@ -1726,6 +1783,55 @@ mod tests {
         let mut zip_cache = ZipCache::new();
         let bytes = read_zip_entry(&mut zip_cache, &raw_cache, &path, 0, Some("s3cret")).unwrap();
         assert_eq!(bytes, b"fake-png");
+    }
+
+    #[test]
+    fn pdf_document_cache_evicts_when_over_budget() {
+        let cache = PdfDocumentCache::new_with_max(10);
+        let path_a = PathBuf::from("/a.pdf");
+        let path_b = PathBuf::from("/b.pdf");
+        cache.insert(path_a.clone(), Arc::new(vec![1u8; 6]));
+        cache.insert(path_b.clone(), Arc::new(vec![2u8; 6]));
+        assert!(cache.get(&path_a).is_none());
+        assert!(cache.get(&path_b).is_some());
+        assert_eq!(cache.bytes_used(), 6);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn pdf_document_cache_get_refreshes_lru_order() {
+        let cache = PdfDocumentCache::new_with_max(12);
+        let path_a = PathBuf::from("/a.pdf");
+        let path_b = PathBuf::from("/b.pdf");
+        let path_c = PathBuf::from("/c.pdf");
+        cache.insert(path_a.clone(), Arc::new(vec![1u8; 6]));
+        cache.insert(path_b.clone(), Arc::new(vec![2u8; 6]));
+        // Touch A so B becomes the oldest.
+        assert!(cache.get(&path_a).is_some());
+        cache.insert(path_c.clone(), Arc::new(vec![3u8; 6]));
+        assert!(
+            cache.get(&path_a).is_some(),
+            "A should survive after get refreshed its LRU order"
+        );
+        assert!(
+            cache.get(&path_b).is_none(),
+            "B should be evicted as the least recently used"
+        );
+        assert!(cache.get(&path_c).is_some());
+        assert_eq!(cache.bytes_used(), 12);
+    }
+
+    #[test]
+    fn pdf_document_cache_rejects_or_skips_single_item_over_max() {
+        let cache = PdfDocumentCache::new_with_max(10);
+        let path = PathBuf::from("/big.pdf");
+        cache.insert(path.clone(), Arc::new(vec![1u8; 11]));
+        assert!(
+            cache.get(&path).is_none(),
+            "single item larger than max_bytes must not be cached"
+        );
+        assert_eq!(cache.bytes_used(), 0);
+        assert_eq!(cache.len(), 0);
     }
 
     #[test]
