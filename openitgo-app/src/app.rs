@@ -256,7 +256,8 @@ impl Default for ReaderApp {
         let store = JsonStore::new(JsonStore::default_dir().unwrap_or_else(|| PathBuf::from(".")));
         let (settings, settings_error) = load_settings_with_error(&store);
         let (comic_settings, comic_settings_error) = load_comic_settings_with_error(&store);
-        let reading_stats = store.load_reading_stats().unwrap_or_default();
+        let mut reading_stats = store.load_reading_stats().unwrap_or_default();
+        let mut comic_settings = comic_settings;
         let library = store.load_library().unwrap_or_default();
         let mut history = store.load_history().unwrap_or_default();
         let mut bookmarks = store.load_bookmarks().unwrap_or_default();
@@ -269,10 +270,14 @@ impl Default for ReaderApp {
             &mut history,
             &mut bookmarks,
             &covers_dir,
+            &mut comic_settings,
+            &mut reading_stats,
         ) {
             let _ = store.save_library(&library_view.library);
             let _ = store.save_history(&history);
             let _ = store.save_bookmarks(&bookmarks);
+            let _ = store.save_comic_settings(&comic_settings);
+            let _ = store.save_reading_stats(&reading_stats);
         }
         let page_loader = PageLoader::new_with_compress(
             settings.compress_images,
@@ -3587,6 +3592,8 @@ fn migrate_library_ids(
     history: &mut History,
     bookmarks: &mut Bookmarks,
     covers_dir: &Path,
+    comic_settings: &mut HashMap<String, ComicReadingSettings>,
+    reading_stats: &mut HashMap<String, openitgo_storage::models::ReadingStat>,
 ) -> bool {
     let mut id_map = HashMap::new();
     for entry in &mut library.entries {
@@ -3596,22 +3603,27 @@ fn migrate_library_ids(
             entry.comic_id = expected;
         }
     }
+    // History entries may reference paths not currently in the library.
+    for h in &mut history.entries {
+        if h.path.as_os_str().is_empty() {
+            continue;
+        }
+        let expected = openitgo_parser::stable_comic_id(&h.path);
+        if h.comic_id != expected {
+            id_map.insert(h.comic_id.clone(), expected.clone());
+            h.comic_id = expected;
+        }
+    }
     if id_map.is_empty() {
         return false;
-    }
-    for h in &mut history.entries {
-        if let Some(new) = id_map.get(&h.comic_id) {
-            h.comic_id = new.clone();
-            if let Some(entry) = library.entries.iter().find(|e| e.comic_id == *new) {
-                h.path = entry.path.clone();
-            }
-        }
     }
     for b in &mut bookmarks.entries {
         if let Some(new) = id_map.get(&b.comic_id) {
             b.comic_id = new.clone();
         }
     }
+    remap_keyed_map(comic_settings, &id_map);
+    remap_keyed_map(reading_stats, &id_map);
     let _ = std::fs::create_dir_all(covers_dir);
     for (old_id, new_id) in &id_map {
         let old_path = cover_path_for_comic_id(covers_dir, old_id);
@@ -3624,8 +3636,45 @@ fn migrate_library_ids(
                 }
             }
         }
+        rename_bookmark_thumbs_for_id(covers_dir, old_id, new_id);
     }
     true
+}
+
+fn remap_keyed_map<V>(map: &mut HashMap<String, V>, id_map: &HashMap<String, String>) {
+    let mut moved = Vec::new();
+    for (old, new) in id_map {
+        if let Some(value) = map.remove(old) {
+            moved.push((new.clone(), value));
+        }
+    }
+    for (new, value) in moved {
+        map.entry(new).or_insert(value);
+    }
+}
+
+fn rename_bookmark_thumbs_for_id(covers_dir: &Path, old_id: &str, new_id: &str) {
+    let dir = bookmark_thumb_dir(covers_dir);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let old_prefix = format!("{}-p", sanitize_id_component(old_id));
+    let new_safe = sanitize_id_component(new_id);
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if let Some(rest) = name.strip_prefix(&old_prefix) {
+            // rest is like "7.jpg"
+            let new_name = format!("{}-p{}", new_safe, rest);
+            let new_path = dir.join(new_name);
+            let old_path = entry.path();
+            if !new_path.exists() {
+                let _ = std::fs::rename(&old_path, &new_path);
+            }
+        }
+    }
 }
 
 /// True while any egui overlay (menu, dropdown popup, floating window) is
@@ -3777,6 +3826,109 @@ mod tests {
             app.reader_view.open.as_ref().unwrap().state.mode,
             ReadingMode::Webtoon
         );
+    }
+
+    #[test]
+    fn migrate_comic_ids_rewrites_library_and_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let book = tmp.path().join("book.cbz");
+        std::fs::write(&book, b"x").unwrap();
+        let expected = openitgo_parser::stable_comic_id(&book);
+        let mut library = Library {
+            entries: vec![openitgo_storage::models::LibraryEntry {
+                comic_id: "old-id".into(),
+                title: "Book".into(),
+                path: book.clone(),
+                cover_path: None,
+                added_at: 0,
+                media_type: MediaType::Comic,
+                tags: vec![],
+            }],
+        };
+        let mut history = History {
+            entries: vec![HistoryEntry {
+                comic_id: "old-id".into(),
+                path: book.clone(),
+                volume_index: 0,
+                page_index: 3,
+                char_offset: None,
+                last_read_at: 1,
+            }],
+        };
+        let mut bookmarks = Bookmarks::default();
+        let mut settings = HashMap::new();
+        settings.insert(
+            "old-id".into(),
+            ComicReadingSettings {
+                mode: ReadingMode::Ltr,
+                double_page: false,
+                fit: FitMode::Height,
+                rotation: 0,
+            },
+        );
+        let mut stats = HashMap::new();
+        stats.insert(
+            "old-id".into(),
+            openitgo_storage::models::ReadingStat {
+                total_seconds: 10,
+                first_read_at: 1,
+                last_read_at: 2,
+            },
+        );
+        let covers = tmp.path().join("covers");
+        assert!(migrate_library_ids(
+            &mut library,
+            &mut history,
+            &mut bookmarks,
+            &covers,
+            &mut settings,
+            &mut stats,
+        ));
+        assert_eq!(library.entries[0].comic_id, expected);
+        assert_eq!(history.entries[0].comic_id, expected);
+        assert!(settings.contains_key(&expected));
+        assert!(!settings.contains_key("old-id"));
+        assert!(stats.contains_key(&expected));
+        assert!(!stats.contains_key("old-id"));
+    }
+
+    #[test]
+    fn migrate_comic_ids_renames_cover_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let book = tmp.path().join("cover-book.cbz");
+        std::fs::write(&book, b"x").unwrap();
+        let expected = openitgo_parser::stable_comic_id(&book);
+        let covers = tmp.path().join("covers");
+        std::fs::create_dir_all(&covers).unwrap();
+        let old_cover = cover_path_for_comic_id(&covers, "legacy-id");
+        std::fs::write(&old_cover, b"jpeg").unwrap();
+        let mut library = Library {
+            entries: vec![openitgo_storage::models::LibraryEntry {
+                comic_id: "legacy-id".into(),
+                title: "Book".into(),
+                path: book,
+                cover_path: Some(old_cover.clone()),
+                added_at: 0,
+                media_type: MediaType::Comic,
+                tags: vec![],
+            }],
+        };
+        let mut history = History::default();
+        let mut bookmarks = Bookmarks::default();
+        let mut settings = HashMap::new();
+        let mut stats = HashMap::new();
+        assert!(migrate_library_ids(
+            &mut library,
+            &mut history,
+            &mut bookmarks,
+            &covers,
+            &mut settings,
+            &mut stats,
+        ));
+        let new_cover = cover_path_for_comic_id(&covers, &expected);
+        assert!(new_cover.exists(), "cover should be renamed to new id");
+        assert!(!old_cover.exists(), "old cover path should be gone");
+        assert_eq!(library.entries[0].cover_path.as_deref(), Some(new_cover.as_path()));
     }
 
     #[test]

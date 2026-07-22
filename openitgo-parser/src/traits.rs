@@ -1,6 +1,4 @@
 use openitgo_core::models::Comic;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 use thiserror::Error;
 
@@ -38,13 +36,15 @@ pub trait Parser: Send + Sync {
 /// Generate a stable, unique comic id from a filesystem path.
 ///
 /// Using the canonicalized path avoids collisions when two comics have the
-/// same filename in different directories. The hash is deterministic for a
-/// given Rust release and host; it only needs to be stable within this app.
+/// same filename in different directories. The id is a blake3 digest prefix
+/// (16 hex chars) so it stays stable across Rust toolchain upgrades.
 pub fn stable_comic_id(path: &Path) -> String {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let mut hasher = DefaultHasher::new();
-    canonical.as_os_str().hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let hash = blake3::hash(canonical.as_os_str().as_encoded_bytes());
+    hash.as_bytes()[..8]
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 /// Supported image file extensions, all lowercase.
@@ -67,5 +67,49 @@ mod tests {
         }
         assert!(!is_image_extension("txt"));
         assert!(!is_image_extension(""));
+    }
+
+    #[test]
+    fn stable_comic_id_is_deterministic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("book.cbz");
+        std::fs::write(&path, b"x").unwrap();
+        let a = stable_comic_id(&path);
+        let b = stable_comic_id(&path);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn stable_comic_id_differs_for_different_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a.cbz");
+        let b = tmp.path().join("b.cbz");
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::write(&b, b"y").unwrap();
+        assert_ne!(stable_comic_id(&a), stable_comic_id(&b));
+    }
+
+    #[test]
+    fn stable_comic_id_is_16_hex_chars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("book.cbz");
+        std::fs::write(&path, b"x").unwrap();
+        let id = stable_comic_id(&path);
+        assert_eq!(id.len(), 16);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(id, id.to_ascii_lowercase());
+    }
+
+    #[test]
+    fn stable_comic_id_uses_canonical_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real.cbz");
+        std::fs::write(&real, b"x").unwrap();
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("link.cbz");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            assert_eq!(stable_comic_id(&real), stable_comic_id(&link));
+        }
     }
 }
