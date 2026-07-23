@@ -3,114 +3,78 @@ use openitgo_core::models::{FitMode, ReadingMode};
 use openitgo_storage::models::{EbookTheme, Settings, Theme, ToolbarDisplayMode};
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsTab {
+    #[default]
+    Appearance,
+    Comic,
+    Ebook,
+    Media,
+    Performance,
+    Shortcuts,
+}
+
+impl SettingsTab {
+    const ALL: [(SettingsTab, &'static str); 6] = [
+        (SettingsTab::Appearance, "外观"),
+        (SettingsTab::Comic, "漫画"),
+        (SettingsTab::Ebook, "电子书"),
+        (SettingsTab::Media, "媒体"),
+        (SettingsTab::Performance, "性能"),
+        (SettingsTab::Shortcuts, "快捷键"),
+    ];
+}
+
 #[derive(Default)]
 pub struct SettingsView {
+    pub tab: SettingsTab,
     shortcut_add_buffer: HashMap<&'static str, String>,
 }
 
 impl SettingsView {
+    pub fn focus_tab(&mut self, tab: SettingsTab) {
+        self.tab = tab;
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {
-        ui.heading("设置");
+        ui.heading(egui::RichText::new("设置").size(22.0).strong());
+        ui.add_space(10.0);
 
-        ui.label("默认阅读模式");
-        egui::ComboBox::from_id_salt("mode")
-            .selected_text(mode_label(settings.default_mode))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut settings.default_mode,
-                    ReadingMode::Ltr,
-                    "国漫（左→右）",
-                );
-                ui.selectable_value(
-                    &mut settings.default_mode,
-                    ReadingMode::Rtl,
-                    "日漫（右→左）",
-                );
-                ui.selectable_value(
-                    &mut settings.default_mode,
-                    ReadingMode::Webtoon,
-                    "韩漫（上→下）",
-                );
-            });
-
-        ui.horizontal(|ui| {
-            ui.label("缓存大小 (MB):");
-            ui.add(egui::Slider::new(&mut settings.cache_size_mb, 100..=4096));
+        self.tab = crate::theme::tabbed_page(ui, &SettingsTab::ALL, self.tab, |ui, tab| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 8.0;
+                    match tab {
+                        SettingsTab::Appearance => self.appearance_ui(ui, settings),
+                        SettingsTab::Comic => self.comic_ui(ui, settings),
+                        SettingsTab::Ebook => self.ebook_settings_ui(ui, settings),
+                        SettingsTab::Media => self.media_ui(ui, settings),
+                        SettingsTab::Performance => self.performance_ui(ui, settings),
+                        SettingsTab::Shortcuts => self.shortcut_editor(ui, &mut settings.shortcuts),
+                    }
+                });
         });
+    }
 
+    fn appearance_ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {
         ui.horizontal(|ui| {
-            ui.label("真实图片缓存页数:");
-            ui.add(egui::Slider::new(
-                &mut settings.real_image_cache_pages,
-                1..=200,
-            ));
+            ui.label("主题");
+            egui::ComboBox::from_id_salt("theme")
+                .selected_text(theme_label(settings.theme.clone()))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut settings.theme, Theme::System, "跟随系统");
+                    ui.selectable_value(&mut settings.theme, Theme::Light, "浅色");
+                    ui.selectable_value(&mut settings.theme, Theme::Dark, "深色");
+                });
+            ui.add_space(8.0);
+            let dark = crate::theme::dark_visuals();
+            let light = crate::theme::light_visuals();
+            crate::theme::theme_swatch(ui, dark.panel_fill, dark.hyperlink_color)
+                .on_hover_text("深色预览");
+            crate::theme::theme_swatch(ui, light.panel_fill, light.hyperlink_color)
+                .on_hover_text("浅色预览");
         });
-
-        ui.checkbox(
-            &mut settings.invert_scroll,
-            "反转滚轮方向（适用于 macOS 自然滚动）",
-        );
-
-        ui.horizontal(|ui| {
-            ui.label("滚轮翻页阈值 (pt):");
-            ui.add(egui::Slider::new(
-                &mut settings.page_scroll_threshold,
-                1.0..=40.0,
-            ));
-            ui.label("（滚一格不翻页就调小，容易误翻就调大）");
-        });
-
-        ui.checkbox(
-            &mut settings.compress_images,
-            "DXT5 纹理压缩（节省显存，但打开时 CPU 占用高）",
-        );
-
-        ui.horizontal(|ui| {
-            ui.label("解码线程数:");
-            ui.add(egui::Slider::new(&mut settings.decode_threads, 0..=16).text("0=自动"));
-            ui.label("（重启后生效）");
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("宽页阈值（宽高比）:");
-            ui.add(egui::Slider::new(&mut settings.wide_page_threshold, 1.0..=2.0).step_by(0.05));
-        });
-
-        ui.checkbox(&mut settings.enable_page_animation, "翻页动画");
-
-        ui.label("默认缩放/适应");
-        egui::ComboBox::from_id_salt("fit")
-            .selected_text(fit_label(settings.default_fit))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut settings.default_fit, FitMode::Height, "适应高度");
-                ui.selectable_value(&mut settings.default_fit, FitMode::Width, "适应宽度");
-                ui.selectable_value(&mut settings.default_fit, FitMode::Page, "适应页面");
-                ui.selectable_value(&mut settings.default_fit, FitMode::Original, "原始大小");
-            });
-
-        ui.horizontal(|ui| {
-            ui.label("阅读背景色:");
-            ui.color_edit_button_srgb(&mut settings.background_color);
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("阅读栏透明度:");
-            ui.add(
-                egui::Slider::new(&mut settings.chrome_opacity, 0.2..=1.0)
-                    .show_value(true)
-                    .suffix(""),
-            );
-            ui.label("（阅读区背景与工具栏 / 进度条共用，透出窗口背后；1=不透明）");
-        });
-
-        ui.label("主题");
-        egui::ComboBox::from_id_salt("theme")
-            .selected_text(theme_label(settings.theme.clone()))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut settings.theme, Theme::System, "跟随系统");
-                ui.selectable_value(&mut settings.theme, Theme::Light, "浅色");
-                ui.selectable_value(&mut settings.theme, Theme::Dark, "深色");
-            });
 
         ui.label("工具栏显示模式");
         egui::ComboBox::from_id_salt("toolbar_display_mode")
@@ -133,22 +97,141 @@ impl SettingsView {
                 );
             });
 
-        ui.separator();
-        ui.collapsing("电子书", |ui| {
-            self.ebook_settings_ui(ui, settings);
+        ui.checkbox(&mut settings.show_toolbar, "显示工具栏");
+        ui.checkbox(&mut settings.show_statusbar, "显示状态栏 / 进度条");
+
+        ui.horizontal(|ui| {
+            ui.label("阅读背景色:");
+            ui.color_edit_button_srgb(&mut settings.background_color);
         });
 
-        ui.separator();
-        ui.heading("快捷键");
-        self.shortcut_editor(ui, &mut settings.shortcuts);
+        ui.horizontal(|ui| {
+            ui.label("阅读栏透明度:");
+            ui.add(
+                egui::Slider::new(&mut settings.chrome_opacity, 0.2..=1.0)
+                    .show_value(true)
+                    .suffix(""),
+            );
+        });
+        hint(
+            ui,
+            "阅读区背景与工具栏 / 进度条共用，透出窗口背后；1 = 不透明",
+        );
     }
 
-    /// Renders only the ebook-related settings. Used when entering settings from
-    /// the ebook reader so the user sees relevant options immediately.
-    pub fn ebook_ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {
-        ui.heading("电子书设置");
-        ui.separator();
-        self.ebook_settings_ui(ui, settings);
+    fn comic_ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {
+        ui.label("默认阅读模式");
+        egui::ComboBox::from_id_salt("mode")
+            .selected_text(mode_label(settings.default_mode))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut settings.default_mode,
+                    ReadingMode::Ltr,
+                    "国漫（左→右）",
+                );
+                ui.selectable_value(
+                    &mut settings.default_mode,
+                    ReadingMode::Rtl,
+                    "日漫（右→左）",
+                );
+                ui.selectable_value(
+                    &mut settings.default_mode,
+                    ReadingMode::Webtoon,
+                    "韩漫（上→下）",
+                );
+            });
+
+        ui.checkbox(&mut settings.double_page, "默认双页");
+
+        ui.label("默认缩放 / 适应");
+        egui::ComboBox::from_id_salt("fit")
+            .selected_text(fit_label(settings.default_fit))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut settings.default_fit, FitMode::Height, "适应高度");
+                ui.selectable_value(&mut settings.default_fit, FitMode::Width, "适应宽度");
+                ui.selectable_value(&mut settings.default_fit, FitMode::Page, "适应页面");
+                ui.selectable_value(&mut settings.default_fit, FitMode::Original, "原始大小");
+            });
+
+        ui.checkbox(&mut settings.enable_page_animation, "翻页动画");
+        ui.checkbox(
+            &mut settings.invert_scroll,
+            "反转滚轮方向（适用于 macOS 自然滚动）",
+        );
+
+        ui.horizontal(|ui| {
+            ui.label("滚轮翻页阈值 (pt):");
+            ui.add(egui::Slider::new(
+                &mut settings.page_scroll_threshold,
+                1.0..=40.0,
+            ));
+        });
+        hint(ui, "滚一格不翻页就调小，容易误翻就调大");
+
+        ui.horizontal(|ui| {
+            ui.label("宽页阈值（宽高比）:");
+            ui.add(egui::Slider::new(&mut settings.wide_page_threshold, 1.0..=2.0).step_by(0.05));
+        });
+    }
+
+    fn media_ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {
+        ui.horizontal(|ui| {
+            ui.label("默认音量:");
+            let mut vol = settings.media_volume as f32;
+            if ui.add(egui::Slider::new(&mut vol, 0.0..=100.0)).changed() {
+                settings.media_volume = vol as f64;
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("默认倍速:");
+            let mut speed = settings.media_speed as f32;
+            if ui
+                .add(egui::Slider::new(&mut speed, 0.25..=4.0).step_by(0.05))
+                .changed()
+            {
+                settings.media_speed = speed as f64;
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("默认音频输出:");
+            ui.add(
+                egui::TextEdit::singleline(&mut settings.media_audio_device)
+                    .hint_text("空 = 自动")
+                    .desired_width(220.0),
+            );
+        });
+        hint(
+            ui,
+            "填写 mpv 设备名；留空为系统默认。无效设备会在打开媒体时回退到自动。",
+        );
+    }
+
+    fn performance_ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {
+        ui.horizontal(|ui| {
+            ui.label("缓存大小 (MB):");
+            ui.add(egui::Slider::new(&mut settings.cache_size_mb, 100..=4096));
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("真实图片缓存页数:");
+            ui.add(egui::Slider::new(
+                &mut settings.real_image_cache_pages,
+                1..=200,
+            ));
+        });
+
+        ui.checkbox(
+            &mut settings.compress_images,
+            "DXT5 纹理压缩（节省显存，但打开时 CPU 占用高）",
+        );
+
+        ui.horizontal(|ui| {
+            ui.label("解码线程数:");
+            ui.add(egui::Slider::new(&mut settings.decode_threads, 0..=16).text("0=自动"));
+        });
+        hint(ui, "解码线程数重启后生效");
     }
 
     fn ebook_settings_ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {
@@ -286,6 +369,10 @@ impl SettingsView {
             });
         }
     }
+}
+
+fn hint(ui: &mut egui::Ui, text: &str) {
+    ui.label(egui::RichText::new(text).weak().size(12.5));
 }
 
 fn fit_label(fit: FitMode) -> &'static str {

@@ -15,6 +15,7 @@ pub fn reader_html(settings: &EbookSettings, chapter_count: usize) -> String {
 :root {{
   --bg: {bg};
   --fg: {fg};
+  --accent: {accent};
   --font: {font};
   --size: {size}px;
   --line: {line};
@@ -35,6 +36,8 @@ html, body {{
   font-size: var(--size);
   line-height: var(--line);
 }}
+a {{ color: var(--accent); text-decoration: none; }}
+a:hover {{ text-decoration: underline; }}
 p {{ margin: 0 0 1em 0; text-indent: 2em; }}
 h1, h2, h3, h4, h5, h6 {{ margin: 0.8em 0 0.4em; line-height: 1.3; }}
 ul, ol {{ margin: 0 0 1em 0; padding-left: 2em; }}
@@ -700,6 +703,7 @@ function applySettings(json) {{
   const root = document.documentElement;
   root.style.setProperty('--bg', s.bg);
   root.style.setProperty('--fg', s.fg);
+  root.style.setProperty('--accent', s.accent);
   root.style.setProperty('--font', s.font);
   root.style.setProperty('--size', s.size + 'px');
   root.style.setProperty('--line', s.line);
@@ -880,6 +884,7 @@ sendIpc({{ "type": "ready" }});
 </html>"#,
         bg = js.bg,
         fg = js.fg,
+        accent = js.accent,
         font = js.font,
         size = js.size,
         line = js.line,

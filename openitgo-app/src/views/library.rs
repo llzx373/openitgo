@@ -79,22 +79,17 @@ impl LibraryView {
         ui.horizontal(|ui| {
             ui.heading(egui::RichText::new("书架").size(22.0).strong());
             ui.add_space(12.0);
-            crate::theme::segmented_frame(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for (mode, label) in [
-                        (LibraryMode::Library, "漫画"),
-                        (LibraryMode::Ebooks, "电子书"),
-                        (LibraryMode::History, "历史"),
-                        (LibraryMode::Bookmarks, "书签"),
-                        (LibraryMode::Stats, "统计"),
-                    ] {
-                        let selected = self.mode == mode;
-                        if ui.selectable_label(selected, label).clicked() {
-                            self.mode = mode;
-                        }
-                    }
-                });
-            });
+            crate::theme::segmented_tabs(
+                ui,
+                &[
+                    (LibraryMode::Library, "漫画"),
+                    (LibraryMode::Ebooks, "电子书"),
+                    (LibraryMode::History, "历史"),
+                    (LibraryMode::Bookmarks, "书签"),
+                    (LibraryMode::Stats, "统计"),
+                ],
+                &mut self.mode,
+            );
             if matches!(self.mode, LibraryMode::Library | LibraryMode::Ebooks) {
                 ui.add_space(8.0);
                 let hint = if self.mode == LibraryMode::Ebooks {
@@ -240,7 +235,7 @@ impl LibraryView {
                                 ui.set_min_size(egui::vec2(CARD_WIDTH, CARD_HEIGHT));
                                 ui.vertical_centered(|ui| {
                                     let cover_rect = {
-                                        let (slot, _response) = ui
+                                        let (slot, cover_sense) = ui
                                             .allocate_exact_size(cover_size, egui::Sense::hover());
                                         ui.painter().rect_filled(
                                             slot,
@@ -287,6 +282,24 @@ impl LibraryView {
                                                 egui::FontId::proportional(15.0),
                                                 egui::Color32::from_rgba_unmultiplied(
                                                     255, 255, 255, 200,
+                                                ),
+                                            );
+                                        }
+                                        if cover_sense.hovered() && !file_missing {
+                                            // Subtle lift: warm accent rim, no shadow stack.
+                                            let accent =
+                                                crate::theme::accent_for(ui.visuals().dark_mode);
+                                            ui.painter().rect_stroke(
+                                                slot,
+                                                cover_radius,
+                                                egui::Stroke::new(1.0, accent),
+                                                egui::StrokeKind::Outside,
+                                            );
+                                            ui.painter().rect_filled(
+                                                slot,
+                                                cover_radius,
+                                                egui::Color32::from_rgba_unmultiplied(
+                                                    255, 255, 255, 18,
                                                 ),
                                             );
                                         }
@@ -563,7 +576,12 @@ impl LibraryView {
         callbacks: LibraryCallbacks<'_>,
     ) {
         if history.entries.is_empty() {
-            ui.label("暂无阅读历史。");
+            render_empty_placeholder(
+                ui,
+                egui_phosphor_icons::icons::CLOCK_COUNTER_CLOCKWISE.as_str(),
+                "暂无阅读历史",
+                "打开漫画、电子书或影音后会自动记录到这里。",
+            );
             return;
         }
         ui.horizontal(|ui| {
@@ -606,7 +624,12 @@ impl LibraryView {
         callbacks: LibraryCallbacks<'_>,
     ) {
         if bookmarks.entries.is_empty() {
-            ui.label("暂无书签。");
+            render_empty_placeholder(
+                ui,
+                egui_phosphor_icons::icons::BOOKMARK.as_str(),
+                "暂无书签",
+                "阅读时添加书签，方便下次回到同一位置。",
+            );
             return;
         }
         egui::Grid::new("bookmarks_grid").show(ui, |ui| {
@@ -772,6 +795,21 @@ fn last_read_at(history: &History, comic_id: &str) -> u64 {
         .map(|h| h.last_read_at)
         .max()
         .unwrap_or(0)
+}
+
+fn render_empty_placeholder(ui: &mut egui::Ui, icon: &str, title: &str, subtitle: &str) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(64.0);
+        ui.label(
+            egui::RichText::new(icon)
+                .size(40.0)
+                .color(crate::theme::accent_for(ui.visuals().dark_mode)),
+        );
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new(title).size(20.0).strong());
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(subtitle).weak().size(13.5));
+    });
 }
 
 fn sort_label(sort: LibrarySort) -> &'static str {

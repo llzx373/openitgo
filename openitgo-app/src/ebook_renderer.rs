@@ -1,5 +1,5 @@
 use openitgo_core::ebook::{Ebook, EbookReadingMode};
-use openitgo_storage::models::{EbookSettings, EbookTheme};
+use openitgo_storage::models::EbookSettings;
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 use wry::{Rect, WebView, WebViewBuilder};
@@ -42,6 +42,7 @@ struct JsSettings {
     mode: String,
     bg: String,
     fg: String,
+    accent: String,
     font: String,
     size: u32,
     line: f32,
@@ -53,19 +54,16 @@ struct JsSettings {
 
 impl From<&EbookSettings> for JsSettings {
     fn from(s: &EbookSettings) -> Self {
-        let (bg, fg) = match s.theme {
-            EbookTheme::Light => ("#ffffff".to_string(), "#1a1a1a".to_string()),
-            EbookTheme::Dark => ("#1a1a1a".to_string(), "#e8e8e8".to_string()),
-            EbookTheme::Sepia => ("#f4ecd8".to_string(), "#5b4636".to_string()),
-        };
+        let palette = crate::theme::EbookPalette::for_theme(s.theme);
         Self {
             mode: match s.reading_mode {
                 EbookReadingMode::SinglePage => "single paginated".to_string(),
                 EbookReadingMode::DoublePage => "double paginated".to_string(),
                 EbookReadingMode::Scroll => "scroll".to_string(),
             },
-            bg,
-            fg,
+            bg: palette.bg_hex(),
+            fg: palette.fg_hex(),
+            accent: palette.accent_hex(),
             font: s.font_family.clone(),
             size: s.font_size,
             line: s.line_height,
@@ -498,16 +496,18 @@ mod tests {
             ..Default::default()
         };
         let js = JsSettings::from(&settings);
-        assert_eq!(js.bg, "#ffffff");
-        assert_eq!(js.fg, "#1a1a1a");
+        assert_eq!(js.bg, "#eeeff1");
+        assert_eq!(js.fg, "#1a1a1c");
+        assert_eq!(js.accent, "#b8834a");
 
         let settings = EbookSettings {
             theme: EbookTheme::Dark,
             ..Default::default()
         };
         let js = JsSettings::from(&settings);
-        assert_eq!(js.bg, "#1a1a1a");
-        assert_eq!(js.fg, "#e8e8e8");
+        assert_eq!(js.bg, "#141416");
+        assert_eq!(js.fg, "#f0eee8");
+        assert_eq!(js.accent, "#d4a574");
 
         let settings = EbookSettings {
             theme: EbookTheme::Sepia,
@@ -516,6 +516,7 @@ mod tests {
         let js = JsSettings::from(&settings);
         assert_eq!(js.bg, "#f4ecd8");
         assert_eq!(js.fg, "#5b4636");
+        assert_eq!(js.accent, "#a07848");
     }
 
     #[test]

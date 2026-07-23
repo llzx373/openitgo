@@ -2,7 +2,7 @@ use crate::loader::PageLoader;
 use crate::opener::{AsyncOpener, OpenStatus};
 use crate::shortcuts::is_shortcut_pressed;
 use crate::timing;
-use crate::views::settings::SettingsView;
+use crate::views::settings::{SettingsTab, SettingsView};
 use crate::views::{
     ebook::EbookView,
     library::{LibraryCallbacks, LibraryView},
@@ -1454,7 +1454,10 @@ impl ReaderApp {
             })
             .unwrap_or((0, None, 100.0, false));
         egui::Panel::bottom("media_seekbar")
-            .frame(crate::theme::chrome_bar_frame(ui.visuals(), self.settings.chrome_opacity))
+            .frame(crate::theme::chrome_bar_frame(
+                ui.visuals(),
+                self.settings.chrome_opacity,
+            ))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     // Row 1: full-width seek bar with a hover-time tooltip.
@@ -1686,10 +1689,8 @@ impl ReaderApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add(
-                                egui::Button::new(icons::X).min_size(egui::vec2(
-                                    0.0,
-                                    crate::theme::TOOLBAR_BUTTON_HEIGHT,
-                                )),
+                                egui::Button::new(icons::X)
+                                    .min_size(egui::vec2(0.0, crate::theme::TOOLBAR_BUTTON_HEIGHT)),
                             )
                             .on_hover_text("隐藏工具栏")
                             .clicked()
@@ -1721,10 +1722,8 @@ impl ReaderApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add(
-                                egui::Button::new(icons::X).min_size(egui::vec2(
-                                    0.0,
-                                    crate::theme::TOOLBAR_BUTTON_HEIGHT,
-                                )),
+                                egui::Button::new(icons::X)
+                                    .min_size(egui::vec2(0.0, crate::theme::TOOLBAR_BUTTON_HEIGHT)),
                             )
                             .on_hover_text("隐藏状态栏")
                             .clicked()
@@ -1825,6 +1824,7 @@ impl ReaderApp {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if toolbar_button(ui, icons::GEAR, "设置", display_mode).clicked() {
+                            self.settings_view.focus_tab(SettingsTab::Ebook);
                             self.current_view = View::Settings;
                         }
                     });
@@ -1977,11 +1977,7 @@ impl ReaderApp {
                 }
             });
             ui.separator();
-            if from_ebook {
-                self.settings_view.ebook_ui(ui, &mut self.settings);
-            } else {
-                self.settings_view.ui(ui, &mut self.settings);
-            }
+            self.settings_view.ui(ui, &mut self.settings);
         });
         if from_ebook {
             self.ebook_view.apply_settings(&self.settings.ebook);

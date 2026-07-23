@@ -254,13 +254,9 @@ pub fn visibility_transition(applied_hidden: bool, want_hidden: bool) -> Option<
     (applied_hidden != want_hidden).then_some(want_hidden)
 }
 
-/// 电子书主题的阅读背景色（与 ebook_renderer.rs JsSettings 的 bg 值一致）。
+/// 电子书主题的阅读背景色（与 ebook_renderer.rs JsSettings / Gallery 壳层同源）。
 pub fn ebook_theme_bg(theme: EbookTheme) -> egui::Color32 {
-    match theme {
-        EbookTheme::Light => egui::Color32::from_rgb(0xff, 0xff, 0xff),
-        EbookTheme::Dark => egui::Color32::from_rgb(0x1a, 0x1a, 0x1a),
-        EbookTheme::Sepia => egui::Color32::from_rgb(0xf4, 0xec, 0xd8),
-    }
+    crate::theme::EbookPalette::for_theme(theme).bg
 }
 
 #[cfg(test)]
@@ -406,14 +402,14 @@ mod tests {
 
     #[test]
     fn test_ebook_theme_bg_matches_js_settings() {
-        // 与 ebook_renderer.rs JsSettings 的 bg 值保持一致
+        // 与 ebook_renderer.rs JsSettings / theme::EbookPalette 同源
         assert_eq!(
             ebook_theme_bg(EbookTheme::Light),
-            egui::Color32::from_rgb(0xff, 0xff, 0xff)
+            egui::Color32::from_rgb(0xee, 0xef, 0xf1)
         );
         assert_eq!(
             ebook_theme_bg(EbookTheme::Dark),
-            egui::Color32::from_rgb(0x1a, 0x1a, 0x1a)
+            egui::Color32::from_rgb(0x14, 0x14, 0x16)
         );
         assert_eq!(
             ebook_theme_bg(EbookTheme::Sepia),

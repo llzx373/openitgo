@@ -5,10 +5,61 @@
 //! (not warm cream).
 
 use egui::{Color32, CornerRadius, Margin, Shadow, Stroke, Style, Theme, Visuals};
+use openitgo_storage::models::EbookTheme;
 
 /// Warm amber accent — used for selection, progress, and active chrome.
 pub const ACCENT_DARK: Color32 = Color32::from_rgb(0xD4, 0xA5, 0x74);
 pub const ACCENT_LIGHT: Color32 = Color32::from_rgb(0xB8, 0x83, 0x4A);
+
+/// Ebook webview palette aligned with Gallery shell (Dark/Light) or sepia paper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EbookPalette {
+    pub bg: Color32,
+    pub fg: Color32,
+    pub accent: Color32,
+}
+
+impl EbookPalette {
+    pub fn for_theme(theme: EbookTheme) -> Self {
+        match theme {
+            // Cool gallery gray + ink (matches light_visuals panel / text).
+            EbookTheme::Light => Self {
+                bg: Color32::from_rgb(0xEE, 0xEF, 0xF1),
+                fg: Color32::from_rgb(0x1A, 0x1A, 0x1C),
+                accent: ACCENT_LIGHT,
+            },
+            // Charcoal panel + warm off-white (matches dark_visuals).
+            EbookTheme::Dark => Self {
+                bg: Color32::from_rgb(0x14, 0x14, 0x16),
+                fg: Color32::from_rgb(0xF0, 0xEE, 0xE8),
+                accent: ACCENT_DARK,
+            },
+            // Independent parchment; keep sepia identity.
+            EbookTheme::Sepia => Self {
+                bg: Color32::from_rgb(0xF4, 0xEC, 0xD8),
+                fg: Color32::from_rgb(0x5B, 0x46, 0x36),
+                accent: Color32::from_rgb(0xA0, 0x78, 0x48),
+            },
+        }
+    }
+
+    pub fn bg_hex(self) -> String {
+        format!("#{:02x}{:02x}{:02x}", self.bg.r(), self.bg.g(), self.bg.b())
+    }
+
+    pub fn fg_hex(self) -> String {
+        format!("#{:02x}{:02x}{:02x}", self.fg.r(), self.fg.g(), self.fg.b())
+    }
+
+    pub fn accent_hex(self) -> String {
+        format!(
+            "#{:02x}{:02x}{:02x}",
+            self.accent.r(),
+            self.accent.g(),
+            self.accent.b()
+        )
+    }
+}
 
 /// Cover / card corner radius.
 pub const RADIUS_COVER: u8 = 10;
@@ -250,11 +301,35 @@ pub fn dashed_separator(ui: &mut egui::Ui) {
     ui.add_space(8.0);
 }
 
-/// Tag / filter chip (rounded capsule).
+/// Compact Dark/Light swatch used next to the theme picker.
+pub fn theme_swatch(ui: &mut egui::Ui, panel: Color32, accent: Color32) -> egui::Response {
+    let size = egui::vec2(28.0, 18.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let rounding = CornerRadius::same(4);
+    ui.painter().rect_filled(rect, rounding, panel);
+    let accent_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - 12.0, rect.center().y - 5.0),
+        egui::vec2(8.0, 10.0),
+    );
+    ui.painter()
+        .rect_filled(accent_rect, CornerRadius::same(2), accent);
+    ui.painter().rect_stroke(
+        rect,
+        rounding,
+        Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        egui::StrokeKind::Outside,
+    );
+    response
+}
+
+/// Tag / filter chip (rounded capsule) with selected + hover fills.
 pub fn tag_chip(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
     let dark = ui.visuals().dark_mode;
     let accent = accent_for(dark);
-    let (fill, fg) = if selected {
+    let id = ui.id().with(("tag_chip", label));
+    let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
+
+    let (fill, fg, stroke) = if selected {
         (
             Color32::from_rgba_unmultiplied(
                 accent.r(),
@@ -263,6 +338,18 @@ pub fn tag_chip(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Respons
                 if dark { 56 } else { 40 },
             ),
             accent,
+            Stroke::new(1.0, accent),
+        )
+    } else if hovered {
+        (
+            ui.visuals().widgets.hovered.weak_bg_fill,
+            ui.visuals()
+                .override_text_color
+                .unwrap_or(ui.visuals().widgets.hovered.fg_stroke.color),
+            Stroke::new(
+                1.0,
+                Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 160),
+            ),
         )
     } else {
         (
@@ -271,21 +358,19 @@ pub fn tag_chip(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Respons
                 .override_text_color
                 .unwrap_or(ui.visuals().widgets.inactive.fg_stroke.color)
                 .gamma_multiply(0.75),
+            Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
         )
     };
+
     let inner = egui::Frame::new()
         .fill(fill)
         .corner_radius(CornerRadius::same(RADIUS_CHIP))
         .inner_margin(Margin::symmetric(10, 4))
-        .stroke(if selected {
-            Stroke::new(1.0, accent)
-        } else {
-            Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
-        })
+        .stroke(stroke)
         .show(ui, |ui| {
             ui.label(egui::RichText::new(label).size(12.5).color(fg));
         });
-    inner.response.interact(egui::Sense::click())
+    ui.interact(inner.response.rect, id, egui::Sense::click())
 }
 
 /// Segmented control background wrapping selectable labels.
@@ -302,6 +387,276 @@ pub fn segmented_frame(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::U
             ui.spacing_mut().item_spacing.x = 2.0;
             add_contents(ui);
         });
+}
+
+/// Fixed-size tab label: hover / selected only change fill — never width.
+fn tab_button_sized(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: bool,
+    size: egui::Vec2,
+    page_fill: Color32,
+) -> egui::Response {
+    let font = egui::FontId::proportional(13.5);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let hovered = response.hovered();
+
+    let (fill, fg) = if selected {
+        (
+            page_fill,
+            ui.visuals()
+                .override_text_color
+                .unwrap_or(ui.visuals().widgets.active.fg_stroke.color),
+        )
+    } else if hovered {
+        (
+            ui.visuals().widgets.hovered.weak_bg_fill,
+            ui.visuals()
+                .override_text_color
+                .unwrap_or(ui.visuals().widgets.hovered.fg_stroke.color),
+        )
+    } else {
+        (
+            Color32::TRANSPARENT,
+            ui.visuals()
+                .override_text_color
+                .unwrap_or(ui.visuals().widgets.inactive.fg_stroke.color)
+                .gamma_multiply(0.72),
+        )
+    };
+
+    let rounding = CornerRadius {
+        nw: 6,
+        ne: 6,
+        sw: 0,
+        se: 0,
+    };
+    if fill != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, rounding, fill);
+    }
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font, fg);
+    let text_pos = egui::pos2(
+        rect.center().x - galley.size().x * 0.5,
+        rect.center().y - galley.size().y * 0.5,
+    );
+    ui.painter().galley(text_pos, galley, fg);
+
+    response
+}
+
+/// Connected tab strip + page body (no gap / double stroke between them).
+///
+/// Selected tab uses the same fill as the page so it reads as one panel.
+/// Returns the (possibly updated) selected tab.
+pub fn tabbed_page<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    tabs: &[(T, &str)],
+    mut current: T,
+    add_contents: impl FnOnce(&mut egui::Ui, T),
+) -> T {
+    if tabs.is_empty() {
+        add_contents(ui, current);
+        return current;
+    }
+
+    let font = egui::FontId::proportional(13.5);
+    let pad_x = 16.0;
+    let pad_y = 7.0;
+    let mut max_w = 64.0_f32;
+    let mut tab_h = 28.0_f32;
+    for (_, label) in tabs {
+        let galley = ui
+            .painter()
+            .layout_no_wrap((*label).to_owned(), font.clone(), Color32::WHITE);
+        max_w = max_w.max(galley.size().x + pad_x * 2.0);
+        tab_h = tab_h.max(galley.size().y + pad_y * 2.0);
+    }
+    let size = egui::vec2(max_w, tab_h);
+
+    let border = Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
+    let page_fill = ui.visuals().window_fill;
+    let strip_fill = ui.visuals().extreme_bg_color;
+    let accent = accent_for(ui.visuals().dark_mode);
+
+    let mut tab_rects: Vec<(T, egui::Rect)> = Vec::with_capacity(tabs.len());
+
+    // Kill inter-widget gap so strip and body paint as one surface.
+    let prev_spacing_y = ui.spacing().item_spacing.y;
+    ui.spacing_mut().item_spacing.y = 0.0;
+
+    egui::Frame::new()
+        .stroke(border)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::ZERO)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+
+            // Tab strip (darker rail); selected tab is painted with page_fill.
+            let strip = egui::Frame::new()
+                .fill(strip_fill)
+                .inner_margin(Margin::symmetric(4, 0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        for &(tab, label) in tabs {
+                            let selected = current == tab;
+                            let response = tab_button_sized(ui, label, selected, size, page_fill);
+                            tab_rects.push((tab, response.rect));
+                            if response.clicked() && !selected {
+                                current = tab;
+                            }
+                        }
+                        // Fill the rest of the strip width with strip_fill (already bg).
+                        ui.allocate_at_least(
+                            egui::vec2(ui.available_width(), size.y),
+                            egui::Sense::hover(),
+                        );
+                    });
+                });
+
+            // Divider under inactive tabs only — gap under the selected tab
+            // so the page fill continues unbroken into the selected tab.
+            let strip_rect = strip.response.rect;
+            let y = strip_rect.bottom() - 0.5;
+            let selected_rect = tab_rects
+                .iter()
+                .find(|(tab, _)| *tab == current)
+                .map(|(_, rect)| *rect);
+            if let Some(sel) = selected_rect {
+                // Re-paint selected tab with page fill in case the click just switched.
+                ui.painter().rect_filled(
+                    sel,
+                    CornerRadius {
+                        nw: 6,
+                        ne: 6,
+                        sw: 0,
+                        se: 0,
+                    },
+                    page_fill,
+                );
+                // Redraw label on top of the refilled tab.
+                if let Some((_, label)) = tabs.iter().find(|(tab, _)| *tab == current) {
+                    let font = egui::FontId::proportional(13.5);
+                    let fg = ui
+                        .visuals()
+                        .override_text_color
+                        .unwrap_or(ui.visuals().widgets.active.fg_stroke.color);
+                    let galley = ui.painter().layout_no_wrap((*label).to_owned(), font, fg);
+                    let text_pos = egui::pos2(
+                        sel.center().x - galley.size().x * 0.5,
+                        sel.center().y - galley.size().y * 0.5,
+                    );
+                    ui.painter().galley(text_pos, galley, fg);
+                }
+
+                if sel.left() > strip_rect.left() + 0.5 {
+                    ui.painter()
+                        .hline(strip_rect.left()..=sel.left(), y, border);
+                }
+                if sel.right() < strip_rect.right() - 0.5 {
+                    ui.painter()
+                        .hline(sel.right()..=strip_rect.right(), y, border);
+                }
+                // Accent on the top of the selected tab — keeps the join seamless.
+                ui.painter().hline(
+                    (sel.left() + 8.0)..=(sel.right() - 8.0),
+                    sel.top() + 1.5,
+                    Stroke::new(2.0, accent),
+                );
+            } else {
+                ui.painter().hline(strip_rect.x_range(), y, border);
+            }
+
+            egui::Frame::new()
+                .fill(page_fill)
+                .inner_margin(Margin::same(14))
+                .show(ui, |ui| {
+                    add_contents(ui, current);
+                });
+        });
+
+    ui.spacing_mut().item_spacing.y = prev_spacing_y;
+    current
+}
+
+/// Capsule segmented control with fixed-size segments (no hover width jump).
+pub fn segmented_tabs<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    tabs: &[(T, &str)],
+    current: &mut T,
+) -> bool {
+    if tabs.is_empty() {
+        return false;
+    }
+    let font = egui::FontId::proportional(13.0);
+    let pad_x = 12.0;
+    let pad_y = 5.0;
+    let mut max_w = 48.0_f32;
+    let mut tab_h = 26.0_f32;
+    for (_, label) in tabs {
+        let galley = ui
+            .painter()
+            .layout_no_wrap((*label).to_owned(), font.clone(), Color32::WHITE);
+        max_w = max_w.max(galley.size().x + pad_x * 2.0);
+        tab_h = tab_h.max(galley.size().y + pad_y * 2.0);
+    }
+    let size = egui::vec2(max_w, tab_h);
+    let dark = ui.visuals().dark_mode;
+    let accent = accent_for(dark);
+
+    let mut changed = false;
+    segmented_frame(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for &(tab, label) in tabs {
+                let selected = *current == tab;
+                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                let hovered = response.hovered();
+                let (fill, fg) = if selected {
+                    (
+                        Color32::from_rgba_unmultiplied(
+                            accent.r(),
+                            accent.g(),
+                            accent.b(),
+                            if dark { 56 } else { 40 },
+                        ),
+                        accent,
+                    )
+                } else if hovered {
+                    (
+                        ui.visuals().widgets.hovered.weak_bg_fill,
+                        ui.visuals()
+                            .override_text_color
+                            .unwrap_or(ui.visuals().widgets.hovered.fg_stroke.color),
+                    )
+                } else {
+                    (
+                        Color32::TRANSPARENT,
+                        ui.visuals()
+                            .override_text_color
+                            .unwrap_or(ui.visuals().widgets.inactive.fg_stroke.color)
+                            .gamma_multiply(0.8),
+                    )
+                };
+                if fill.a() > 0 {
+                    ui.painter().rect_filled(rect, CornerRadius::same(6), fill);
+                }
+                let galley = ui
+                    .painter()
+                    .layout_no_wrap(label.to_owned(), font.clone(), fg);
+                let text_pos = egui::pos2(
+                    rect.center().x - galley.size().x * 0.5,
+                    rect.center().y - galley.size().y * 0.5,
+                );
+                ui.painter().galley(text_pos, galley, fg);
+                if response.clicked() && !selected {
+                    *current = tab;
+                    changed = true;
+                }
+            }
+        });
+    });
+    changed
 }
 
 #[cfg(test)]
@@ -325,5 +680,20 @@ mod tests {
         let fill = chrome_fill(&dark, 0.85);
         assert!(fill.a() < 255);
         assert_eq!(chrome_fill(&dark, 1.0).a(), 255);
+    }
+
+    #[test]
+    fn ebook_palette_aligns_with_gallery_shell() {
+        let dark = EbookPalette::for_theme(EbookTheme::Dark);
+        assert_eq!(dark.bg, dark_visuals().panel_fill);
+        assert_eq!(dark.fg, Color32::from_rgb(0xF0, 0xEE, 0xE8));
+        assert_eq!(dark.accent, ACCENT_DARK);
+
+        let light = EbookPalette::for_theme(EbookTheme::Light);
+        assert_eq!(light.bg, light_visuals().panel_fill);
+        assert_eq!(light.accent, ACCENT_LIGHT);
+
+        let sepia = EbookPalette::for_theme(EbookTheme::Sepia);
+        assert_eq!(sepia.bg_hex(), "#f4ecd8");
     }
 }
