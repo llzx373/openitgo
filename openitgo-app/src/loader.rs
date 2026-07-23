@@ -473,7 +473,11 @@ impl PageLoader {
                     } else {
                         decode_image_bytes(&job.bytes, job.format_hint.as_deref(), compress).map(
                             |image| {
-                                let original_size = image.original_size();
+                                // Prefer file-header dimensions for layout/fit.
+                                // Decoded pixels may be capped at MAX_IMAGE_DIMENSION.
+                                let decoded = image.original_size();
+                                let original_size =
+                                    image_dimensions_from_bytes(&job.bytes).unwrap_or(decoded);
                                 LoadResult {
                                     epoch: job.epoch,
                                     page_index: job.page_index,

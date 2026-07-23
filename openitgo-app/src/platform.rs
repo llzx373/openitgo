@@ -198,19 +198,32 @@ pub mod macos {
         }
     }
 
+    /// Create a thumbnail (or GPU-sized downsample) from the **full** image.
+    ///
+    /// Must use `kCGImageSourceCreateThumbnailFromImageAlways`, not
+    /// `…IfAbsent`. Many JPEG/HEIC files ship a tiny EXIF/HEIF embedded
+    /// thumbnail (often ~160×100); with `IfAbsent`, ImageIO returns that
+    /// embedded thumb regardless of `max_dim`, which the oversized-page
+    /// decode path then treats as the "full" page — postage-stamp rendering
+    /// and wrong fit zoom. `Always` forces a fresh downsample from the
+    /// primary image to `max_dim`. `WithTransform` applies EXIF orientation.
     unsafe fn create_thumbnail_image(source: CGImageSourceRef, max_dim: usize) -> Option<CGImage> {
         let max_size_key = CFString::from_static_string("kCGImageSourceThumbnailMaxPixelSize");
-        let create_if_absent_key =
-            CFString::from_static_string("kCGImageSourceCreateThumbnailFromImageIfAbsent");
+        let create_always_key =
+            CFString::from_static_string("kCGImageSourceCreateThumbnailFromImageAlways");
+        let with_transform_key =
+            CFString::from_static_string("kCGImageSourceCreateThumbnailWithTransform");
         let should_cache_key = CFString::from_static_string("kCGImageSourceShouldCache");
 
         let max_size = CFNumber::from(max_dim as i64);
-        let one = CFNumber::from(1i32);
+        let always = CFNumber::from(1i32);
+        let with_transform = CFNumber::from(1i32);
         let zero = CFNumber::from(0i32);
 
         let options = CFDictionary::from_CFType_pairs(&[
             (max_size_key, max_size),
-            (create_if_absent_key, one),
+            (create_always_key, always),
+            (with_transform_key, with_transform),
             (should_cache_key, zero),
         ]);
 
@@ -665,6 +678,68 @@ pub mod macos {
             // SAFETY: `fileSystemRepresentation` 保证返回合法且生命周期覆盖当前
             // autorelease pool 的 C 字符串；使用 `CStr` 仅做只读解析，不越界。
             CStr::from_ptr(fs).to_str().ok().map(PathBuf::from)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::loader::MAX_IMAGE_DIMENSION;
+
+        #[test]
+        fn oversized_jpeg_with_exif_thumb_decodes_near_max_dim_not_exif_thumb() {
+            // Fixture: 4200×100 primary + ~160×4 EXIF thumb. Long edge > 4096
+            // forces the ImageIO thumbnail downsample path; with IfAbsent this
+            // used to return the EXIF postage stamp.
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/large_jpeg_with_exif_thumb.jpg");
+            let bytes = std::fs::read(&path).expect("fixture present");
+            let loaded = decode_image_bytes(&bytes, false)
+                .expect("decode ok")
+                .expect("ImageIO should handle JPEG");
+            let [w, h] = loaded.original_size();
+            let long = w.max(h);
+            assert!(
+                long > 1024,
+                "decoded {}x{} — looks like EXIF embedded thumb, not a full downsample",
+                w,
+                h
+            );
+            assert!(
+                long <= MAX_IMAGE_DIMENSION,
+                "decoded {}x{} exceeds MAX_IMAGE_DIMENSION",
+                w,
+                h
+            );
+            // Aspect roughly preserved (4200:100).
+            assert!(
+                (w as f32 / h as f32) > 20.0,
+                "unexpected aspect {}x{}",
+                w,
+                h
+            );
+        }
+
+        #[test]
+        fn ui_thumbnail_path_downscales_oversized_jpeg_not_exif_thumb() {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/large_jpeg_with_exif_thumb.jpg");
+            let bytes = std::fs::read(&path).expect("fixture present");
+            let thumb = decode_thumbnail_bytes(&bytes)
+                .expect("decode ok")
+                .expect("ImageIO should handle JPEG");
+            let long = thumb.size[0].max(thumb.size[1]) as u32;
+            assert!(
+                long > 32,
+                "UI thumb {}x{} too small — EXIF thumb leak?",
+                thumb.size[0],
+                thumb.size[1]
+            );
+            assert!(
+                long <= crate::loader::THUMBNAIL_MAX_DIMENSION,
+                "UI thumb {} exceeds THUMBNAIL_MAX_DIMENSION",
+                long
+            );
         }
     }
 }

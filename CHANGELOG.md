@@ -81,6 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 超大 JPEG（长边 >4096）含 EXIF 内嵌缩略图时，macOS ImageIO 全图/缩略图路径改用 `CreateThumbnailFromImageAlways`，不再误用 ~160px EXIF 小图当正文；布局尺寸保留文件头分辨率，fit 在尺寸变化时重算。
 - 漫画首页缩放：双页 LTR 封面仅右页时 `spread_size` 不再因 `left_page?` 失败；`available` 过小或尺寸晚到时保留/重挂 `pending_fit`，翻页后按当前 `fit_mode` 适应。
 - 窗口几何：启动恢复上次大小/位置/最大化；屏外时回退默认尺寸并居中；运行中节流写入 settings，退出再 flush。
 

@@ -154,15 +154,25 @@ impl PageCache {
         &mut self,
         page_index: usize,
         image: LoadedImage,
+        // Preferred layout size (typically file-header dims from LoadResult).
+        // When the bitmap was capped at MAX_IMAGE_DIMENSION, this keeps
+        // fit/zoom calibrated to the true page size.
+        layout_size: [u32; 2],
         max_size_bytes: usize,
         protected: &std::collections::HashSet<usize>,
     ) {
         let new_size = image.size_bytes();
-        let original_size = image.original_size();
+        let decoded_size = image.original_size();
         timing::log(&format!(
-            "cache insert full page {} size {} budget {}",
-            page_index, new_size, max_size_bytes
+            "cache insert full page {} size {} budget {} layout {:?} decoded {:?}",
+            page_index, new_size, max_size_bytes, layout_size, decoded_size
         ));
+
+        // Prefer an already-seeded / thumbnail-reported size over a smaller
+        // downsampled decode so pending fit zoom stays stable across the
+        // thumb→full transition.
+        let existing_layout = self.textures.get(&page_index).map(|e| e.original_size);
+        let original_size = prefer_layout_size(existing_layout, layout_size, decoded_size);
 
         // Remove any existing full-resolution data for this page first so the
         // budget check accounts for the replacement. size_bytes tracks either
@@ -261,6 +271,40 @@ impl PageCache {
     }
 }
 
+/// Pick the layout size used for fit/zoom.
+///
+/// Prefers an already-known header/seed size, then an explicit `layout_size`
+/// from the loader (file header), and only falls back to the decoded bitmap
+/// size. Never replaces a larger known size with a smaller downsample so
+/// `apply_pending_fit` stays calibrated across the thumb→full transition.
+fn prefer_layout_size(
+    existing: Option<[u32; 2]>,
+    layout_size: [u32; 2],
+    decoded_size: [u32; 2],
+) -> [u32; 2] {
+    fn area(s: [u32; 2]) -> u64 {
+        s[0] as u64 * s[1] as u64
+    }
+    fn valid(s: [u32; 2]) -> bool {
+        s[0] > 0 && s[1] > 0
+    }
+
+    let mut best = if valid(decoded_size) {
+        decoded_size
+    } else {
+        [1, 1]
+    };
+    if valid(layout_size) && area(layout_size) >= area(best) {
+        best = layout_size;
+    }
+    if let Some(existing) = existing {
+        if valid(existing) && area(existing) >= area(best) {
+            best = existing;
+        }
+    }
+    best
+}
+
 impl Default for PageCache {
     fn default() -> Self {
         Self::new()
@@ -294,7 +338,7 @@ mod tests {
         assert!(!cache.contains_full(0));
 
         let image = make_image(2, 2);
-        cache.insert_full(0, image, 1024, &HashSet::new());
+        cache.insert_full(0, image, [2, 2], 1024, &HashSet::new());
 
         assert!(cache.contains_full(0));
         let handle = cache
@@ -310,14 +354,14 @@ mod tests {
         // 2x2 RGBA8 = 16 bytes each.
         let budget = 32;
 
-        cache.insert_full(0, make_image(2, 2), budget, &HashSet::new());
-        cache.insert_full(1, make_image(2, 2), budget, &HashSet::new());
+        cache.insert_full(0, make_image(2, 2), [2, 2], budget, &HashSet::new());
+        cache.insert_full(1, make_image(2, 2), [2, 2], budget, &HashSet::new());
         assert_eq!(cache.total_size_bytes(), 32);
         assert!(cache.contains_full(0));
         assert!(cache.contains_full(1));
 
         // Inserting a third page should evict the least-recently-used full image (page 0).
-        cache.insert_full(2, make_image(2, 2), budget, &HashSet::new());
+        cache.insert_full(2, make_image(2, 2), [2, 2], budget, &HashSet::new());
         assert_eq!(cache.total_size_bytes(), 32);
         assert!(!cache.contains_full(0));
         assert!(cache.contains_full(1));
@@ -333,13 +377,13 @@ mod tests {
         let mut cache = PageCache::new();
         let budget = 32;
 
-        cache.insert_full(0, make_image(2, 2), budget, &HashSet::new());
-        cache.insert_full(1, make_image(2, 2), budget, &HashSet::new());
+        cache.insert_full(0, make_image(2, 2), [2, 2], budget, &HashSet::new());
+        cache.insert_full(1, make_image(2, 2), [2, 2], budget, &HashSet::new());
 
         // Touch page 0 so page 1 becomes the LRU entry.
         let _ = cache.get_texture(&ctx, 0);
 
-        cache.insert_full(2, make_image(2, 2), budget, &HashSet::new());
+        cache.insert_full(2, make_image(2, 2), [2, 2], budget, &HashSet::new());
         assert!(cache.contains_full(0));
         assert!(!cache.contains_full(1));
         assert!(cache.contains_full(2));
@@ -351,7 +395,7 @@ mod tests {
         let mut cache = PageCache::new();
         let budget = 8;
 
-        cache.insert_full(0, make_image(2, 2), budget, &HashSet::new()); // 16 bytes, exceeds budget
+        cache.insert_full(0, make_image(2, 2), [2, 2], budget, &HashSet::new()); // 16 bytes, exceeds budget
 
         assert!(cache.contains_full(0));
         assert_eq!(cache.total_size_bytes(), 16);
@@ -370,11 +414,11 @@ mod tests {
         let mut cache = PageCache::new();
         let budget = 32;
 
-        cache.insert_full(0, make_image(2, 2), budget, &HashSet::new());
-        cache.insert_full(1, make_image(2, 2), budget, &HashSet::new());
+        cache.insert_full(0, make_image(2, 2), [2, 2], budget, &HashSet::new());
+        cache.insert_full(1, make_image(2, 2), [2, 2], budget, &HashSet::new());
 
         // Insert page 2 while protecting page 0. Page 1 is the only evictable entry.
-        cache.insert_full(2, make_image(2, 2), budget, &HashSet::from([0]));
+        cache.insert_full(2, make_image(2, 2), [2, 2], budget, &HashSet::from([0]));
         assert!(cache.contains_full(0));
         assert!(!cache.contains_full(1));
         assert!(cache.contains_full(2));
@@ -390,10 +434,10 @@ mod tests {
         // 2x2 RGBA8 = 16 bytes each; budget can only hold one.
         let budget = 16;
 
-        cache.insert_full(0, make_image(2, 2), budget, &HashSet::new());
+        cache.insert_full(0, make_image(2, 2), [2, 2], budget, &HashSet::new());
         // Insert page 1 while page 0 is protected. Since page 0 cannot be
         // evicted, the budget must be exceeded rather than looping forever.
-        cache.insert_full(1, make_image(2, 2), budget, &HashSet::from([0]));
+        cache.insert_full(1, make_image(2, 2), [2, 2], budget, &HashSet::from([0]));
 
         assert!(cache.contains_full(0));
         assert!(cache.contains_full(1));
@@ -410,7 +454,7 @@ mod tests {
         let budget = 8;
 
         cache.insert_thumbnail(0, make_image(2, 2), [2, 2]);
-        cache.insert_full(0, make_image(2, 2), budget, &HashSet::new());
+        cache.insert_full(0, make_image(2, 2), [2, 2], budget, &HashSet::new());
 
         // Evict the full image; the thumbnail should remain.
         cache.enforce_budget_with_protected(budget, &HashSet::new());
@@ -427,6 +471,48 @@ mod tests {
         assert_eq!(cache.get_original_size(0), Some([123, 456]));
         assert!(!cache.contains_full(0));
         assert!(!cache.contains_thumbnail(0));
+    }
+
+    #[test]
+    fn test_insert_full_preserves_larger_seeded_layout_size() {
+        let mut cache = PageCache::new();
+        // Header/seed says 4500×2815; GPU decode was capped to 4096×2562.
+        cache.insert_dimensions(0, [4500, 2815]);
+        cache.insert_full(
+            0,
+            make_image(64, 40), // stand-in for downsampled bitmap
+            [4096, 2562],
+            1024 * 1024,
+            &HashSet::new(),
+        );
+        assert_eq!(cache.get_original_size(0), Some([4500, 2815]));
+        assert!(cache.contains_full(0));
+    }
+
+    #[test]
+    fn test_insert_full_uses_layout_size_over_decoded_when_no_seed() {
+        let mut cache = PageCache::new();
+        cache.insert_full(
+            0,
+            make_image(64, 40),
+            [4500, 2815],
+            1024 * 1024,
+            &HashSet::new(),
+        );
+        assert_eq!(cache.get_original_size(0), Some([4500, 2815]));
+    }
+
+    #[test]
+    fn test_prefer_layout_size_never_shrinks() {
+        assert_eq!(
+            prefer_layout_size(Some([4500, 2815]), [4096, 2562], [160, 100]),
+            [4500, 2815]
+        );
+        assert_eq!(
+            prefer_layout_size(None, [4500, 2815], [4096, 2562]),
+            [4500, 2815]
+        );
+        assert_eq!(prefer_layout_size(None, [0, 0], [4096, 2562]), [4096, 2562]);
     }
 
     #[test]

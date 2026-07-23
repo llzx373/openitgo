@@ -93,9 +93,9 @@ pub struct OpenReader {
     pub webtoon_last_page: usize,
     /// Last seen viewport size, used to re-apply the current fit on resize.
     pub last_available_size: Option<egui::Vec2>,
-    /// Whether `spread_size()` was available last frame. Rising edge (false→true)
-    /// re-arms pending_fit so late-arriving page dimensions still get a correct zoom.
-    pub had_spread_size: bool,
+    /// Last committed spread size used for fit. Rising edge / dimension
+    /// upgrades re-arm `pending_fit` so zoom stays calibrated.
+    pub last_spread_size: Option<egui::Vec2>,
     /// Aspect ratio above which a page is treated as a wide spread and shown
     /// alone even in double-page mode. Inherited from Settings at open time.
     pub wide_page_threshold: f32,
@@ -334,7 +334,7 @@ impl OpenReader {
         self.page_errors.clear();
         self.left_page = None;
         self.right_page = None;
-        self.had_spread_size = false;
+        self.last_spread_size = None;
     }
 
     /// Eagerly seed the page cache with the dimensions of the spread that will
@@ -428,6 +428,7 @@ impl OpenReader {
                                 self.cache.insert_full(
                                     result.page_index,
                                     image,
+                                    result.original_size,
                                     cache_size_bytes,
                                     &protected,
                                 );
@@ -529,7 +530,7 @@ impl ReaderView {
             webtoon_scroll_offset: 0.0,
             webtoon_last_page: state.current_page,
             last_available_size: None,
-            had_spread_size: false,
+            last_spread_size: None,
             wide_page_threshold,
             enable_page_animation,
         };
@@ -814,11 +815,18 @@ impl ReaderView {
         // Apply the pending fit as soon as the original dimensions are known,
         // even if the GPU texture has not been uploaded yet. This prevents the
         // first frames after opening a comic from showing an unscaled page.
-        let has_spread = reader.spread_size().is_some();
-        if has_spread && !reader.had_spread_size {
+        // Also re-arm when layout size changes (e.g. header dims replace a
+        // wrong decode size) so zoom stays calibrated.
+        let spread = reader.spread_size();
+        let dims_changed = match (reader.last_spread_size, spread) {
+            (Some(prev), Some(cur)) => (prev.x - cur.x).abs() > 0.5 || (prev.y - cur.y).abs() > 0.5,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if dims_changed {
             reader.pending_fit = reader.pending_fit.or(Some(reader.state.fit_mode));
         }
-        reader.had_spread_size = has_spread;
+        reader.last_spread_size = spread;
         reader.apply_pending_fit(ctx, available.size());
 
         let spread_size = egui::vec2(left_size.x + right_size.x, left_size.y.max(right_size.y));
@@ -1435,7 +1443,7 @@ mod tests {
             webtoon_scroll_offset: 0.0,
             webtoon_last_page: 0,
             last_available_size: None,
-            had_spread_size: false,
+            last_spread_size: None,
             wide_page_threshold: 1.4,
             enable_page_animation: true,
         }
