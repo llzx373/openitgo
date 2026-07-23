@@ -77,46 +77,36 @@ impl LibraryView {
         callbacks: LibraryCallbacks<'_>,
     ) {
         ui.horizontal(|ui| {
-            ui.heading("书架");
-            ui.separator();
-            if ui
-                .selectable_label(self.mode == LibraryMode::Library, "漫画")
-                .clicked()
-            {
-                self.mode = LibraryMode::Library;
-            }
-            if ui
-                .selectable_label(self.mode == LibraryMode::Ebooks, "电子书")
-                .clicked()
-            {
-                self.mode = LibraryMode::Ebooks;
-            }
-            if ui
-                .selectable_label(self.mode == LibraryMode::History, "历史")
-                .clicked()
-            {
-                self.mode = LibraryMode::History;
-            }
-            if ui
-                .selectable_label(self.mode == LibraryMode::Bookmarks, "书签")
-                .clicked()
-            {
-                self.mode = LibraryMode::Bookmarks;
-            }
-            if ui
-                .selectable_label(self.mode == LibraryMode::Stats, "统计")
-                .clicked()
-            {
-                self.mode = LibraryMode::Stats;
-            }
+            ui.heading(egui::RichText::new("书架").size(22.0).strong());
+            ui.add_space(12.0);
+            crate::theme::segmented_frame(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (mode, label) in [
+                        (LibraryMode::Library, "漫画"),
+                        (LibraryMode::Ebooks, "电子书"),
+                        (LibraryMode::History, "历史"),
+                        (LibraryMode::Bookmarks, "书签"),
+                        (LibraryMode::Stats, "统计"),
+                    ] {
+                        let selected = self.mode == mode;
+                        if ui.selectable_label(selected, label).clicked() {
+                            self.mode = mode;
+                        }
+                    }
+                });
+            });
             if matches!(self.mode, LibraryMode::Library | LibraryMode::Ebooks) {
-                ui.separator();
+                ui.add_space(8.0);
                 let hint = if self.mode == LibraryMode::Ebooks {
                     "搜索电子书"
                 } else {
                     "搜索漫画"
                 };
-                ui.add(egui::TextEdit::singleline(&mut self.search_query).hint_text(hint));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.search_query)
+                        .hint_text(hint)
+                        .desired_width(180.0),
+                );
                 egui::ComboBox::from_id_salt("library_sort")
                     .selected_text(sort_label(*library_sort))
                     .show_ui(ui, |ui| {
@@ -134,7 +124,13 @@ impl LibraryView {
                 {
                     (callbacks.on_remove_missing)();
                 }
-                if ui.button("打开文件夹").clicked() {
+                if ui
+                    .button(format!(
+                        "{} 打开文件夹",
+                        egui_phosphor_icons::icons::FOLDER_PLUS.as_str()
+                    ))
+                    .clicked()
+                {
                     (callbacks.on_add)();
                 }
             });
@@ -143,24 +139,25 @@ impl LibraryView {
         if matches!(self.mode, LibraryMode::Library | LibraryMode::Ebooks) {
             let tags = collect_unique_tags(&self.library.entries);
             if !tags.is_empty() {
+                ui.add_space(6.0);
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("标签:");
-                    if ui
-                        .selectable_label(self.tag_filter.is_none(), "全部")
-                        .clicked()
-                    {
+                    ui.label(egui::RichText::new("标签").weak().size(12.5));
+                    if crate::theme::tag_chip(ui, "全部", self.tag_filter.is_none()).clicked() {
                         self.tag_filter = None;
                     }
                     for tag in tags {
                         let selected = self.tag_filter.as_deref() == Some(tag.as_str());
-                        if ui.selectable_label(selected, &tag).clicked() {
+                        if crate::theme::tag_chip(ui, &tag, selected).clicked() {
                             self.tag_filter = if selected { None } else { Some(tag.clone()) };
                         }
                     }
                 });
-                ui.separator();
+                ui.add_space(4.0);
             }
         }
+
+        // Soft dashed rule between header chrome and content grid.
+        crate::theme::dashed_separator(ui);
 
         if let Some((idx, buffer)) = self.tag_edit_buffer.as_mut() {
             let idx = *idx;
@@ -212,15 +209,16 @@ impl LibraryView {
             self.render_empty_library(ui, callbacks);
             return;
         }
-        const CARD_WIDTH: f32 = 140.0;
-        const CARD_HEIGHT: f32 = 260.0;
-        const COVER_WIDTH: f32 = 120.0;
-        const COVER_HEIGHT: f32 = 170.0;
+        const CARD_WIDTH: f32 = 148.0;
+        const CARD_HEIGHT: f32 = 268.0;
+        const COVER_WIDTH: f32 = 132.0;
+        const COVER_HEIGHT: f32 = 186.0;
         let cover_size = egui::vec2(COVER_WIDTH, COVER_HEIGHT);
+        let cover_radius = egui::CornerRadius::same(crate::theme::RADIUS_COVER);
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(16.0, 16.0);
+                ui.spacing_mut().item_spacing = egui::vec2(18.0, 20.0);
                 for (original_idx, entry) in entries {
                     let is_editing = self.edit_buffer.as_ref().map(|b| b.0) == Some(original_idx);
                     let file_missing = !entry.path.exists();
@@ -239,10 +237,17 @@ impl LibraryView {
                             egui::vec2(CARD_WIDTH, CARD_HEIGHT),
                             egui::Layout::top_down(egui::Align::Center),
                             |ui| {
-                                ui.group(|ui| {
-                                    ui.set_min_size(egui::vec2(CARD_WIDTH, CARD_HEIGHT));
-                                    ui.vertical_centered(|ui| {
-                                        let cover_rect = if let Some(texture) = self.cover_texture(
+                                ui.set_min_size(egui::vec2(CARD_WIDTH, CARD_HEIGHT));
+                                ui.vertical_centered(|ui| {
+                                    let cover_rect = {
+                                        let (slot, _response) = ui
+                                            .allocate_exact_size(cover_size, egui::Sense::hover());
+                                        ui.painter().rect_filled(
+                                            slot,
+                                            cover_radius,
+                                            ui.visuals().extreme_bg_color,
+                                        );
+                                        if let Some(texture) = self.cover_texture(
                                             ui.ctx(),
                                             &entry.comic_id,
                                             entry.cover_path.as_ref(),
@@ -251,30 +256,24 @@ impl LibraryView {
                                             let scale = (COVER_WIDTH / desired.x)
                                                 .min(COVER_HEIGHT / desired.y);
                                             let size = desired * scale;
-                                            let (rect, _response) =
-                                                ui.allocate_exact_size(size, egui::Sense::hover());
-                                            ui.painter().image(
-                                                texture.id(),
-                                                rect,
-                                                egui::Rect::from_min_max(
-                                                    egui::pos2(0.0, 0.0),
-                                                    egui::pos2(1.0, 1.0),
-                                                ),
-                                                egui::Color32::WHITE,
-                                            );
-                                            rect
+                                            let rect =
+                                                egui::Rect::from_center_size(slot.center(), size);
+                                            egui::Image::new(&texture)
+                                                .fit_to_exact_size(size)
+                                                .corner_radius(cover_radius)
+                                                .paint_at(ui, rect);
                                         } else {
-                                            let (rect, _response) = ui.allocate_exact_size(
-                                                cover_size,
-                                                egui::Sense::hover(),
-                                            );
                                             let placeholder_color =
                                                 if entry.media_type == MediaType::Ebook {
-                                                    egui::Color32::from_rgb(60, 80, 120)
+                                                    egui::Color32::from_rgb(60, 72, 96)
                                                 } else {
                                                     ui.visuals().widgets.inactive.bg_fill
                                                 };
-                                            ui.painter().rect_filled(rect, 0.0, placeholder_color);
+                                            ui.painter().rect_filled(
+                                                slot,
+                                                cover_radius,
+                                                placeholder_color,
+                                            );
                                             let placeholder_label = match entry.media_type {
                                                 MediaType::Ebook => "电子书",
                                                 MediaType::Comic => "漫画",
@@ -282,76 +281,113 @@ impl LibraryView {
                                                 MediaType::Audio => "音频",
                                             };
                                             ui.painter().text(
-                                                rect.center(),
+                                                slot.center(),
                                                 egui::Align2::CENTER_CENTER,
                                                 placeholder_label,
-                                                egui::FontId::proportional(16.0),
-                                                egui::Color32::WHITE,
-                                            );
-                                            rect
-                                        };
-
-                                        if file_missing {
-                                            let overlay = cover_rect.expand2(egui::vec2(4.0, 4.0));
-                                            ui.painter().rect_filled(
-                                                overlay,
-                                                0.0,
-                                                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180),
-                                            );
-                                            ui.painter().text(
-                                                overlay.center(),
-                                                egui::Align2::CENTER_CENTER,
-                                                "已删除",
-                                                egui::FontId::proportional(14.0),
-                                                egui::Color32::WHITE,
+                                                egui::FontId::proportional(15.0),
+                                                egui::Color32::from_rgba_unmultiplied(
+                                                    255, 255, 255, 200,
+                                                ),
                                             );
                                         }
+                                        slot
+                                    };
 
-                                        ui.add_space(4.0);
+                                    if file_missing {
+                                        let overlay = cover_rect;
+                                        ui.painter().rect_filled(
+                                            overlay,
+                                            cover_radius,
+                                            egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+                                        );
+                                        ui.painter().text(
+                                            overlay.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            "已删除",
+                                            egui::FontId::proportional(14.0),
+                                            egui::Color32::WHITE,
+                                        );
+                                    }
 
-                                        if is_editing {
-                                            let title = &mut self.edit_buffer.as_mut().unwrap().1;
-                                            ui.text_edit_singleline(title);
-                                            let mut save = false;
-                                            let mut cancel = false;
-                                            ui.horizontal(|ui| {
-                                                if ui.button("保存").clicked() {
-                                                    save = true;
-                                                }
-                                                if ui.button("取消").clicked() {
-                                                    cancel = true;
-                                                }
-                                            });
-                                            if save {
-                                                let new_title = title.trim().to_string();
-                                                if !new_title.is_empty() {
-                                                    (callbacks.on_update_title)(
-                                                        original_idx,
-                                                        new_title,
-                                                    );
-                                                }
-                                                self.edit_buffer = None;
-                                            } else if cancel {
-                                                self.edit_buffer = None;
+                                    ui.add_space(8.0);
+
+                                    if is_editing {
+                                        let title = &mut self.edit_buffer.as_mut().unwrap().1;
+                                        ui.text_edit_singleline(title);
+                                        let mut save = false;
+                                        let mut cancel = false;
+                                        ui.horizontal(|ui| {
+                                            if ui.button("保存").clicked() {
+                                                save = true;
                                             }
-                                        } else {
-                                            ui.label(
+                                            if ui.button("取消").clicked() {
+                                                cancel = true;
+                                            }
+                                        });
+                                        if save {
+                                            let new_title = title.trim().to_string();
+                                            if !new_title.is_empty() {
+                                                (callbacks.on_update_title)(
+                                                    original_idx,
+                                                    new_title,
+                                                );
+                                            }
+                                            self.edit_buffer = None;
+                                        } else if cancel {
+                                            self.edit_buffer = None;
+                                        }
+                                    } else {
+                                        ui.add(
+                                            egui::Label::new(
                                                 egui::RichText::new(&entry.title)
                                                     .strong()
-                                                    .text_style(egui::TextStyle::Button),
+                                                    .size(13.0),
+                                            )
+                                            .truncate(),
+                                        );
+                                    }
+
+                                    let progress = library_progress(history, &entry);
+                                    if progress.total > 0 {
+                                        ui.add_space(4.0);
+                                        let bar_w = COVER_WIDTH;
+                                        let (bar_rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(bar_w, 4.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        let rounding = egui::CornerRadius::same(2);
+                                        ui.painter().rect_filled(
+                                            bar_rect,
+                                            rounding,
+                                            ui.visuals().extreme_bg_color,
+                                        );
+                                        let fill_w = bar_rect.width() * progress.ratio();
+                                        if fill_w > 0.0 {
+                                            let fill = egui::Rect::from_min_size(
+                                                bar_rect.min,
+                                                egui::vec2(fill_w, bar_rect.height()),
+                                            );
+                                            ui.painter().rect_filled(
+                                                fill,
+                                                rounding,
+                                                ui.visuals().selection.stroke.color,
                                             );
                                         }
-
-                                        let progress = library_progress(history, &entry);
-                                        if progress.total > 0 {
-                                            ui.add(egui::ProgressBar::new(progress.ratio()).text(
-                                                format!("{}/{}", progress.read, progress.total),
-                                            ));
-                                        }
-                                    });
-                                })
-                                .response
-                                .interact(egui::Sense::click())
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{}/{}",
+                                                progress.read, progress.total
+                                            ))
+                                            .size(11.0)
+                                            .weak(),
+                                        );
+                                    }
+                                });
+                                ui.interact(
+                                    ui.min_rect(),
+                                    ui.id().with(("lib_card", original_idx)),
+                                    egui::Sense::click(),
+                                )
                             },
                         )
                         .inner;
@@ -399,12 +435,31 @@ impl LibraryView {
 
     fn render_empty_library(&mut self, ui: &mut egui::Ui, callbacks: LibraryCallbacks<'_>) {
         ui.vertical_centered(|ui| {
-            ui.add_space(64.0);
-            ui.label(egui::RichText::new("书架还是空的").size(20.0).strong());
+            ui.add_space(80.0);
+            ui.label(
+                egui::RichText::new(egui_phosphor_icons::icons::BOOKS.as_str())
+                    .size(48.0)
+                    .color(crate::theme::accent_for(ui.visuals().dark_mode)),
+            );
+            ui.add_space(12.0);
+            ui.label(egui::RichText::new("书架还是空的").size(22.0).strong());
             ui.add_space(8.0);
-            ui.label("拖拽漫画文件/文件夹到窗口，或点击下面按钮导入。");
-            ui.add_space(16.0);
-            if ui.button("打开文件夹").clicked() {
+            ui.label(
+                egui::RichText::new("拖拽漫画、电子书或影音文件到窗口，或点击下方按钮导入。")
+                    .weak()
+                    .size(14.0),
+            );
+            ui.add_space(20.0);
+            if ui
+                .add_sized(
+                    egui::vec2(160.0, 32.0),
+                    egui::Button::new(format!(
+                        "{} 打开文件夹",
+                        egui_phosphor_icons::icons::FOLDER_PLUS.as_str()
+                    )),
+                )
+                .clicked()
+            {
                 (callbacks.on_add)();
             }
         });

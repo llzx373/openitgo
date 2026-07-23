@@ -3,7 +3,8 @@ pub struct ProgressBarResponse {
     pub hovered_page: Option<usize>,
 }
 
-const BAR_HEIGHT: f32 = 8.0;
+const BAR_HEIGHT: f32 = 10.0;
+const BAR_RADIUS: u8 = 4;
 
 pub fn comic_progress_bar(
     ui: &mut egui::Ui,
@@ -40,20 +41,21 @@ pub fn comic_progress_bar(
 fn draw_empty_bar(ui: &mut egui::Ui, rect: egui::Rect) {
     ui.painter().rect_filled(
         rect,
-        egui::CornerRadius::same(2),
+        egui::CornerRadius::same(BAR_RADIUS),
         ui.visuals().extreme_bg_color,
     );
 }
 
 fn draw_filled_bar(ui: &mut egui::Ui, rect: egui::Rect, current_page: usize, total_pages: usize) {
-    let rounding = egui::CornerRadius::same(2);
+    let rounding = egui::CornerRadius::same(BAR_RADIUS);
     let bg_color = ui.visuals().extreme_bg_color;
     ui.painter().rect_filled(rect, rounding, bg_color);
 
     let progress = (current_page + 1).min(total_pages) as f32 / total_pages as f32;
     let fill_width = rect.width() * progress;
     let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, rect.height()));
-    let fill_color = ui.visuals().selection.bg_fill;
+    // Prefer selection stroke (accent) for a clearer Gallery progress fill.
+    let fill_color = ui.visuals().selection.stroke.color;
     ui.painter().rect_filled(fill_rect, rounding, fill_color);
 }
 

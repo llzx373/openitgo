@@ -6,6 +6,7 @@ pub mod loader;
 pub mod opener;
 pub mod platform;
 pub mod shortcuts;
+pub mod theme;
 pub mod timing;
 pub mod views;
 pub mod widgets;

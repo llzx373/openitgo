@@ -534,10 +534,17 @@ fn toolbar_button(
     text: &str,
     mode: ToolbarDisplayMode,
 ) -> egui::Response {
+    let min = egui::vec2(0.0, crate::theme::TOOLBAR_BUTTON_HEIGHT);
     match mode {
-        ToolbarDisplayMode::IconOnly => ui.button(icon).on_hover_text(text),
-        ToolbarDisplayMode::TextOnly => ui.button(text),
-        ToolbarDisplayMode::IconAndText => ui.button(format!("{} {}", icon.as_str(), text)),
+        ToolbarDisplayMode::IconOnly => ui
+            .add(egui::Button::new(icon).min_size(min))
+            .on_hover_text(text),
+        ToolbarDisplayMode::TextOnly => ui.add(egui::Button::new(text).min_size(min)),
+        // Separate atoms: Phosphor font for the icon, proportional for the label —
+        // avoids mixed-font galley baseline drift that made labels look off-center.
+        ToolbarDisplayMode::IconAndText => {
+            ui.add(egui::Button::new((icon, format!(" {text}"))).min_size(min))
+        }
     }
 }
 
@@ -548,14 +555,15 @@ fn toolbar_selectable(
     active: bool,
     mode: ToolbarDisplayMode,
 ) -> egui::Response {
-    let label = match mode {
-        ToolbarDisplayMode::IconOnly => egui::WidgetText::from(icon),
-        ToolbarDisplayMode::TextOnly => egui::WidgetText::from(text),
-        ToolbarDisplayMode::IconAndText => {
-            egui::WidgetText::from(format!("{} {}", icon.as_str(), text))
-        }
+    let min = egui::vec2(0.0, crate::theme::TOOLBAR_BUTTON_HEIGHT);
+    let button = match mode {
+        ToolbarDisplayMode::IconOnly => egui::Button::new(icon).selected(active).min_size(min),
+        ToolbarDisplayMode::TextOnly => egui::Button::new(text).selected(active).min_size(min),
+        ToolbarDisplayMode::IconAndText => egui::Button::new((icon, format!(" {text}")))
+            .selected(active)
+            .min_size(min),
     };
-    ui.selectable_label(active, label).on_hover_text(text)
+    ui.add(button).on_hover_text(text)
 }
 
 /// 启动时要打开的路径：优先 `OPENITGO_OPEN` 环境变量，其次第一个命令行参数
@@ -569,8 +577,12 @@ fn initial_open_path(
 }
 
 impl ReaderApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut app = Self::default();
+        // Install Gallery Immersive visuals on startup even when theme is
+        // already System (the settings≠current_theme guard would otherwise skip).
+        app.apply_theme(&cc.egui_ctx);
+        app.current_theme = app.settings.theme.clone();
         let env_open = std::env::var("OPENITGO_OPEN")
             .ok()
             .map(std::path::PathBuf::from);
@@ -1095,128 +1107,148 @@ impl ReaderApp {
             .map(|ds| ds.iter().map(|d| (d.name.clone(), d.label())).collect())
             .unwrap_or_default();
         let current_device = self.settings.media_audio_device.clone();
-        egui::Panel::top("media_toolbar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("书架").clicked() {
-                    self.current_view = View::Library;
-                }
-                ui.separator();
-                if ui.button(if paused { "播放" } else { "暂停" }).clicked() {
-                    self.media_view.toggle_pause();
-                }
-                if ui.button("-10s").clicked() {
-                    self.seek_media_rel(&ctx, -10.0);
-                }
-                if ui.button("+10s").clicked() {
-                    self.seek_media_rel(&ctx, 10.0);
-                }
-                ui.separator();
-                if ui.button(format!("{:.1}x", speed)).clicked() {
-                    if let Some(target) = self.media_view.cycle_speed() {
-                        self.settings.media_speed = target;
-                        self.media_view
-                            .show_osd(&ctx, crate::views::media::speed_osd_text(target));
+        let display_mode = self.settings.toolbar_display_mode;
+        let chrome = crate::theme::chrome_bar_frame(ui.visuals());
+        egui::Panel::top("media_toolbar")
+            .frame(chrome)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    crate::theme::begin_chrome_row(ui);
+                    if toolbar_button(ui, icons::HOUSE, "书架", display_mode).clicked() {
+                        self.current_view = View::Library;
                     }
-                }
-                ui.separator();
-                let subs: Vec<(i64, String)> = tracks
-                    .iter()
-                    .filter(|t| t.kind == openitgo_media::TrackKind::Sub)
-                    .enumerate()
-                    .map(|(i, t)| (t.id, crate::views::media::track_label(t, i)))
-                    .collect();
-                egui::ComboBox::from_label("字幕")
-                    .selected_text(
-                        current_sub
-                            .and_then(|id| subs.iter().find(|(sid, _)| *sid == id))
-                            .map(|(_, l)| l.clone())
-                            .unwrap_or_else(|| "关闭".to_string()),
-                    )
-                    .show_ui(ui, |ui| {
-                        if ui.selectable_label(current_sub.is_none(), "关闭").clicked() {
-                            self.media_view.set_sub(None);
+                    ui.separator();
+                    let play_icon = if paused { icons::PLAY } else { icons::PAUSE };
+                    let play_label = if paused { "播放" } else { "暂停" };
+                    if toolbar_button(ui, play_icon, play_label, display_mode).clicked() {
+                        self.media_view.toggle_pause();
+                    }
+                    if toolbar_button(ui, icons::SKIP_BACK, "-10s", display_mode).clicked() {
+                        self.seek_media_rel(&ctx, -10.0);
+                    }
+                    if toolbar_button(ui, icons::SKIP_FORWARD, "+10s", display_mode).clicked() {
+                        self.seek_media_rel(&ctx, 10.0);
+                    }
+                    ui.separator();
+                    if ui
+                        .add(
+                            egui::Button::new(format!("{:.1}x", speed))
+                                .min_size(egui::vec2(0.0, crate::theme::TOOLBAR_BUTTON_HEIGHT)),
+                        )
+                        .on_hover_text("循环切换倍速")
+                        .clicked()
+                    {
+                        if let Some(target) = self.media_view.cycle_speed() {
+                            self.settings.media_speed = target;
+                            self.media_view
+                                .show_osd(&ctx, crate::views::media::speed_osd_text(target));
                         }
-                        for (id, label) in &subs {
-                            if ui
-                                .selectable_label(current_sub == Some(*id), label)
-                                .clicked()
-                            {
-                                self.media_view.set_sub(Some(*id));
-                            }
-                        }
-                        ui.separator();
-                        if ui.button("加载外部字幕…").clicked() {
-                            self.load_external_subtitle(&ctx);
-                        }
-                        ui.separator();
-                        if ui.button("字幕延迟 -0.1s").clicked() {
-                            self.adjust_media_sub_delay(&ctx, -0.1);
-                        }
-                        if ui.button("字幕延迟 +0.1s").clicked() {
-                            self.adjust_media_sub_delay(&ctx, 0.1);
-                        }
-                        if ui.button("重置字幕延迟").clicked() {
-                            self.reset_media_sub_delay(&ctx);
-                        }
-                    });
-                let audios: Vec<(i64, String)> = tracks
-                    .iter()
-                    .filter(|t| t.kind == openitgo_media::TrackKind::Audio)
-                    .enumerate()
-                    .map(|(i, t)| (t.id, crate::views::media::track_label(t, i)))
-                    .collect();
-                if audios.len() > 1 {
-                    egui::ComboBox::from_label("音轨")
+                    }
+                    ui.separator();
+                    let subs: Vec<(i64, String)> = tracks
+                        .iter()
+                        .filter(|t| t.kind == openitgo_media::TrackKind::Sub)
+                        .enumerate()
+                        .map(|(i, t)| (t.id, crate::views::media::track_label(t, i)))
+                        .collect();
+                    egui::ComboBox::from_label("字幕")
                         .selected_text(
-                            current_audio
-                                .and_then(|id| audios.iter().find(|(aid, _)| *aid == id))
+                            current_sub
+                                .and_then(|id| subs.iter().find(|(sid, _)| *sid == id))
                                 .map(|(_, l)| l.clone())
-                                .unwrap_or_else(|| "-".to_string()),
+                                .unwrap_or_else(|| "关闭".to_string()),
                         )
                         .show_ui(ui, |ui| {
-                            for (id, label) in &audios {
+                            if ui.selectable_label(current_sub.is_none(), "关闭").clicked() {
+                                self.media_view.set_sub(None);
+                            }
+                            for (id, label) in &subs {
                                 if ui
-                                    .selectable_label(current_audio == Some(*id), label)
+                                    .selectable_label(current_sub == Some(*id), label)
                                     .clicked()
                                 {
-                                    self.media_view.set_audio(*id);
+                                    self.media_view.set_sub(Some(*id));
+                                }
+                            }
+                            ui.separator();
+                            if ui.button("加载外部字幕…").clicked() {
+                                self.load_external_subtitle(&ctx);
+                            }
+                            ui.separator();
+                            if ui.button("字幕延迟 -0.1s").clicked() {
+                                self.adjust_media_sub_delay(&ctx, -0.1);
+                            }
+                            if ui.button("字幕延迟 +0.1s").clicked() {
+                                self.adjust_media_sub_delay(&ctx, 0.1);
+                            }
+                            if ui.button("重置字幕延迟").clicked() {
+                                self.reset_media_sub_delay(&ctx);
+                            }
+                        });
+                    let audios: Vec<(i64, String)> = tracks
+                        .iter()
+                        .filter(|t| t.kind == openitgo_media::TrackKind::Audio)
+                        .enumerate()
+                        .map(|(i, t)| (t.id, crate::views::media::track_label(t, i)))
+                        .collect();
+                    if audios.len() > 1 {
+                        egui::ComboBox::from_label("音轨")
+                            .selected_text(
+                                current_audio
+                                    .and_then(|id| audios.iter().find(|(aid, _)| *aid == id))
+                                    .map(|(_, l)| l.clone())
+                                    .unwrap_or_else(|| "-".to_string()),
+                            )
+                            .show_ui(ui, |ui| {
+                                for (id, label) in &audios {
+                                    if ui
+                                        .selectable_label(current_audio == Some(*id), label)
+                                        .clicked()
+                                    {
+                                        self.media_view.set_audio(*id);
+                                    }
+                                }
+                            });
+                    }
+                    ui.separator();
+                    let current_label = devices
+                        .iter()
+                        .find(|(n, _)| *n == current_device)
+                        .map(|(_, l)| l.clone())
+                        .unwrap_or_else(|| "自动".to_string());
+                    egui::ComboBox::from_label("输出")
+                        // 选中项截断显示，避免长设备名撑爆工具栏；下拉列表保留全名
+                        .selected_text(crate::views::media::truncate_label(&current_label, 20))
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(current_device.is_empty(), "自动")
+                                .clicked()
+                            {
+                                self.set_media_audio_device(
+                                    &ctx,
+                                    String::new(),
+                                    "自动".to_string(),
+                                );
+                            }
+                            for (name, label) in &devices {
+                                if ui
+                                    .selectable_label(current_device == *name, label)
+                                    .clicked()
+                                {
+                                    self.set_media_audio_device(&ctx, name.clone(), label.clone());
                                 }
                             }
                         });
-                }
-                ui.separator();
-                let current_label = devices
-                    .iter()
-                    .find(|(n, _)| *n == current_device)
-                    .map(|(_, l)| l.clone())
-                    .unwrap_or_else(|| "自动".to_string());
-                egui::ComboBox::from_label("输出")
-                    // 选中项截断显示，避免长设备名撑爆工具栏；下拉列表保留全名
-                    .selected_text(crate::views::media::truncate_label(&current_label, 20))
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(current_device.is_empty(), "自动")
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if toolbar_button(ui, icons::ARROWS_OUT_SIMPLE, "全屏", display_mode)
                             .clicked()
                         {
-                            self.set_media_audio_device(&ctx, String::new(), "自动".to_string());
+                            self.toggle_fullscreen(&ctx);
                         }
-                        for (name, label) in &devices {
-                            if ui
-                                .selectable_label(current_device == *name, label)
-                                .clicked()
-                            {
-                                self.set_media_audio_device(&ctx, name.clone(), label.clone());
-                            }
-                        }
+                        ui.label(egui::RichText::new(title).weak());
                     });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("全屏").clicked() {
-                        self.toggle_fullscreen(&ctx);
-                    }
-                    ui.label(title);
                 });
             });
-        });
     }
 
     /// 媒体视图菜单：倍速微调/循环播放/截图/AB 循环/章节导航。
@@ -1415,77 +1447,85 @@ impl ReaderApp {
                 )
             })
             .unwrap_or((0, None, 100.0, false));
-        egui::Panel::bottom("media_seekbar").show(ui, |ui| {
-            ui.vertical(|ui| {
-                // Row 1: full-width seek bar with a hover-time tooltip.
-                // egui 0.35 Slider still allocates spacing().slider_width
-                // (100px) and ignores add_sized (egui-0.35.0
-                // widgets/slider.rs:652-653), so override the width in a
-                // scoped Ui — without leaking it to the row-2 volume slider.
-                match dur {
-                    Some(d) if d > 0 => {
-                        let mut ratio = pos as f32 / d as f32;
-                        let slider = egui::Slider::new(&mut ratio, 0.0..=1.0).show_value(false);
-                        let width = ui.available_width();
-                        let response = ui
-                            .scope(|ui| {
+        egui::Panel::bottom("media_seekbar")
+            .frame(crate::theme::chrome_bar_frame(ui.visuals()))
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    // Row 1: full-width seek bar with a hover-time tooltip.
+                    // egui 0.35 Slider still allocates spacing().slider_width
+                    // (100px) and ignores add_sized (egui-0.35.0
+                    // widgets/slider.rs:652-653), so override the width in a
+                    // scoped Ui — without leaking it to the row-2 volume slider.
+                    match dur {
+                        Some(d) if d > 0 => {
+                            let mut ratio = pos as f32 / d as f32;
+                            let slider = egui::Slider::new(&mut ratio, 0.0..=1.0).show_value(false);
+                            let width = ui.available_width();
+                            let response = ui
+                                .scope(|ui| {
+                                    ui.spacing_mut().slider_width = width;
+                                    ui.add(slider)
+                                })
+                                .inner;
+                            let hover_text = response.hover_pos().and_then(|hover| {
+                                crate::views::media::hover_time_at(hover.x, response.rect, dur)
+                                    .map(openitgo_media::time::format_time_ms)
+                            });
+                            if response.drag_stopped() {
+                                self.media_view.seek_to_ratio_exact(ratio as f64);
+                            } else if response.changed() {
+                                self.media_view.seek_to_ratio(ratio as f64);
+                            }
+                            if let Some(text) = hover_text {
+                                // Consumes the response, so it goes last.
+                                response.on_hover_text(text);
+                            }
+                        }
+                        _ => {
+                            let width = ui.available_width();
+                            ui.scope(|ui| {
                                 ui.spacing_mut().slider_width = width;
-                                ui.add(slider)
-                            })
-                            .inner;
-                        let hover_text = response.hover_pos().and_then(|hover| {
-                            crate::views::media::hover_time_at(hover.x, response.rect, dur)
-                                .map(openitgo_media::time::format_time_ms)
-                        });
-                        if response.drag_stopped() {
-                            self.media_view.seek_to_ratio_exact(ratio as f64);
-                        } else if response.changed() {
-                            self.media_view.seek_to_ratio(ratio as f64);
-                        }
-                        if let Some(text) = hover_text {
-                            // Consumes the response, so it goes last.
-                            response.on_hover_text(text);
+                                ui.add_enabled(
+                                    false,
+                                    egui::Slider::new(&mut 0.0f32, 0.0..=1.0).show_value(false),
+                                )
+                            });
                         }
                     }
-                    _ => {
-                        let width = ui.available_width();
-                        ui.scope(|ui| {
-                            ui.spacing_mut().slider_width = width;
-                            ui.add_enabled(
-                                false,
-                                egui::Slider::new(&mut 0.0f32, 0.0..=1.0).show_value(false),
-                            )
+                    // Row 2: time display on the left; mute + volume on the right.
+                    ui.horizontal(|ui| {
+                        let dur_text = dur
+                            .map(openitgo_media::time::format_time_ms)
+                            .unwrap_or_else(|| "--:--".to_string());
+                        ui.label(format!(
+                            "{} / {}",
+                            openitgo_media::time::format_time_ms(pos),
+                            dur_text
+                        ));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let mut vol = volume as f32;
+                            if ui
+                                .add_enabled(
+                                    !muted,
+                                    egui::Slider::new(&mut vol, 0.0..=100.0).show_value(false),
+                                )
+                                .changed()
+                            {
+                                self.set_media_volume(&ctx, vol as f64);
+                            }
+                            let mute_icon = if muted {
+                                icons::SPEAKER_SLASH
+                            } else {
+                                icons::SPEAKER_HIGH
+                            };
+                            let mute_label = if muted { "取消静音" } else { "静音" };
+                            if ui.button(mute_icon).on_hover_text(mute_label).clicked() {
+                                self.toggle_media_mute(&ctx);
+                            }
                         });
-                    }
-                }
-                // Row 2: time display on the left; mute + volume on the right.
-                ui.horizontal(|ui| {
-                    let dur_text = dur
-                        .map(openitgo_media::time::format_time_ms)
-                        .unwrap_or_else(|| "--:--".to_string());
-                    ui.label(format!(
-                        "{} / {}",
-                        openitgo_media::time::format_time_ms(pos),
-                        dur_text
-                    ));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let mut vol = volume as f32;
-                        if ui
-                            .add_enabled(
-                                !muted,
-                                egui::Slider::new(&mut vol, 0.0..=100.0).show_value(false),
-                            )
-                            .changed()
-                        {
-                            self.set_media_volume(&ctx, vol as f64);
-                        }
-                        if ui.button(if muted { "取消静音" } else { "静音" }).clicked() {
-                            self.toggle_media_mute(&ctx);
-                        }
                     });
                 });
             });
-        });
     }
 
     fn render_reader_toolbar(
@@ -1498,141 +1538,152 @@ impl ReaderApp {
     ) {
         let ctx = ui.ctx().clone();
         let display_mode = self.settings.toolbar_display_mode;
-        egui::Panel::top("reader_toolbar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if toolbar_button(ui, icons::HOUSE, "书架", display_mode).clicked() {
-                    self.current_view = View::Library;
-                }
-                ui.separator();
-
-                let modes = [
-                    (ReadingMode::Ltr, icons::ARROW_RIGHT, "国漫"),
-                    (ReadingMode::Rtl, icons::ARROW_LEFT, "日漫"),
-                    (ReadingMode::Webtoon, icons::ARROW_DOWN, "韩漫"),
-                ];
-                for (m, icon, label) in modes {
-                    if toolbar_selectable(ui, icon, label, mode == m, display_mode).clicked() {
-                        self.apply_reading_mode(m);
+        let chrome = crate::theme::chrome_bar_frame(ui.visuals());
+        egui::Panel::top("reader_toolbar")
+            .frame(chrome)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    crate::theme::begin_chrome_row(ui);
+                    if toolbar_button(ui, icons::HOUSE, "书架", display_mode).clicked() {
+                        self.current_view = View::Library;
                     }
-                }
-                ui.separator();
+                    ui.separator();
 
-                if mode != ReadingMode::Webtoon {
-                    let double_page = self
-                        .reader_view
-                        .open
-                        .as_ref()
-                        .map(|r| r.state.double_page)
-                        .unwrap_or(self.settings.double_page);
-                    if toolbar_selectable(ui, icons::BOOK_OPEN, "双页", double_page, display_mode)
-                        .on_hover_text("切换到双页模式")
-                        .clicked()
-                    {
-                        let new_double = !double_page;
-                        self.settings.double_page = new_double;
-                        if let Some(reader) = self.reader_view.open.as_mut() {
-                            reader.state.set_double_page(new_double, total_pages);
-                            reader.pending_fit = Some(FitMode::Page);
+                    let modes = [
+                        (ReadingMode::Ltr, icons::ARROW_RIGHT, "国漫"),
+                        (ReadingMode::Rtl, icons::ARROW_LEFT, "日漫"),
+                        (ReadingMode::Webtoon, icons::ARROW_DOWN, "韩漫"),
+                    ];
+                    for (m, icon, label) in modes {
+                        if toolbar_selectable(ui, icon, label, mode == m, display_mode).clicked() {
+                            self.apply_reading_mode(m);
                         }
                     }
                     ui.separator();
-                }
 
-                if toolbar_button(ui, icons::MINUS, "", display_mode).clicked() {
-                    if let Some(reader) = self.reader_view.open.as_mut() {
-                        reader.zoom_out();
+                    if mode != ReadingMode::Webtoon {
+                        let double_page = self
+                            .reader_view
+                            .open
+                            .as_ref()
+                            .map(|r| r.state.double_page)
+                            .unwrap_or(self.settings.double_page);
+                        if toolbar_selectable(
+                            ui,
+                            icons::BOOK_OPEN,
+                            "双页",
+                            double_page,
+                            display_mode,
+                        )
+                        .on_hover_text("切换到双页模式")
+                        .clicked()
+                        {
+                            let new_double = !double_page;
+                            self.settings.double_page = new_double;
+                            if let Some(reader) = self.reader_view.open.as_mut() {
+                                reader.state.set_double_page(new_double, total_pages);
+                                reader.pending_fit = Some(FitMode::Page);
+                            }
+                        }
+                        ui.separator();
                     }
-                }
-                ui.label(format!("{:.0}%", zoom * 100.0));
-                if toolbar_button(ui, icons::PLUS, "", display_mode).clicked() {
-                    if let Some(reader) = self.reader_view.open.as_mut() {
-                        reader.zoom_in();
-                    }
-                }
-                if toolbar_button(
-                    ui,
-                    icons::ARROWS_OUT_LINE_HORIZONTAL,
-                    "适应宽度",
-                    display_mode,
-                )
-                .clicked()
-                {
-                    if let Some(reader) = self.reader_view.open.as_mut() {
-                        reader.request_fit(FitMode::Width);
-                    }
-                }
-                if toolbar_button(
-                    ui,
-                    icons::ARROWS_OUT_LINE_VERTICAL,
-                    "适应高度",
-                    display_mode,
-                )
-                .clicked()
-                {
-                    if let Some(reader) = self.reader_view.open.as_mut() {
-                        reader.request_fit(FitMode::Height);
-                    }
-                }
-                if toolbar_button(ui, icons::FRAME_CORNERS, "自动适应", display_mode).clicked()
-                {
-                    if let Some(reader) = self.reader_view.open.as_mut() {
-                        reader.request_fit(FitMode::Page);
-                    }
-                }
-                if toolbar_button(ui, icons::ARROW_CLOCKWISE, "旋转", display_mode)
-                    .on_hover_text("顺时针旋转 90°")
-                    .clicked()
-                {
-                    if let Some(reader) = self.reader_view.open.as_mut() {
-                        reader.rotate_cw();
-                    }
-                }
-                ui.separator();
 
-                if toolbar_button(ui, icons::CARET_LEFT, "上一页", display_mode).clicked() {
-                    self.reader_prev_page();
-                }
-                let mut displayed_page = current_page + 1;
-                let page_response = ui.add(
-                    egui::DragValue::new(&mut displayed_page)
-                        .speed(1.0)
-                        .range(1..=total_pages.max(1))
-                        .update_while_editing(false),
-                );
-                if page_response.lost_focus() {
-                    let target = displayed_page
-                        .saturating_sub(1)
-                        .min(total_pages.saturating_sub(1));
-                    if let Some(reader) = self.reader_view.open.as_mut() {
-                        if target != reader.state.current_page {
-                            reader.state.go_to_page(target, total_pages);
-                            reader.mark_page_turn();
+                    if toolbar_button(ui, icons::MINUS, "", display_mode).clicked() {
+                        if let Some(reader) = self.reader_view.open.as_mut() {
+                            reader.zoom_out();
                         }
                     }
-                }
-                ui.label(format!("/ {}", total_pages));
-                if toolbar_button(ui, icons::CARET_RIGHT, "下一页", display_mode).clicked() {
-                    self.reader_next_page();
-                }
-                ui.separator();
-
-                if toolbar_button(ui, icons::BOOKMARK, "添加书签", display_mode).clicked() {
-                    self.add_bookmark(current_page);
-                }
-                if toolbar_button(ui, icons::ARROWS_OUT_SIMPLE, "全屏", display_mode).clicked() {
-                    self.toggle_fullscreen(&ctx);
-                }
-                if toolbar_button(ui, icons::GEAR, "设置", display_mode).clicked() {
-                    self.current_view = View::Settings;
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(icons::X).on_hover_text("隐藏工具栏").clicked() {
-                        self.settings.show_toolbar = false;
+                    ui.label(format!("{:.0}%", zoom * 100.0));
+                    if toolbar_button(ui, icons::PLUS, "", display_mode).clicked() {
+                        if let Some(reader) = self.reader_view.open.as_mut() {
+                            reader.zoom_in();
+                        }
                     }
+                    if toolbar_button(
+                        ui,
+                        icons::ARROWS_OUT_LINE_HORIZONTAL,
+                        "适应宽度",
+                        display_mode,
+                    )
+                    .clicked()
+                    {
+                        if let Some(reader) = self.reader_view.open.as_mut() {
+                            reader.request_fit(FitMode::Width);
+                        }
+                    }
+                    if toolbar_button(
+                        ui,
+                        icons::ARROWS_OUT_LINE_VERTICAL,
+                        "适应高度",
+                        display_mode,
+                    )
+                    .clicked()
+                    {
+                        if let Some(reader) = self.reader_view.open.as_mut() {
+                            reader.request_fit(FitMode::Height);
+                        }
+                    }
+                    if toolbar_button(ui, icons::FRAME_CORNERS, "自动适应", display_mode).clicked()
+                    {
+                        if let Some(reader) = self.reader_view.open.as_mut() {
+                            reader.request_fit(FitMode::Page);
+                        }
+                    }
+                    if toolbar_button(ui, icons::ARROW_CLOCKWISE, "旋转", display_mode)
+                        .on_hover_text("顺时针旋转 90°")
+                        .clicked()
+                    {
+                        if let Some(reader) = self.reader_view.open.as_mut() {
+                            reader.rotate_cw();
+                        }
+                    }
+                    ui.separator();
+
+                    if toolbar_button(ui, icons::CARET_LEFT, "上一页", display_mode).clicked() {
+                        self.reader_prev_page();
+                    }
+                    let mut displayed_page = current_page + 1;
+                    let page_response = ui.add(
+                        egui::DragValue::new(&mut displayed_page)
+                            .speed(1.0)
+                            .range(1..=total_pages.max(1))
+                            .update_while_editing(false),
+                    );
+                    if page_response.lost_focus() {
+                        let target = displayed_page
+                            .saturating_sub(1)
+                            .min(total_pages.saturating_sub(1));
+                        if let Some(reader) = self.reader_view.open.as_mut() {
+                            if target != reader.state.current_page {
+                                reader.state.go_to_page(target, total_pages);
+                                reader.mark_page_turn();
+                            }
+                        }
+                    }
+                    ui.label(format!("/ {}", total_pages));
+                    if toolbar_button(ui, icons::CARET_RIGHT, "下一页", display_mode).clicked() {
+                        self.reader_next_page();
+                    }
+                    ui.separator();
+
+                    if toolbar_button(ui, icons::BOOKMARK, "添加书签", display_mode).clicked() {
+                        self.add_bookmark(current_page);
+                    }
+                    if toolbar_button(ui, icons::ARROWS_OUT_SIMPLE, "全屏", display_mode).clicked()
+                    {
+                        self.toggle_fullscreen(&ctx);
+                    }
+                    if toolbar_button(ui, icons::GEAR, "设置", display_mode).clicked() {
+                        self.current_view = View::Settings;
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(icons::X).on_hover_text("隐藏工具栏").clicked() {
+                            self.settings.show_toolbar = false;
+                        }
+                    });
                 });
             });
-        });
     }
 
     fn render_reader_statusbar(
@@ -1641,19 +1692,30 @@ impl ReaderApp {
     ) -> (Option<egui::Rect>, Option<usize>) {
         let mut progress_rect = None;
         let mut hovered_page = None;
-        egui::Panel::bottom("reader_statusbar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let bar_response = self.reader_view.render_progress_bar(ui);
-                hovered_page = bar_response.hovered_page;
+        let chrome = crate::theme::chrome_bar_frame(ui.visuals());
+        egui::Panel::bottom("reader_statusbar")
+            .frame(chrome)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    crate::theme::begin_chrome_row(ui);
+                    let bar_response = self.reader_view.render_progress_bar(ui);
+                    hovered_page = bar_response.hovered_page;
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("✕").on_hover_text("隐藏状态栏").clicked() {
-                        self.settings.show_statusbar = false;
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(icons::X)
+                                    .min_size(egui::vec2(0.0, crate::theme::TOOLBAR_BUTTON_HEIGHT)),
+                            )
+                            .on_hover_text("隐藏状态栏")
+                            .clicked()
+                        {
+                            self.settings.show_statusbar = false;
+                        }
+                    });
                 });
+                progress_rect = Some(ui.min_rect());
             });
-            progress_rect = Some(ui.min_rect());
-        });
         (progress_rect, hovered_page)
     }
 
@@ -1673,123 +1735,144 @@ impl ReaderApp {
             })
             .unwrap_or((0, 0, 0, 0));
 
-        egui::Panel::top("ebook_toolbar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("书架").clicked() {
-                    self.current_view = View::Library;
-                }
-                ui.separator();
-                if ui.button("目录").clicked() {
-                    self.ebook_view.toggle_toc();
-                }
-                if ui.button("搜索").clicked() {
-                    self.ebook_view.toggle_search();
-                }
-                if ui.button("上一章").clicked() {
-                    self.ebook_view.prev_chapter();
-                }
-                if ui.button("下一章").clicked() {
-                    self.ebook_view.next_chapter();
-                }
-                if ui.button("上一页").clicked() {
-                    self.ebook_view.prev_page();
-                }
-                if ui.button("下一页").clicked() {
-                    self.ebook_view.next_page();
-                }
-                ui.separator();
-                if ui.button("添加书签").clicked() {
-                    self.add_ebook_bookmark();
-                }
-                ui.separator();
-                if ui.button("A-").clicked() {
-                    self.settings.ebook.font_size =
-                        self.settings.ebook.font_size.saturating_sub(1).max(10);
-                    self.ebook_view.apply_settings(&self.settings.ebook);
-                }
-                if ui.button("A+").clicked() {
-                    self.settings.ebook.font_size = (self.settings.ebook.font_size + 1).min(72);
-                    self.ebook_view.apply_settings(&self.settings.ebook);
-                }
-                if ui.button("主题").clicked() {
-                    self.settings.ebook.theme = match self.settings.ebook.theme {
-                        EbookTheme::Light => EbookTheme::Dark,
-                        EbookTheme::Dark => EbookTheme::Sepia,
-                        EbookTheme::Sepia => EbookTheme::Light,
-                    };
-                    self.ebook_view.apply_settings(&self.settings.ebook);
-                }
-                let (_, page_label) =
-                    Self::ebook_status_text(current, total, current_spread, total_spreads, None);
-                ui.label(page_label);
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("设置").clicked() {
-                        self.current_view = View::Settings;
+        let display_mode = self.settings.toolbar_display_mode;
+        let chrome = crate::theme::chrome_bar_frame(ui.visuals());
+        egui::Panel::top("ebook_toolbar")
+            .frame(chrome)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    crate::theme::begin_chrome_row(ui);
+                    if toolbar_button(ui, icons::HOUSE, "书架", display_mode).clicked() {
+                        self.current_view = View::Library;
                     }
+                    ui.separator();
+                    if toolbar_button(ui, icons::LIST_BULLETS, "目录", display_mode).clicked() {
+                        self.ebook_view.toggle_toc();
+                    }
+                    if toolbar_button(ui, icons::MAGNIFYING_GLASS, "搜索", display_mode).clicked()
+                    {
+                        self.ebook_view.toggle_search();
+                    }
+                    if toolbar_button(ui, icons::CARET_DOUBLE_LEFT, "上一章", display_mode)
+                        .clicked()
+                    {
+                        self.ebook_view.prev_chapter();
+                    }
+                    if toolbar_button(ui, icons::CARET_DOUBLE_RIGHT, "下一章", display_mode)
+                        .clicked()
+                    {
+                        self.ebook_view.next_chapter();
+                    }
+                    if toolbar_button(ui, icons::CARET_LEFT, "上一页", display_mode).clicked() {
+                        self.ebook_view.prev_page();
+                    }
+                    if toolbar_button(ui, icons::CARET_RIGHT, "下一页", display_mode).clicked() {
+                        self.ebook_view.next_page();
+                    }
+                    ui.separator();
+                    if toolbar_button(ui, icons::BOOKMARK, "添加书签", display_mode).clicked() {
+                        self.add_ebook_bookmark();
+                    }
+                    ui.separator();
+                    if toolbar_button(ui, icons::MAGNIFYING_GLASS_MINUS, "A-", display_mode)
+                        .clicked()
+                    {
+                        self.settings.ebook.font_size =
+                            self.settings.ebook.font_size.saturating_sub(1).max(10);
+                        self.ebook_view.apply_settings(&self.settings.ebook);
+                    }
+                    if toolbar_button(ui, icons::MAGNIFYING_GLASS_PLUS, "A+", display_mode)
+                        .clicked()
+                    {
+                        self.settings.ebook.font_size = (self.settings.ebook.font_size + 1).min(72);
+                        self.ebook_view.apply_settings(&self.settings.ebook);
+                    }
+                    if toolbar_button(ui, icons::PALETTE, "主题", display_mode).clicked() {
+                        self.settings.ebook.theme = match self.settings.ebook.theme {
+                            EbookTheme::Light => EbookTheme::Dark,
+                            EbookTheme::Dark => EbookTheme::Sepia,
+                            EbookTheme::Sepia => EbookTheme::Light,
+                        };
+                        self.ebook_view.apply_settings(&self.settings.ebook);
+                    }
+                    let (_, page_label) = Self::ebook_status_text(
+                        current,
+                        total,
+                        current_spread,
+                        total_spreads,
+                        None,
+                    );
+                    ui.label(egui::RichText::new(page_label).weak().size(12.5));
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if toolbar_button(ui, icons::GEAR, "设置", display_mode).clicked() {
+                            self.current_view = View::Settings;
+                        }
+                    });
                 });
             });
-        });
     }
 
     fn render_ebook_search_bar(&mut self, ui: &mut egui::Ui) {
         if !self.ebook_view.search_visible() {
             return;
         }
-        egui::Panel::top("ebook_search_bar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("搜索:");
-                let mut submitted = None::<bool>; // Some(true)=下一个, Some(false)=上一个
-                let mut close_requested = false;
-                if let Some(open) = self.ebook_view.open.as_mut() {
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut open.search.query)
-                            .id(egui::Id::new("ebook_search_input"))
-                            .desired_width(240.0),
-                    );
-                    if open.search.take_focus_request() {
-                        response.request_focus();
+        egui::Panel::top("ebook_search_bar")
+            .frame(crate::theme::chrome_bar_frame(ui.visuals()))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("搜索:");
+                    let mut submitted = None::<bool>; // Some(true)=下一个, Some(false)=上一个
+                    let mut close_requested = false;
+                    if let Some(open) = self.ebook_view.open.as_mut() {
+                        let response = ui.add(
+                            egui::TextEdit::singleline(&mut open.search.query)
+                                .id(egui::Id::new("ebook_search_input"))
+                                .desired_width(240.0),
+                        );
+                        if open.search.take_focus_request() {
+                            response.request_focus();
+                        }
+                        if response.changed() {
+                            let q = open.search.query.clone();
+                            open.renderer.find_text(&q);
+                        }
+                        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            submitted = Some(!ui.input(|i| i.modifiers.shift));
+                        }
+                        let (count, active) = open.renderer.search_state();
+                        let label = if count == 0 {
+                            "0/0".to_string()
+                        } else {
+                            format!("{}/{}", active.max(0) as usize + 1, count)
+                        };
+                        ui.label(label);
+                        if ui
+                            .add_enabled(count > 0, egui::Button::new("上一个"))
+                            .clicked()
+                        {
+                            open.renderer.find_prev();
+                        }
+                        if ui
+                            .add_enabled(count > 0, egui::Button::new("下一个"))
+                            .clicked()
+                        {
+                            open.renderer.find_next();
+                        }
+                        if ui.button("✕").clicked() {
+                            close_requested = true;
+                        }
                     }
-                    if response.changed() {
-                        let q = open.search.query.clone();
-                        open.renderer.find_text(&q);
+                    if close_requested {
+                        self.ebook_view.close_search();
                     }
-                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        submitted = Some(!ui.input(|i| i.modifiers.shift));
+                    match submitted {
+                        Some(true) => self.ebook_view.find_next(),
+                        Some(false) => self.ebook_view.find_prev(),
+                        None => {}
                     }
-                    let (count, active) = open.renderer.search_state();
-                    let label = if count == 0 {
-                        "0/0".to_string()
-                    } else {
-                        format!("{}/{}", active.max(0) as usize + 1, count)
-                    };
-                    ui.label(label);
-                    if ui
-                        .add_enabled(count > 0, egui::Button::new("上一个"))
-                        .clicked()
-                    {
-                        open.renderer.find_prev();
-                    }
-                    if ui
-                        .add_enabled(count > 0, egui::Button::new("下一个"))
-                        .clicked()
-                    {
-                        open.renderer.find_next();
-                    }
-                    if ui.button("✕").clicked() {
-                        close_requested = true;
-                    }
-                }
-                if close_requested {
-                    self.ebook_view.close_search();
-                }
-                match submitted {
-                    Some(true) => self.ebook_view.find_next(),
-                    Some(false) => self.ebook_view.find_prev(),
-                    None => {}
-                }
+                });
             });
-        });
     }
 
     /// Returns the status-bar text for an ebook: chapter title and spread progress.
@@ -1842,14 +1925,16 @@ impl ReaderApp {
             })
             .unwrap_or_else(|| ("".to_string(), "".to_string()));
 
-        egui::Panel::bottom("ebook_statusbar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(title);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(progress);
+        egui::Panel::bottom("ebook_statusbar")
+            .frame(crate::theme::chrome_bar_frame(ui.visuals()))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(title).weak());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(progress).weak().size(12.5));
+                    });
                 });
             });
-        });
     }
 
     fn render_settings(&mut self, ui: &mut egui::Ui) {
@@ -2484,6 +2569,7 @@ impl ReaderApp {
             Theme::Dark => egui::ThemePreference::Dark,
         };
         ctx.set_theme(preference);
+        crate::theme::install(ctx);
     }
 
     fn handle_global_input(&mut self, ctx: &egui::Context) {

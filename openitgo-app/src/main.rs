@@ -5,6 +5,7 @@ mod loader;
 mod opener;
 mod platform;
 mod shortcuts;
+mod theme;
 mod timing;
 mod views;
 mod widgets;
