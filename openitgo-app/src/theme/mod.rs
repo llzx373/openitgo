@@ -182,28 +182,35 @@ fn apply_gallery_style(style: &mut Style) {
 /// Uniform height for toolbar / chrome controls (matches `interact_size.y`).
 pub const TOOLBAR_BUTTON_HEIGHT: f32 = 28.0;
 
+fn opacity_u8(opacity: f32) -> u8 {
+    (opacity.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
 /// Semi-opaque elevated fill for immersive top/bottom chrome bars.
-pub fn chrome_fill(visuals: &Visuals) -> Color32 {
+pub fn chrome_fill(visuals: &Visuals, opacity: f32) -> Color32 {
     let base = visuals.window_fill;
-    if visuals.dark_mode {
-        Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 230)
-    } else {
-        Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 235)
-    }
+    Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), opacity_u8(opacity))
+}
+
+/// Comic reader central-panel fill: same opacity as chrome bars, against the
+/// transparent window clear (desktop), not against page pixels.
+pub fn reader_background_fill(rgb: [u8; 3], opacity: f32) -> Color32 {
+    Color32::from_rgba_unmultiplied(rgb[0], rgb[1], rgb[2], opacity_u8(opacity))
 }
 
 /// Frame used by reader / ebook / media toolbars and status bars.
-pub fn chrome_bar_frame(visuals: &Visuals) -> egui::Frame {
+pub fn chrome_bar_frame(visuals: &Visuals, opacity: f32) -> egui::Frame {
+    let stroke_alpha = opacity_u8(opacity * 0.4);
     egui::Frame::new()
-        .fill(chrome_fill(visuals))
+        .fill(chrome_fill(visuals, opacity))
         // Tight vertical margin so buttons nearly fill the chrome row.
         .inner_margin(Margin::symmetric(12, 4))
         .stroke(Stroke::new(
             1.0,
             if visuals.dark_mode {
-                Color32::from_rgba_unmultiplied(0x40, 0x40, 0x48, 80)
+                Color32::from_rgba_unmultiplied(0x40, 0x40, 0x48, stroke_alpha)
             } else {
-                Color32::from_rgba_unmultiplied(0xC0, 0xC2, 0xC8, 100)
+                Color32::from_rgba_unmultiplied(0xC0, 0xC2, 0xC8, stroke_alpha)
             },
         ))
 }
@@ -315,7 +322,8 @@ mod tests {
     #[test]
     fn chrome_fill_is_translucent() {
         let dark = dark_visuals();
-        let fill = chrome_fill(&dark);
+        let fill = chrome_fill(&dark, 0.85);
         assert!(fill.a() < 255);
+        assert_eq!(chrome_fill(&dark, 1.0).a(), 255);
     }
 }

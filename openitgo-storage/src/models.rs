@@ -28,6 +28,9 @@ pub struct Settings {
     pub invert_scroll: bool,
     /// 滚轮翻页触发阈值（pt）：累计滚动这么多距离翻一页。越小越灵敏。
     pub page_scroll_threshold: f32,
+    /// 阅读界面工具栏 / 状态栏（进度条）半透明程度，1.0 = 不透明。
+    #[serde(default = "default_chrome_opacity")]
+    pub chrome_opacity: f32,
     pub background_color: [u8; 3],
     pub shortcuts: Shortcuts,
     pub library_sort: LibrarySort,
@@ -36,6 +39,10 @@ pub struct Settings {
     pub media_volume: f64,
     pub media_speed: f64,
     pub media_audio_device: String,
+}
+
+fn default_chrome_opacity() -> f32 {
+    0.85
 }
 
 impl Default for Settings {
@@ -58,6 +65,7 @@ impl Default for Settings {
             show_statusbar: true,
             invert_scroll: false,
             page_scroll_threshold: 12.0,
+            chrome_opacity: default_chrome_opacity(),
             background_color: [30, 30, 30],
             shortcuts: Shortcuts::default(),
             library_sort: LibrarySort::default(),
@@ -102,6 +110,12 @@ impl Settings {
             return Err(format!(
                 "page_scroll_threshold must be between 1.0 and 40.0, got {}",
                 self.page_scroll_threshold
+            ));
+        }
+        if !(0.2..=1.0).contains(&self.chrome_opacity) {
+            return Err(format!(
+                "chrome_opacity must be between 0.2 and 1.0, got {}",
+                self.chrome_opacity
             ));
         }
         if self.window_size.0 < 400.0 || self.window_size.1 < 300.0 {
@@ -160,6 +174,7 @@ impl Settings {
         self.real_image_cache_pages = self.real_image_cache_pages.clamp(1, 500);
         self.wide_page_threshold = self.wide_page_threshold.clamp(1.0, 3.0);
         self.page_scroll_threshold = self.page_scroll_threshold.clamp(1.0, 40.0);
+        self.chrome_opacity = self.chrome_opacity.clamp(0.2, 1.0);
         self.window_size.0 = self.window_size.0.clamp(400.0, 16384.0);
         self.window_size.1 = self.window_size.1.clamp(300.0, 16384.0);
         self.ebook.font_size = self.ebook.font_size.clamp(10, 72);
@@ -498,6 +513,32 @@ mod tests {
         assert_eq!(s.background_color, [30, 30, 30]);
         assert!((s.wide_page_threshold - 1.4).abs() < f32::EPSILON);
         assert!((s.page_scroll_threshold - 12.0).abs() < f32::EPSILON);
+        assert!((s.chrome_opacity - 0.85).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_settings_chrome_opacity_validate_and_clamp() {
+        let mut s = Settings {
+            chrome_opacity: 0.05,
+            ..Default::default()
+        };
+        assert!(s.validate().is_err());
+        s.clamp();
+        assert!((s.chrome_opacity - 0.2).abs() < f32::EPSILON);
+        let mut s = Settings {
+            chrome_opacity: 1.5,
+            ..Default::default()
+        };
+        assert!(s.validate().is_err());
+        s.clamp();
+        assert!((s.chrome_opacity - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_settings_deserialize_missing_chrome_opacity() {
+        let json = r#"{"theme":"Dark"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert!((s.chrome_opacity - 0.85).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -1075,7 +1075,7 @@ impl ReaderView {
         Some(from_response.union(to_response))
     }
 
-    pub fn render_progress_bar(&mut self, ui: &mut egui::Ui) -> ProgressBarResponse {
+    pub fn render_progress_bar(&mut self, ui: &mut egui::Ui, opacity: f32) -> ProgressBarResponse {
         let Some(reader) = &mut self.open else {
             return ProgressBarResponse {
                 response: ui.allocate_response(egui::Vec2::ZERO, egui::Sense::hover()),
@@ -1088,7 +1088,7 @@ impl ReaderView {
         let ProgressBarResponse {
             response,
             hovered_page,
-        } = comic_progress_bar(ui, current_page, total_pages);
+        } = comic_progress_bar(ui, current_page, total_pages, opacity);
 
         if response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {

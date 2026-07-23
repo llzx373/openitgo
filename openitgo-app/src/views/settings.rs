@@ -93,6 +93,16 @@ impl SettingsView {
             ui.color_edit_button_srgb(&mut settings.background_color);
         });
 
+        ui.horizontal(|ui| {
+            ui.label("阅读栏透明度:");
+            ui.add(
+                egui::Slider::new(&mut settings.chrome_opacity, 0.2..=1.0)
+                    .show_value(true)
+                    .suffix(""),
+            );
+            ui.label("（阅读区背景与工具栏 / 进度条共用，透出窗口背后；1=不透明）");
+        });
+
         ui.label("主题");
         egui::ComboBox::from_id_salt("theme")
             .selected_text(theme_label(settings.theme.clone()))

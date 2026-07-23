@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Gallery Immersive UI（P0–P2）：全局 `theme` tokens + 自定义 Visuals/Style；书架分段 Tab / 圆角封面卡 / 标签 chip / 空状态；漫画·电子书·媒体工具栏统一 Phosphor 与半透明 chrome。
+- Settings：`chrome_opacity`（阅读栏透明度），漫画阅读区背景与工具栏 / 进度条 / 状态栏共用；相对窗口透明清屏透出桌面，不盖在正文像素上。
 - Settings：`window_pos` / `window_maximized`，与既有 `window_size` 一起记忆窗口几何。
 
 - 电子书阅读模式：支持 EPUB、TXT、MOBI/AZW3、Markdown 格式，基于 `wry` 内嵌 WebView 渲染。

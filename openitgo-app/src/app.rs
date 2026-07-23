@@ -791,30 +791,36 @@ impl ReaderApp {
                 i.content_rect().size(),
             )
         });
-        if Self::should_show_bar(
+        let show_toolbar = Self::should_show_bar(
             self.settings.show_toolbar,
             fullscreen,
             mouse_pos,
             screen_size,
             BarEdge::Top,
-        ) {
-            self.render_reader_toolbar(ui, total_pages, current_page, mode, zoom);
-        }
-        let (progress_bar_rect, hovered_page) = if Self::should_show_bar(
+        );
+        let show_statusbar = Self::should_show_bar(
             self.settings.show_statusbar,
             fullscreen,
             mouse_pos,
             screen_size,
             BarEdge::Bottom,
-        ) {
+        );
+
+        // Panel chrome (not overlay): translucency is against the window clear /
+        // reader background, never against the page content itself.
+        if show_toolbar {
+            self.render_reader_toolbar(ui, total_pages, current_page, mode, zoom);
+        }
+        let (progress_bar_rect, hovered_page) = if show_statusbar {
             self.render_reader_statusbar(ui)
         } else {
             (None, None)
         };
 
         let bg = self.settings.background_color;
-        let frame = egui::Frame::central_panel(&ctx.global_style())
-            .fill(egui::Color32::from_rgb(bg[0], bg[1], bg[2]));
+        let frame = egui::Frame::central_panel(&ctx.global_style()).fill(
+            crate::theme::reader_background_fill(bg, self.settings.chrome_opacity),
+        );
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             let response = self.reader_view.ui(&ctx, ui, &self.page_loader);
 
@@ -1108,7 +1114,7 @@ impl ReaderApp {
             .unwrap_or_default();
         let current_device = self.settings.media_audio_device.clone();
         let display_mode = self.settings.toolbar_display_mode;
-        let chrome = crate::theme::chrome_bar_frame(ui.visuals());
+        let chrome = crate::theme::chrome_bar_frame(ui.visuals(), self.settings.chrome_opacity);
         egui::Panel::top("media_toolbar")
             .frame(chrome)
             .show(ui, |ui| {
@@ -1448,7 +1454,7 @@ impl ReaderApp {
             })
             .unwrap_or((0, None, 100.0, false));
         egui::Panel::bottom("media_seekbar")
-            .frame(crate::theme::chrome_bar_frame(ui.visuals()))
+            .frame(crate::theme::chrome_bar_frame(ui.visuals(), self.settings.chrome_opacity))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     // Row 1: full-width seek bar with a hover-time tooltip.
@@ -1538,7 +1544,7 @@ impl ReaderApp {
     ) {
         let ctx = ui.ctx().clone();
         let display_mode = self.settings.toolbar_display_mode;
-        let chrome = crate::theme::chrome_bar_frame(ui.visuals());
+        let chrome = crate::theme::chrome_bar_frame(ui.visuals(), self.settings.chrome_opacity);
         egui::Panel::top("reader_toolbar")
             .frame(chrome)
             .show(ui, |ui| {
@@ -1678,7 +1684,16 @@ impl ReaderApp {
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(icons::X).on_hover_text("隐藏工具栏").clicked() {
+                        if ui
+                            .add(
+                                egui::Button::new(icons::X).min_size(egui::vec2(
+                                    0.0,
+                                    crate::theme::TOOLBAR_BUTTON_HEIGHT,
+                                )),
+                            )
+                            .on_hover_text("隐藏工具栏")
+                            .clicked()
+                        {
                             self.settings.show_toolbar = false;
                         }
                     });
@@ -1692,20 +1707,24 @@ impl ReaderApp {
     ) -> (Option<egui::Rect>, Option<usize>) {
         let mut progress_rect = None;
         let mut hovered_page = None;
-        let chrome = crate::theme::chrome_bar_frame(ui.visuals());
+        let chrome = crate::theme::chrome_bar_frame(ui.visuals(), self.settings.chrome_opacity);
         egui::Panel::bottom("reader_statusbar")
             .frame(chrome)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     crate::theme::begin_chrome_row(ui);
-                    let bar_response = self.reader_view.render_progress_bar(ui);
+                    let bar_response = self
+                        .reader_view
+                        .render_progress_bar(ui, self.settings.chrome_opacity);
                     hovered_page = bar_response.hovered_page;
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add(
-                                egui::Button::new(icons::X)
-                                    .min_size(egui::vec2(0.0, crate::theme::TOOLBAR_BUTTON_HEIGHT)),
+                                egui::Button::new(icons::X).min_size(egui::vec2(
+                                    0.0,
+                                    crate::theme::TOOLBAR_BUTTON_HEIGHT,
+                                )),
                             )
                             .on_hover_text("隐藏状态栏")
                             .clicked()
@@ -1736,7 +1755,7 @@ impl ReaderApp {
             .unwrap_or((0, 0, 0, 0));
 
         let display_mode = self.settings.toolbar_display_mode;
-        let chrome = crate::theme::chrome_bar_frame(ui.visuals());
+        let chrome = crate::theme::chrome_bar_frame(ui.visuals(), self.settings.chrome_opacity);
         egui::Panel::top("ebook_toolbar")
             .frame(chrome)
             .show(ui, |ui| {
@@ -1818,7 +1837,10 @@ impl ReaderApp {
             return;
         }
         egui::Panel::top("ebook_search_bar")
-            .frame(crate::theme::chrome_bar_frame(ui.visuals()))
+            .frame(crate::theme::chrome_bar_frame(
+                ui.visuals(),
+                self.settings.chrome_opacity,
+            ))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("搜索:");
@@ -1926,7 +1948,10 @@ impl ReaderApp {
             .unwrap_or_else(|| ("".to_string(), "".to_string()));
 
         egui::Panel::bottom("ebook_statusbar")
-            .frame(crate::theme::chrome_bar_frame(ui.visuals()))
+            .frame(crate::theme::chrome_bar_frame(
+                ui.visuals(),
+                self.settings.chrome_opacity,
+            ))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(title).weak());

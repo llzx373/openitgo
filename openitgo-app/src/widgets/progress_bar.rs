@@ -10,20 +10,21 @@ pub fn comic_progress_bar(
     ui: &mut egui::Ui,
     current_page: usize,
     total_pages: usize,
+    opacity: f32,
 ) -> ProgressBarResponse {
     let available_width = ui.available_width();
     let desired_size = egui::vec2(available_width, BAR_HEIGHT);
     let (rect, response) = ui.allocate_at_least(desired_size, egui::Sense::click());
 
     if total_pages == 0 {
-        draw_empty_bar(ui, rect);
+        draw_empty_bar(ui, rect, opacity);
         return ProgressBarResponse {
             response,
             hovered_page: None,
         };
     }
 
-    draw_filled_bar(ui, rect, current_page, total_pages);
+    draw_filled_bar(ui, rect, current_page, total_pages, opacity);
 
     let hovered_page = if response.hovered() {
         ui.input(|i| i.pointer.hover_pos())
@@ -38,25 +39,48 @@ pub fn comic_progress_bar(
     }
 }
 
-fn draw_empty_bar(ui: &mut egui::Ui, rect: egui::Rect) {
+fn alpha(opacity: f32, scale: f32) -> u8 {
+    ((opacity.clamp(0.0, 1.0) * scale).clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn draw_empty_bar(ui: &mut egui::Ui, rect: egui::Rect, opacity: f32) {
+    let base = ui.visuals().extreme_bg_color;
     ui.painter().rect_filled(
         rect,
         egui::CornerRadius::same(BAR_RADIUS),
-        ui.visuals().extreme_bg_color,
+        egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha(opacity, 0.55)),
     );
 }
 
-fn draw_filled_bar(ui: &mut egui::Ui, rect: egui::Rect, current_page: usize, total_pages: usize) {
+fn draw_filled_bar(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    current_page: usize,
+    total_pages: usize,
+    opacity: f32,
+) {
     let rounding = egui::CornerRadius::same(BAR_RADIUS);
-    let bg_color = ui.visuals().extreme_bg_color;
-    ui.painter().rect_filled(rect, rounding, bg_color);
+    let bg = ui.visuals().extreme_bg_color;
+    ui.painter().rect_filled(
+        rect,
+        rounding,
+        egui::Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), alpha(opacity, 0.55)),
+    );
 
     let progress = (current_page + 1).min(total_pages) as f32 / total_pages as f32;
     let fill_width = rect.width() * progress;
     let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, rect.height()));
-    // Prefer selection stroke (accent) for a clearer Gallery progress fill.
-    let fill_color = ui.visuals().selection.stroke.color;
-    ui.painter().rect_filled(fill_rect, rounding, fill_color);
+    let accent = ui.visuals().selection.stroke.color;
+    ui.painter().rect_filled(
+        fill_rect,
+        rounding,
+        egui::Color32::from_rgba_unmultiplied(
+            accent.r(),
+            accent.g(),
+            accent.b(),
+            alpha(opacity, 0.92),
+        ),
+    );
 }
 
 pub(crate) fn page_at_x(x: f32, rect: egui::Rect, total_pages: usize) -> usize {
