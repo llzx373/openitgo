@@ -8,8 +8,11 @@ mod shortcuts;
 mod timing;
 mod views;
 mod widgets;
+mod window_geometry;
 
 use app::ReaderApp;
+use openitgo_storage::json_store::JsonStore;
+use window_geometry::{resolve_startup_geometry, DEFAULT_WINDOW_SIZE};
 
 fn load_app_icon() -> Option<std::sync::Arc<egui::IconData>> {
     let bytes = include_bytes!("../../assets/icon/1024x1024.png");
@@ -26,13 +29,37 @@ fn main() -> eframe::Result<()> {
     #[cfg(target_os = "macos")]
     crate::platform::macos::dock_open::install_dock_open_handler_early();
 
+    let store = JsonStore::new(JsonStore::default_dir().unwrap_or_else(|| ".".into()));
+    let settings = store
+        .load_settings()
+        .unwrap_or_else(|_| openitgo_storage::models::Settings::default());
+    // At process start we do not yet have a reliable monitor list from egui;
+    // pass empty monitors and keep the saved position optimistically. ReaderApp
+    // re-validates against live monitor size on the first frame.
+    let restored = resolve_startup_geometry(
+        settings.window_size,
+        settings.window_pos,
+        settings.window_maximized,
+        &[],
+    );
+    let (w, h) = if restored.size.0 > 0.0 && restored.size.1 > 0.0 {
+        restored.size
+    } else {
+        DEFAULT_WINDOW_SIZE
+    };
+
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1280.0, 800.0])
+        .with_inner_size([w, h])
+        .with_maximized(restored.maximized)
         // Transparent backbuffer: egui-wgpu then picks
         // CompositeAlphaMode::PreMultiplied and the CAMetalLayer becomes
         // non-opaque, so the video layer below the egui surface (Task 4)
         // shows through unpainted regions.
-        .with_transparent(true);
+        .with_transparent(true)
+        .with_clamp_size_to_monitor_size(true);
+    if let Some((x, y)) = restored.pos {
+        viewport = viewport.with_position([x, y]);
+    }
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(icon);
     }

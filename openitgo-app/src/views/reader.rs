@@ -93,6 +93,9 @@ pub struct OpenReader {
     pub webtoon_last_page: usize,
     /// Last seen viewport size, used to re-apply the current fit on resize.
     pub last_available_size: Option<egui::Vec2>,
+    /// Whether `spread_size()` was available last frame. Rising edge (false→true)
+    /// re-arms pending_fit so late-arriving page dimensions still get a correct zoom.
+    pub had_spread_size: bool,
     /// Aspect ratio above which a page is treated as a wide spread and shown
     /// alone even in double-page mode. Inherited from Settings at open time.
     pub wide_page_threshold: f32,
@@ -276,18 +279,31 @@ impl OpenReader {
     }
 
     fn spread_size(&self) -> Option<egui::Vec2> {
-        let left_size = self.effective_size(self.left_page?)?;
-        let right_size = self
+        let left = self
+            .left_page
+            .and_then(|idx| self.effective_size(idx))
+            .map(|s| egui::vec2(s[0] as f32, s[1] as f32));
+        let right = self
             .right_page
             .and_then(|idx| self.effective_size(idx))
-            .unwrap_or([0, 0]);
-        Some(egui::vec2(
-            (left_size[0] + right_size[0]) as f32,
-            left_size[1].max(right_size[1]) as f32,
-        ))
+            .map(|s| egui::vec2(s[0] as f32, s[1] as f32));
+        match (left, right) {
+            (None, None) => None,
+            (Some(l), None) => Some(l),
+            (None, Some(r)) => Some(r),
+            (Some(l), Some(r)) => Some(egui::vec2(l.x + r.x, l.y.max(r.y))),
+        }
     }
 
+    /// Minimum usable reading area before we commit a pending fit (avoids
+    /// locking in a wrong zoom while panels are still settling).
+    const MIN_FIT_AVAILABLE: f32 = 50.0;
+
     fn apply_pending_fit(&mut self, _ctx: &egui::Context, available: egui::Vec2) {
+        if available.x < Self::MIN_FIT_AVAILABLE || available.y < Self::MIN_FIT_AVAILABLE {
+            // Keep pending_fit for a later frame once layout has room.
+            return;
+        }
         let Some(spread_size) = self.spread_size() else {
             // 页面尺寸尚未可用（仍在加载），保留 pending_fit 等到下一帧再应用。
             return;
@@ -318,6 +334,7 @@ impl OpenReader {
         self.page_errors.clear();
         self.left_page = None;
         self.right_page = None;
+        self.had_spread_size = false;
     }
 
     /// Eagerly seed the page cache with the dimensions of the spread that will
@@ -512,6 +529,7 @@ impl ReaderView {
             webtoon_scroll_offset: 0.0,
             webtoon_last_page: state.current_page,
             last_available_size: None,
+            had_spread_size: false,
             wide_page_threshold,
             enable_page_animation,
         };
@@ -765,7 +783,9 @@ impl ReaderView {
         reader.left_page = left_idx;
         reader.right_page = right_idx;
         if spread_changed {
-            reader.pending_fit = reader.pending_fit.or(Some(FitMode::Page));
+            // Re-apply the user's current fit mode for the new spread (not a
+            // hardcoded Page fit — that fought Height/Width defaults on cover).
+            reader.pending_fit = reader.pending_fit.or(Some(reader.state.fit_mode));
         }
 
         let available = ui.available_rect_before_wrap();
@@ -794,6 +814,11 @@ impl ReaderView {
         // Apply the pending fit as soon as the original dimensions are known,
         // even if the GPU texture has not been uploaded yet. This prevents the
         // first frames after opening a comic from showing an unscaled page.
+        let has_spread = reader.spread_size().is_some();
+        if has_spread && !reader.had_spread_size {
+            reader.pending_fit = reader.pending_fit.or(Some(reader.state.fit_mode));
+        }
+        reader.had_spread_size = has_spread;
         reader.apply_pending_fit(ctx, available.size());
 
         let spread_size = egui::vec2(left_size.x + right_size.x, left_size.y.max(right_size.y));
@@ -1410,6 +1435,7 @@ mod tests {
             webtoon_scroll_offset: 0.0,
             webtoon_last_page: 0,
             last_available_size: None,
+            had_spread_size: false,
             wide_page_threshold: 1.4,
             enable_page_animation: true,
         }
@@ -1523,6 +1549,52 @@ mod tests {
         reader.seed_spread_dimensions(None);
 
         assert_eq!(reader.cache.get_original_size(0), Some([100, 200]));
+    }
+
+    #[test]
+    fn spread_size_works_with_right_page_only_cover() {
+        let mut reader = dummy_reader();
+        reader.state.set_double_page(true, 10);
+        reader.cache.insert_dimensions(0, [800, 1200]);
+        // LTR double-page cover: left empty, right = page 0.
+        reader.left_page = None;
+        reader.right_page = Some(0);
+        let size = reader.spread_size().expect("cover-only spread");
+        assert_eq!(size, egui::vec2(800.0, 1200.0));
+    }
+
+    #[test]
+    fn apply_pending_fit_cover_ltr_double_page_scales_to_page() {
+        let mut reader = dummy_reader();
+        reader.state.set_double_page(true, 10);
+        reader.state.fit_mode = FitMode::Page;
+        reader.pending_fit = Some(FitMode::Page);
+        reader.cache.insert_dimensions(0, [800, 1200]);
+        reader.left_page = None;
+        reader.right_page = Some(0);
+        let available = egui::vec2(1000.0, 800.0);
+        reader.apply_pending_fit(&egui::Context::default(), available);
+        // Page fit: min(1000/800, 800/1200) = min(1.25, 0.666...) ≈ 0.666
+        let expected = (1000.0_f32 / 800.0).min(800.0 / 1200.0);
+        assert!(
+            (reader.state.zoom - expected).abs() < 1e-4,
+            "zoom={} expected={}",
+            reader.state.zoom,
+            expected
+        );
+        assert!(reader.pending_fit.is_none());
+    }
+
+    #[test]
+    fn apply_pending_fit_keeps_pending_when_available_too_small() {
+        let mut reader = dummy_reader();
+        reader.pending_fit = Some(FitMode::Page);
+        reader.cache.insert_dimensions(0, [800, 1200]);
+        reader.left_page = Some(0);
+        reader.right_page = None;
+        reader.apply_pending_fit(&egui::Context::default(), egui::vec2(10.0, 10.0));
+        assert_eq!(reader.pending_fit, Some(FitMode::Page));
+        assert_eq!(reader.state.zoom, 1.0);
     }
 
     #[test]

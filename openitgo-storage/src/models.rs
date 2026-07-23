@@ -17,6 +17,12 @@ pub struct Settings {
     pub cache_size_mb: u32,
     pub real_image_cache_pages: u32,
     pub window_size: (f32, f32),
+    /// Outer window position (top-left). `None` = let the OS place the window.
+    #[serde(default)]
+    pub window_pos: Option<(f32, f32)>,
+    /// Whether the window was maximized when last saved (non-fullscreen).
+    #[serde(default)]
+    pub window_maximized: bool,
     pub show_toolbar: bool,
     pub show_statusbar: bool,
     pub invert_scroll: bool,
@@ -45,7 +51,9 @@ impl Default for Settings {
             decode_threads: 0,
             cache_size_mb: 1024,
             real_image_cache_pages: 10,
-            window_size: (1280.0, 720.0),
+            window_size: (1280.0, 800.0),
+            window_pos: None,
+            window_maximized: false,
             show_toolbar: true,
             show_statusbar: true,
             invert_scroll: false,
@@ -96,9 +104,9 @@ impl Settings {
                 self.page_scroll_threshold
             ));
         }
-        if self.window_size.0 <= 0.0 || self.window_size.1 <= 0.0 {
+        if self.window_size.0 < 400.0 || self.window_size.1 < 300.0 {
             return Err(format!(
-                "window_size must be positive, got {:?}",
+                "window_size must be at least 400x300, got {:?}",
                 self.window_size
             ));
         }
@@ -152,8 +160,8 @@ impl Settings {
         self.real_image_cache_pages = self.real_image_cache_pages.clamp(1, 500);
         self.wide_page_threshold = self.wide_page_threshold.clamp(1.0, 3.0);
         self.page_scroll_threshold = self.page_scroll_threshold.clamp(1.0, 40.0);
-        self.window_size.0 = self.window_size.0.max(100.0);
-        self.window_size.1 = self.window_size.1.max(100.0);
+        self.window_size.0 = self.window_size.0.clamp(400.0, 16384.0);
+        self.window_size.1 = self.window_size.1.clamp(300.0, 16384.0);
         self.ebook.font_size = self.ebook.font_size.clamp(10, 72);
         self.ebook.line_height = self.ebook.line_height.clamp(1.0, 3.0);
         self.ebook.margin_horizontal = self.ebook.margin_horizontal.clamp(0, 200);
@@ -473,7 +481,8 @@ mod tests {
         assert_eq!(loaded.page_count, Some(12));
 
         // 旧版 library.json 无 page_count → None，不炸
-        let old = r#"{"comic_id":"id","title":"Test","path":"/tmp","cover_path":null,"added_at":0}"#;
+        let old =
+            r#"{"comic_id":"id","title":"Test","path":"/tmp","cover_path":null,"added_at":0}"#;
         let legacy: LibraryEntry = serde_json::from_str(old).unwrap();
         assert_eq!(legacy.page_count, None);
     }

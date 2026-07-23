@@ -9,6 +9,10 @@ use crate::views::{
     media::{media_overlay, MediaOverlay, MediaView},
     reader::ReaderView,
 };
+use crate::window_geometry::{
+    merge_live_into_settings, resolve_startup_geometry, LiveGeometry, MonitorRect,
+    DEFAULT_WINDOW_SIZE,
+};
 use egui_phosphor_icons::{icons, Icon};
 use openitgo_core::ebook::Ebook;
 use openitgo_core::models::{Comic, FitMode, PageSource, ReadingMode};
@@ -27,6 +31,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// 阅读中历史/书签落盘节流间隔；离开视图与书签增删改不受此限制。
 const HISTORY_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
+
+/// 窗口几何写入 settings 的节流间隔。
+const WINDOW_GEOMETRY_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// 待打开的媒体请求；`force_start` 为 true 时跳过历史续播（自动续播下一集）。
 pub struct PendingMediaOpen {
@@ -319,6 +326,10 @@ pub struct ReaderApp {
     pub bookmarks_dirty: bool,
     /// 上次成功将历史落盘的时刻（用于阅读中 30s 节流）。
     pub last_history_flush: Option<Instant>,
+    /// 上次将窗口几何写入 settings 的时刻（节流，避免每帧写盘）。
+    pub last_window_geometry_flush: Option<Instant>,
+    /// 是否已做过启动后几何合法性检查（相对当前显示器）。
+    pub window_geometry_validated: bool,
 }
 
 impl Default for ReaderApp {
@@ -393,6 +404,8 @@ impl Default for ReaderApp {
             history_dirty: false,
             bookmarks_dirty: false,
             last_history_flush: None,
+            last_window_geometry_flush: None,
+            window_geometry_validated: false,
         }
     }
 }
@@ -412,6 +425,7 @@ impl eframe::App for ReaderApp {
         self.record_media_history();
         self.flush_reading_stats();
         self.reader_view.close();
+        // Window geometry is updated during ui(); flush settings once more on exit.
         let _ = self.store.save_settings(&self.settings);
         let _ = self.store.save_library(&self.library_view.library);
         if let Err(e) = self.store.save_history(&self.history) {
@@ -494,6 +508,8 @@ impl eframe::App for ReaderApp {
         self.maybe_save_comic_settings();
         self.tick_reading_stats();
         self.tick_persist_history_bookmarks();
+        self.maybe_validate_window_geometry(&ctx);
+        self.tick_persist_window_geometry(&ctx);
     }
 }
 
@@ -2802,6 +2818,103 @@ impl ReaderApp {
         self.persist_history_bookmarks_if_due(Instant::now(), HISTORY_FLUSH_INTERVAL);
     }
 
+    /// 首帧（或 monitor 信息就绪后）：若当前窗口相对可见屏几乎无交集，重置为默认几何。
+    fn maybe_validate_window_geometry(&mut self, ctx: &egui::Context) {
+        if self.window_geometry_validated {
+            return;
+        }
+        let (outer, monitor_size, maximized, fullscreen) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.outer_rect, v.monitor_size, v.maximized, v.fullscreen)
+        });
+        let Some(ms) = monitor_size else {
+            return;
+        };
+        if ms.x < 1.0 || ms.y < 1.0 {
+            return;
+        }
+        self.window_geometry_validated = true;
+
+        if maximized.unwrap_or(false) || fullscreen.unwrap_or(false) {
+            return;
+        }
+        let Some(outer) = outer else {
+            return;
+        };
+
+        // egui 只给当前屏尺寸，不给完整显示器列表；用当前屏及其四邻近似多屏桌面。
+        let monitors = [
+            MonitorRect::from_min_size((0.0, 0.0), (ms.x, ms.y)),
+            MonitorRect::from_min_size((ms.x, 0.0), (ms.x, ms.y)),
+            MonitorRect::from_min_size((-ms.x, 0.0), (ms.x, ms.y)),
+            MonitorRect::from_min_size((0.0, ms.y), (ms.x, ms.y)),
+            MonitorRect::from_min_size((0.0, -ms.y), (ms.x, ms.y)),
+        ];
+        let size = (outer.width(), outer.height());
+        let pos = (outer.min.x, outer.min.y);
+        let restored = resolve_startup_geometry(size, Some(pos), false, &monitors);
+        if restored.pos.is_some() {
+            return;
+        }
+
+        // 屏外：恢复默认尺寸并尽量居中到当前屏。
+        let (w, h) = DEFAULT_WINDOW_SIZE;
+        let cx = ((ms.x - w) * 0.5).max(0.0);
+        let cy = ((ms.y - h) * 0.5).max(0.0);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(cx, cy)));
+        self.settings.window_size = DEFAULT_WINDOW_SIZE;
+        self.settings.window_pos = Some((cx, cy));
+        self.settings.window_maximized = false;
+        let _ = self.store.save_settings(&self.settings);
+    }
+
+    /// 节流把当前非全屏窗口几何合并进 settings 并落盘。
+    fn tick_persist_window_geometry(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        if self
+            .last_window_geometry_flush
+            .is_some_and(|t| now.duration_since(t) < WINDOW_GEOMETRY_FLUSH_INTERVAL)
+        {
+            return;
+        }
+
+        let (inner, outer, maximized, fullscreen) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.inner_rect, v.outer_rect, v.maximized, v.fullscreen)
+        });
+        let Some(inner) = inner else {
+            return;
+        };
+        let live = LiveGeometry {
+            inner_size: (inner.width(), inner.height()),
+            outer_pos: outer.map(|r| (r.min.x, r.min.y)),
+            maximized: maximized.unwrap_or(false),
+            fullscreen: fullscreen.unwrap_or(false),
+        };
+        let Some(merged) =
+            merge_live_into_settings(self.settings.window_size, self.settings.window_pos, live)
+        else {
+            return;
+        };
+
+        let changed = self.settings.window_size != merged.size
+            || self.settings.window_pos != merged.pos
+            || self.settings.window_maximized != merged.maximized;
+        if !changed {
+            self.last_window_geometry_flush = Some(now);
+            return;
+        }
+
+        self.settings.window_size = merged.size;
+        self.settings.window_pos = merged.pos;
+        self.settings.window_maximized = merged.maximized;
+        if self.store.save_settings(&self.settings).is_ok() {
+            self.last_window_geometry_flush = Some(now);
+        }
+    }
+
     /// 将脏的历史/书签立即写盘；失败时设置中文 `error_message`。
     fn persist_history_bookmarks(&mut self) {
         if self.history_dirty {
@@ -4026,6 +4139,8 @@ mod tests {
                 history_dirty: false,
                 bookmarks_dirty: false,
                 last_history_flush: None,
+                last_window_geometry_flush: None,
+                window_geometry_validated: false,
             }
         }
     }

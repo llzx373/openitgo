@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Settings：`window_pos` / `window_maximized`，与既有 `window_size` 一起记忆窗口几何。
+
 - 电子书阅读模式：支持 EPUB、TXT、MOBI/AZW3、Markdown 格式，基于 `wry` 内嵌 WebView 渲染。
 - 电子书阅读布局：单页、双页、连续滚动，可设置字体、字号、行间距、页边距与主题（白天 / 夜晚 / 羊皮纸）。
 - 自动按 EPUB 目录或 TXT/Markdown 标题分章；无章节标记时按字数切分虚拟章节。
@@ -75,6 +77,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - egui/eframe 0.29 → 0.35.0：图标库由 egui-phosphor 换为 egui_phosphor_icons 0.4；wgpu 22 → 29 连带升级；要求 rustc ≥ 1.92（#57）。
 
 ### Fixed
+
+- 漫画首页缩放：双页 LTR 封面仅右页时 `spread_size` 不再因 `left_page?` 失败；`available` 过小或尺寸晚到时保留/重挂 `pending_fit`，翻页后按当前 `fit_mode` 适应。
+- 窗口几何：启动恢复上次大小/位置/最大化；屏外时回退默认尺寸并居中；运行中节流写入 settings，退出再 flush。
 
 - 隐藏缺陷批次（TODO #62–#71）：`stable_comic_id` 改用 blake3 并启动迁移；历史/书签离开视图与变更时及时落盘（阅读中 30s 节流）；媒体换片写进度且自动续播强制从头；双页末页不再跳封面；Webtoon 清除双页标志并重置滚轮累加器；`SharedRawCache` 重复插入账本；PDF 文档缓存 256MiB LRU；密码路径 canonicalize 与空密码不重试；加密包首帧尺寸探测带密码；批量导入非密码错误汇总提示。
 - 书架卡片显示真实阅读进度（`LibraryEntry.page_count`，打开/导入时写入）。

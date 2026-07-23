@@ -9,3 +9,4 @@ pub mod shortcuts;
 pub mod timing;
 pub mod views;
 pub mod widgets;
+pub mod window_geometry;
