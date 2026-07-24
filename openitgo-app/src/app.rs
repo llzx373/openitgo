@@ -244,9 +244,9 @@ fn is_comic_folder(path: &Path) -> bool {
     };
     rd.filter_map(|e| e.ok()).map(|e| e.path()).any(|p| {
         p.is_file()
-            && p.extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(openitgo_parser::traits::is_image_extension)
+            && p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(openitgo_parser::traits::is_comic_image_name)
     })
 }
 
@@ -1060,6 +1060,8 @@ impl ReaderApp {
         self.media_view.sync_state();
         self.maybe_auto_next_media(&ctx);
         self.media_view.tick_osd(&ctx);
+        self.media_view
+            .apply_reader_background(self.settings.background_color, self.settings.chrome_opacity);
 
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         let mouse_pos = ctx.input(|i| i.pointer.hover_pos());
@@ -1089,10 +1091,13 @@ impl ReaderApp {
             self.render_media_seekbar(ui);
         }
 
-        // Transparent frame: the video layer composites below the egui
-        // surface (Task 4), so the central area must stay unpainted for the
-        // video to show through. Audio-only/error states still get an opaque
-        // black fill from MediaView::ui.
+        // Transparent frame while video plays: the layer composites below egui
+        // (Task 4). Letterbox uses mpv background-color matching the comic
+        // reader fill. Audio-only/error still paint that fill via MediaView::ui.
+        let panel_fill = crate::theme::reader_background_fill(
+            self.settings.background_color,
+            self.settings.chrome_opacity,
+        );
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -1131,7 +1136,7 @@ impl ReaderApp {
                     }
                 };
                 self.media_view.update_bounds(bounds);
-                self.media_view.ui(&ctx, ui);
+                self.media_view.ui(&ctx, ui, panel_fill);
             });
     }
 
@@ -1515,11 +1520,14 @@ impl ReaderApp {
                     match dur {
                         Some(d) if d > 0 => {
                             let mut ratio = pos as f32 / d as f32;
-                            let slider = egui::Slider::new(&mut ratio, 0.0..=1.0).show_value(false);
+                            let slider = egui::Slider::new(&mut ratio, 0.0..=1.0)
+                                .show_value(false)
+                                .trailing_fill(true);
                             let width = ui.available_width();
+                            let opacity = self.settings.chrome_opacity;
                             let response = ui
                                 .scope(|ui| {
-                                    ui.spacing_mut().slider_width = width;
+                                    crate::theme::style_media_seek_slider(ui, width, opacity);
                                     ui.add(slider)
                                 })
                                 .inner;
@@ -1539,11 +1547,14 @@ impl ReaderApp {
                         }
                         _ => {
                             let width = ui.available_width();
+                            let opacity = self.settings.chrome_opacity;
                             ui.scope(|ui| {
-                                ui.spacing_mut().slider_width = width;
+                                crate::theme::style_media_seek_slider(ui, width, opacity);
                                 ui.add_enabled(
                                     false,
-                                    egui::Slider::new(&mut 0.0f32, 0.0..=1.0).show_value(false),
+                                    egui::Slider::new(&mut 0.0f32, 0.0..=1.0)
+                                        .show_value(false)
+                                        .trailing_fill(true),
                                 )
                             });
                         }
@@ -1560,15 +1571,16 @@ impl ReaderApp {
                         ));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let mut vol = volume as f32;
-                            if ui
-                                .add_enabled(
-                                    !muted,
-                                    egui::Slider::new(&mut vol, 0.0..=100.0).show_value(false),
-                                )
-                                .changed()
-                            {
+                            let vol_resp = crate::widgets::volume_wedge::volume_wedge(
+                                ui,
+                                &mut vol,
+                                !muted,
+                                self.settings.chrome_opacity,
+                            );
+                            if vol_resp.changed() {
                                 self.set_media_volume(&ctx, vol as f64);
                             }
+                            vol_resp.on_hover_text(format!("音量 {:.0}%", volume));
                             let mute_icon = if muted {
                                 icons::SPEAKER_SLASH
                             } else {

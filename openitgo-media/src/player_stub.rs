@@ -51,6 +51,10 @@ impl MpvPlayer {
         Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
     }
 
+    pub fn set_background_color(&self, _rgb: [u8; 3], _opacity: f32) -> Result<(), MediaError> {
+        Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
+    }
+
     pub fn set_sub_track(&self, _id: Option<i64>) -> Result<(), MediaError> {
         Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
     }

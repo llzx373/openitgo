@@ -56,6 +56,13 @@ pub fn sid_arg(id: Option<i64>) -> String {
     }
 }
 
+/// `background-color` 属性：mpv `#AARRGGBB`，alpha 来自阅读区透明度。
+/// 与漫画 `reader_background_fill` 同色，letterbox 相对桌面半透明而非纯黑。
+pub fn format_background_color_arg(rgb: [u8; 3], opacity: f32) -> String {
+    let a = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{a:02X}{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +114,12 @@ mod tests {
     fn sid_arg_formats_track_id_or_no() {
         assert_eq!(sid_arg(Some(3)), "3");
         assert_eq!(sid_arg(None), "no");
+    }
+
+    #[test]
+    fn background_color_arg_is_aarrggbb() {
+        assert_eq!(format_background_color_arg([30, 30, 30], 1.0), "#FF1E1E1E");
+        assert_eq!(format_background_color_arg([12, 34, 56], 0.5), "#800C2238");
+        assert_eq!(format_background_color_arg([255, 0, 0], 0.0), "#00FF0000");
     }
 }

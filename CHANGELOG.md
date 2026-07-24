@@ -83,6 +83,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 媒体播放：进度条开启 trailing fill，未播放轨与已播放段用更高对比度（与漫画进度条同色系）；音量改为经典直角三角楔形控件并提高对比色；视频 letterbox / 纯音频占位改用设置中的阅读背景色 + `chrome_opacity`（mpv `background-color` + 非不透明 CAOpenGLLayer），不再纯黑。
+- ZIP/CBZ/RAR/文件夹解析跳过 macOS AppleDouble（`._*.jpg`）与 `__MACOSX/` 条目，避免其排在真图之前导致「缩略图加载失败」。
 - 双页模式宽页（跨页大图）单独展示时水平居中，不再贴在阅读方向一侧；空左槽不再用占位宽度导致偏移。
 - 超大 JPEG（长边 >4096）含 EXIF 内嵌缩略图时，macOS ImageIO 全图/缩略图路径改用 `CreateThumbnailFromImageAlways`，不再误用 ~160px EXIF 小图当正文；布局尺寸保留文件头分辨率，fit 在尺寸变化时重算。
 - 漫画首页缩放：双页 LTR 封面仅右页时 `spread_size` 不再因 `left_page?` 失败；`available` 过小或尺寸晚到时保留/重挂 `pending_fit`，翻页后按当前 `fit_mode` 适应。

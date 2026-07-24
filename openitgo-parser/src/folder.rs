@@ -1,4 +1,4 @@
-use crate::traits::{is_image_extension, ParseError, Parser};
+use crate::traits::{is_comic_image_name, ParseError, Parser};
 use openitgo_core::models::{Comic, Page, PageSource, Volume};
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,11 @@ impl Parser for FolderParser {
     fn parse(path: &Path) -> Result<Comic, ParseError> {
         let mut entries: Vec<PathBuf> = std::fs::read_dir(path)?
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| is_image(p))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(is_comic_image_name)
+            })
             .collect();
         entries.sort();
 
@@ -45,13 +49,6 @@ impl Parser for FolderParser {
             }],
         })
     }
-}
-
-fn is_image(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(is_image_extension)
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -90,5 +87,18 @@ mod tests {
         fs::write(tmp.path().join("skip.txt"), b"not an image").unwrap();
         let comic = FolderParser::parse(tmp.path()).unwrap();
         assert_eq!(comic.volumes[0].pages.len(), IMAGE_EXTENSIONS.len());
+    }
+
+    #[test]
+    fn test_parse_folder_skips_appledouble_sidecars() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("._001.jpg"), [0u8, 5, 0x16, 7]).unwrap();
+        fs::write(tmp.path().join("001.jpg"), b"fake").unwrap();
+        let comic = FolderParser::parse(tmp.path()).unwrap();
+        assert_eq!(comic.volumes[0].pages.len(), 1);
+        match &comic.volumes[0].pages[0].source {
+            PageSource::File(p) => assert_eq!(p.file_name().unwrap(), "001.jpg"),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

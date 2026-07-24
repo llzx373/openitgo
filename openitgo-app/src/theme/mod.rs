@@ -249,6 +249,32 @@ pub fn reader_background_fill(rgb: [u8; 3], opacity: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(rgb[0], rgb[1], rgb[2], opacity_u8(opacity))
 }
 
+/// High-contrast seek rail for the media bottom bar (played = accent,
+/// unplayed = extreme_bg). Scoped so volume sliders keep default visuals.
+pub fn style_media_seek_slider(ui: &mut egui::Ui, width: f32, opacity: f32) {
+    ui.spacing_mut().slider_width = width;
+    ui.spacing_mut().slider_rail_height = 10.0;
+    let track = ui.visuals().extreme_bg_color;
+    let accent = ui.visuals().selection.stroke.color;
+    let track_fill = Color32::from_rgba_unmultiplied(
+        track.r(),
+        track.g(),
+        track.b(),
+        opacity_u8(opacity * 0.75),
+    );
+    let played = Color32::from_rgba_unmultiplied(
+        accent.r(),
+        accent.g(),
+        accent.b(),
+        opacity_u8(opacity.max(0.85)),
+    );
+    let visuals = ui.visuals_mut();
+    visuals.widgets.inactive.bg_fill = track_fill;
+    visuals.widgets.hovered.bg_fill = track_fill;
+    visuals.widgets.active.bg_fill = track_fill;
+    visuals.selection.bg_fill = played;
+}
+
 /// Frame used by reader / ebook / media toolbars and status bars.
 pub fn chrome_bar_frame(visuals: &Visuals, opacity: f32) -> egui::Frame {
     let stroke_alpha = opacity_u8(opacity * 0.4);

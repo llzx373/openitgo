@@ -174,14 +174,18 @@ fn with_current_context<R>(ctx: cgl::CGLContextObj, f: impl FnOnce() -> R) -> R 
 
 fn create_pixel_format() -> Option<cgl::CGLPixelFormatObj> {
     use cgl::{
-        kCGLPFAAccelerated, kCGLPFADoubleBuffer, kCGLPFANoRecovery, CGLChoosePixelFormat,
-        CGLPixelFormatAttribute,
+        kCGLPFAAccelerated, kCGLPFAAlphaSize, kCGLPFADoubleBuffer, kCGLPFANoRecovery,
+        CGLChoosePixelFormat, CGLPixelFormatAttribute,
     };
-    // Default (legacy) GL profile is enough for libmpv.
-    let attrs: [CGLPixelFormatAttribute; 4] = [
+    // Alpha is required so mpv's translucent letterbox (`background-color`
+    // with A < FF) composites over the transparent window clear — matching
+    // the comic reader's `reader_background_fill`.
+    let attrs: [CGLPixelFormatAttribute; 6] = [
         kCGLPFAAccelerated,
         kCGLPFANoRecovery,
         kCGLPFADoubleBuffer,
+        kCGLPFAAlphaSize,
+        8,
         0,
     ];
     let mut pf: cgl::CGLPixelFormatObj = std::ptr::null_mut();
@@ -431,6 +435,10 @@ impl MpvNativeView {
             *rs_state_ivar().load_ptr::<usize>(&*layer) = state_ptr as usize;
             let () = msg_send![layer, setAsynchronous: Bool::YES];
             let () = msg_send![layer, setNeedsDisplayOnBoundsChange: Bool::YES];
+            // Non-opaque so letterbox alpha from mpv background-color shows
+            // the desktop through the transparent egui clear (same as the
+            // comic reader panel fill).
+            let () = msg_send![layer, setOpaque: Bool::NO];
             // Retina: match the window's backing scale.
             let window: *mut AnyObject = msg_send![ns_view, window];
             let scale: f64 = msg_send![window, backingScaleFactor];

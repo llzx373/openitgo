@@ -1,4 +1,4 @@
-use crate::traits::{is_image_extension, ParseError, Parser};
+use crate::traits::{is_comic_image_name, ParseError, Parser};
 use openitgo_core::models::{Comic, Page, PageSource, Volume};
 use std::collections::HashMap;
 use std::io::Error as IoError;
@@ -57,7 +57,7 @@ pub fn parse_rar(path: &Path, password: Option<&str>) -> Result<Comic, ParseErro
         if header.is_file() {
             let name = header.filename.to_string_lossy().to_string();
             header_positions.insert(name.clone(), position);
-            if is_image_name(&name) {
+            if is_comic_image_name(&name) {
                 names.push(name);
             }
         }
@@ -141,13 +141,6 @@ pub fn parse_rar(path: &Path, password: Option<&str>) -> Result<Comic, ParseErro
             pages,
         }],
     })
-}
-
-fn is_image_name(name: &str) -> bool {
-    name.rsplit('.')
-        .next()
-        .map(is_image_extension)
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

@@ -56,6 +56,8 @@ impl MpvPlayer {
             ("keep-open", "yes"),
             ("input-default-bindings", "no"),
             ("terminal", "no"),
+            // Letterbox / uncovered area uses --background-color (not tiles).
+            ("background", "color"),
         ] {
             let (k, v) = (cstring(k), cstring(v));
             // SAFETY: handle is a valid mpv handle; k/v are valid NUL-terminated
@@ -253,6 +255,14 @@ impl MpvPlayer {
 
     pub fn set_speed(&self, speed: f64) -> Result<(), MediaError> {
         self.set_property_string("speed", &args::format_speed_arg(speed))
+    }
+
+    /// Letterbox / uncovered area fill (`background-color`), `#AARRGGBB`.
+    pub fn set_background_color(&self, rgb: [u8; 3], opacity: f32) -> Result<(), MediaError> {
+        self.set_property_string(
+            "background-color",
+            &args::format_background_color_arg(rgb, opacity),
+        )
     }
 
     pub fn set_sub_track(&self, id: Option<i64>) -> Result<(), MediaError> {

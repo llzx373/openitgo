@@ -55,6 +55,31 @@ pub fn is_image_extension(ext: &str) -> bool {
     IMAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
 }
 
+/// Whether an archive entry or file path should be treated as a comic page image.
+///
+/// Skips macOS AppleDouble sidecars (`._foo.jpg`), `__MACOSX/` resource-fork
+/// trees, and other non-page junk that often ships inside CBZ/ZIP made on a Mac.
+/// Without this filter those ~4 KiB metadata blobs sort before real pages
+/// (`.` < `0`) and surface as "缩略图加载失败".
+pub fn is_comic_image_name(name: &str) -> bool {
+    let path = Path::new(name);
+    if path
+        .components()
+        .any(|c| matches!(c.as_os_str().to_str(), Some("__MACOSX") | Some(".DS_Store")))
+    {
+        return false;
+    }
+    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if file_name.starts_with("._") || file_name.eq_ignore_ascii_case(".DS_Store") {
+        return false;
+    }
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(is_image_extension)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,6 +92,18 @@ mod tests {
         }
         assert!(!is_image_extension("txt"));
         assert!(!is_image_extension(""));
+    }
+
+    #[test]
+    fn comic_image_name_skips_appledouble_and_macosx() {
+        assert!(is_comic_image_name("vol/001.jpg"));
+        assert!(is_comic_image_name("001.PNG"));
+        assert!(!is_comic_image_name("vol/._001.jpg"));
+        assert!(!is_comic_image_name("._cover.png"));
+        assert!(!is_comic_image_name("__MACOSX/._001.jpg"));
+        assert!(!is_comic_image_name("__MACOSX/folder/001.jpg"));
+        assert!(!is_comic_image_name("notes.txt"));
+        assert!(!is_comic_image_name(""));
     }
 
     #[test]

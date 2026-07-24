@@ -11,6 +11,8 @@ through an embedded `libmpv` backend.
 
 - `openitgo-core/` — shared models, reading-state machine, and layout math.
 - `openitgo-parser/` — archive/folder/PDF parsers and comic ID generation.
+  Image-page listing uses `is_comic_image_name` (skips macOS `._*` AppleDouble
+  sidecars and `__MACOSX/` trees so they are not treated as pages).
 - `openitgo-storage/` — JSON persistence for settings, library, history, bookmarks,
   per-comic reading settings, and reading stats (`reading_stats.json`).
 - `openitgo-media/` — libmpv wrapper: commands, event pump, property observation,
@@ -123,7 +125,12 @@ builds on unpinned stable.
   transparent backbuffer (`with_transparent(true)` + `clear_color` returning
   zero alpha) and the media view's CentralPanel uses a transparent frame, so
   the video shows through the unpainted central area while egui menus,
-  dropdowns and popups composite above it. Hit-testing is unaffected (the
+  dropdowns and popups composite above it. Video letterbox / uncovered area
+  uses mpv `background=color` + `background-color` (`#AARRGGBB` from
+  `settings.background_color` and `chrome_opacity`, same as comic
+  `reader_background_fill`); the CAOpenGLLayer is non-opaque with an alpha
+  pixel format so that fill composites over the desktop. Audio-only / decode
+  error overlays paint the same fill in egui. Hit-testing is unaffected (the
   egui NSView still receives all events). The egui control bars are
   repainted by the mpv event-pump thread calling
   `egui::Context::request_repaint()`. Bare-layer geometry changes must go

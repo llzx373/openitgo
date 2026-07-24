@@ -30,6 +30,8 @@ pub struct MediaView {
     pub loop_file: bool,
     /// AB 循环状态机；随 open() 复位。
     pub ab_loop: AbLoop,
+    /// Last applied letterbox fill (`background_color` + opacity byte).
+    applied_background: Option<([u8; 3], u8)>,
 }
 
 pub struct OpenMedia {
@@ -64,6 +66,7 @@ impl MediaView {
         self.auto_next_fired = false;
         self.loop_file = false;
         self.ab_loop = AbLoop::None;
+        self.applied_background = None;
         let pending_osd = self.pending_open_osd.take();
         let ctx2 = ctx.clone();
         let player =
@@ -137,7 +140,7 @@ impl MediaView {
         }
     }
 
-    pub fn ui(&mut self, _ctx: &egui::Context, ui: &mut egui::Ui) {
+    pub fn ui(&mut self, _ctx: &egui::Context, ui: &mut egui::Ui, panel_fill: egui::Color32) {
         let rect = ui.max_rect();
         ui.allocate_space(ui.available_size());
         let Some(open) = self.open.as_ref() else {
@@ -154,7 +157,7 @@ impl MediaView {
             MediaOverlay::AudioOnly => open.title.clone(),
         };
         let painter = ui.painter();
-        painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
+        painter.rect_filled(rect, 0.0, panel_fill);
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -334,6 +337,21 @@ impl MediaView {
         let _ = open.player.set_speed(speed);
         if !audio_device.is_empty() {
             open.pending_startup_device = Some(audio_device.to_string());
+        }
+    }
+
+    /// Sync letterbox / uncovered fill with the comic reader background
+    /// (`background_color` + `chrome_opacity`). No-ops when unchanged.
+    pub fn apply_reader_background(&mut self, rgb: [u8; 3], opacity: f32) {
+        let Some(open) = self.open.as_ref() else {
+            return;
+        };
+        let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+        if self.applied_background == Some((rgb, alpha)) {
+            return;
+        }
+        if open.player.set_background_color(rgb, opacity).is_ok() {
+            self.applied_background = Some((rgb, alpha));
         }
     }
 

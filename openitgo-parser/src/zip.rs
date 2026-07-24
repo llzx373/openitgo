@@ -1,4 +1,4 @@
-use crate::traits::{is_image_extension, ParseError, Parser};
+use crate::traits::{is_comic_image_name, ParseError, Parser};
 use openitgo_core::models::{Comic, Page, PageSource, Volume};
 use std::path::Path;
 
@@ -33,7 +33,7 @@ pub fn parse_zip(path: &Path, password: Option<&str>) -> Result<Comic, ParseErro
         // ends, so the decrypt retry happens in a separate statement below.
         let encrypted = match archive.by_index(i) {
             Ok(entry) => {
-                if entry.is_file() && is_image_name(entry.name()) {
+                if entry.is_file() && is_comic_image_name(entry.name()) {
                     entries.push((i, entry.name().to_string()));
                 }
                 false
@@ -51,7 +51,7 @@ pub fn parse_zip(path: &Path, password: Option<&str>) -> Result<Comic, ParseErro
             };
             match archive.by_index_decrypt(i, pw.as_bytes()) {
                 Ok(entry) => {
-                    if entry.is_file() && is_image_name(entry.name()) {
+                    if entry.is_file() && is_comic_image_name(entry.name()) {
                         entries.push((i, entry.name().to_string()));
                     }
                 }
@@ -99,13 +99,6 @@ pub fn parse_zip(path: &Path, password: Option<&str>) -> Result<Comic, ParseErro
     })
 }
 
-fn is_image_name(name: &str) -> bool {
-    name.rsplit('.')
-        .next()
-        .map(is_image_extension)
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,6 +130,33 @@ mod tests {
                 index: 0,
             }
         );
+    }
+
+    #[test]
+    fn test_parse_cbz_skips_appledouble_sidecars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("macos.cbz");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            // AppleDouble sorts before the real page ('.' < '0') and is not a JPEG.
+            zip.start_file("folder/._001.jpg", options).unwrap();
+            zip.write_all(&[0x00, 0x05, 0x16, 0x07]).unwrap();
+            zip.start_file("folder/001.jpg", options).unwrap();
+            zip.write_all(b"fake-jpeg").unwrap();
+            zip.start_file("__MACOSX/folder/._001.jpg", options)
+                .unwrap();
+            zip.write_all(&[0x00, 0x05, 0x16, 0x07]).unwrap();
+            zip.finish().unwrap();
+        }
+        let comic = ZipParser::parse(&path).unwrap();
+        assert_eq!(comic.volumes[0].pages.len(), 1);
+        match &comic.volumes[0].pages[0].source {
+            PageSource::ZipEntry { name, .. } => assert_eq!(name, "folder/001.jpg"),
+            other => panic!("unexpected source: {other:?}"),
+        }
     }
 
     #[test]
