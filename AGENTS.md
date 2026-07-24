@@ -69,7 +69,8 @@ builds on unpinned stable.
   `decode_threads`, `cache_size_mb`, `real_image_cache_pages`,
   `show_toolbar`, `show_statusbar`, `invert_scroll`, `library_sort`,
   `page_scroll_threshold`,
-  `media_volume`, `media_speed`, and `media_audio_device`.
+  `media_volume`, `media_speed`, `media_audio_device`,
+  `comic_end_action`, and `media_end_action`.
 - **History entries** store both `comic_id` and `path` for robust matching.
 - **Per-comic reading settings** (`comic_settings.json`,
   `HashMap<String, ComicReadingSettings>` keyed by comic_id) remember each
@@ -169,7 +170,8 @@ builds on unpinned stable.
   a missing saved device falls back to "auto" and is reported once via
   `take_startup_device_invalid` (the app clears the stale setting).
 - **Media auto-next (自动续播)**: `ReaderApp::maybe_auto_next_media` runs in
-  `render_media` right after `sync_state`; when `open.last.ended` is true
+  `render_media` right after `sync_state` when `settings.media_end_action` is
+  `NextInDir` (`Stop` skips); when `open.last.ended` is true
   with no `error`, it opens the next media file in the same directory
   exactly once per opened media (`MediaView::auto_next_fired`, reset in
   `MediaView::open`). The successor comes from `next_media_in_dir`
@@ -180,6 +182,22 @@ builds on unpinned stable.
   view, which the swap destroys. Playback errors (`error` non-empty) never
   trigger auto-next; at the last episode a one-shot `已是最后一集` OSD shows
   instead.
+- **Comic end action**: `settings.comic_end_action` — when the user requests
+  next page but `current_page` does not advance (`reader_next_page`),
+  `DoNothing` (default), `WrapToFirst`, or `NextSibling` via
+  `next_comic_sibling` (comic archive/PDF → next file; image folder → next
+  sibling folder that contains images; natural sort). Last sibling sets
+  `error_message` to `已是最后一个漫画`.
+- **Wide page in double-page mode**: aspect ≥ `wide_page_threshold` →
+  `spread_pages` returns `(Some(current), None)` so the page is centered;
+  empty left slot must use zero size (not `FALLBACK_PAGE_SIZE`) or the
+  spread gains phantom width and shifts off-center (LTR cover alone uses
+  the same empty-left fix).
+- **Window title**: `ReaderApp::sync_window_title` each frame sets
+  `ViewportCommand::Title` when changed — Reader:
+  `{page} — {comic} - OpenItGo`; Ebook/Media/Loading: `{file} - OpenItGo`;
+  Library/Settings: `OpenItGo`. Page name from `PageSource` (archive entry
+  basename, or `第 N 页` for PDF).
 - **MpvPlayer command rule**: every mpv command/property call made from the
   UI thread MUST use the async libmpv APIs (`mpv_command_async`,
   `mpv_set_property_async`, `mpv_get_property_async` — see

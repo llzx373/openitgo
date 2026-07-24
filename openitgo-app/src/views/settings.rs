@@ -1,6 +1,8 @@
 use openitgo_core::ebook::EbookReadingMode;
 use openitgo_core::models::{FitMode, ReadingMode};
-use openitgo_storage::models::{EbookTheme, Settings, Theme, ToolbarDisplayMode};
+use openitgo_storage::models::{
+    ComicEndAction, EbookTheme, MediaEndAction, Settings, Theme, ToolbarDisplayMode,
+};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -172,9 +174,54 @@ impl SettingsView {
             ui.label("宽页阈值（宽高比）:");
             ui.add(egui::Slider::new(&mut settings.wide_page_threshold, 1.0..=2.0).step_by(0.05));
         });
+
+        ui.label("到末页后再翻下一页");
+        egui::ComboBox::from_id_salt("comic_end_action")
+            .selected_text(comic_end_action_label(settings.comic_end_action))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut settings.comic_end_action,
+                    ComicEndAction::DoNothing,
+                    comic_end_action_label(ComicEndAction::DoNothing),
+                );
+                ui.selectable_value(
+                    &mut settings.comic_end_action,
+                    ComicEndAction::WrapToFirst,
+                    comic_end_action_label(ComicEndAction::WrapToFirst),
+                );
+                ui.selectable_value(
+                    &mut settings.comic_end_action,
+                    ComicEndAction::NextSibling,
+                    comic_end_action_label(ComicEndAction::NextSibling),
+                );
+            });
+        hint(
+            ui,
+            "「打开下一个」：当前是压缩包/PDF 则找同目录下一个漫画文件；当前是图片文件夹则找同级下一个文件夹",
+        );
     }
 
     fn media_ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {
+        ui.label("播放到结尾");
+        egui::ComboBox::from_id_salt("media_end_action")
+            .selected_text(media_end_action_label(settings.media_end_action))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut settings.media_end_action,
+                    MediaEndAction::Stop,
+                    media_end_action_label(MediaEndAction::Stop),
+                );
+                ui.selectable_value(
+                    &mut settings.media_end_action,
+                    MediaEndAction::NextInDir,
+                    media_end_action_label(MediaEndAction::NextInDir),
+                );
+            });
+        hint(
+            ui,
+            "「自动下一集」按同目录自然排序续播；开启循环播放时不会触发",
+        );
+
         ui.horizontal(|ui| {
             ui.label("默认音量:");
             let mut vol = settings.media_volume as f32;
@@ -405,6 +452,21 @@ fn toolbar_mode_label(mode: ToolbarDisplayMode) -> &'static str {
         ToolbarDisplayMode::IconAndText => "图标 + 文字",
         ToolbarDisplayMode::IconOnly => "仅图标",
         ToolbarDisplayMode::TextOnly => "仅文字",
+    }
+}
+
+fn comic_end_action_label(action: ComicEndAction) -> &'static str {
+    match action {
+        ComicEndAction::DoNothing => "什么都不做",
+        ComicEndAction::WrapToFirst => "回到第一页",
+        ComicEndAction::NextSibling => "打开下一个漫画",
+    }
+}
+
+fn media_end_action_label(action: MediaEndAction) -> &'static str {
+    match action {
+        MediaEndAction::Stop => "停止",
+        MediaEndAction::NextInDir => "自动播放下一集",
     }
 }
 

@@ -227,7 +227,7 @@ impl OpenReader {
     /// In double-page mode, the first page (cover) is shown alone on the
     /// reading side; subsequent spreads use two pages, unless the current page
     /// is a wide spread (aspect ratio >= `wide_page_threshold`) in which case it
-    /// is shown alone.
+    /// is shown alone and centered (not pinned to the reading side).
     fn spread_pages(&self) -> (Option<usize>, Option<usize>) {
         let current = self.state.current_page;
         let total = self.total_pages();
@@ -238,12 +238,8 @@ impl OpenReader {
             return (Some(current), None);
         }
         if self.is_wide_page(current) {
-            // Wide/cross-page spreads are shown alone on the reading side.
-            match self.state.mode {
-                ReadingMode::Ltr => (None, Some(current)),
-                ReadingMode::Rtl => (Some(current), None),
-                ReadingMode::Webtoon => (Some(current), None),
-            }
+            // Wide/cross-page spreads: single page, horizontally centered.
+            (Some(current), None)
         } else if current == 0 {
             // Cover page shown alone on the reading side.
             match self.state.mode {
@@ -800,10 +796,16 @@ impl ReaderView {
         }
         reader.last_available_size = Some(available_size);
 
-        let left_size = left_idx
-            .and_then(|idx| reader.effective_size(idx))
-            .map(|s| egui::vec2(s[0] as f32, s[1] as f32))
-            .unwrap_or(FALLBACK_PAGE_SIZE);
+        let left_size = match left_idx {
+            Some(idx) => reader
+                .effective_size(idx)
+                .map(|s| egui::vec2(s[0] as f32, s[1] as f32))
+                .unwrap_or(FALLBACK_PAGE_SIZE),
+            // Empty left slot must not contribute phantom width (e.g. LTR cover
+            // alone); otherwise the spread is oversized and the page shifts off
+            // center.
+            None => egui::Vec2::ZERO,
+        };
         let right_size = match right_idx {
             None => egui::Vec2::ZERO,
             Some(idx) => reader
@@ -1521,6 +1523,24 @@ mod tests {
 
         reader.state.current_page = 1;
         assert_eq!(reader.spread_pages(), (Some(2), Some(1)));
+    }
+
+    #[test]
+    fn test_spread_pages_wide_page_alone_and_centered() {
+        let mut reader = dummy_reader();
+        reader.state.mode = ReadingMode::Ltr;
+        reader.state.set_double_page(true, 10);
+        reader.state.current_page = 3;
+        // Aspect >= wide_page_threshold (1.4): treat as centered single page.
+        reader.cache.insert_dimensions(3, [2800, 1400]);
+        assert_eq!(reader.spread_pages(), (Some(3), None));
+
+        reader.state.mode = ReadingMode::Rtl;
+        assert_eq!(
+            reader.spread_pages(),
+            (Some(3), None),
+            "wide page stays centered in RTL too"
+        );
     }
 
     #[test]

@@ -39,6 +39,12 @@ pub struct Settings {
     pub media_volume: f64,
     pub media_speed: f64,
     pub media_audio_device: String,
+    /// 漫画翻到末页后再按「下一页」时的行为。
+    #[serde(default)]
+    pub comic_end_action: ComicEndAction,
+    /// 媒体播放到结尾时的行为。
+    #[serde(default)]
+    pub media_end_action: MediaEndAction,
 }
 
 fn default_chrome_opacity() -> f32 {
@@ -74,6 +80,8 @@ impl Default for Settings {
             media_volume: 100.0,
             media_speed: 1.0,
             media_audio_device: String::new(),
+            comic_end_action: ComicEndAction::default(),
+            media_end_action: MediaEndAction::default(),
         }
     }
 }
@@ -251,6 +259,30 @@ pub enum ToolbarDisplayMode {
     IconAndText,
     IconOnly,
     TextOnly,
+}
+
+/// 漫画读到末页后再翻「下一页」时的行为。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ComicEndAction {
+    /// 停在末页（默认，与历史行为一致）。
+    #[default]
+    DoNothing,
+    /// 回到本书第一页。
+    WrapToFirst,
+    /// 打开同级下一个漫画文件，或（当前为文件夹时）下一个兄弟文件夹。
+    NextSibling,
+}
+
+/// 媒体播放到结尾时的行为。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaEndAction {
+    /// 停在结尾，不自动续播。
+    Stop,
+    /// 自动打开同目录自然排序的下一个媒体文件（默认，与历史行为一致）。
+    #[default]
+    NextInDir,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -514,6 +546,16 @@ mod tests {
         assert!((s.wide_page_threshold - 1.4).abs() < f32::EPSILON);
         assert!((s.page_scroll_threshold - 12.0).abs() < f32::EPSILON);
         assert!((s.chrome_opacity - 0.85).abs() < f32::EPSILON);
+        assert_eq!(s.comic_end_action, ComicEndAction::DoNothing);
+        assert_eq!(s.media_end_action, MediaEndAction::NextInDir);
+    }
+
+    #[test]
+    fn test_settings_deserialize_missing_end_actions() {
+        let json = r#"{"theme":"Dark"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.comic_end_action, ComicEndAction::DoNothing);
+        assert_eq!(s.media_end_action, MediaEndAction::NextInDir);
     }
 
     #[test]

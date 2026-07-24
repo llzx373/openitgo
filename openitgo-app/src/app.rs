@@ -20,8 +20,8 @@ use openitgo_core::state::ReadingState;
 use openitgo_storage::{
     json_store::JsonStore,
     models::{
-        Bookmarks, ComicReadingSettings, EbookTheme, History, HistoryEntry, Library, MediaType,
-        Settings, Theme, ToolbarDisplayMode,
+        Bookmarks, ComicEndAction, ComicReadingSettings, EbookTheme, History, HistoryEntry,
+        Library, MediaEndAction, MediaType, Settings, Theme, ToolbarDisplayMode,
     },
 };
 use std::collections::{HashMap, HashSet};
@@ -195,6 +195,35 @@ fn next_media_in_dir(current: &Path) -> Option<PathBuf> {
         .map(|e| e.path())
         .filter(|p| p.is_file() && is_media_file(p))
         .collect();
+    sort_paths_natural(&mut entries);
+    let pos = entries.iter().position(|p| p == current)?;
+    entries.get(pos + 1).cloned()
+}
+
+/// 同级下一个漫画：当前为文件则找下一个漫画文件；为文件夹则找下一个含图片的兄弟文件夹。
+fn next_comic_sibling(current: &Path) -> Option<PathBuf> {
+    let dir = current.parent()?;
+    let mut entries: Vec<PathBuf> = if current.is_dir() {
+        std::fs::read_dir(dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir() && is_comic_folder(p))
+            .collect()
+    } else {
+        std::fs::read_dir(dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && is_supported_comic_file(p))
+            .collect()
+    };
+    sort_paths_natural(&mut entries);
+    let pos = entries.iter().position(|p| p == current)?;
+    entries.get(pos + 1).cloned()
+}
+
+fn sort_paths_natural(entries: &mut [PathBuf]) {
     entries.sort_by(|a, b| {
         let an = a
             .file_name()
@@ -204,11 +233,21 @@ fn next_media_in_dir(current: &Path) -> Option<PathBuf> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        // 自然比较相等（仅大小写/前导零差异）时用原始文件名兜底，保证排序确定。
         natural_cmp(&an, &bn).then_with(|| an.cmp(&bn))
     });
-    let pos = entries.iter().position(|p| p == current)?;
-    entries.get(pos + 1).cloned()
+}
+
+/// 目录是否可作为文件夹漫画打开（直接子项中至少有一张图片）。
+fn is_comic_folder(path: &Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(path) else {
+        return false;
+    };
+    rd.filter_map(|e| e.ok()).map(|e| e.path()).any(|p| {
+        p.is_file()
+            && p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(openitgo_parser::traits::is_image_extension)
+    })
 }
 
 fn media_type_for_path(path: &std::path::Path) -> MediaType {
@@ -330,6 +369,8 @@ pub struct ReaderApp {
     pub last_window_geometry_flush: Option<Instant>,
     /// 是否已做过启动后几何合法性检查（相对当前显示器）。
     pub window_geometry_validated: bool,
+    /// 上次设置的窗口标题，避免每帧重复发 ViewportCommand。
+    last_window_title: String,
 }
 
 impl Default for ReaderApp {
@@ -406,6 +447,7 @@ impl Default for ReaderApp {
             last_history_flush: None,
             last_window_geometry_flush: None,
             window_geometry_validated: false,
+            last_window_title: String::new(),
         }
     }
 }
@@ -510,6 +552,7 @@ impl eframe::App for ReaderApp {
         self.tick_persist_history_bookmarks();
         self.maybe_validate_window_geometry(&ctx);
         self.tick_persist_window_geometry(&ctx);
+        self.sync_window_title(&ctx);
     }
 }
 
@@ -969,11 +1012,15 @@ impl ReaderApp {
         });
     }
 
-    /// 播放正常结束（ended 且无 error）时自动续播同目录自然排序的下一集，
+    /// 播放正常结束（ended 且无 error）时按 `media_end_action` 处理：
+    /// `NextInDir` 自动续播同目录自然排序的下一集；`Stop` 则停在结尾。
     /// 每个打开的媒体只触发一次（auto_next_fired 守卫，open() 时复位）。
     /// 有下一集时先写入当前集进度，再以 force_start 打开下一集（从头播放），
     /// OSD 通过 pending_open_osd 由 MediaView::open 在新媒体就绪后显示。
     fn maybe_auto_next_media(&mut self, ctx: &egui::Context) {
+        if self.settings.media_end_action != MediaEndAction::NextInDir {
+            return;
+        }
         let should_fire = match self.media_view.open.as_ref() {
             Some(open) => {
                 !self.media_view.auto_next_fired && open.last.ended && open.last.error.is_none()
@@ -2790,8 +2837,42 @@ impl ReaderApp {
     }
 
     fn reader_next_page(&mut self) {
-        if let Some(reader) = self.reader_view.open.as_mut() {
-            reader.next_page_with_animation();
+        let Some(reader) = self.reader_view.open.as_mut() else {
+            return;
+        };
+        let from = reader.state.current_page;
+        reader.next_page_with_animation();
+        let to = reader.state.current_page;
+        if from == to {
+            self.handle_comic_end_action();
+        }
+    }
+
+    /// 已在末页仍请求「下一页」时，按设置执行停住 / 回首页 / 打开下一个漫画。
+    fn handle_comic_end_action(&mut self) {
+        match self.settings.comic_end_action {
+            ComicEndAction::DoNothing => {}
+            ComicEndAction::WrapToFirst => {
+                if let Some(reader) = self.reader_view.open.as_mut() {
+                    reader.first_page();
+                }
+            }
+            ComicEndAction::NextSibling => {
+                let Some(current) = self.reader_view.open.as_ref().map(|r| r.comic.path.clone())
+                else {
+                    return;
+                };
+                match next_comic_sibling(&current) {
+                    Some(next) => {
+                        self.record_reader_history();
+                        self.persist_history_bookmarks();
+                        self.open_path(next);
+                    }
+                    None => {
+                        self.error_message = Some("已是最后一个漫画".to_string());
+                    }
+                }
+            }
         }
     }
 
@@ -3019,6 +3100,47 @@ impl ReaderApp {
         self.settings.window_maximized = merged.maximized;
         if self.store.save_settings(&self.settings).is_ok() {
             self.last_window_geometry_flush = Some(now);
+        }
+    }
+
+    /// 按当前视图更新窗口标题；内容未变时不发 ViewportCommand。
+    fn sync_window_title(&mut self, ctx: &egui::Context) {
+        let title = self.compose_window_title();
+        if title == self.last_window_title {
+            return;
+        }
+        self.last_window_title = title.clone();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+    }
+
+    fn compose_window_title(&self) -> String {
+        match &self.current_view {
+            View::Reader => {
+                let Some(reader) = self.reader_view.open.as_ref() else {
+                    return APP_WINDOW_TITLE.to_string();
+                };
+                let comic_name = path_display_name(&reader.comic.path);
+                let page_name = reader
+                    .comic
+                    .page_source(reader.state.current_page)
+                    .map(page_source_display_name)
+                    .unwrap_or_default();
+                format_comic_window_title(&comic_name, &page_name)
+            }
+            View::Ebook => {
+                let Some(open) = self.ebook_view.open.as_ref() else {
+                    return APP_WINDOW_TITLE.to_string();
+                };
+                format_content_window_title(&path_display_name(&open.ebook.path))
+            }
+            View::Media => {
+                let Some(open) = self.media_view.open.as_ref() else {
+                    return APP_WINDOW_TITLE.to_string();
+                };
+                format_content_window_title(&path_display_name(&open.path))
+            }
+            View::Loading(path) => format_content_window_title(&path_display_name(path)),
+            View::Library | View::Settings => APP_WINDOW_TITLE.to_string(),
         }
     }
 
@@ -3928,6 +4050,47 @@ fn is_supported_comic_file(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+const APP_WINDOW_TITLE: &str = "OpenItGo";
+
+/// 路径在标题栏中的展示名（文件名或文件夹名）。
+fn path_display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// 漫画当前页在标题栏中的图片/条目名。
+fn page_source_display_name(source: &PageSource) -> String {
+    match source {
+        PageSource::File(path) => path_display_name(path),
+        PageSource::ZipEntry { name, .. } | PageSource::RarEntry { name, .. } => Path::new(name)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| name.clone()),
+        PageSource::PdfPage { page_number, .. } => format!("第 {} 页", page_number + 1),
+    }
+}
+
+fn format_content_window_title(content: &str) -> String {
+    if content.is_empty() {
+        APP_WINDOW_TITLE.to_string()
+    } else {
+        format!("{content} - {APP_WINDOW_TITLE}")
+    }
+}
+
+fn format_comic_window_title(comic_name: &str, page_name: &str) -> String {
+    if page_name.is_empty() {
+        format_content_window_title(comic_name)
+    } else if comic_name.is_empty() {
+        format_content_window_title(page_name)
+    } else {
+        format!("{page_name} — {comic_name} - {APP_WINDOW_TITLE}")
+    }
+}
+
 /// comic_id 的文件系统安全形式（非字母数字/-/下划线一律替换为 _）。
 fn sanitize_id_component(id: &str) -> String {
     id.chars()
@@ -4248,6 +4411,7 @@ mod tests {
                 last_history_flush: None,
                 last_window_geometry_flush: None,
                 window_geometry_validated: false,
+                last_window_title: String::new(),
             }
         }
     }
@@ -5526,6 +5690,99 @@ mod tests {
             Some(dir.join("c.mkv"))
         );
         assert_eq!(next_media_in_dir(&dir.join("c.mkv")), None);
+        // 漫画文件不算媒体
+        assert_eq!(next_media_in_dir(&dir.join("d.cbz")), None);
+    }
+
+    #[test]
+    fn next_comic_sibling_files_natural_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        for name in ["vol1.cbz", "vol2.cbz", "vol10.cbz", "readme.txt", "ep1.mkv"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        std::fs::create_dir(dir.join("vol3")).unwrap();
+
+        assert_eq!(
+            next_comic_sibling(&dir.join("vol1.cbz")),
+            Some(dir.join("vol2.cbz"))
+        );
+        assert_eq!(
+            next_comic_sibling(&dir.join("vol2.cbz")),
+            Some(dir.join("vol10.cbz"))
+        );
+        assert_eq!(next_comic_sibling(&dir.join("vol10.cbz")), None);
+        // 媒体/文本不算漫画文件兄弟
+        assert_eq!(next_comic_sibling(&dir.join("ep1.mkv")), None);
+    }
+
+    #[test]
+    fn next_comic_sibling_folders_skips_empty_and_uses_natural_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        for name in ["06", "07", "10", "empty", "notes"] {
+            std::fs::create_dir(dir.join(name)).unwrap();
+        }
+        // 有图片的才算漫画文件夹
+        std::fs::write(dir.join("06").join("001.jpg"), b"x").unwrap();
+        std::fs::write(dir.join("07").join("001.jpg"), b"x").unwrap();
+        std::fs::write(dir.join("10").join("001.jpg"), b"x").unwrap();
+        std::fs::write(dir.join("notes").join("readme.txt"), b"x").unwrap();
+        // 文件不应出现在文件夹兄弟列表里
+        std::fs::write(dir.join("extra.cbz"), b"x").unwrap();
+
+        assert_eq!(next_comic_sibling(&dir.join("06")), Some(dir.join("07")));
+        assert_eq!(next_comic_sibling(&dir.join("07")), Some(dir.join("10")));
+        assert_eq!(next_comic_sibling(&dir.join("10")), None);
+        assert_eq!(next_comic_sibling(&dir.join("empty")), None);
+    }
+
+    #[test]
+    fn path_display_name_uses_file_or_folder_component() {
+        assert_eq!(
+            path_display_name(Path::new("/tmp/series/06")),
+            "06".to_string()
+        );
+        assert_eq!(
+            path_display_name(Path::new("/tmp/book.cbz")),
+            "book.cbz".to_string()
+        );
+    }
+
+    #[test]
+    fn page_source_display_name_strips_archive_dirs() {
+        assert_eq!(
+            page_source_display_name(&PageSource::File(PathBuf::from("/a/b/001.jpg"))),
+            "001.jpg"
+        );
+        assert_eq!(
+            page_source_display_name(&PageSource::ZipEntry {
+                archive: PathBuf::from("x.cbz"),
+                name: "vol1/pages/002.png".into(),
+                index: 0,
+            }),
+            "002.png"
+        );
+        assert_eq!(
+            page_source_display_name(&PageSource::PdfPage {
+                document: PathBuf::from("doc.pdf"),
+                page_number: 0,
+            }),
+            "第 1 页"
+        );
+    }
+
+    #[test]
+    fn format_comic_window_title_includes_page_and_comic() {
+        assert_eq!(
+            format_comic_window_title("06", "001.jpg"),
+            "001.jpg — 06 - OpenItGo"
+        );
+        assert_eq!(
+            format_content_window_title("clip.mkv"),
+            "clip.mkv - OpenItGo"
+        );
+        assert_eq!(format_content_window_title(""), "OpenItGo");
     }
 
     #[test]

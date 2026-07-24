@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 窗口标题：阅读/播放时显示当前漫画·电子书·视频文件名；漫画额外显示当前页图片名（如 `001.jpg — 06 - OpenItGo`）。
+- Settings：`comic_end_action`（漫画末页后再翻下一页：什么都不做 / 回到第一页 / 打开下一个文件或兄弟文件夹）；`media_end_action`（媒体结尾：停止 / 自动播放下一集，默认续播以保持原行为）。
 - Gallery Immersive UI（P0–P2）：全局 `theme` tokens + 自定义 Visuals/Style；书架分段 Tab / 圆角封面卡 / 标签 chip / 空状态；漫画·电子书·媒体工具栏统一 Phosphor 与半透明 chrome。
 - Gallery Immersive UI（P3–P4）：设置页分段 Tab（外观/漫画/电子书/媒体/性能/快捷键）；电子书 Dark/Light 色值与壳层对齐（`EbookPalette`）；书架封面/标签 hover 与空历史·空书签插画。
 - Settings：`chrome_opacity`（阅读栏透明度），漫画阅读区背景与工具栏 / 进度条 / 状态栏共用；相对窗口透明清屏透出桌面，不盖在正文像素上。
@@ -81,6 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 双页模式宽页（跨页大图）单独展示时水平居中，不再贴在阅读方向一侧；空左槽不再用占位宽度导致偏移。
 - 超大 JPEG（长边 >4096）含 EXIF 内嵌缩略图时，macOS ImageIO 全图/缩略图路径改用 `CreateThumbnailFromImageAlways`，不再误用 ~160px EXIF 小图当正文；布局尺寸保留文件头分辨率，fit 在尺寸变化时重算。
 - 漫画首页缩放：双页 LTR 封面仅右页时 `spread_size` 不再因 `left_page?` 失败；`available` 过小或尺寸晚到时保留/重挂 `pending_fit`，翻页后按当前 `fit_mode` 适应。
 - 窗口几何：启动恢复上次大小/位置/最大化；屏外时回退默认尺寸并居中；运行中节流写入 settings，退出再 flush。
