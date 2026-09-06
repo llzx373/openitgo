@@ -12,13 +12,11 @@ fn main() -> eframe::Result<()> {
         .map(PathBuf::from)
         .expect("usage: cargo run --example profile_open -- <path-to-archive>");
 
-    let app = ReaderApp {
-        opener: Some(AsyncOpener::<Comic>::open(path.clone(), |p| {
-            openitgo_parser::parse(p).map_err(|e| e.to_string())
-        })),
-        current_view: View::Loading(path),
-        ..Default::default()
-    };
+    let mut app = ReaderApp::default();
+    app.opener = Some(AsyncOpener::<Comic>::open(path.clone(), |p| {
+        openitgo_parser::parse(p).map_err(|e| e.to_string())
+    }));
+    app.current_view = View::Loading(path);
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),

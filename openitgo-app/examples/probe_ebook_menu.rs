@@ -16,13 +16,11 @@ fn main() -> eframe::Result<()> {
         .map(PathBuf::from)
         .expect("usage: cargo run --example probe_ebook_menu -- <ebook-file>");
 
-    let app = ReaderApp {
-        ebook_opener: Some(AsyncOpener::<Ebook>::open(path.clone(), |p| {
-            openitgo_parser::parse_ebook(p).map_err(|e| e.to_string())
-        })),
-        current_view: View::Loading(path),
-        ..Default::default()
-    };
+    let mut app = ReaderApp::default();
+    app.ebook_opener = Some(AsyncOpener::<Ebook>::open(path.clone(), |p| {
+        openitgo_parser::parse_ebook(p).map_err(|e| e.to_string())
+    }));
+    app.current_view = View::Loading(path);
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),

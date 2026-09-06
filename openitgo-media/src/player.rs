@@ -46,19 +46,40 @@ fn cstring(s: &str) -> CString {
 
 impl MpvPlayer {
     pub fn new(repaint: Box<dyn Fn() + Send + Sync>) -> Result<Self, MediaError> {
+        Self::new_with_wid(repaint, None)
+    }
+
+    /// `wid`: native window handle for mpv's own video output (Windows HWND
+    /// embedding). Must be set before `mpv_initialize`, hence a constructor
+    /// parameter. `None` selects `vo=libmpv` (macOS render-context path).
+    pub fn new_with_wid(
+        repaint: Box<dyn Fn() + Send + Sync>,
+        wid: Option<i64>,
+    ) -> Result<Self, MediaError> {
         // SAFETY: mpv_create has no preconditions.
         let handle = unsafe { mpv::mpv_create() };
         if handle.is_null() {
             return Err(MediaError::Init("mpv_create 返回空句柄".to_string()));
         }
-        for (k, v) in [
-            ("vo", "libmpv"),
+        let wid_string;
+        let mut options = vec![
             ("keep-open", "yes"),
             ("input-default-bindings", "no"),
             ("terminal", "no"),
             // Letterbox / uncovered area uses --background-color (not tiles).
             ("background", "color"),
-        ] {
+        ];
+        match wid {
+            Some(w) => {
+                wid_string = w.to_string();
+                options.push(("wid", wid_string.as_str()));
+                // wid embedding loads the OSC by default on some builds; the
+                // app renders its own controls.
+                options.push(("osc", "no"));
+            }
+            None => options.push(("vo", "libmpv")),
+        }
+        for (k, v) in options {
             let (k, v) = (cstring(k), cstring(v));
             // SAFETY: handle is a valid mpv handle; k/v are valid NUL-terminated
             // strings that outlive the call.
@@ -163,7 +184,10 @@ impl MpvPlayer {
         self.state.clone()
     }
 
-    pub(crate) fn handle(&self) -> *mut mpv::mpv_handle {
+    /// Raw handle for platform video-view integration (Windows HWND embedding
+    /// issues `show-text` OSD commands directly). Not a general-purpose API.
+    #[doc(hidden)]
+    pub fn handle(&self) -> *mut mpv::mpv_handle {
         self.handle
     }
 

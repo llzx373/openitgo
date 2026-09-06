@@ -744,7 +744,7 @@ pub mod macos {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub mod macos {
     use crate::loader::LoadedImage;
     use egui::ColorImage;
@@ -761,18 +761,49 @@ pub mod macos {
     }
 
     pub mod mpv_view {
-        pub struct MpvNativeView;
-        impl MpvNativeView {
-            pub fn new<
+        pub struct PendingVideoView;
+        impl PendingVideoView {
+            pub fn create<
                 W: wry::raw_window_handle::HasWindowHandle + wry::raw_window_handle::HasDisplayHandle,
             >(
                 _parent: &W,
+            ) -> Result<Self, String> {
+                Err("媒体播放暂仅支持 macOS/Windows".to_string())
+            }
+            pub fn wid(&self) -> Option<i64> {
+                None
+            }
+            pub fn finish<
+                W: wry::raw_window_handle::HasWindowHandle + wry::raw_window_handle::HasDisplayHandle,
+            >(
+                self,
+                _parent: &W,
                 _bounds: wry::Rect,
                 _player: &openitgo_media::MpvPlayer,
-            ) -> Result<Self, String> {
-                Err("媒体播放暂仅支持 macOS".to_string())
+            ) -> Result<MpvNativeView, String> {
+                Err("媒体播放暂仅支持 macOS/Windows".to_string())
             }
+        }
+
+        pub struct MpvNativeView;
+        impl MpvNativeView {
             pub fn set_bounds(&self, _bounds: wry::Rect) {}
+            pub fn set_osd(&self, _text: &str) {}
+            pub fn clear_osd(&self) {}
         }
     }
 }
+
+#[cfg(target_os = "windows")]
+pub mod windows {
+    pub mod mpv_view;
+}
+
+/// Unified video-view API used by views/media.rs (`PendingVideoView`
+/// two-phase construction + `MpvNativeView`).
+#[cfg(target_os = "macos")]
+pub use macos::mpv_view as video;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub use macos::mpv_view as video;
+#[cfg(target_os = "windows")]
+pub use windows::mpv_view as video;

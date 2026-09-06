@@ -1,3 +1,9 @@
+// unrar_sys 的捆绑 UnRAR C++ 源码在 Windows 上调用注册表/令牌/加密 API
+// （advapi32.lib），但该 crate 未为 MSVC 目标声明链接——在此补上。
+#[cfg(target_os = "windows")]
+#[link(name = "advapi32")]
+unsafe extern "C" {}
+
 mod chapters;
 pub mod epub;
 pub mod folder;

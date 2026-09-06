@@ -92,6 +92,33 @@ pub struct MpvNativeView {
 // owns this value; moving ownership between threads does not alias them.
 unsafe impl Send for MpvNativeView {}
 
+/// Placeholder keeping `MediaView::open` platform-neutral: macOS attaches the
+/// render context AFTER `mpv_initialize` (vo=libmpv), so nothing needs to
+/// exist before player construction (`wid()` is `None` → `MpvPlayer::new`
+/// keeps the libmpv VO).
+pub struct PendingVideoView;
+
+impl PendingVideoView {
+    pub fn create<W: HasWindowHandle + HasDisplayHandle>(_parent: &W) -> Result<Self, String> {
+        Ok(Self)
+    }
+
+    pub fn wid(&self) -> Option<i64> {
+        None
+    }
+
+    pub fn finish<W: HasWindowHandle + HasDisplayHandle>(
+        self,
+        parent: &W,
+        bounds: wry::Rect,
+        player: &openitgo_media::MpvPlayer,
+    ) -> Result<MpvNativeView, String> {
+        MpvNativeView::new(parent, bounds, player)
+    }
+}
+
+use wry::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+
 fn layer_class() -> &'static AnyClass {
     use std::sync::OnceLock;
     static CLS: OnceLock<&'static AnyClass> = OnceLock::new();

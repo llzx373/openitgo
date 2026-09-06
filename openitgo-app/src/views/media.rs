@@ -37,10 +37,10 @@ pub struct MediaView {
 pub struct OpenMedia {
     pub path: PathBuf,
     pub title: String,
-    // Field order matters for drop: `native` frees the mpv render context,
-    // which render.h requires to happen before the player handle is
-    // destroyed (`player` below). Struct fields drop in declaration order.
-    native: crate::platform::macos::mpv_view::MpvNativeView,
+    // Field order matters for drop: `native` frees the render context /
+    // video window, which must happen before the player handle is destroyed
+    // (`player` below). Struct fields drop in declaration order.
+    native: crate::platform::video::MpvNativeView,
     pub player: MpvPlayer,
     pub state: Arc<Mutex<PlayerState>>,
     pub last: PlayerState,
@@ -69,9 +69,14 @@ impl MediaView {
         self.applied_background = None;
         let pending_osd = self.pending_open_osd.take();
         let ctx2 = ctx.clone();
+        // Two-phase construction: Windows must create the video HWND and pass
+        // it as mpv's `wid` BEFORE mpv_initialize; macOS attaches its render
+        // context post-init, so its PendingVideoView is an empty placeholder.
+        let pending = crate::platform::video::PendingVideoView::create(parent)?;
         let player =
-            MpvPlayer::new(Box::new(move || ctx2.request_repaint())).map_err(|e| e.to_string())?;
-        let native = crate::platform::macos::mpv_view::MpvNativeView::new(parent, bounds, &player)?;
+            MpvPlayer::new_with_wid(Box::new(move || ctx2.request_repaint()), pending.wid())
+                .map_err(|e| e.to_string())?;
+        let native = pending.finish(parent, bounds, &player)?;
         let title = path
             .file_stem()
             .and_then(|s| s.to_str())

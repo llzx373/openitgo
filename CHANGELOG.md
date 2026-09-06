@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Windows 支持：全 workspace 在 `x86_64-pc-windows-msvc` 下编译、测试通过；媒体播放经 mpv `wid` 嵌入 HWND 子窗口（`platform/windows/mpv_view.rs`，OSD 用 mpv `show-text` 自绘，菜单打开时停放视频窗口，与电子书 webview 停放同一模式）；媒体封面用 mpv `vo=image` 无头抓帧；电子书经 wry/WebView2。新增 `scripts/setup-windows.ps1`（下载 libmpv 并生成 MSVC 导入库到 `vendor/mpv/`）与 `scripts/cargo-win.bat`（vcvars64 环境内运行 cargo）。
+- 诊断示例：`media_smoke`（打开媒体文件，播放进度推进即自动退出）与 `probe_cover`（无头封面生成冒烟）。
+
+### Fixed
+
+- 非 macOS 平台编译：`mpv_view` stub 补齐 `set_osd`/`clear_osd`（`media.rs` 无条件调用）；EPUB 章节 href 归一化兼容反斜杠（epub crate 在 Windows 下用 `PathBuf::join` 拼 NCX content 路径）；`unrar_sys` 在 MSVC 下缺 advapi32 链接声明（`#[link]` 补在 `openitgo-parser` lib 与 `probe_rar_password` 示例）；缩略图小图不再被放大到 256px（`image::thumbnail` 会上采样，与 macOS ImageIO 路径行为对齐）；修复四个诊断示例对 `ReaderApp` 私有字段的结构体更新语法（`last_window_title` 引入后全平台编译失败）。
 - 窗口标题：阅读/播放时显示当前漫画·电子书·视频文件名；漫画额外显示当前页图片名（如 `001.jpg — 06 - OpenItGo`）。
 - Settings：`comic_end_action`（漫画末页后再翻下一页：什么都不做 / 回到第一页 / 打开下一个文件或兄弟文件夹）；`media_end_action`（媒体结尾：停止 / 自动播放下一集，默认续播以保持原行为）。
 - Gallery Immersive UI（P0–P2）：全局 `theme` tokens + 自定义 Visuals/Style；书架分段 Tab / 圆角封面卡 / 标签 chip / 空状态；漫画·电子书·媒体工具栏统一 Phosphor 与半透明 chrome。

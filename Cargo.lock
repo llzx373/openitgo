@@ -3614,6 +3614,7 @@ dependencies = [
  "egui_phosphor_icons",
  "foreign-types",
  "image",
+ "libmpv-sys",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "openitgo-core",
@@ -3629,6 +3630,7 @@ dependencies = [
  "texpresso",
  "time",
  "unrar",
+ "windows-sys 0.61.2",
  "wry",
  "zip 2.4.2",
 ]

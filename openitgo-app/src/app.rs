@@ -453,12 +453,20 @@ impl Default for ReaderApp {
 }
 
 impl eframe::App for ReaderApp {
-    /// Fully transparent: every view paints its own opaque panels, and in
-    /// the media view the unpainted central area must let the video layer
-    /// below the egui surface show through (see
-    /// platform/macos/mpv_view.rs).
+    /// macOS: fully transparent — the mpv video layer composites below the
+    /// egui surface and shows through the unpainted central area (see
+    /// platform/macos/mpv_view.rs). Windows embeds video in an HWND child
+    /// window instead (platform/windows/mpv_view.rs), so the surface stays
+    /// opaque; other views paint their own opaque panels either way.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
+        #[cfg(target_os = "macos")]
+        {
+            [0.0, 0.0, 0.0, 0.0]
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            [0.0, 0.0, 0.0, 1.0]
+        }
     }
 
     fn on_exit(&mut self) {
@@ -1091,53 +1099,63 @@ impl ReaderApp {
             self.render_media_seekbar(ui);
         }
 
-        // Transparent frame while video plays: the layer composites below egui
-        // (Task 4). Letterbox uses mpv background-color matching the comic
+        // Transparent frame while video plays: on macOS the layer composites
+        // below egui (Task 4); on Windows the HWND child covers the panel.
+        // Letterbox uses mpv background-color matching the comic
         // reader fill. Audio-only/error still paint that fill via MediaView::ui.
         let panel_fill = crate::theme::reader_background_fill(
             self.settings.background_color,
             self.settings.chrome_opacity,
         );
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE)
-            .show(ui, |ui| {
-                let rect = ui.max_rect();
-                // Scroll-wheel volume over the video area. Skipped while an egui
-                // popup (字幕/音轨/输出 dropdown) is open under the pointer, so
-                // scrolling the popup list does not also change the volume.
-                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                if scroll != 0.0 && ui.rect_contains_pointer(rect) && !ctx.is_pointer_over_egui() {
-                    let (acc, steps) =
-                        crate::views::media::accumulate_scroll(self.media_view.scroll_acc, scroll);
-                    self.media_view.scroll_acc = acc;
-                    if steps != 0 {
-                        self.adjust_media_volume(&ctx, steps as f64 * 5.0);
-                    }
+        // Windows 菜单停放：HWND 子窗口恒在 egui 表面之上，弹层会被视频盖住，
+        // 因此菜单打开时与电子书 webview 同一模式——停放视频窗口并以背景色
+        // 填充正文区，关闭即恢复。macOS 的层叠模型（视频在 egui 之下）无需此处理。
+        let menu_parked = cfg!(target_os = "windows") && menu_overlay_open(&ctx);
+        let frame = if menu_parked {
+            egui::Frame::NONE.fill(panel_fill)
+        } else {
+            egui::Frame::NONE
+        };
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+            let rect = ui.max_rect();
+            // Scroll-wheel volume over the video area. Skipped while an egui
+            // popup (字幕/音轨/输出 dropdown) is open under the pointer, so
+            // scrolling the popup list does not also change the volume.
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 && ui.rect_contains_pointer(rect) && !ctx.is_pointer_over_egui() {
+                let (acc, steps) =
+                    crate::views::media::accumulate_scroll(self.media_view.scroll_acc, scroll);
+                self.media_view.scroll_acc = acc;
+                if steps != 0 {
+                    self.adjust_media_volume(&ctx, steps as f64 * 5.0);
                 }
-                let overlay = self
-                    .media_view
-                    .open
-                    .as_ref()
-                    .map(|o| media_overlay(&o.last))
-                    .unwrap_or(MediaOverlay::None);
-                // Audio-only or decode error: park the native layer at zero
-                // size so the egui placeholder painted by MediaView::ui shows
-                // instead of the video. Menus need no parking: the egui
-                // surface composites above the video layer now.
-                let bounds = if matches!(overlay, MediaOverlay::None) {
-                    wry::Rect {
-                        position: wry::dpi::LogicalPosition::new(rect.min.x, rect.min.y).into(),
-                        size: wry::dpi::LogicalSize::new(rect.width(), rect.height()).into(),
-                    }
-                } else {
-                    wry::Rect {
-                        position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
-                        size: wry::dpi::LogicalSize::new(0.0, 0.0).into(),
-                    }
-                };
-                self.media_view.update_bounds(bounds);
-                self.media_view.ui(&ctx, ui, panel_fill);
-            });
+            }
+            let overlay = self
+                .media_view
+                .open
+                .as_ref()
+                .map(|o| media_overlay(&o.last))
+                .unwrap_or(MediaOverlay::None);
+            // Audio-only or decode error: park the native layer at zero
+            // size so the egui placeholder painted by MediaView::ui shows
+            // instead of the video. On Windows the HWND child also parks
+            // while a menu is open (menu_parked above); macOS needs no
+            // menu parking since the egui surface composites above the
+            // video layer.
+            let bounds = if matches!(overlay, MediaOverlay::None) && !menu_parked {
+                wry::Rect {
+                    position: wry::dpi::LogicalPosition::new(rect.min.x, rect.min.y).into(),
+                    size: wry::dpi::LogicalSize::new(rect.width(), rect.height()).into(),
+                }
+            } else {
+                wry::Rect {
+                    position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+                    size: wry::dpi::LogicalSize::new(0.0, 0.0).into(),
+                }
+            };
+            self.media_view.update_bounds(bounds);
+            self.media_view.ui(&ctx, ui, panel_fill);
+        });
     }
 
     fn render_media_toolbar(&mut self, ui: &mut egui::Ui) {

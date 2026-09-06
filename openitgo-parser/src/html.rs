@@ -480,13 +480,15 @@ fn resolve_resource_path(dir: &str, rel: &str) -> String {
 }
 
 /// Normalize an EPUB chapter/resource href for archive lookup: strip any
-/// `#fragment` and resolve `.` / `..` segments (calibre NCX files reference
+/// `#fragment`, resolve `.` / `..` segments (calibre NCX files reference
 /// pages outside the OPF directory as `../page.html`, and anchors as
-/// `page.html#toc_1`). Zip lookups are exact-match, so both forms would
+/// `page.html#toc_1`), and convert `\` to `/` (the epub crate builds NCX
+/// content paths with `PathBuf::join`, which produces backslashes on
+/// Windows). Zip lookups are exact-match, so all three forms would
 /// otherwise miss.
 fn normalize_epub_href(href: &str) -> String {
     let no_fragment = href.split('#').next().unwrap_or("");
-    resolve_resource_path("", no_fragment)
+    resolve_resource_path("", &no_fragment.replace('\\', "/"))
 }
 
 /// Build an absolute `ebook://reader/res/` URL for a relative resource

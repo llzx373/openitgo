@@ -3,11 +3,11 @@ pub(crate) mod apply;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod args;
 pub mod chapters;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub mod cover;
 pub mod devices;
 pub mod error;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub mod cover {
     use crate::error::MediaError;
     use std::path::{Path, PathBuf};
@@ -22,14 +22,16 @@ pub mod cover {
         _output: &Path,
         _timeout: Duration,
     ) -> Result<(), MediaError> {
-        Err(MediaError::Init("媒体播放暂仅支持 macOS".to_string()))
+        Err(MediaError::Init(
+            "媒体播放暂仅支持 macOS/Windows".to_string(),
+        ))
     }
 }
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub mod player;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub mod player_stub;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub use player_stub as player;
 #[cfg(target_os = "macos")]
 pub mod render;

@@ -1174,12 +1174,19 @@ fn downsample_if_needed(image: image::DynamicImage) -> image::DynamicImage {
 pub(crate) const THUMBNAIL_MAX_DIMENSION: u32 = 256;
 
 /// Resize an already-decoded dynamic image to thumbnail dimensions while
-/// preserving aspect ratio.
+/// preserving aspect ratio. Small images are kept at their original size
+/// (image's `thumbnail` would upscale them; the macOS ImageIO path does not,
+/// and the tests assert parity).
 fn make_thumbnail(image: image::DynamicImage) -> (ColorImage, [u32; 2]) {
     let original_size = [image.width(), image.height()];
     // Use image's optimized fast thumbnail path instead of Lanczos3: it is
     // much cheaper on CPU and the quality loss is acceptable at 256px.
-    let thumb = image.thumbnail(THUMBNAIL_MAX_DIMENSION, THUMBNAIL_MAX_DIMENSION);
+    let thumb =
+        if image.width() <= THUMBNAIL_MAX_DIMENSION && image.height() <= THUMBNAIL_MAX_DIMENSION {
+            image
+        } else {
+            image.thumbnail(THUMBNAIL_MAX_DIMENSION, THUMBNAIL_MAX_DIMENSION)
+        };
     let rgba = thumb.to_rgba8();
     (
         ColorImage::from_rgba_unmultiplied(

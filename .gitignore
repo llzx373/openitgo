@@ -1,4 +1,5 @@
 /target
+/vendor/mpv
 .DS_Store
 .worktrees
 /.superpowers

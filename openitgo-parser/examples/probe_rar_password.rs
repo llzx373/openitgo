@@ -4,6 +4,12 @@
 //! Run three times per fixture: no password / wrong password / correct password
 //! and compare against the mapping table in the batch plan (Task 3 Step 2).
 
+// 直接用 unrar 而不经 openitgo_parser，因此自带 advapi32 链接声明
+// （原因见 openitgo-parser/src/lib.rs 顶部的注释）。
+#[cfg(target_os = "windows")]
+#[link(name = "advapi32")]
+unsafe extern "C" {}
+
 use std::path::Path;
 
 fn list_and_read(path: &Path, password: Option<&str>) {
