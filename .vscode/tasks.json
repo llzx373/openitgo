@@ -110,6 +110,18 @@
         "panel": "shared"
       },
       "problemMatcher": []
+    },
+    {
+      "label": "Package Windows portable zip",
+      "type": "shell",
+      "command": "powershell",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/package-windows.ps1"],
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
     }
   ]
 }

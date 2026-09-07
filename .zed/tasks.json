@@ -79,5 +79,14 @@
     "use_new_terminal": false,
     "allow_concurrent_runs": false,
     "reveal": "always"
+  },
+  {
+    "label": "Package Windows portable zip",
+    "command": "powershell",
+    "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/package-windows.ps1"],
+    "env": {},
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
   }
 ]
