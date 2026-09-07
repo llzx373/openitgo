@@ -19,6 +19,7 @@ use egui_phosphor_icons::{icons, Icon};
 use openitgo_core::ebook::Ebook;
 use openitgo_core::models::{Comic, FitMode, PageSource, ReadingMode};
 use openitgo_core::state::ReadingState;
+use openitgo_parser::archive::archive_kind;
 use openitgo_storage::{
     json_store::JsonStore,
     models::{
@@ -106,17 +107,19 @@ fn history_persist_due(
     }
 }
 
+/// 电子书扩展名表：is_ebook_file 判定与「打开文件…」过滤器共用（单处定义）。
+const EBOOK_EXTS: &[&str] = &["epub", "mobi", "azw", "azw3", "txt", "md", "markdown"];
+
 fn is_ebook_file(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| {
-            matches!(
-                e.to_ascii_lowercase().as_str(),
-                "epub" | "mobi" | "azw" | "azw3" | "txt" | "md" | "markdown"
-            )
-        })
-        .unwrap_or(false)
+        .is_some_and(|e| EBOOK_EXTS.contains(&e.to_ascii_lowercase().as_str()))
 }
+
+/// 视频扩展名表：is_media_file 判定与「打开文件…」过滤器共用（单处定义）。
+const VIDEO_EXTS: &[&str] = &[
+    "mp4", "m4v", "mkv", "webm", "avi", "mov", "wmv", "flv", "ts", "m2ts", "mpg", "mpeg", "3gp",
+];
 
 const AUDIO_EXTS: &[&str] = &[
     "mp3", "flac", "aac", "m4a", "ogg", "oga", "opus", "wav", "aiff", "ape", "wma",
@@ -127,23 +130,7 @@ fn is_media_file(path: &std::path::Path) -> bool {
         .and_then(|e| e.to_str())
         .map(|e| {
             let ext = e.to_ascii_lowercase();
-            matches!(
-                ext.as_str(),
-                // 视频
-                "mp4"
-                    | "m4v"
-                    | "mkv"
-                    | "webm"
-                    | "avi"
-                    | "mov"
-                    | "wmv"
-                    | "flv"
-                    | "ts"
-                    | "m2ts"
-                    | "mpg"
-                    | "mpeg"
-                    | "3gp"
-            ) || AUDIO_EXTS.contains(&ext.as_str())
+            VIDEO_EXTS.contains(&ext.as_str()) || AUDIO_EXTS.contains(&ext.as_str())
         })
         .unwrap_or(false)
 }
@@ -2326,6 +2313,7 @@ impl ReaderApp {
                 ui.colored_label(ui.visuals().error_fg_color, err);
             }
             let mut back = false;
+            let mut open_as_comic = false;
             let mut extract_all = false;
             let mut extract_selected: Option<Vec<String>> = None;
             let mut need_password = false;
@@ -2333,6 +2321,7 @@ impl ReaderApp {
                 ui,
                 ArchiveCallbacks {
                     on_back: &mut || back = true,
+                    on_open_as_comic: &mut || open_as_comic = true,
                     on_extract_all: &mut || extract_all = true,
                     on_extract_selected: &mut |sel| extract_selected = Some(sel),
                     on_need_password: &mut || need_password = true,
@@ -2340,6 +2329,11 @@ impl ReaderApp {
             );
             if back {
                 self.current_view = View::Library;
+            }
+            if open_as_comic {
+                if let Some(path) = self.archive_view.path.clone() {
+                    self.open_path(path);
+                }
             }
             if need_password {
                 if let Some(path) = self.archive_view.path.clone() {
@@ -2461,6 +2455,12 @@ impl ReaderApp {
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("文件", |ui| {
+                    if ui.button("打开文件…").clicked() {
+                        if let Some(path) = open_file_dialog().pick_file() {
+                            self.open_path(path);
+                        }
+                        ui.close();
+                    }
                     if ui.button("打开文件夹").clicked() {
                         if let Some(path) = rfd::FileDialog::new().pick_folder() {
                             self.add_folder_to_library(path);
@@ -4187,6 +4187,9 @@ impl ReaderApp {
             self.open_media(path);
         } else if is_image_file(&path) {
             self.open_image_as_comic(path);
+        } else if archive_kind(&path).is_some() && !is_supported_comic_file(&path) {
+            // 7z/tar 系纯压缩包 → 压缩包浏览视图；zip/cbz/rar/cbr 仍走漫画链路。
+            self.open_archive_browser(path);
         } else {
             self.open_comic(path);
         }
@@ -4571,16 +4574,41 @@ fn walk_supported_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     result
 }
 
-fn is_supported_comic_file(path: &std::path::Path) -> bool {
+/// 可作为漫画打开的扩展名表：is_supported_comic_file 判定与「打开文件…」
+/// 过滤器共用（单处定义）。
+const COMIC_EXTS: &[&str] = &["zip", "cbz", "rar", "cbr", "pdf"];
+
+/// 纯压缩包扩展名表（「打开文件…」过滤器用）：仅列单后缀形式，
+/// tar.gz/tar.xz/tar.zst/tar.bz2 等双后缀 rfd 无法按扩展名过滤，故不列；
+/// 识别范围与 openitgo_parser::archive::archive_kind 对应。
+const ARCHIVE_EXTS: &[&str] = &["7z", "tar", "tgz", "txz", "tbz2"];
+
+pub(crate) fn is_supported_comic_file(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| {
-            matches!(
-                e.to_ascii_lowercase().as_str(),
-                "zip" | "cbz" | "rar" | "cbr" | "pdf"
-            )
-        })
-        .unwrap_or(false)
+        .is_some_and(|e| COMIC_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// 「打开文件…」对话框：过滤器分组与 open_path 的分发判定共用扩展名表
+/// （图片复用 parser 的 IMAGE_EXTENSIONS）。
+fn open_file_dialog() -> rfd::FileDialog {
+    let all: Vec<&str> = COMIC_EXTS
+        .iter()
+        .chain(EBOOK_EXTS)
+        .chain(openitgo_parser::traits::IMAGE_EXTENSIONS)
+        .chain(VIDEO_EXTS)
+        .chain(AUDIO_EXTS)
+        .chain(ARCHIVE_EXTS)
+        .copied()
+        .collect();
+    let media: Vec<&str> = VIDEO_EXTS.iter().chain(AUDIO_EXTS).copied().collect();
+    rfd::FileDialog::new()
+        .add_filter("所有支持的文件", &all)
+        .add_filter("漫画", COMIC_EXTS)
+        .add_filter("电子书", EBOOK_EXTS)
+        .add_filter("图片", openitgo_parser::traits::IMAGE_EXTENSIONS)
+        .add_filter("媒体", &media)
+        .add_filter("压缩包", ARCHIVE_EXTS)
 }
 
 const APP_WINDOW_TITLE: &str = "OpenItGo";
@@ -5942,6 +5970,48 @@ mod tests {
         assert!(matches!(app.current_view, View::Loading(_)));
         assert!(app.opener.is_some());
         assert!(app.ebook_opener.is_none());
+    }
+
+    #[test]
+    fn test_open_path_dispatches_plain_archive_to_browser() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let dir = tempfile::tempdir().unwrap();
+        // 7z/tar 系纯压缩包 → 压缩包浏览视图，不走漫画 opener。
+        for name in ["pack.7z", "pack.tar", "pack.tgz", "pack.tar.gz"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"fake").unwrap();
+            app.open_path(path.clone());
+            assert!(
+                matches!(&app.current_view, View::Archive(p) if *p == path),
+                "{name} 应分流到 Archive 视图"
+            );
+            assert!(app.opener.is_none(), "{name} 不应走漫画 opener");
+            assert!(app.ebook_opener.is_none());
+            assert_eq!(app.archive_view.path.as_deref(), Some(path.as_path()));
+        }
+    }
+
+    #[test]
+    fn test_open_file_filter_exts_match_predicates() {
+        // 「打开文件…」过滤器扩展名表必须与 open_path 各分发判定保持一致。
+        let with_ext = |ext: &str| PathBuf::from(format!("a.{ext}"));
+        for ext in COMIC_EXTS {
+            assert!(is_supported_comic_file(&with_ext(ext)), "{ext}");
+        }
+        for ext in EBOOK_EXTS {
+            assert!(is_ebook_file(&with_ext(ext)), "{ext}");
+        }
+        for ext in openitgo_parser::traits::IMAGE_EXTENSIONS {
+            assert!(is_image_file(&with_ext(ext)), "{ext}");
+        }
+        for ext in VIDEO_EXTS.iter().chain(AUDIO_EXTS) {
+            assert!(is_media_file(&with_ext(ext)), "{ext}");
+        }
+        for ext in ARCHIVE_EXTS {
+            let p = with_ext(ext);
+            assert!(archive_kind(&p).is_some(), "{ext}");
+            assert!(!is_supported_comic_file(&p), "{ext}");
+        }
     }
 
     #[test]

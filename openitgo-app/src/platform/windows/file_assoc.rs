@@ -1,8 +1,11 @@
 //! Windows 文件关联注册（HKCU\Software\Classes，免管理员、不碰 HKCR/HKLM）。
 //!
 //! 每个扩展名指向所属分组的 ProgID（`OpenItGo.Archive/Image/Media`），
-//! ProgID 键携带中文描述、`DefaultIcon`（exe 资源 ID 1 → `",0"`）与
-//! `shell\open\command`。覆盖他人默认值前先备份到
+//! ProgID 键携带中文描述、`DefaultIcon` 与 `shell\open\command`。
+//! DefaultIcon 指向 exe 内嵌图标资源：`assets/icon/openitgo.rc` 按
+//! ID 1..=4 编入 AppIcon/Archive/Image/Media.ico，对应图标索引
+//! 0..=3（`"<exe>",<index>"`）；索引 0 是应用主图标，三组分组各用
+//! 1/2/3（见 `AssocGroup::icon_index`）。覆盖他人默认值前先备份到
 //! `HKCU\Software\Classes\OpenItGo.bak\<ext>`（已有备份不覆盖），注销时
 //! 仅当默认值仍是本程序 ProgID 才恢复备份并删除；ProgID 键在不再被任何
 //! 扩展名引用时整体删除。注册/注销后广播 `SHChangeNotify(SHCNE_ASSOCCHANGED)`。
@@ -45,6 +48,15 @@ impl AssocGroup {
     /// ProgID 键默认值描述（「OpenItGo 压缩包」等）。
     pub fn description(self) -> String {
         format!("OpenItGo {}", self.label())
+    }
+
+    /// DefaultIcon 图标索引（`"<exe>",<index>"`）：对应 rc 资源 ID 2/3/4。
+    pub fn icon_index(self) -> i32 {
+        match self {
+            AssocGroup::Archive => 1,
+            AssocGroup::Image => 2,
+            AssocGroup::Media => 3,
+        }
     }
 }
 
@@ -201,7 +213,7 @@ fn ensure_progid(group: AssocGroup) -> Result<(), String> {
     let (icon, _) = key
         .create_subkey("DefaultIcon")
         .map_err(|e| format!("创建 {progid}\\DefaultIcon 失败: {e}"))?;
-    icon.set_value("", &format!("\"{exe}\",0"))
+    icon.set_value("", &format!("\"{exe}\",{}", group.icon_index()))
         .map_err(|e| format!("写入 {progid} 图标失败: {e}"))?;
     let (cmd, _) = key
         .create_subkey("shell\\open\\command")
@@ -430,6 +442,16 @@ mod tests {
         assert!(should_restore(Some(progid), Some("WinRAR"), progid));
         assert!(!should_restore(Some("Other"), Some("WinRAR"), progid));
         assert!(!should_restore(Some(progid), None, progid));
+    }
+
+    #[test]
+    fn icon_indices_distinct() {
+        // 三组图标索引互不相同且都在 1..=3（0 是应用主图标，不用于分组）。
+        let indices: HashSet<i32> = EXT_GROUPS.iter().map(|(g, _, _)| g.icon_index()).collect();
+        assert_eq!(indices.len(), 3);
+        for idx in indices {
+            assert!((1..=3).contains(&idx), "图标索引越界: {idx}");
+        }
     }
 
     #[test]

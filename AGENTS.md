@@ -95,7 +95,11 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
   `View::Archive(PathBuf)` + `views/archive.rs`（条目列表/勾选/过滤，
   加密包经 `open_with_password` 重列）+ `extract_manager.rs`（每任务一
   线程 + 右下角进度面板，`poll_extracts` 每帧汇总写 `error_message`）；
-  入口为 Library 卡片右键「浏览压缩包」/「解压到…」。
+  入口：Library 卡片右键「浏览压缩包」/「解压到…」；`open_path` 对
+  `archive_kind` 命中但 `is_supported_comic_file` 不命中的纯压缩包
+  （7z/tar 系）直接分流进 Archive 视图；Archive 视图顶栏对漫画可读格式
+  （zip/cbz/rar/cbr）提供「作为漫画打开」（回调 `on_open_as_comic`
+  → 回 `open_path` 走 comic 链路）。
 - **PageLoader** runs IO and decode workers in background threads; results are
   sent back to the UI thread via channels. The app also maintains a separate
   `cover_loader` for library cover thumbnails.
@@ -203,11 +207,16 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
 - **文件关联（Windows only）**：`platform/windows/file_assoc.rs`（非 Windows
   有同签名 stub，统一入口 `crate::platform::file_assoc`）把扩展名注册到
   `HKCU\Software\Classes`（winreg，无需管理员）：三个 ProgID
-  （`OpenItGo.Archive/Image/Media`，`DefaultIcon`=`exe,0`，
+  （`OpenItGo.Archive/Image/Media`，`DefaultIcon`=`exe,<icon_index>`，
   `shell\open\command`=`"exe" "%1"`）+ 每组扩展名写 `.ext` 默认值与
   `OpenWithProgids`；覆盖他人默认值前先备份到 `OpenItGo.bak\<ext>`，
   取消关联时仅在当前默认值仍是本程序 ProgID 才删除并恢复备份；
-  完成后 `SHChangeNotify(SHCNE_ASSOCCHANGED)`。Win10/11 若用户已设过
+  完成后 `SHChangeNotify(SHCNE_ASSOCCHANGED)`。**分组图标**：
+  `assets/icon/openitgo.rc` 有 4 个 ICON 资源（1=AppIcon 主图标，
+  2/3/4=Archive/Image/Media 角标 ico，由 `generate_type_icons.py`
+  用 Pillow 在 1024x1024.png 底图上合成彩色圆形角标生成并入库），
+  `AssocGroup::icon_index()` 返回 1/2/3 对应 DefaultIcon 的
+  `"exe",1/2/3`。Win10/11 若用户已设过
   默认应用，UserChoice 优先于 Classes 默认值——UI 提供
   `open_default_apps_settings()`（`ms-settings:defaultapps`）引导。
   设置页「文件关联」tab（`SettingsTab::FileAssoc`，变体全平台存在，
@@ -363,7 +372,11 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
   文件关联经此传入）取路径，由 `ReaderApp::new` 经 `open_path` 打开；
   `exists()` 检查天然过滤无效参数（如 macOS 偶发的 `-psn_*`）。
   `open_path` 分发顺序：ebook → media → **图片**（`is_image_file`，复用
-  parser 的 `is_image_extension`）→ comic。图片分支 `open_image_as_comic`
+  parser 的 `is_image_extension`）→ **纯压缩包**（`archive_kind` 命中且
+  `is_supported_comic_file` 不命中 → `open_archive_browser`）→ comic。
+  文件菜单「打开文件…」（rfd `pick_file`，过滤器扩展名表与各分发判定
+  函数共用 `COMIC_EXTS`/`EBOOK_EXTS` 等单处定义常量）也走 `open_path`。
+  图片分支 `open_image_as_comic`
   把**父目录**作为漫画经 `open_comic` 打开，并置一次性
   `pending_open_options { start_file, force_single_page }`：`poll_opener`
   在每书设置覆盖与历史恢复之后消费——`go_to_page` 定位到该图

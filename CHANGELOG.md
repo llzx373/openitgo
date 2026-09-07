@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 文件菜单新增「打开文件…」（rfd 文件对话框，过滤器分漫画/电子书/图片/媒体/压缩包），选中后走 `open_path` 完整分发链。
+- Archive 视图顶栏「作为漫画打开」按钮（仅 zip/cbz/rar/cbr 显示）。
+- Windows 文件关联分组图标：基于主图标生成橙「A」/绿「P」/蓝「V」圆形角标 ico（`assets/icon/generate_type_icons.py`），经 rc 资源 ID 2/3/4 嵌入 exe，三类 ProgID 的 DefaultIcon 分别指向对应图标。
 - Windows 文件关联：设置页新增「文件关联」tab，可把压缩包（zip/cbz/rar/cbr/7z/tar/tgz/tbz2）、图片、影视三组扩展名注册为 OpenItGo 默认打开（HKCU  per-user，无需管理员；覆盖前备份原关联、取消时恢复；同时写入「打开方式」列表；附系统默认应用设置直达按钮）。
 - 图片文件打开：双击图片 = 打开所在文件夹作为漫画并定位到该图，强制单页模式（`open_image_as_comic` + 一次性 `pending_open_options`）；覆盖启动参数、拖放等所有 `open_path` 入口。
 - 压缩包浏览与解压：新 Archive 视图列出压缩包全部条目（复选/过滤/全选），支持解压全部或选中条目；覆盖 ZIP/CBZ、RAR/CBR、7z、TAR 系（.tar/.tgz/.tar.gz/.txz/.tar.xz/.tar.zst/.tar.bz2/.tbz2）；ZIP 条目级并行解压（每 worker 独立句柄），批量解压多包并行（上限 4），带进度面板与取消；条目名路径穿越防护，同名文件自动改名（可改为覆盖）。入口：书架卡片右键「浏览压缩包」/「解压到…」。
@@ -23,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 「密码不落盘」旧约定有意变更：会话密码表（`ReaderApp.passwords`）仍不落盘，但验证成功的密码会收录进持久化密码本（见上）。
 
 ### Fixed
+
+- 7z/tar 系纯压缩包经文件关联双击或「打开文件…」打开时报 "Unsupported format"：现分流到 Archive 压缩包浏览视图（`open_path` 按 `archive_kind` × `is_supported_comic_file` 差集判定）。
 
 - 非 macOS 平台编译：`mpv_view` stub 补齐 `set_osd`/`clear_osd`（`media.rs` 无条件调用）；EPUB 章节 href 归一化兼容反斜杠（epub crate 在 Windows 下用 `PathBuf::join` 拼 NCX content 路径）；`unrar_sys` 在 MSVC 下缺 advapi32 链接声明（`#[link]` 补在 `openitgo-parser` lib 与 `probe_rar_password` 示例）；缩略图小图不再被放大到 256px（`image::thumbnail` 会上采样，与 macOS ImageIO 路径行为对齐）；修复四个诊断示例对 `ReaderApp` 私有字段的结构体更新语法（`last_window_title` 引入后全平台编译失败）。
 - 窗口标题：阅读/播放时显示当前漫画·电子书·视频文件名；漫画额外显示当前页图片名（如 `001.jpg — 06 - OpenItGo`）。

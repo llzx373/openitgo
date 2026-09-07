@@ -51,6 +51,8 @@ impl Default for ArchiveView {
 
 pub struct ArchiveCallbacks<'a> {
     pub on_back: &'a mut dyn FnMut(),
+    /// 「作为漫画打开」：仅当包本身是支持的漫画格式（zip/cbz/rar/cbr）时展示。
+    pub on_open_as_comic: &'a mut dyn FnMut(),
     pub on_extract_all: &'a mut dyn FnMut(),
     pub on_extract_selected: &'a mut dyn FnMut(Vec<String>),
     /// NeedPassword 状态下点击「输入密码」。
@@ -162,6 +164,7 @@ impl ArchiveView {
     pub fn ui(&mut self, ui: &mut egui::Ui, callbacks: ArchiveCallbacks<'_>) {
         let ArchiveCallbacks {
             on_back,
+            on_open_as_comic,
             on_extract_all,
             on_extract_selected,
             on_need_password,
@@ -176,6 +179,17 @@ impl ArchiveView {
                 on_back();
             }
             ui.separator();
+            if self
+                .path
+                .as_deref()
+                .is_some_and(crate::app::is_supported_comic_file)
+                && ui
+                    .button((icons::BOOK_OPEN, " 作为漫画打开"))
+                    .on_hover_text("用漫画阅读器打开该压缩包")
+                    .clicked()
+            {
+                on_open_as_comic();
+            }
             if let Some(path) = &self.path {
                 let name = path
                     .file_name()
