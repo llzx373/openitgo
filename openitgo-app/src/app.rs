@@ -43,6 +43,14 @@ pub struct PendingMediaOpen {
     pub force_start: bool,
 }
 
+/// 双击图片文件触发的一次性打开选项：打开所在文件夹作为漫画后，
+/// 定位到该图片页并强制单页模式。由 poll_opener 消费（成功/失败均清除）。
+#[derive(Debug, Clone, PartialEq)]
+struct PendingOpenOptions {
+    start_file: Option<PathBuf>,
+    force_single_page: bool,
+}
+
 /// 计算打开媒体时的 resume 毫秒：自动续播强制从头，手动打开沿用历史进度。
 fn media_resume_ms(force_start: bool, history_ms: Option<u64>) -> Option<u64> {
     if force_start {
@@ -138,6 +146,41 @@ fn is_media_file(path: &std::path::Path) -> bool {
             ) || AUDIO_EXTS.contains(&ext.as_str())
         })
         .unwrap_or(false)
+}
+
+/// 是否为图片文件（双击图片打开所在文件夹的分发依据）。扩展名表与
+/// openitgo-parser 的 `IMAGE_EXTENSIONS` 同源（复用其 `is_image_extension`）。
+fn is_image_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(openitgo_parser::traits::is_image_extension)
+}
+
+/// 在漫画第一卷的页面中查找与 target 同一路径的 `PageSource::File` 页，
+/// 返回页下标；非 File 页源（压缩包/PDF 页）跳过，找不到返回 None。
+/// Windows 文件名大小写不敏感：先纯字符串比较（大小写不敏感），
+/// 再回退 canonicalize 比较（处理 `./`、符号链接等路径差异）。
+fn find_image_page_index(comic: &Comic, target: &Path) -> Option<usize> {
+    let pages = &comic.volumes.first()?.pages;
+    let file_pages = || {
+        pages
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, page)| match &page.source {
+                PageSource::File(path) => Some((pos, path.as_path())),
+                _ => None,
+            })
+    };
+    if let Some((pos, _)) = file_pages().find(|(_, p)| {
+        *p == target
+            || p.to_string_lossy()
+                .eq_ignore_ascii_case(&target.to_string_lossy())
+    }) {
+        return Some(pos);
+    }
+    let canon = target.canonicalize().ok()?;
+    file_pages()
+        .find_map(|(pos, p)| (p.canonicalize().ok().as_ref() == Some(&canon)).then_some(pos))
 }
 
 /// 数字感知、大小写不敏感的自然排序比较（"EP2" < "EP10"）。
@@ -331,6 +374,8 @@ pub struct ReaderApp {
     pub opener: Option<AsyncOpener<Comic>>,
     pub ebook_opener: Option<AsyncOpener<Ebook>>,
     pub pending_media_open: Option<PendingMediaOpen>,
+    /// 双击图片打开所在文件夹的一次性选项（起始图/强制单页），poll_opener 消费。
+    pending_open_options: Option<PendingOpenOptions>,
     /// Cover requests in flight: epoch -> (comic_id, comic_path).
     pub pending_covers: HashMap<crate::loader::Epoch, (String, PathBuf)>,
     /// Comic ids for which a cover generation has already been requested.
@@ -445,6 +490,7 @@ impl Default for ReaderApp {
             opener: None,
             ebook_opener: None,
             pending_media_open: None,
+            pending_open_options: None,
             pending_covers: HashMap::new(),
             requested_cover_ids: HashSet::new(),
             media_cover_tx,
@@ -680,81 +726,102 @@ impl ReaderApp {
             OpenStatus::Loading => {
                 self.opener = Some(opener);
             }
-            OpenStatus::Ready(result) => match result {
-                Ok(comic) => {
-                    timing::log(&format!(
-                        "poll_opener comic ready: {} pages",
-                        comic.total_pages()
-                    ));
-                    let total = comic.volumes.first().map(|v| v.pages.len()).unwrap_or(0);
-                    let mut state = ReadingState::new(self.settings.default_mode, total);
-                    state.set_double_page(self.settings.double_page, total);
-                    state.fit_mode = self.settings.default_fit;
-                    // 每本书记忆的阅读设置（模式/双页/缩放/旋转）优先于全局默认；
-                    // 应用方式与模式菜单/双页开关一致，fit 走 default_fit 同一后续路径。
-                    if let Some(saved) = self.comic_settings.get(&comic.id).copied() {
-                        state.set_mode(saved.mode, total);
-                        state.set_double_page(saved.double_page, total);
-                        state.fit_mode = saved.fit;
-                        // 只接受 90° 步进值，脏数据按 0 处理。
-                        state.rotation = match saved.rotation {
-                            90 | 180 | 270 => saved.rotation,
-                            _ => 0,
-                        };
+            OpenStatus::Ready(result) => {
+                // 双击图片的一次性打开选项：成功/失败均在此统一消费清除。
+                let pending_open_options = self.pending_open_options.take();
+                match result {
+                    Ok(comic) => {
+                        timing::log(&format!(
+                            "poll_opener comic ready: {} pages",
+                            comic.total_pages()
+                        ));
+                        let total = comic.volumes.first().map(|v| v.pages.len()).unwrap_or(0);
+                        let mut state = ReadingState::new(self.settings.default_mode, total);
+                        state.set_double_page(self.settings.double_page, total);
+                        state.fit_mode = self.settings.default_fit;
+                        // 每本书记忆的阅读设置（模式/双页/缩放/旋转）优先于全局默认；
+                        // 应用方式与模式菜单/双页开关一致，fit 走 default_fit 同一后续路径。
+                        if let Some(saved) = self.comic_settings.get(&comic.id).copied() {
+                            state.set_mode(saved.mode, total);
+                            state.set_double_page(saved.double_page, total);
+                            state.fit_mode = saved.fit;
+                            // 只接受 90° 步进值，脏数据按 0 处理。
+                            state.rotation = match saved.rotation {
+                                90 | 180 | 270 => saved.rotation,
+                                _ => 0,
+                            };
+                        }
+                        self.last_saved_comic_settings =
+                            Some(comic_reading_settings_snapshot(&comic.id, &state));
+                        if let Some(h) = self
+                            .history
+                            .entries
+                            .iter()
+                            .find(|h| history_matches(h, &comic.id, &comic.path))
+                        {
+                            state.go_to_page(h.page_index, total);
+                        }
+                        // 双击图片打开的一次性选项：在每书设置与历史恢复之后应用，
+                        // 起始图定位优先于历史页码，强制单页覆盖每书双页记忆。
+                        if let Some(opts) = pending_open_options {
+                            if opts.force_single_page {
+                                state.set_double_page(false, total);
+                            }
+                            if let Some(start) = opts.start_file.as_deref() {
+                                if let Some(idx) = find_image_page_index(&comic, start) {
+                                    state.go_to_page(idx, total);
+                                }
+                            }
+                            // 快照同步为强制后的实际值，避免把「单页」误存为该书的
+                            // 长期每书设置（maybe_save_comic_settings 按快照 diff 回写）。
+                            self.last_saved_comic_settings =
+                                Some(comic_reading_settings_snapshot(&comic.id, &state));
+                        }
+                        let comic_id = comic.id.clone();
+                        let page_count = comic.total_pages();
+                        let archive_password =
+                            self.passwords.get(&password_key(&comic.path)).cloned();
+                        // 会话密码验证成功（手动输入或密码本自动尝试）：记入密码本。
+                        if let Some(pw) = archive_password
+                            .clone()
+                            .or_else(|| self.passwords.get(&comic.path).cloned())
+                        {
+                            self.password_book.record_success(&pw);
+                            self.save_password_book();
+                        }
+                        self.reader_view.open(
+                            ctx,
+                            comic,
+                            state,
+                            &self.page_loader,
+                            self.settings.wide_page_threshold,
+                            self.settings.enable_page_animation,
+                            archive_password.as_deref(),
+                        );
+                        self.update_library_page_count(&comic_id, page_count);
+                        self.current_view = View::Reader;
+                        self.error_message = None;
                     }
-                    self.last_saved_comic_settings =
-                        Some(comic_reading_settings_snapshot(&comic.id, &state));
-                    if let Some(h) = self
-                        .history
-                        .entries
-                        .iter()
-                        .find(|h| history_matches(h, &comic.id, &comic.path))
-                    {
-                        state.go_to_page(h.page_index, total);
-                    }
-                    let comic_id = comic.id.clone();
-                    let page_count = comic.total_pages();
-                    let archive_password = self.passwords.get(&password_key(&comic.path)).cloned();
-                    // 会话密码验证成功（手动输入或密码本自动尝试）：记入密码本。
-                    if let Some(pw) = archive_password
-                        .clone()
-                        .or_else(|| self.passwords.get(&comic.path).cloned())
-                    {
-                        self.password_book.record_success(&pw);
-                        self.save_password_book();
-                    }
-                    self.reader_view.open(
-                        ctx,
-                        comic,
-                        state,
-                        &self.page_loader,
-                        self.settings.wide_page_threshold,
-                        self.settings.enable_page_animation,
-                        archive_password.as_deref(),
-                    );
-                    self.update_library_page_count(&comic_id, page_count);
-                    self.current_view = View::Reader;
-                    self.error_message = None;
-                }
-                Err(e) => match password_prompt_kind(&e) {
-                    Some(kind) => {
-                        if let Some(path) = self.opening_path.take() {
-                            // 先用密码本候选后台静默尝试；无候选或本会话已试过
-                            // 才直接弹手动输入对话框。
-                            if !self.start_password_probe(path.clone(), kind) {
-                                self.password_dialog = Some(PasswordDialog::new(path, kind));
+                    Err(e) => match password_prompt_kind(&e) {
+                        Some(kind) => {
+                            if let Some(path) = self.opening_path.take() {
+                                // 先用密码本候选后台静默尝试；无候选或本会话已试过
+                                // 才直接弹手动输入对话框。
+                                if !self.start_password_probe(path.clone(), kind) {
+                                    self.password_dialog = Some(PasswordDialog::new(path, kind));
+                                    self.current_view = View::Library;
+                                }
+                            } else {
                                 self.current_view = View::Library;
                             }
-                        } else {
+                        }
+                        None => {
+                            self.error_message = Some(format!("无法打开漫画: {}", e));
                             self.current_view = View::Library;
                         }
-                    }
-                    None => {
-                        self.error_message = Some(format!("无法打开漫画: {}", e));
-                        self.current_view = View::Library;
-                    }
-                },
-            },
+                    },
+                }
+            }
         }
     }
 
@@ -4057,6 +4124,8 @@ impl ReaderApp {
     fn open_comic(&mut self, path: std::path::PathBuf) {
         timing::log(&format!("open_comic {:?}", path));
         self.page_scroll_acc = 0.0;
+        // 清掉上一次双击图片遗留的一次性选项；open_image_as_comic 在本调用之后重新设置。
+        self.pending_open_options = None;
         let password = self.passwords.get(&path).cloned();
         self.opener = Some(AsyncOpener::open(path.clone(), move |p| {
             openitgo_parser::parse_with_password(p, password.as_deref()).map_err(|e| match e {
@@ -4093,11 +4162,31 @@ impl ReaderApp {
         self.error_message = None;
     }
 
+    /// 双击图片文件：打开所在文件夹作为漫画（走原 open_comic 链路），
+    /// 解析成功后由 poll_opener 消费 pending_open_options 定位到该图并强制单页。
+    fn open_image_as_comic(&mut self, path: std::path::PathBuf) {
+        let Some(dir) = path
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty() && d.is_dir())
+        else {
+            self.error_message = Some(format!("无法打开图片: 找不到所在文件夹 {}", path.display()));
+            return;
+        };
+        self.open_comic(dir.to_path_buf());
+        // open_comic 会清掉旧的一次性选项，故在其之后设置。
+        self.pending_open_options = Some(PendingOpenOptions {
+            start_file: Some(path),
+            force_single_page: true,
+        });
+    }
+
     fn open_path(&mut self, path: std::path::PathBuf) {
         if is_ebook_file(&path) {
             self.open_ebook(path);
         } else if is_media_file(&path) {
             self.open_media(path);
+        } else if is_image_file(&path) {
+            self.open_image_as_comic(path);
         } else {
             self.open_comic(path);
         }
@@ -4838,6 +4927,7 @@ mod tests {
                 opener: None,
                 ebook_opener: None,
                 pending_media_open: None,
+                pending_open_options: None,
                 pending_covers: HashMap::new(),
                 requested_cover_ids: HashSet::new(),
                 media_cover_tx,
@@ -5852,6 +5942,193 @@ mod tests {
         assert!(matches!(app.current_view, View::Loading(_)));
         assert!(app.opener.is_some());
         assert!(app.ebook_opener.is_none());
+    }
+
+    #[test]
+    fn test_is_image_file_recognizes_image_extensions() {
+        assert!(is_image_file(Path::new("a.jpg")));
+        assert!(is_image_file(Path::new("a.JPEG")));
+        assert!(is_image_file(Path::new("a.PNG")));
+        assert!(is_image_file(Path::new("a.webp")));
+        assert!(is_image_file(Path::new("a.gif")));
+        assert!(is_image_file(Path::new("a.bmp")));
+        assert!(is_image_file(Path::new("a.tiff")));
+        assert!(is_image_file(Path::new("a.avif")));
+        assert!(!is_image_file(Path::new("a.cbz")));
+        assert!(!is_image_file(Path::new("a.mp4")));
+        assert!(!is_image_file(Path::new("a.epub")));
+        assert!(!is_image_file(Path::new("a")));
+    }
+
+    fn comic_with_sources(sources: Vec<PageSource>) -> Comic {
+        Comic {
+            id: "img-comic".to_string(),
+            title: "Img".to_string(),
+            path: PathBuf::from("/tmp/img-comic"),
+            volumes: vec![Volume {
+                title: "Vol 1".to_string(),
+                pages: sources
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, source)| Page { index: i, source })
+                    .collect(),
+            }],
+        }
+    }
+
+    #[test]
+    fn test_find_image_page_index() {
+        let comic = comic_with_sources(vec![
+            PageSource::File(PathBuf::from("/tmp/dir/a.png")),
+            PageSource::File(PathBuf::from("/tmp/dir/b.png")),
+            PageSource::File(PathBuf::from("/tmp/dir/c.png")),
+        ]);
+        // 命中。
+        assert_eq!(
+            find_image_page_index(&comic, Path::new("/tmp/dir/b.png")),
+            Some(1)
+        );
+        // 大小写不敏感（Windows 文件名语义）。
+        assert_eq!(
+            find_image_page_index(&comic, Path::new("/TMP/DIR/B.PNG")),
+            Some(1)
+        );
+        // 未命中。
+        assert_eq!(
+            find_image_page_index(&comic, Path::new("/tmp/dir/z.png")),
+            None
+        );
+        // 非 File 页源跳过。
+        let mixed = comic_with_sources(vec![
+            PageSource::ZipEntry {
+                archive: PathBuf::from("/tmp/pack.cbz"),
+                name: "p.png".to_string(),
+                index: 0,
+            },
+            PageSource::File(PathBuf::from("/tmp/dir/p.png")),
+        ]);
+        assert_eq!(
+            find_image_page_index(&mixed, Path::new("/tmp/dir/p.png")),
+            Some(1)
+        );
+        // 空漫画。
+        let empty = comic_with_sources(Vec::new());
+        assert_eq!(
+            find_image_page_index(&empty, Path::new("/tmp/dir/a.png")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_open_path_dispatches_image_to_folder_comic() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let dir = tempfile::tempdir().unwrap();
+        write_dummy_image(dir.path(), "page0.png");
+        write_dummy_image(dir.path(), "page1.png");
+        let img = dir.path().join("page1.png");
+
+        app.open_path(img.clone());
+        assert!(matches!(app.current_view, View::Loading(_)));
+        // 走的是漫画链路：opener 目标为所在文件夹。
+        assert!(app.opener.is_some());
+        assert!(app.ebook_opener.is_none());
+        assert_eq!(app.opening_path.as_deref(), Some(dir.path()));
+        assert_eq!(
+            app.pending_open_options,
+            Some(PendingOpenOptions {
+                start_file: Some(img),
+                force_single_page: true,
+            })
+        );
+    }
+
+    #[test]
+    fn test_open_image_as_comic_missing_parent_dir_errors() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let img = PathBuf::from("/nonexistent-dir-xyz/page0.png");
+        app.open_path(img);
+        assert!(app.opener.is_none());
+        assert!(app.pending_open_options.is_none());
+        assert!(app
+            .error_message
+            .as_deref()
+            .is_some_and(|m| m.contains("找不到所在文件夹")));
+    }
+
+    #[test]
+    fn test_poll_opener_applies_pending_open_options() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let dir = tempfile::tempdir().unwrap();
+        write_dummy_image(dir.path(), "page0.png");
+        write_dummy_image(dir.path(), "page1.png");
+        write_dummy_image(dir.path(), "page2.png");
+        // 全局双页 + 历史页码，验证一次性选项覆盖二者。
+        app.settings.double_page = true;
+        let comic_id = openitgo_parser::stable_comic_id(dir.path());
+        app.history.entries.push(HistoryEntry {
+            comic_id: comic_id.clone(),
+            path: dir.path().to_path_buf(),
+            volume_index: 0,
+            page_index: 0,
+            char_offset: None,
+            last_read_at: 0,
+        });
+
+        let img = dir.path().join("page2.png");
+        app.open_path(img);
+        let ctx = egui::Context::default();
+        for _ in 0..100 {
+            app.poll_opener(&ctx);
+            if app.current_view == View::Reader {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(app.current_view, View::Reader);
+        let reader = app
+            .reader_view
+            .open
+            .as_ref()
+            .expect("reader should be open");
+        // 起始图定位优先于历史恢复。
+        assert_eq!(reader.state.current_page, 2);
+        // 强制单页覆盖全局双页默认。
+        assert!(!reader.state.double_page);
+        // 一次性选项已消费。
+        assert_eq!(app.pending_open_options, None);
+        // 快照同步为强制后的值：无后续改动时不会把「单页」误存为每书设置。
+        assert_eq!(
+            app.last_saved_comic_settings,
+            Some(comic_reading_settings_snapshot(&comic_id, &reader.state))
+        );
+        app.maybe_save_comic_settings();
+        assert!(!app.store.dir().join("comic_settings.json").exists());
+    }
+
+    #[test]
+    fn test_poll_opener_clears_pending_open_options_on_error() {
+        let (mut app, _tmp) = app_with_temp_store();
+        app.pending_open_options = Some(PendingOpenOptions {
+            start_file: Some(PathBuf::from("/tmp/dir/page0.png")),
+            force_single_page: true,
+        });
+        // 目标不存在 → 解析失败。
+        app.opener = Some(AsyncOpener::open(
+            PathBuf::from("/nonexistent-dir-xyz"),
+            |p| openitgo_parser::parse(p).map_err(|e| e.to_string()),
+        ));
+        app.current_view = View::Loading(PathBuf::from("/nonexistent-dir-xyz"));
+        let ctx = egui::Context::default();
+        for _ in 0..100 {
+            app.poll_opener(&ctx);
+            if app.current_view == View::Library {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(app.current_view, View::Library);
+        assert_eq!(app.pending_open_options, None);
     }
 
     #[test]

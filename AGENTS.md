@@ -200,6 +200,20 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
   （`set_osd` → `mpv_command_async`，遵守 UI 线程异步规则）；坐标为逻辑值，
   `set_bounds` 内按 `GetDpiForWindow` 换算物理像素。诊断示例：
   `cargo run -p openitgo-app --example media_smoke -- <媒体文件>`。
+- **文件关联（Windows only）**：`platform/windows/file_assoc.rs`（非 Windows
+  有同签名 stub，统一入口 `crate::platform::file_assoc`）把扩展名注册到
+  `HKCU\Software\Classes`（winreg，无需管理员）：三个 ProgID
+  （`OpenItGo.Archive/Image/Media`，`DefaultIcon`=`exe,0`，
+  `shell\open\command`=`"exe" "%1"`）+ 每组扩展名写 `.ext` 默认值与
+  `OpenWithProgids`；覆盖他人默认值前先备份到 `OpenItGo.bak\<ext>`，
+  取消关联时仅在当前默认值仍是本程序 ProgID 才删除并恢复备份；
+  完成后 `SHChangeNotify(SHCNE_ASSOCCHANGED)`。Win10/11 若用户已设过
+  默认应用，UserChoice 优先于 Classes 默认值——UI 提供
+  `open_default_apps_settings()`（`ms-settings:defaultapps`）引导。
+  设置页「文件关联」tab（`SettingsTab::FileAssoc`，变体全平台存在，
+  非 Windows 只显示「仅支持 Windows」hint）惰性 `query_status()` 并缓存，
+  关联状态以注册表为准、不落 Settings。文件关联双击 = 新进程 + argv[1]
+  （无单实例机制）。
 - **Media OSD**: transient feedback (volume, mute, seeks, speed, device
   switches) renders in a CATextLayer sublayer of the CAOpenGLLayer
   (`MpvNativeView::set_osd/clear_osd`) — the CATextLayer lives inside the
@@ -348,6 +362,15 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
   `OPENITGO_OPEN` 环境变量（优先）或 `argv[1]`（`args_os`，Windows/Linux
   文件关联经此传入）取路径，由 `ReaderApp::new` 经 `open_path` 打开；
   `exists()` 检查天然过滤无效参数（如 macOS 偶发的 `-psn_*`）。
+  `open_path` 分发顺序：ebook → media → **图片**（`is_image_file`，复用
+  parser 的 `is_image_extension`）→ comic。图片分支 `open_image_as_comic`
+  把**父目录**作为漫画经 `open_comic` 打开，并置一次性
+  `pending_open_options { start_file, force_single_page }`：`poll_opener`
+  在每书设置覆盖与历史恢复之后消费——`go_to_page` 定位到该图
+  （`find_image_page_index`，大小写不敏感 + canonicalize 回退）并
+  `set_double_page(false)`（强制单页）；应用后把
+  `last_saved_comic_settings` 快照同步为强制后的值，防止
+  `maybe_save_comic_settings` 把「单页」误存为该书的长期每书设置。
 
 ## Commits
 

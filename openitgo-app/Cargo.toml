@@ -44,8 +44,11 @@ embed-resource = "3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # mpv `wid` HWND 子窗口（platform/windows/mpv_view.rs）+ show-text OSD。
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi"] }
+# Win32_UI_Shell：文件关联（file_assoc.rs）的 SHChangeNotify / ShellExecuteW。
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi"] }
 libmpv-sys = "3.1"
+# HKCU\Software\Classes 文件关联注册（platform/windows/file_assoc.rs）。
+winreg = "0.55"
 
 [dev-dependencies]
 tempfile = "3.14"

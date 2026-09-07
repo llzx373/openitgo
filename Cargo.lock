@@ -3707,6 +3707,7 @@ dependencies = [
  "time",
  "unrar",
  "windows-sys 0.61.2",
+ "winreg",
  "wry",
  "zip 2.4.2",
 ]

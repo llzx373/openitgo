@@ -1,3 +1,4 @@
+use crate::platform::file_assoc::{self, AssocState, ExtAssoc};
 use egui_phosphor_icons::icons;
 use openitgo_core::ebook::EbookReadingMode;
 use openitgo_core::models::{FitMode, ReadingMode};
@@ -15,17 +16,19 @@ pub enum SettingsTab {
     Ebook,
     Media,
     Archive,
+    FileAssoc,
     Performance,
     Shortcuts,
 }
 
 impl SettingsTab {
-    const ALL: [(SettingsTab, &'static str); 7] = [
+    const ALL: [(SettingsTab, &'static str); 8] = [
         (SettingsTab::Appearance, "外观"),
         (SettingsTab::Comic, "漫画"),
         (SettingsTab::Ebook, "电子书"),
         (SettingsTab::Media, "媒体"),
         (SettingsTab::Archive, "压缩包"),
+        (SettingsTab::FileAssoc, "文件关联"),
         (SettingsTab::Performance, "性能"),
         (SettingsTab::Shortcuts, "快捷键"),
     ];
@@ -41,6 +44,10 @@ pub struct SettingsView {
     password_add_input: String,
     /// 密码本「添加」输入框：可选备注。
     password_add_note: String,
+    /// 文件关联状态缓存（None = 未加载，首次进入该 tab 时惰性查询）。
+    file_assoc: Option<Vec<ExtAssoc>>,
+    /// 文件关联操作结果 / 错误提示。
+    assoc_status: Option<String>,
 }
 
 impl SettingsView {
@@ -72,6 +79,7 @@ impl SettingsView {
                         SettingsTab::Archive => {
                             book_changed = self.archive_ui(ui, settings, password_book);
                         }
+                        SettingsTab::FileAssoc => self.file_assoc_ui(ui),
                         SettingsTab::Performance => self.performance_ui(ui, settings),
                         SettingsTab::Shortcuts => self.shortcut_editor(ui, &mut settings.shortcuts),
                     }
@@ -537,6 +545,161 @@ impl SettingsView {
         }
 
         book_changed
+    }
+
+    /// 文件关联 tab：按组列出扩展名勾选，批量注册 / 注销。
+    fn file_assoc_ui(&mut self, ui: &mut egui::Ui) {
+        if !cfg!(target_os = "windows") {
+            hint(ui, "文件关联仅支持 Windows");
+            return;
+        }
+
+        // 惰性加载：首次进入该 tab 查询；加载失败停在错误态等「重试」。
+        if self.file_assoc.is_none() && self.assoc_status.is_none() {
+            match file_assoc::query_status() {
+                Ok(list) => self.file_assoc = Some(list),
+                Err(e) => self.assoc_status = Some(format!("查询关联状态失败：{e}")),
+            }
+        }
+
+        if self.file_assoc.is_none() {
+            if let Some(err) = self.assoc_status.clone() {
+                ui.label(egui::RichText::new(err).color(egui::Color32::from_rgb(0xd0, 0x50, 0x50)));
+            }
+            if ui.button("重试").clicked() {
+                self.assoc_status = None;
+            }
+            return;
+        }
+
+        /// 底部按钮触发的待执行操作（借用的列表释放后再执行）。
+        enum Pending {
+            None,
+            Register(Vec<&'static str>),
+            Unregister(Vec<&'static str>),
+            OpenSystem,
+        }
+        let mut pending = Pending::None;
+
+        {
+            let assocs = self.file_assoc.as_mut().expect("checked above");
+            for (group, label, _) in file_assoc::EXT_GROUPS {
+                let mut items: Vec<&mut ExtAssoc> =
+                    assocs.iter_mut().filter(|a| a.group == *group).collect();
+                if items.is_empty() {
+                    continue;
+                }
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(*label).strong());
+                    if ui.small_button("全选").clicked() {
+                        for item in items.iter_mut() {
+                            item.selected = true;
+                        }
+                    }
+                    if ui.small_button("全不选").clicked() {
+                        for item in items.iter_mut() {
+                            item.selected = false;
+                        }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    for item in items.iter_mut() {
+                        ui.checkbox(&mut item.selected, format!(".{}", item.ext));
+                        let (text, color) = match &item.state {
+                            AssocState::Ours => {
+                                ("已关联", egui::Color32::from_rgb(0x4c, 0xaf, 0x50))
+                            }
+                            AssocState::Other(_) => ("其他程序", ui.visuals().weak_text_color()),
+                            AssocState::None => ("未关联", egui::Color32::DARK_GRAY),
+                        };
+                        let resp = ui.label(egui::RichText::new(text).color(color).size(11.0));
+                        if let AssocState::Other(progid) = &item.state {
+                            resp.on_hover_text(format!("当前默认程序：{progid}"));
+                        }
+                        ui.add_space(6.0);
+                    }
+                });
+                ui.add_space(4.0);
+            }
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("关联选中").clicked() {
+                    pending = Pending::Register(
+                        assocs
+                            .iter()
+                            .filter(|a| a.selected)
+                            .map(|a| a.ext)
+                            .collect(),
+                    );
+                }
+                if ui.button("取消关联选中").clicked() {
+                    pending = Pending::Unregister(
+                        assocs
+                            .iter()
+                            .filter(|a| a.selected)
+                            .map(|a| a.ext)
+                            .collect(),
+                    );
+                }
+                if ui.button("打开系统默认应用设置").clicked() {
+                    pending = Pending::OpenSystem;
+                }
+            });
+        }
+
+        match pending {
+            Pending::None => {}
+            Pending::Register(exts) => self.apply_assoc_op(true, exts),
+            Pending::Unregister(exts) => self.apply_assoc_op(false, exts),
+            Pending::OpenSystem => match file_assoc::open_default_apps_settings() {
+                Ok(()) => self.assoc_status = None,
+                Err(e) => self.assoc_status = Some(e),
+            },
+        }
+
+        if let Some(status) = &self.assoc_status {
+            ui.label(egui::RichText::new(status).weak());
+        }
+
+        hint(
+            ui,
+            "若扩展名已被其他程序设为默认，Windows 10/11 需在系统设置中更改（上方按钮直达）；关联后也会出现在右键「打开方式」列表。",
+        );
+        hint(ui, "便携版移动程序位置后，请重新关联。");
+    }
+
+    /// 批量注册 / 注销勾选的扩展名，成功后刷新状态缓存。
+    fn apply_assoc_op(&mut self, register: bool, exts: Vec<&'static str>) {
+        if exts.is_empty() {
+            self.assoc_status = Some("未勾选任何扩展名".to_string());
+            return;
+        }
+        let result = if register {
+            file_assoc::register(&exts)
+        } else {
+            file_assoc::unregister(&exts)
+        };
+        match result {
+            Ok(n) => {
+                self.assoc_status = Some(if register {
+                    format!("已关联 {n} 个扩展名")
+                } else {
+                    format!("已取消关联 {n} 个扩展名")
+                });
+                match file_assoc::query_status() {
+                    Ok(list) => self.file_assoc = Some(list),
+                    Err(e) => self.assoc_status = Some(format!("刷新关联状态失败：{e}")),
+                }
+            }
+            Err(e) => {
+                self.assoc_status = Some(if register {
+                    format!("关联失败：{e}")
+                } else {
+                    format!("取消关联失败：{e}")
+                });
+            }
+        }
     }
 
     fn shortcut_editor(

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Windows 文件关联：设置页新增「文件关联」tab，可把压缩包（zip/cbz/rar/cbr/7z/tar/tgz/tbz2）、图片、影视三组扩展名注册为 OpenItGo 默认打开（HKCU  per-user，无需管理员；覆盖前备份原关联、取消时恢复；同时写入「打开方式」列表；附系统默认应用设置直达按钮）。
+- 图片文件打开：双击图片 = 打开所在文件夹作为漫画并定位到该图，强制单页模式（`open_image_as_comic` + 一次性 `pending_open_options`）；覆盖启动参数、拖放等所有 `open_path` 入口。
 - 压缩包浏览与解压：新 Archive 视图列出压缩包全部条目（复选/过滤/全选），支持解压全部或选中条目；覆盖 ZIP/CBZ、RAR/CBR、7z、TAR 系（.tar/.tgz/.tar.gz/.txz/.tar.xz/.tar.zst/.tar.bz2/.tbz2）；ZIP 条目级并行解压（每 worker 独立句柄），批量解压多包并行（上限 4），带进度面板与取消；条目名路径穿越防护，同名文件自动改名（可改为覆盖）。入口：书架卡片右键「浏览压缩包」/「解压到…」。
 - 密码本（`password_book.json`）：内置常见资源站密码表，验证成功的密码自动收录并按命中次数排序；打开加密漫画时先静默逐个尝试密码本候选，全灭才弹密码框；密码在 JSON 中 base64 混淆存储；设置页「压缩包」tab 可增删管理、恢复内置表。
 - Settings：`extract_dir` / `extract_threads` / `extract_overwrite` 解压设置（设置页「压缩包」tab）。

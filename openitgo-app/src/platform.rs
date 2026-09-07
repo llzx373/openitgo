@@ -796,8 +796,104 @@ pub mod macos {
 
 #[cfg(target_os = "windows")]
 pub mod windows {
+    pub mod file_assoc;
     pub mod mpv_view;
 }
+
+/// 文件关联 stub（非 Windows）：类型/静态表与 `windows::file_assoc` 同签名，
+/// 操作一律返回 Err，保证 `crate::platform::file_assoc` 跨平台可用。
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+pub mod file_assoc {
+    /// 扩展名分组（压缩包 / 图片 / 影视）。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum AssocGroup {
+        /// 压缩包（zip/cbz/rar/…）
+        Archive,
+        /// 图片（jpg/png/…）
+        Image,
+        /// 影视（音视频）
+        Media,
+    }
+
+    impl AssocGroup {
+        /// 分组显示名（「压缩包」/「图片」/「影视」）。
+        pub fn label(self) -> &'static str {
+            match self {
+                AssocGroup::Archive => "压缩包",
+                AssocGroup::Image => "图片",
+                AssocGroup::Media => "影视",
+            }
+        }
+
+        /// 该组的 ProgID，如 `OpenItGo.Archive`。
+        pub fn progid(self) -> &'static str {
+            match self {
+                AssocGroup::Archive => "OpenItGo.Archive",
+                AssocGroup::Image => "OpenItGo.Image",
+                AssocGroup::Media => "OpenItGo.Media",
+            }
+        }
+
+        /// ProgID 键默认值描述（「OpenItGo 压缩包」等）。
+        pub fn description(self) -> String {
+            format!("OpenItGo {}", self.label())
+        }
+    }
+
+    /// 单个扩展名的关联状态。
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum AssocState {
+        /// 已关联到本程序。
+        Ours,
+        /// 被其他程序占用（值为现有 ProgID / 应用标识）。
+        Other(String),
+        /// 无关联。
+        None,
+    }
+
+    /// 扩展名关联条目（query_status 的返回元素）。
+    #[derive(Debug, Clone)]
+    pub struct ExtAssoc {
+        /// 扩展名（小写、不含点）。
+        pub ext: &'static str,
+        /// 所属分组。
+        pub group: AssocGroup,
+        /// 当前关联状态。
+        pub state: AssocState,
+        /// 设置页勾选框默认值。
+        pub selected: bool,
+    }
+
+    /// 静态扩展名分组表（与 Windows 版保持一致）。
+    pub const EXT_GROUPS: &[(AssocGroup, &str, &[&str])] = &[];
+
+    const UNSUPPORTED: &str = "文件关联仅支持 Windows";
+
+    /// 查询全部已知扩展名的当前关联状态。
+    pub fn query_status() -> Result<Vec<ExtAssoc>, String> {
+        Err(UNSUPPORTED.to_string())
+    }
+
+    /// 注册文件关联（非 Windows 不支持）。
+    pub fn register(_exts: &[&str]) -> Result<usize, String> {
+        Err(UNSUPPORTED.to_string())
+    }
+
+    /// 注销文件关联（非 Windows 不支持）。
+    pub fn unregister(_exts: &[&str]) -> Result<usize, String> {
+        Err(UNSUPPORTED.to_string())
+    }
+
+    /// 打开系统「默认应用」设置页（非 Windows 不支持）。
+    pub fn open_default_apps_settings() -> Result<(), String> {
+        Err(UNSUPPORTED.to_string())
+    }
+}
+
+/// Unified file-association API (`crate::platform::file_assoc`)。
+#[cfg(target_os = "windows")]
+pub use windows::file_assoc;
 
 /// Unified video-view API used by views/media.rs (`PendingVideoView`
 /// two-phase construction + `MpvNativeView`).
