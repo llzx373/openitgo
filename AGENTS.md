@@ -91,15 +91,28 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
   （`ExtractManager`，上限 4）。条目名统一做路径穿越防护（拒绝 `..`/
   绝对路径/盘符）。密码错误分类与漫画解析一致（ZIP `InvalidPassword`、
   RAR `classify_rar_error` + CRC `BadData`、7z 错密码表现为 CRC 校验失败
-  经 `classify_sevenz_io_error` 归一为 `PasswordIncorrect`）。app 侧：
-  `View::Archive(PathBuf)` + `views/archive.rs`（条目列表/勾选/过滤，
+  经 `classify_sevenz_io_error` 归一为 `PasswordIncorrect`）。`classify_archive()`
+  按图片占比 ≥80% 启发式分类 Comic/Files，`read_entry()` 读单条目不预览上限
+  由 app 侧控制。app 侧：
+  `View::Archive(PathBuf)` + `views/archive.rs`（条目列表/树形双模式
+  （`views/archive_tree.rs` 纯函数构树，`\\` 也作分隔符、隐式目录补全、
+  目录勾选级联后代文件）、勾选/过滤、右侧预览面板（图片解码/UTF-8 文本
+  嗅探前 256KB、>64MB 不预览，密码经 `preview_password` 由 app 每帧写入），
   加密包经 `open_with_password` 重列）+ `extract_manager.rs`（每任务一
   线程 + 右下角进度面板，`poll_extracts` 每帧汇总写 `error_message`）；
   入口：Library 卡片右键「浏览压缩包」/「解压到…」；`open_path` 对
   `archive_kind` 命中但 `is_supported_comic_file` 不命中的纯压缩包
-  （7z/tar 系）直接分流进 Archive 视图；Archive 视图顶栏对漫画可读格式
-  （zip/cbz/rar/cbr）提供「作为漫画打开」（回调 `on_open_as_comic`
-  → 回 `open_path` 走 comic 链路）。
+  （7z/tar 系）直接分流进 Archive 视图；zip/cbz/rar/cbr 经
+  `open_archive_auto` 后台列条目 + `poll_archive_router` 启发式分流
+  （Comic → 漫画链路，Files → `archive_view.open_with_entries` 复用已列
+  条目进 Archive 视图，任何列目录错误含密码错误回落漫画链路）；显式动作
+  跳过启发式：Archive 视图顶栏对漫画可读格式（zip/cbz/rar/cbr）提供
+  「作为漫画打开」（回调 `on_open_as_comic` → 直接 `open_comic`）；
+  阅读器工具栏「浏览压缩包」按钮（仅当前漫画路径 `archive_kind` 命中时
+  显示，Archive 视图自愈守卫保证同路径不重列）；双击图片条目
+  （`on_open_entry_as_comic` → `open_entry_as_comic`：同漫画已打开则
+  `find_entry_page_index` 直接跳页，否则 `open_comic` +
+  `PendingOpenOptions.start_entry` 由 poll_opener 定位，不强制单页）。
 - **PageLoader** runs IO and decode workers in background threads; results are
   sent back to the UI thread via channels. The app also maintains a separate
   `cover_loader` for library cover thumbnails.
@@ -372,13 +385,14 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
   文件关联经此传入）取路径，由 `ReaderApp::new` 经 `open_path` 打开；
   `exists()` 检查天然过滤无效参数（如 macOS 偶发的 `-psn_*`）。
   `open_path` 分发顺序：ebook → media → **图片**（`is_image_file`，复用
-  parser 的 `is_image_extension`）→ **纯压缩包**（`archive_kind` 命中且
-  `is_supported_comic_file` 不命中 → `open_archive_browser`）→ comic。
+  parser 的 `is_image_extension`）→ **zip/cbz/rar/cbr**（`archive_kind` 与
+  `is_supported_comic_file` 同时命中 → `open_archive_auto` 启发式分流）
+  → **纯压缩包**（仅 `archive_kind` 命中 → `open_archive_browser`）→ comic。
   文件菜单「打开文件…」（rfd `pick_file`，过滤器扩展名表与各分发判定
   函数共用 `COMIC_EXTS`/`EBOOK_EXTS` 等单处定义常量）也走 `open_path`。
   图片分支 `open_image_as_comic`
   把**父目录**作为漫画经 `open_comic` 打开，并置一次性
-  `pending_open_options { start_file, force_single_page }`：`poll_opener`
+  `pending_open_options { start_file, start_entry, force_single_page }`：`poll_opener`
   在每书设置覆盖与历史恢复之后消费——`go_to_page` 定位到该图
   （`find_image_page_index`，大小写不敏感 + canonicalize 回退）并
   `set_double_page(false)`（强制单页）；应用后把

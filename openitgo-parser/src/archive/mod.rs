@@ -202,6 +202,140 @@ fn list_sevenz(path: &Path, password: Option<&str>) -> Result<Vec<ArchiveEntry>,
         .collect())
 }
 
+/// 压缩包内容分类：按图片占比启发式判断是漫画包还是文件包。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveClass {
+    Comic,
+    Files,
+}
+
+/// ≥80% 图片判定为漫画包：images*5 >= files*4 且 files > 0。
+/// 目录项与垃圾名（见 `is_junk_name`）不计入分子分母。
+pub fn classify_archive(entries: &[ArchiveEntry]) -> ArchiveClass {
+    let mut files = 0usize;
+    let mut images = 0usize;
+    for e in entries {
+        if e.is_dir || is_junk_name(&e.name) {
+            continue;
+        }
+        files += 1;
+        if crate::traits::is_comic_image_name(&e.name) {
+            images += 1;
+        }
+    }
+    if files > 0 && images * 5 >= files * 4 {
+        ArchiveClass::Comic
+    } else {
+        ArchiveClass::Files
+    }
+}
+
+/// 垃圾名判定：任一路径组件为 `__MACOSX`（`/` 与 `\` 都算分隔符），
+/// 或 basename 以 `._` 开头 / 为 `.DS_Store`（大小写不敏感）。
+fn is_junk_name(name: &str) -> bool {
+    let basename = name.split(['/', '\\']).next_back().unwrap_or("");
+    if basename.starts_with("._") || basename.eq_ignore_ascii_case(".DS_Store") {
+        return true;
+    }
+    name.split(['/', '\\']).any(|part| part == "__MACOSX")
+}
+
+/// 读取单个条目内容到内存（预览用）。TAR 无加密概念，忽略 `password`。
+pub fn read_entry(path: &Path, name: &str, password: Option<&str>) -> Result<Vec<u8>, ParseError> {
+    match archive_kind(path) {
+        Some(ArchiveKind::Zip) => read_zip_entry(path, name, password),
+        Some(ArchiveKind::Rar) => read_rar_entry(path, name, password),
+        Some(ArchiveKind::SevenZ) => read_sevenz_entry(path, name, password),
+        Some(ArchiveKind::Tar) => read_tar_entry(path, name),
+        None => Err(ParseError::Unsupported),
+    }
+}
+
+fn read_zip_entry(path: &Path, name: &str, password: Option<&str>) -> Result<Vec<u8>, ParseError> {
+    use zip::result::ZipError;
+    let map_open_err = |e: ZipError| match e {
+        ZipError::InvalidPassword => ParseError::PasswordIncorrect,
+        ZipError::UnsupportedArchive(msg) if msg == ZipError::PASSWORD_REQUIRED => {
+            ParseError::PasswordRequired
+        }
+        ZipError::FileNotFound => ParseError::InvalidArchive(format!("entry not found: {name}")),
+        other => ParseError::InvalidArchive(other.to_string()),
+    };
+    let file = std::fs::File::open(path)?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| ParseError::InvalidArchive(e.to_string()))?;
+    let mut entry = match password {
+        Some(pw) => archive
+            .by_name_decrypt(name, pw.as_bytes())
+            .map_err(map_open_err)?,
+        None => archive.by_name(name).map_err(map_open_err)?,
+    };
+    let mut data = Vec::with_capacity(entry.size() as usize);
+    entry.read_to_end(&mut data)?;
+    Ok(data)
+}
+
+/// RAR：顺序扫描头部，按文件名匹配（预览不需要 header_position 跳转）。
+fn read_rar_entry(path: &Path, name: &str, password: Option<&str>) -> Result<Vec<u8>, ParseError> {
+    let builder = match password {
+        Some(pw) => unrar::Archive::with_password(path, pw),
+        None => unrar::Archive::new(path),
+    };
+    let mut archive = builder
+        .open_for_processing()
+        .map_err(crate::rar::classify_rar_error)?;
+    loop {
+        let Some(entry) = archive
+            .read_header()
+            .map_err(crate::rar::classify_rar_error)?
+        else {
+            return Err(ParseError::InvalidArchive(format!(
+                "entry not found: {name}"
+            )));
+        };
+        if entry.entry().is_file() && entry.entry().filename.to_string_lossy() == name {
+            let (data, _rest) = entry.read().map_err(crate::rar::classify_rar_error)?;
+            return Ok(data);
+        }
+        archive = entry.skip().map_err(crate::rar::classify_rar_error)?;
+    }
+}
+
+/// 7z：ArchiveReader::read_file 按名读取；Io 包装的 CRC 失败
+/// （错密码解出乱码）经 extract 侧的 classify_sevenz_io_error 归一。
+fn read_sevenz_entry(
+    path: &Path,
+    name: &str,
+    password: Option<&str>,
+) -> Result<Vec<u8>, ParseError> {
+    use sevenz_rust2::Error as SE;
+    let had_password = password.is_some();
+    let mut reader = sevenz_rust2::ArchiveReader::open(path, sevenz_password(password))
+        .map_err(|e| classify_sevenz_error(e, had_password))?;
+    reader.read_file(name).map_err(|e| match e {
+        SE::FileNotFound => ParseError::InvalidArchive(format!("entry not found: {name}")),
+        SE::Io(io_err, _) => extract::classify_sevenz_io_error(io_err, had_password),
+        other => classify_sevenz_error(other, had_password),
+    })
+}
+
+/// TAR：单遍流式扫描，按 `path_bytes` 的 lossy 字符串精确匹配（不做分隔符归一）。
+fn read_tar_entry(path: &Path, name: &str) -> Result<Vec<u8>, ParseError> {
+    let reader = tar_reader(path)?;
+    let mut archive = tar::Archive::new(reader);
+    for item in archive.entries()? {
+        let mut entry = item?;
+        if String::from_utf8_lossy(entry.path_bytes().as_ref()) == name {
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data)?;
+            return Ok(data);
+        }
+    }
+    Err(ParseError::InvalidArchive(format!(
+        "entry not found: {name}"
+    )))
+}
+
 /// TAR：按压缩变体套解码器后单遍流式枚举。
 fn list_tar(path: &Path) -> Result<Vec<ArchiveEntry>, ParseError> {
     let reader = tar_reader(path)?;
@@ -450,6 +584,169 @@ pub(crate) mod tests {
     fn list_unsupported_extension() {
         assert!(matches!(
             list_entries(Path::new("a.pdf"), None),
+            Err(ParseError::Unsupported)
+        ));
+    }
+
+    fn file_entry(name: &str) -> ArchiveEntry {
+        ArchiveEntry {
+            name: name.to_string(),
+            is_dir: false,
+            size: 0,
+            compressed_size: None,
+        }
+    }
+
+    #[test]
+    fn classify_all_images_is_comic() {
+        let entries: Vec<ArchiveEntry> = ["1.png", "2.jpg", "3.webp"]
+            .iter()
+            .map(|n| file_entry(n))
+            .collect();
+        assert_eq!(classify_archive(&entries), ArchiveClass::Comic);
+    }
+
+    #[test]
+    fn classify_exactly_eighty_percent_is_comic() {
+        let entries: Vec<ArchiveEntry> = ["1.png", "2.png", "3.png", "4.png", "notes.txt"]
+            .iter()
+            .map(|n| file_entry(n))
+            .collect();
+        assert_eq!(classify_archive(&entries), ArchiveClass::Comic);
+    }
+
+    #[test]
+    fn classify_sixty_percent_is_files() {
+        let entries: Vec<ArchiveEntry> = ["1.png", "2.png", "3.png", "a.txt", "b.txt"]
+            .iter()
+            .map(|n| file_entry(n))
+            .collect();
+        assert_eq!(classify_archive(&entries), ArchiveClass::Files);
+    }
+
+    #[test]
+    fn classify_all_text_is_files() {
+        let entries: Vec<ArchiveEntry> = ["a.txt", "b.md"].iter().map(|n| file_entry(n)).collect();
+        assert_eq!(classify_archive(&entries), ArchiveClass::Files);
+    }
+
+    #[test]
+    fn classify_empty_is_files() {
+        assert_eq!(classify_archive(&[]), ArchiveClass::Files);
+    }
+
+    #[test]
+    fn classify_dirs_only_is_files() {
+        let entries: Vec<ArchiveEntry> = ["sub/", "pics/"]
+            .iter()
+            .map(|n| ArchiveEntry {
+                name: n.to_string(),
+                is_dir: true,
+                size: 0,
+                compressed_size: None,
+            })
+            .collect();
+        assert_eq!(classify_archive(&entries), ArchiveClass::Files);
+    }
+
+    #[test]
+    fn classify_junk_excluded_from_denominator() {
+        // 垃圾名不计入 files：4 图 + 3 垃圾仍是漫画包
+        // （若垃圾计入则 4/7 < 80%，会误判为 Files）。
+        let entries: Vec<ArchiveEntry> = [
+            "1.png",
+            "2.png",
+            "3.png",
+            "4.png",
+            "__MACOSX/x.png",
+            "._a.png",
+            ".DS_Store",
+        ]
+        .iter()
+        .map(|n| file_entry(n))
+        .collect();
+        assert_eq!(classify_archive(&entries), ArchiveClass::Comic);
+    }
+
+    #[test]
+    fn read_entry_zip_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.zip");
+        write_test_zip(&path);
+        assert_eq!(read_entry(&path, "a.txt", None).unwrap(), b"hello a");
+        assert_eq!(read_entry(&path, "sub/b.png", None).unwrap(), b"png-bytes");
+        assert!(matches!(
+            read_entry(&path, "missing.txt", None),
+            Err(ParseError::InvalidArchive(_))
+        ));
+    }
+
+    #[test]
+    fn read_entry_7z_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.7z");
+        write_test_7z(&path);
+        assert_eq!(read_entry(&path, "a.txt", None).unwrap(), b"hello a");
+        assert_eq!(read_entry(&path, "sub/b.png", None).unwrap(), b"png-bytes");
+        assert!(matches!(
+            read_entry(&path, "missing.txt", None),
+            Err(ParseError::InvalidArchive(_))
+        ));
+    }
+
+    #[test]
+    fn read_entry_tar_gz_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.tar.gz");
+        write_test_tar_gz(&path);
+        assert_eq!(read_entry(&path, "a.txt", None).unwrap(), b"hello a");
+        assert_eq!(read_entry(&path, "sub/b.png", None).unwrap(), b"png-bytes");
+        assert!(matches!(
+            read_entry(&path, "missing.txt", None),
+            Err(ParseError::InvalidArchive(_))
+        ));
+    }
+
+    #[test]
+    fn read_entry_encrypted_zip_password_states() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("enc.zip");
+        write_encrypted_zip(&path, "s3cret");
+        assert!(matches!(
+            read_entry(&path, "secret.txt", None),
+            Err(ParseError::PasswordRequired)
+        ));
+        assert!(matches!(
+            read_entry(&path, "secret.txt", Some("nope")),
+            Err(ParseError::PasswordIncorrect)
+        ));
+        assert_eq!(
+            read_entry(&path, "secret.txt", Some("s3cret")).unwrap(),
+            b"top secret"
+        );
+    }
+
+    #[test]
+    fn read_entry_rar_data_encrypted() {
+        // 数据加密包（rar -p）：列表可读，读条目必须带密码。
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/encrypted-files-pw123.rar");
+        let entries = list_entries(&path, None).unwrap();
+        let name = entries
+            .iter()
+            .find(|e| !e.is_dir)
+            .expect("fixture has a file entry")
+            .name
+            .clone();
+        let data = read_entry(&path, &name, Some("pw123")).unwrap();
+        assert!(!data.is_empty());
+        assert!(read_entry(&path, &name, Some("nope")).is_err());
+    }
+
+    #[test]
+    fn read_entry_unsupported_extension() {
+        assert!(matches!(
+            read_entry(Path::new("a.pdf"), "x", None),
             Err(ParseError::Unsupported)
         ));
     }

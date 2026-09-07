@@ -19,7 +19,9 @@ use egui_phosphor_icons::{icons, Icon};
 use openitgo_core::ebook::Ebook;
 use openitgo_core::models::{Comic, FitMode, PageSource, ReadingMode};
 use openitgo_core::state::ReadingState;
-use openitgo_parser::archive::archive_kind;
+use openitgo_parser::archive::{
+    archive_kind, classify_archive, list_entries, ArchiveClass, ArchiveEntry,
+};
 use openitgo_storage::{
     json_store::JsonStore,
     models::{
@@ -44,11 +46,14 @@ pub struct PendingMediaOpen {
     pub force_start: bool,
 }
 
-/// 双击图片文件触发的一次性打开选项：打开所在文件夹作为漫画后，
-/// 定位到该图片页并强制单页模式。由 poll_opener 消费（成功/失败均清除）。
+/// 双击图片文件/压缩包图片条目触发的一次性打开选项：打开所在文件夹/包
+/// 作为漫画后，定位到起始页（图片路径或包内条目名）并可强制单页模式。
+/// 由 poll_opener 消费（成功/失败均清除）。
 #[derive(Debug, Clone, PartialEq)]
 struct PendingOpenOptions {
     start_file: Option<PathBuf>,
+    /// 压缩包条目名（双击包内图片条目打开时设置）。
+    start_entry: Option<String>,
     force_single_page: bool,
 }
 
@@ -168,6 +173,26 @@ fn find_image_page_index(comic: &Comic, target: &Path) -> Option<usize> {
     let canon = target.canonicalize().ok()?;
     file_pages()
         .find_map(|(pos, p)| (p.canonicalize().ok().as_ref() == Some(&canon)).then_some(pos))
+}
+
+/// 在漫画第一卷的页面中查找条目名为 `entry_name` 的压缩包页
+/// （`PageSource::ZipEntry`/`RarEntry`，大小写不敏感），返回页下标；
+/// File/PdfPage 页源跳过，找不到返回 None。
+fn find_entry_page_index(comic: &Comic, entry_name: &str) -> Option<usize> {
+    comic
+        .volumes
+        .first()?
+        .pages
+        .iter()
+        .enumerate()
+        .find_map(|(pos, page)| match &page.source {
+            PageSource::ZipEntry { name, .. } | PageSource::RarEntry { name, .. }
+                if name.eq_ignore_ascii_case(entry_name) =>
+            {
+                Some(pos)
+            }
+            _ => None,
+        })
 }
 
 /// 数字感知、大小写不敏感的自然排序比较（"EP2" < "EP10"）。
@@ -360,6 +385,9 @@ pub struct ReaderApp {
     pub cover_loader: PageLoader,
     pub opener: Option<AsyncOpener<Comic>>,
     pub ebook_opener: Option<AsyncOpener<Ebook>>,
+    /// zip/cbz/rar/cbr 打开时的启发式分流任务：后台列条目，
+    /// 按图片占比决定进漫画链路还是压缩包浏览视图。
+    archive_router: Option<(PathBuf, AsyncOpener<Vec<ArchiveEntry>>)>,
     pub pending_media_open: Option<PendingMediaOpen>,
     /// 双击图片打开所在文件夹的一次性选项（起始图/强制单页），poll_opener 消费。
     pending_open_options: Option<PendingOpenOptions>,
@@ -476,6 +504,7 @@ impl Default for ReaderApp {
             cover_loader,
             opener: None,
             ebook_opener: None,
+            archive_router: None,
             pending_media_open: None,
             pending_open_options: None,
             pending_covers: HashMap::new(),
@@ -580,6 +609,7 @@ impl eframe::App for ReaderApp {
             self.handle_open_paths(dock_paths);
         }
         self.poll_opener(&ctx);
+        self.poll_archive_router(&ctx);
         self.poll_password_probe(&ctx);
         self.poll_ebook_opener(&ctx, frame);
         self.poll_media_open(&ctx, frame);
@@ -756,6 +786,12 @@ impl ReaderApp {
                             }
                             if let Some(start) = opts.start_file.as_deref() {
                                 if let Some(idx) = find_image_page_index(&comic, start) {
+                                    state.go_to_page(idx, total);
+                                }
+                            }
+                            // 双击包内图片条目：定位到该条目页（不强制单页）。
+                            if let Some(entry) = opts.start_entry.as_deref() {
+                                if let Some(idx) = find_entry_page_index(&comic, entry) {
                                     state.go_to_page(idx, total);
                                 }
                             }
@@ -1811,6 +1847,19 @@ impl ReaderApp {
                     if toolbar_button(ui, icons::HOUSE, "书架", display_mode).clicked() {
                         self.current_view = View::Library;
                     }
+                    // 当前漫画是压缩包时提供「浏览压缩包」入口（文件夹/PDF 不显示）。
+                    let comic_archive_path = self
+                        .reader_view
+                        .open
+                        .as_ref()
+                        .map(|r| r.comic.path.clone())
+                        .filter(|p| archive_kind(p).is_some());
+                    if let Some(path) = comic_archive_path {
+                        if toolbar_button(ui, icons::PACKAGE, "浏览压缩包", display_mode).clicked()
+                        {
+                            self.current_view = View::Archive(path);
+                        }
+                    }
                     ui.separator();
 
                     let modes = [
@@ -2263,6 +2312,7 @@ impl ReaderApp {
                             self.opener = None;
                             self.ebook_opener = None;
                             self.password_probe = None;
+                            self.archive_router = None;
                             self.current_view = View::Library;
                         }
                         if let Some(err) = &self.error_message {
@@ -2276,6 +2326,8 @@ impl ReaderApp {
 
     /// 打开压缩包浏览视图（库卡片右键「浏览压缩包」入口）。
     fn open_archive_browser(&mut self, path: PathBuf) {
+        // 直接进浏览视图，取消在途的启发式分流任务。
+        self.archive_router = None;
         self.archive_view.open(path.clone());
         self.current_view = View::Archive(path);
         self.error_message = None;
@@ -2312,8 +2364,15 @@ impl ReaderApp {
             if let Some(err) = &self.error_message {
                 ui.colored_label(ui.visuals().error_fg_color, err);
             }
+            // 预览读取加密条目用会话密码（canonical key 与裸路径两处都查）。
+            self.archive_view.preview_password = self
+                .passwords
+                .get(&password_key(path))
+                .or_else(|| self.passwords.get(path))
+                .cloned();
             let mut back = false;
             let mut open_as_comic = false;
+            let mut entry_as_comic: Option<String> = None;
             let mut extract_all = false;
             let mut extract_selected: Option<Vec<String>> = None;
             let mut need_password = false;
@@ -2322,6 +2381,7 @@ impl ReaderApp {
                 ArchiveCallbacks {
                     on_back: &mut || back = true,
                     on_open_as_comic: &mut || open_as_comic = true,
+                    on_open_entry_as_comic: &mut |name| entry_as_comic = Some(name),
                     on_extract_all: &mut || extract_all = true,
                     on_extract_selected: &mut |sel| extract_selected = Some(sel),
                     on_need_password: &mut || need_password = true,
@@ -2332,8 +2392,12 @@ impl ReaderApp {
             }
             if open_as_comic {
                 if let Some(path) = self.archive_view.path.clone() {
-                    self.open_path(path);
+                    // 显式「作为漫画打开」：跳过启发式分流，直接走漫画链路。
+                    self.open_comic(path);
                 }
+            }
+            if let Some(name) = entry_as_comic {
+                self.open_entry_as_comic(path, name);
             }
             if need_password {
                 if let Some(path) = self.archive_view.path.clone() {
@@ -4176,23 +4240,97 @@ impl ReaderApp {
         // open_comic 会清掉旧的一次性选项，故在其之后设置。
         self.pending_open_options = Some(PendingOpenOptions {
             start_file: Some(path),
+            start_entry: None,
             force_single_page: true,
         });
     }
 
     fn open_path(&mut self, path: std::path::PathBuf) {
+        // 新的打开请求取代在途的启发式分流任务。
+        self.archive_router = None;
         if is_ebook_file(&path) {
             self.open_ebook(path);
         } else if is_media_file(&path) {
             self.open_media(path);
         } else if is_image_file(&path) {
             self.open_image_as_comic(path);
-        } else if archive_kind(&path).is_some() && !is_supported_comic_file(&path) {
-            // 7z/tar 系纯压缩包 → 压缩包浏览视图；zip/cbz/rar/cbr 仍走漫画链路。
+        } else if archive_kind(&path).is_some() && is_supported_comic_file(&path) {
+            // zip/cbz/rar/cbr：后台先列条目，按图片占比启发式分流到
+            // 漫画链路或压缩包浏览视图。
+            self.open_archive_auto(path);
+        } else if archive_kind(&path).is_some() {
+            // 7z/tar 系纯压缩包 → 压缩包浏览视图。
             self.open_archive_browser(path);
         } else {
             self.open_comic(path);
         }
+    }
+
+    /// zip/cbz/rar/cbr 的启发式分流：后台列条目（带上会话密码），
+    /// 结果由 poll_archive_router 分类处理。
+    fn open_archive_auto(&mut self, path: PathBuf) {
+        timing::log(&format!("open_archive_auto {:?}", path));
+        let password = self
+            .passwords
+            .get(&path)
+            .or_else(|| self.passwords.get(&password_key(&path)))
+            .cloned();
+        self.archive_router = Some((
+            path.clone(),
+            AsyncOpener::open(path.clone(), move |p| {
+                list_entries(p, password.as_deref()).map_err(|e| e.to_string())
+            }),
+        ));
+        self.current_view = View::Loading(path);
+        self.error_message = None;
+    }
+
+    /// 每帧排空启发式分流的列目录结果：漫画包进漫画链路，文件包直接以
+    /// 已列好的条目进压缩包浏览视图（不重复列出）；任何列目录错误
+    /// （含密码错误）回落漫画链路，由既有密码探测/错误链处理。
+    fn poll_archive_router(&mut self, ctx: &egui::Context) {
+        let Some((path, mut router)) = self.archive_router.take() else {
+            return;
+        };
+        match router.poll() {
+            OpenStatus::Loading => {
+                self.archive_router = Some((path, router));
+                // 空闲时 egui 不重绘，主动轮询以排空后台列目录结果。
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            OpenStatus::Ready(Ok(entries)) => match classify_archive(&entries) {
+                ArchiveClass::Comic => self.open_comic(path),
+                ArchiveClass::Files => {
+                    self.archive_view.open_with_entries(path.clone(), entries);
+                    self.current_view = View::Archive(path);
+                    self.error_message = None;
+                }
+            },
+            OpenStatus::Ready(Err(_)) => self.open_comic(path),
+        }
+    }
+
+    /// 双击压缩包浏览视图中的图片条目：以漫画打开并定位到该页。
+    /// 快路径：同一漫画已打开时直接跳页，不重新解析。
+    fn open_entry_as_comic(&mut self, archive_path: &Path, entry_name: String) {
+        if let Some(reader) = self.reader_view.open.as_mut() {
+            if reader.comic.path == archive_path {
+                let total = reader.total_pages();
+                if let Some(idx) = find_entry_page_index(&reader.comic, &entry_name) {
+                    reader.state.go_to_page(idx, total);
+                    self.current_view = View::Reader;
+                    return;
+                }
+            }
+        }
+        // 慢路径：走 open_comic 解析链路，解析成功后由 poll_opener 定位。
+        self.open_comic(archive_path.to_path_buf());
+        // open_comic 会清掉旧的一次性选项，故在其之后设置。
+        self.pending_open_options = Some(PendingOpenOptions {
+            start_file: None,
+            start_entry: Some(entry_name),
+            force_single_page: false,
+        });
     }
 
     fn open_media(&mut self, path: std::path::PathBuf) {
@@ -4954,6 +5092,7 @@ mod tests {
                 cover_loader,
                 opener: None,
                 ebook_opener: None,
+                archive_router: None,
                 pending_media_open: None,
                 pending_open_options: None,
                 pending_covers: HashMap::new(),
@@ -5964,12 +6103,19 @@ mod tests {
     }
 
     #[test]
-    fn test_open_path_dispatches_to_comic_opener() {
+    fn test_open_path_dispatches_comic_archive_to_heuristic_router() {
         let (mut app, _tmp) = app_with_temp_store();
-        app.open_path(PathBuf::from("/tmp/fake.cbz"));
-        assert!(matches!(app.current_view, View::Loading(_)));
-        assert!(app.opener.is_some());
-        assert!(app.ebook_opener.is_none());
+        // zip/cbz/rar/cbr 不再直接走漫画 opener，而是先进启发式分流（后台列条目）。
+        for ext in ["zip", "cbz", "rar", "cbr"] {
+            app.open_path(PathBuf::from(format!("/tmp/fake.{ext}")));
+            assert!(
+                matches!(app.current_view, View::Loading(_)),
+                "{ext} 应显示 Loading"
+            );
+            assert!(app.archive_router.is_some(), "{ext} 应进启发式分流");
+            assert!(app.opener.is_none(), "{ext} 不应直接走漫画 opener");
+            assert!(app.ebook_opener.is_none());
+        }
     }
 
     #[test]
@@ -6090,6 +6236,125 @@ mod tests {
     }
 
     #[test]
+    fn test_find_entry_page_index() {
+        let comic = comic_with_sources(vec![
+            PageSource::ZipEntry {
+                archive: PathBuf::from("/tmp/pack.cbz"),
+                name: "vol1/p01.png".to_string(),
+                index: 0,
+            },
+            PageSource::RarEntry {
+                archive: PathBuf::from("/tmp/pack.cbr"),
+                name: "vol1/p02.png".to_string(),
+                header_position: 0,
+            },
+            PageSource::File(PathBuf::from("/tmp/dir/p03.png")),
+            PageSource::PdfPage {
+                document: PathBuf::from("/tmp/book.pdf"),
+                page_number: 3,
+            },
+        ]);
+        assert_eq!(find_entry_page_index(&comic, "vol1/p01.png"), Some(0));
+        assert_eq!(find_entry_page_index(&comic, "vol1/p02.png"), Some(1));
+        // 大小写不敏感。
+        assert_eq!(find_entry_page_index(&comic, "VOL1/P01.PNG"), Some(0));
+        // File/PdfPage 页源跳过，未命中返回 None。
+        assert_eq!(find_entry_page_index(&comic, "p03.png"), None);
+        assert_eq!(find_entry_page_index(&comic, "vol1/p99.png"), None);
+        let empty = comic_with_sources(Vec::new());
+        assert_eq!(find_entry_page_index(&empty, "vol1/p01.png"), None);
+    }
+
+    #[test]
+    fn test_open_entry_as_comic_slow_path_sets_pending_options() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let archive = PathBuf::from("/tmp/pack.cbz");
+        // 无已打开漫画 → 慢路径：走 open_comic，挂一次性 start_entry 选项。
+        app.open_entry_as_comic(&archive, "p01.png".to_string());
+        assert!(matches!(app.current_view, View::Loading(_)));
+        assert!(app.opener.is_some());
+        assert_eq!(
+            app.pending_open_options,
+            Some(PendingOpenOptions {
+                start_file: None,
+                start_entry: Some("p01.png".to_string()),
+                force_single_page: false,
+            })
+        );
+    }
+
+    /// 写一个含指定条目名的 zip（内容无关紧要，分类只看扩展名）。
+    fn write_zip_with_entries(path: &Path, names: &[&str]) {
+        use std::io::Write;
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for name in names {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(b"data").unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// 轮询启发式分流直到任务完成（返回是否曾在 Loading 后落定）。
+    fn poll_router_until_done(app: &mut ReaderApp) {
+        let ctx = egui::Context::default();
+        for _ in 0..200 {
+            app.poll_archive_router(&ctx);
+            if app.archive_router.is_none() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("archive router did not finish");
+    }
+
+    #[test]
+    fn test_poll_archive_router_comic_archive_goes_to_comic_chain() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pack.cbz");
+        write_zip_with_entries(&path, &["p1.png", "p2.png", "p3.png", "p4.jpg"]);
+
+        app.open_path(path.clone());
+        assert!(app.archive_router.is_some());
+        poll_router_until_done(&mut app);
+        // 图片占比 ≥80% → 漫画链路。
+        assert!(app.opener.is_some());
+        assert!(matches!(app.current_view, View::Loading(p) if p == path));
+    }
+
+    #[test]
+    fn test_poll_archive_router_files_archive_goes_to_browser() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pack.zip");
+        write_zip_with_entries(&path, &["a.txt", "b.md", "c.txt", "cover.png"]);
+
+        app.open_path(path.clone());
+        poll_router_until_done(&mut app);
+        // 图片占比 <80% → 压缩包浏览视图，直接复用已列条目（不重复列出）。
+        assert!(matches!(&app.current_view, View::Archive(p) if *p == path));
+        assert!(app.opener.is_none());
+        assert_eq!(app.archive_view.state, ArchiveViewState::Ready);
+        assert_eq!(app.archive_view.entries.len(), 4);
+    }
+
+    #[test]
+    fn test_poll_archive_router_error_falls_back_to_comic_chain() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.cbz");
+        std::fs::write(&path, b"not a zip").unwrap();
+
+        app.open_path(path);
+        poll_router_until_done(&mut app);
+        // 列目录错误回落漫画链路（由 poll_opener 的错误/密码链处理）。
+        assert!(app.opener.is_some());
+        assert!(matches!(app.current_view, View::Loading(_)));
+    }
+
+    #[test]
     fn test_open_path_dispatches_image_to_folder_comic() {
         let (mut app, _tmp) = app_with_temp_store();
         let dir = tempfile::tempdir().unwrap();
@@ -6107,6 +6372,7 @@ mod tests {
             app.pending_open_options,
             Some(PendingOpenOptions {
                 start_file: Some(img),
+                start_entry: None,
                 force_single_page: true,
             })
         );
@@ -6181,6 +6447,7 @@ mod tests {
         let (mut app, _tmp) = app_with_temp_store();
         app.pending_open_options = Some(PendingOpenOptions {
             start_file: Some(PathBuf::from("/tmp/dir/page0.png")),
+            start_entry: None,
             force_single_page: true,
         });
         // 目标不存在 → 解析失败。

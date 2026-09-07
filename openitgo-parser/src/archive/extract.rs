@@ -519,7 +519,7 @@ fn extract_rar(
 /// 7z 内容 CRC 校验失败（错密码解出乱码过不了 CRC）会以
 /// io::Error 包着 ChecksumVerificationFailed 的形式从读流里冒出来；
 /// 带密码时归一为 PasswordIncorrect（与 RAR BadData 规则同理）。
-fn classify_sevenz_io_error(e: std::io::Error, had_password: bool) -> ParseError {
+pub(crate) fn classify_sevenz_io_error(e: std::io::Error, had_password: bool) -> ParseError {
     if had_password {
         if let Some(inner) = e.get_ref() {
             if let Some(se) = inner.downcast_ref::<sevenz_rust2::Error>() {
