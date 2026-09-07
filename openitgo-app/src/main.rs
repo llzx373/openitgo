@@ -1,6 +1,10 @@
+// release 构建为 GUI 子系统，避免启动时附带控制台窗口；debug 保留控制台以查看日志
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod cache;
 mod ebook_renderer;
+mod extract_manager;
 mod loader;
 mod opener;
 mod platform;

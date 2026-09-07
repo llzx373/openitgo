@@ -22,7 +22,7 @@ impl Parser for RarParser {
 /// Map unrar errors to password-specific variants; everything else keeps
 /// the legacy IO flattening. 保守映射：只有明确的 MissingPassword /
 /// BadPassword 才转换，不误伤真实损坏的包。
-fn classify_rar_error(e: unrar::error::UnrarError) -> ParseError {
+pub(crate) fn classify_rar_error(e: unrar::error::UnrarError) -> ParseError {
     match e.code {
         unrar::error::Code::MissingPassword => ParseError::PasswordRequired,
         unrar::error::Code::BadPassword => ParseError::PasswordIncorrect,

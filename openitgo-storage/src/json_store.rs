@@ -1,4 +1,6 @@
-use crate::models::{Bookmarks, ComicReadingSettings, History, Library, ReadingStat, Settings};
+use crate::models::{
+    Bookmarks, ComicReadingSettings, History, Library, PasswordBook, ReadingStat, Settings,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -104,6 +106,21 @@ impl JsonStore {
 
     pub fn load_reading_stats(&self) -> Result<HashMap<String, ReadingStat>, StorageError> {
         self.read_json_with_backup("reading_stats.json")
+    }
+
+    pub fn save_password_book(&self, book: &PasswordBook) -> Result<(), StorageError> {
+        self.write_json("password_book.json", book)
+    }
+
+    /// 文件不存在时返回内置默认表（调用方可随后落盘）；文件存在则以文件
+    /// 内容为准——用户删除过的内置条目不复活。主文件损坏时回退 .bak。
+    pub fn load_password_book(&self) -> Result<PasswordBook, StorageError> {
+        if !self.dir.join("password_book.json").exists() {
+            return Ok(PasswordBook {
+                entries: PasswordBook::builtin_defaults(),
+            });
+        }
+        self.read_json_with_backup("password_book.json")
     }
 
     /// Write a JSON file atomically:
@@ -271,6 +288,74 @@ mod tests {
         std::fs::write(tmp.path().join("reading_stats.json"), "not json").unwrap();
         let loaded = store.load_reading_stats().unwrap();
         assert!(loaded.contains_key("comic-1"));
+    }
+
+    fn sample_password_book() -> crate::models::PasswordBook {
+        crate::models::PasswordBook {
+            entries: vec![
+                crate::models::PasswordBookEntry {
+                    password: "带 空格🔒unicode".to_string(),
+                    builtin: false,
+                    note: "中文备注".to_string(),
+                    use_count: 2,
+                    last_used_unix: 1_700_000_000,
+                },
+                crate::models::PasswordBookEntry {
+                    password: "123456".to_string(),
+                    builtin: true,
+                    note: String::new(),
+                    use_count: 0,
+                    last_used_unix: 0,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_password_book() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = JsonStore::new(tmp.path());
+        let book = sample_password_book();
+        store.save_password_book(&book).unwrap();
+        let loaded = store.load_password_book().unwrap();
+        assert_eq!(book, loaded);
+        // base64 混淆：落盘 JSON 中不出现明文密码
+        let json = std::fs::read_to_string(tmp.path().join("password_book.json")).unwrap();
+        assert!(!json.contains("带 空格🔒unicode"));
+    }
+
+    #[test]
+    fn test_load_password_book_missing_file_returns_builtin_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = JsonStore::new(tmp.path());
+        let book = store.load_password_book().unwrap();
+        assert!(!book.entries.is_empty());
+        assert!(book.entries.iter().all(|e| e.builtin));
+    }
+
+    #[test]
+    fn test_password_book_load_falls_back_to_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = JsonStore::new(tmp.path());
+        store.save_password_book(&sample_password_book()).unwrap();
+        store
+            .save_password_book(&crate::models::PasswordBook::default())
+            .unwrap(); // 生成 .bak
+        std::fs::write(tmp.path().join("password_book.json"), "not json").unwrap();
+        let loaded = store.load_password_book().unwrap();
+        assert_eq!(loaded, sample_password_book());
+    }
+
+    #[test]
+    fn test_password_book_saved_file_does_not_revive_deleted_builtin() {
+        // 文件存在即以文件为准：用户删掉的内置条目不复活
+        let tmp = tempfile::tempdir().unwrap();
+        let store = JsonStore::new(tmp.path());
+        store
+            .save_password_book(&crate::models::PasswordBook::default())
+            .unwrap();
+        let loaded = store.load_password_book().unwrap();
+        assert!(loaded.entries.is_empty());
     }
 
     #[test]

@@ -9,8 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 压缩包浏览与解压：新 Archive 视图列出压缩包全部条目（复选/过滤/全选），支持解压全部或选中条目；覆盖 ZIP/CBZ、RAR/CBR、7z、TAR 系（.tar/.tgz/.tar.gz/.txz/.tar.xz/.tar.zst/.tar.bz2/.tbz2）；ZIP 条目级并行解压（每 worker 独立句柄），批量解压多包并行（上限 4），带进度面板与取消；条目名路径穿越防护，同名文件自动改名（可改为覆盖）。入口：书架卡片右键「浏览压缩包」/「解压到…」。
+- 密码本（`password_book.json`）：内置常见资源站密码表，验证成功的密码自动收录并按命中次数排序；打开加密漫画时先静默逐个尝试密码本候选，全灭才弹密码框；密码在 JSON 中 base64 混淆存储；设置页「压缩包」tab 可增删管理、恢复内置表。
+- Settings：`extract_dir` / `extract_threads` / `extract_overwrite` 解压设置（设置页「压缩包」tab）。
+
 - Windows 支持：全 workspace 在 `x86_64-pc-windows-msvc` 下编译、测试通过；媒体播放经 mpv `wid` 嵌入 HWND 子窗口（`platform/windows/mpv_view.rs`，OSD 用 mpv `show-text` 自绘，菜单打开时停放视频窗口，与电子书 webview 停放同一模式）；媒体封面用 mpv `vo=image` 无头抓帧；电子书经 wry/WebView2。新增 `scripts/setup-windows.ps1`（下载 libmpv 并生成 MSVC 导入库到 `vendor/mpv/`）与 `scripts/cargo-win.bat`（vcvars64 环境内运行 cargo）。
 - 诊断示例：`media_smoke`（打开媒体文件，播放进度推进即自动退出）与 `probe_cover`（无头封面生成冒烟）。
+
+### Changed
+
+- 「密码不落盘」旧约定有意变更：会话密码表（`ReaderApp.passwords`）仍不落盘，但验证成功的密码会收录进持久化密码本（见上）。
 
 ### Fixed
 

@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod ebook;
 pub mod library;
 pub mod media;

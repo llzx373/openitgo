@@ -1,9 +1,11 @@
+use crate::extract_manager::ExtractManager;
 use crate::loader::PageLoader;
 use crate::opener::{AsyncOpener, OpenStatus};
 use crate::shortcuts::is_shortcut_pressed;
 use crate::timing;
 use crate::views::settings::{SettingsTab, SettingsView};
 use crate::views::{
+    archive::{ArchiveCallbacks, ArchiveView, ArchiveViewState},
     ebook::EbookView,
     library::{LibraryCallbacks, LibraryView},
     media::{media_overlay, MediaOverlay, MediaView},
@@ -21,7 +23,7 @@ use openitgo_storage::{
     json_store::JsonStore,
     models::{
         Bookmarks, ComicEndAction, ComicReadingSettings, EbookTheme, History, HistoryEntry,
-        Library, MediaEndAction, MediaType, Settings, Theme, ToolbarDisplayMode,
+        Library, MediaEndAction, MediaType, PasswordBook, Settings, Theme, ToolbarDisplayMode,
     },
 };
 use std::collections::{HashMap, HashSet};
@@ -316,6 +318,10 @@ pub struct ReaderApp {
     pub ebook_view: EbookView,
     pub media_view: MediaView,
     pub settings_view: SettingsView,
+    /// 压缩包浏览视图（View::Archive 时前台展示）。
+    pub archive_view: ArchiveView,
+    /// 后台解压任务管理（并发 4，超出排队；右下进度面板）。
+    pub extract_manager: ExtractManager,
     pub store: JsonStore,
     pub history: History,
     pub bookmarks: Bookmarks,
@@ -341,8 +347,17 @@ pub struct ReaderApp {
     pub last_saved_comic_settings: Option<(String, ComicReadingSettings)>,
     /// 帮助菜单"快捷键一览"面板的显示状态。
     pub show_shortcuts: bool,
-    /// 会话级压缩包密码缓存（不落盘）；key 为压缩包路径。
+    /// 会话级压缩包密码缓存（本表自身不落盘；验证成功的密码会另记入
+    /// 密码本 password_book 持久化——这是有意行为）；key 为压缩包路径。
     pub passwords: HashMap<PathBuf, String>,
+    /// 加密压缩包密码本（持久化于 password_book.json，JSON 中 base64 混淆）。
+    pub password_book: PasswordBook,
+    /// 密码本自动尝试的后台任务：(路径, 触发时的密码错误类型, opener)。
+    /// 打开加密漫画时先在后台静默逐个尝试密码本候选，全部失败才弹密码框。
+    password_probe: Option<(PathBuf, PasswordPromptKind, AsyncOpener<Option<String>>)>,
+    /// 本会话已自动尝试过密码本的路径（canonical key）：每路径只自动试一次，
+    /// 失败后重进不反复尝试。
+    password_probe_done: HashSet<PathBuf>,
     /// 加密压缩包密码对话框状态；Some 时渲染模态窗口。
     pub password_dialog: Option<PasswordDialog>,
     /// 批量导入中等待输密码的文件队列（逐个弹同一对话框）。
@@ -407,6 +422,9 @@ impl Default for ReaderApp {
         );
         let cover_loader = PageLoader::new_with_compress(false, 1);
         let (media_cover_tx, media_cover_rx) = crossbeam_channel::unbounded();
+        let password_book = store.load_password_book().unwrap_or_else(|_| PasswordBook {
+            entries: PasswordBook::builtin_defaults(),
+        });
         Self {
             current_view: View::Library,
             last_view: View::Library,
@@ -416,6 +434,8 @@ impl Default for ReaderApp {
             ebook_view: EbookView::default(),
             media_view: MediaView::default(),
             settings_view: SettingsView::default(),
+            archive_view: ArchiveView::default(),
+            extract_manager: ExtractManager::new(),
             store,
             history,
             bookmarks,
@@ -434,6 +454,9 @@ impl Default for ReaderApp {
             last_saved_comic_settings: None,
             show_shortcuts: false,
             passwords: HashMap::new(),
+            password_book,
+            password_probe: None,
+            password_probe_done: HashSet::new(),
             password_dialog: None,
             pending_password_imports: Vec::new(),
             skipped_encrypted_imports: 0,
@@ -524,6 +547,7 @@ impl eframe::App for ReaderApp {
             self.handle_open_paths(dock_paths);
         }
         self.poll_opener(&ctx);
+        self.poll_password_probe(&ctx);
         self.poll_ebook_opener(&ctx, frame);
         self.poll_media_open(&ctx, frame);
         if self.media_view.take_startup_device_invalid() {
@@ -542,6 +566,7 @@ impl eframe::App for ReaderApp {
         );
         self.poll_cover_results();
         self.poll_media_covers();
+        self.poll_extracts(&ctx);
 
         self.render_menu_bar(ui);
 
@@ -551,9 +576,11 @@ impl eframe::App for ReaderApp {
             View::Ebook => self.render_ebook(ui),
             View::Media => self.render_media(ui),
             View::Settings => self.render_settings(ui),
+            View::Archive(path) => self.render_archive(ui, &path),
             View::Loading(path) => self.render_loading(ui, path),
         }
         self.render_shortcuts_window(&ctx);
+        self.render_extract_panel(&ctx);
         self.render_password_dialog(&ctx);
         self.maybe_save_comic_settings();
         self.tick_reading_stats();
@@ -571,6 +598,7 @@ pub enum View {
     Ebook,
     Media,
     Settings,
+    Archive(PathBuf),
     Loading(PathBuf),
 }
 
@@ -687,6 +715,14 @@ impl ReaderApp {
                     let comic_id = comic.id.clone();
                     let page_count = comic.total_pages();
                     let archive_password = self.passwords.get(&password_key(&comic.path)).cloned();
+                    // 会话密码验证成功（手动输入或密码本自动尝试）：记入密码本。
+                    if let Some(pw) = archive_password
+                        .clone()
+                        .or_else(|| self.passwords.get(&comic.path).cloned())
+                    {
+                        self.password_book.record_success(&pw);
+                        self.save_password_book();
+                    }
                     self.reader_view.open(
                         ctx,
                         comic,
@@ -703,9 +739,15 @@ impl ReaderApp {
                 Err(e) => match password_prompt_kind(&e) {
                     Some(kind) => {
                         if let Some(path) = self.opening_path.take() {
-                            self.password_dialog = Some(PasswordDialog::new(path, kind));
+                            // 先用密码本候选后台静默尝试；无候选或本会话已试过
+                            // 才直接弹手动输入对话框。
+                            if !self.start_password_probe(path.clone(), kind) {
+                                self.password_dialog = Some(PasswordDialog::new(path, kind));
+                                self.current_view = View::Library;
+                            }
+                        } else {
+                            self.current_view = View::Library;
                         }
-                        self.current_view = View::Library;
                     }
                     None => {
                         self.error_message = Some(format!("无法打开漫画: {}", e));
@@ -713,6 +755,63 @@ impl ReaderApp {
                     }
                 },
             },
+        }
+    }
+
+    /// 打开遇密码错误时，用密码本候选在后台线程静默逐个尝试（保持 Loading
+    /// 视图，不弹密码框）。返回是否已发起：无候选或该路径本会话已自动试过
+    /// 则返回 false，调用方回落手动输入。
+    fn start_password_probe(&mut self, path: PathBuf, kind: PasswordPromptKind) -> bool {
+        let key = password_key(&path);
+        if self.password_probe_done.contains(&key) {
+            return false;
+        }
+        let candidates = password_candidates_for(&path, &self.passwords, &self.password_book);
+        if candidates.is_empty() {
+            return false;
+        }
+        self.password_probe_done.insert(key);
+        self.password_probe = Some((
+            path.clone(),
+            kind,
+            AsyncOpener::open(path.clone(), move |p| {
+                Ok(first_working_password(p, &candidates))
+            }),
+        ));
+        self.current_view = View::Loading(path);
+        true
+    }
+
+    /// 每帧排空密码本自动尝试结果：命中则写入会话密码表并按原流程打开
+    /// （record_success 由 poll_opener 成功分支统一做）；全部失败回落密码框。
+    fn poll_password_probe(&mut self, ctx: &egui::Context) {
+        let Some((path, kind, mut probe)) = self.password_probe.take() else {
+            return;
+        };
+        match probe.poll() {
+            OpenStatus::Loading => {
+                self.password_probe = Some((path, kind, probe));
+                // 空闲时 egui 不重绘，主动轮询以排空后台尝试结果。
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            OpenStatus::Ready(Ok(Some(pw))) => {
+                // open_comic 用裸路径查询会话表，两把 key 都写入。
+                self.passwords.insert(password_key(&path), pw.clone());
+                self.passwords.insert(path.clone(), pw);
+                self.sync_passwords_to_loaders();
+                self.open_path(path);
+            }
+            OpenStatus::Ready(_) => {
+                self.password_dialog = Some(PasswordDialog::new(path, kind));
+                self.current_view = View::Library;
+            }
+        }
+    }
+
+    /// 密码本落盘；失败仅记 error_message（不阻断当前操作）。
+    fn save_password_book(&mut self) {
+        if let Err(e) = self.store.save_password_book(&self.password_book) {
+            self.error_message = Some(format!("无法保存密码本: {}", e));
         }
     }
 
@@ -733,6 +832,8 @@ impl ReaderApp {
             let mut delete_library_idx: Option<usize> = None;
             let mut clear_history = false;
             let mut delete_history_idx: Option<usize> = None;
+            let mut browse_archive_idx: Option<usize> = None;
+            let mut extract_archive_idx: Option<usize> = None;
             self.library_view.ui(
                 ui,
                 &self.history,
@@ -752,6 +853,8 @@ impl ReaderApp {
                     on_delete_library: &mut |idx| delete_library_idx = Some(idx),
                     on_clear_history: &mut || clear_history = true,
                     on_delete_history: &mut |idx| delete_history_idx = Some(idx),
+                    on_browse_archive: &mut |idx| browse_archive_idx = Some(idx),
+                    on_extract_archive: &mut |idx| extract_archive_idx = Some(idx),
                 },
             );
             if add_requested {
@@ -820,6 +923,27 @@ impl ReaderApp {
                 self.history.entries.remove(idx);
                 self.history_dirty = true;
                 self.persist_history_bookmarks();
+            }
+            if let Some(idx) = browse_archive_idx {
+                if let Some(entry) = self.library_view.entry_at(idx).cloned() {
+                    self.open_archive_browser(entry.path);
+                }
+            }
+            if let Some(idx) = extract_archive_idx {
+                if let Some(entry) = self.library_view.entry_at(idx).cloned() {
+                    // 用户取消文件夹选择则什么都不做。
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                        let password = self.passwords.get(&password_key(&entry.path)).cloned();
+                        self.extract_manager.start(
+                            entry.path,
+                            dir,
+                            None,
+                            password,
+                            self.settings.extract_threads as usize,
+                            self.settings.extract_overwrite,
+                        );
+                    }
+                }
             }
         });
     }
@@ -2054,7 +2178,13 @@ impl ReaderApp {
                 }
             });
             ui.separator();
-            self.settings_view.ui(ui, &mut self.settings);
+            let book_changed =
+                self.settings_view
+                    .ui(ui, &mut self.settings, &mut self.password_book);
+            if book_changed {
+                // 密码本增删改立即落盘。
+                self.save_password_book();
+            }
         });
         if from_ebook {
             self.ebook_view.apply_settings(&self.settings.ebook);
@@ -2078,6 +2208,7 @@ impl ReaderApp {
                         if ui.button("取消").clicked() {
                             self.opener = None;
                             self.ebook_opener = None;
+                            self.password_probe = None;
                             self.current_view = View::Library;
                         }
                         if let Some(err) = &self.error_message {
@@ -2087,6 +2218,175 @@ impl ReaderApp {
                 },
             );
         });
+    }
+
+    /// 打开压缩包浏览视图（库卡片右键「浏览压缩包」入口）。
+    fn open_archive_browser(&mut self, path: PathBuf) {
+        self.archive_view.open(path.clone());
+        self.current_view = View::Archive(path);
+        self.error_message = None;
+    }
+
+    fn render_archive(&mut self, ui: &mut egui::Ui, path: &Path) {
+        // 自愈守卫：视图路径与 archive_view 不一致时重新列出
+        // （正常入口 open_archive_browser 已同步两者）。
+        if self.archive_view.path.as_deref() != Some(path) {
+            self.archive_view.open(path.to_path_buf());
+        }
+        self.archive_view.poll();
+        // 带密码列目录成功：记入密码本（对话框确认时已写入会话密码表）。
+        if self.archive_view.state == ArchiveViewState::Ready {
+            if let Some(pw) = self.archive_view.tried_password.take() {
+                self.password_book.record_success(&pw);
+                self.save_password_book();
+            }
+        }
+        // 带密码列目录仍失败（密码错误）：对话框以 incorrect 复现。
+        if self.archive_view.state == ArchiveViewState::NeedPassword
+            && self.archive_view.password_failed
+            && self.password_dialog.is_none()
+        {
+            self.archive_view.password_failed = false;
+            if let Some(path) = self.archive_view.path.clone() {
+                self.password_dialog = Some(PasswordDialog::new(
+                    path,
+                    PasswordPromptKind::ArchiveListIncorrect,
+                ));
+            }
+        }
+        egui::CentralPanel::default().show(ui, |ui| {
+            if let Some(err) = &self.error_message {
+                ui.colored_label(ui.visuals().error_fg_color, err);
+            }
+            let mut back = false;
+            let mut extract_all = false;
+            let mut extract_selected: Option<Vec<String>> = None;
+            let mut need_password = false;
+            self.archive_view.ui(
+                ui,
+                ArchiveCallbacks {
+                    on_back: &mut || back = true,
+                    on_extract_all: &mut || extract_all = true,
+                    on_extract_selected: &mut |sel| extract_selected = Some(sel),
+                    on_need_password: &mut || need_password = true,
+                },
+            );
+            if back {
+                self.current_view = View::Library;
+            }
+            if need_password {
+                if let Some(path) = self.archive_view.path.clone() {
+                    self.password_dialog =
+                        Some(PasswordDialog::new(path, PasswordPromptKind::ArchiveList));
+                }
+            }
+            if extract_all {
+                self.start_extract_from_browser(None);
+            } else if let Some(sel) = extract_selected {
+                self.start_extract_from_browser(Some(sel));
+            }
+        });
+    }
+
+    /// 从浏览视图发起解压：输出目录由设置决定（默认包同目录的同名子目录，
+    /// 重名加 " (N)"）。密码用会话级缓存（验证成功的密码才入密码本）。
+    fn start_extract_from_browser(&mut self, selection: Option<Vec<String>>) {
+        let Some(path) = self.archive_view.path.clone() else {
+            return;
+        };
+        let output_dir = extract_output_dir(&self.settings, &path);
+        let password = self.passwords.get(&password_key(&path)).cloned();
+        self.extract_manager.start(
+            path,
+            output_dir,
+            selection,
+            password,
+            self.settings.extract_threads as usize,
+            self.settings.extract_overwrite,
+        );
+    }
+
+    /// 每帧汇总解压任务结果 → `error_message`；有活动任务时驱动进度刷新。
+    fn poll_extracts(&mut self, ctx: &egui::Context) {
+        let summary = self.extract_manager.poll();
+        let mut messages: Vec<String> = Vec::new();
+        for (archive, output_dir) in &summary.finished {
+            messages.push(format!(
+                "已解压 {} 到 {}",
+                path_display_name(archive),
+                output_dir.display()
+            ));
+        }
+        for (archive, err) in &summary.failed {
+            messages.push(format!(
+                "解压 {} 失败: {}",
+                path_display_name(archive),
+                extract_error_text(err)
+            ));
+        }
+        for archive in &summary.cancelled {
+            messages.push(format!("已取消解压 {}", path_display_name(archive)));
+        }
+        if !messages.is_empty() {
+            self.error_message = Some(messages.join("；"));
+        }
+        if summary.has_active {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
+    }
+
+    /// 右下角常驻解压进度面板：有活动任务时显示；关闭仅隐藏，不取消任务。
+    fn render_extract_panel(&mut self, ctx: &egui::Context) {
+        if !self.extract_manager.has_active() {
+            return;
+        }
+        let mut open = self.extract_manager.panel_open;
+        let mut cancel_ids: Vec<u64> = Vec::new();
+        egui::Window::new("解压任务")
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -12.0))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(340.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                for task in self.extract_manager.tasks() {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(task.archive_name()).strong())
+                                .on_hover_text(format!("输出到 {}", task.output_dir.display()));
+                            match task.status {
+                                crate::extract_manager::ExtractTaskStatus::Queued => {
+                                    ui.label(egui::RichText::new("排队中…").weak());
+                                }
+                                crate::extract_manager::ExtractTaskStatus::Running => {
+                                    ui.add(
+                                        egui::ProgressBar::new(task.fraction()).show_percentage(),
+                                    );
+                                    if !task.current_entry.is_empty() {
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&task.current_entry).weak(),
+                                            )
+                                            .truncate(),
+                                        );
+                                    }
+                                }
+                                _ => {}
+                            }
+                        });
+                        if task.status.is_active()
+                            && ui.button("取消").on_hover_text("取消该解压任务").clicked()
+                        {
+                            cancel_ids.push(task.id);
+                        }
+                    });
+                    ui.separator();
+                }
+            });
+        self.extract_manager.panel_open = open;
+        for id in cancel_ids {
+            self.extract_manager.cancel(id);
+        }
     }
 
     fn render_menu_bar(&mut self, ui: &mut egui::Ui) {
@@ -2325,12 +2625,25 @@ impl ReaderApp {
                 return;
             };
             let dialog = self.password_dialog.take().unwrap();
-            self.passwords.insert(password_key(&dialog.path), pw);
+            self.passwords
+                .insert(password_key(&dialog.path), pw.clone());
             self.sync_passwords_to_loaders();
-            if self.pending_password_imports.contains(&dialog.path) {
-                self.retry_password_import(dialog.path);
-            } else {
-                self.open_path(dialog.path);
+            match dialog.kind {
+                // 压缩包浏览：带密码重跑列目录；密码未经验证，record 待
+                // 列表成功后由 render_archive 做。
+                PasswordPromptKind::ArchiveList | PasswordPromptKind::ArchiveListIncorrect => {
+                    self.archive_view
+                        .open_with_password(dialog.path.clone(), pw);
+                }
+                _ => {
+                    // 打开/导入路径的 record_success 在重试成功处做
+                    // （poll_opener 成功分支 / add_file_to_library）。
+                    if self.pending_password_imports.contains(&dialog.path) {
+                        self.retry_password_import(dialog.path);
+                    } else {
+                        self.open_path(dialog.path);
+                    }
+                }
             }
         } else if cancel {
             let dialog = self.password_dialog.take().unwrap();
@@ -3170,6 +3483,7 @@ impl ReaderApp {
                 format_content_window_title(&path_display_name(&open.path))
             }
             View::Loading(path) => format_content_window_title(&path_display_name(path)),
+            View::Archive(path) => format_content_window_title(&path_display_name(path)),
             View::Library | View::Settings => APP_WINDOW_TITLE.to_string(),
         }
     }
@@ -3582,9 +3896,20 @@ impl ReaderApp {
         } else if is_media_file(&path) {
             self.add_media_to_library(path);
         } else {
-            let password = self.passwords.get(&path).cloned();
+            let password = self
+                .passwords
+                .get(&password_key(&path))
+                .or_else(|| self.passwords.get(&path))
+                .cloned();
             match openitgo_parser::parse_with_password(&path, password.as_deref()) {
-                Ok(comic) => self.add_comic_to_library(comic, &path),
+                Ok(comic) => {
+                    // 会话密码验证成功（手动输入）：记入密码本。
+                    if let Some(pw) = password {
+                        self.password_book.record_success(&pw);
+                        self.save_password_book();
+                    }
+                    self.add_comic_to_library(comic, &path);
+                }
                 Err(e)
                     if matches!(
                         e,
@@ -3928,13 +4253,17 @@ fn load_comic_settings_with_error(
 
 /// AsyncOpener 只携带 String 错误：用不可见前缀标记密码类错误，
 /// poll_opener 据此弹密码对话框而不是普通错误。
-const PASSWORD_REQUIRED_MARKER: &str = "\u{1}password-required";
-const PASSWORD_INCORRECT_MARKER: &str = "\u{1}password-incorrect";
+pub(crate) const PASSWORD_REQUIRED_MARKER: &str = "\u{1}password-required";
+pub(crate) const PASSWORD_INCORRECT_MARKER: &str = "\u{1}password-incorrect";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PasswordPromptKind {
     Required,
     Incorrect,
+    /// 压缩包浏览视图列目录需要密码。
+    ArchiveList,
+    /// 压缩包浏览视图列目录：上次输入的密码错误，重试。
+    ArchiveListIncorrect,
 }
 
 fn password_prompt_kind(err: &str) -> Option<PasswordPromptKind> {
@@ -3950,6 +4279,86 @@ fn password_prompt_kind(err: &str) -> Option<PasswordPromptKind> {
 /// Normalize password-map keys so relative/symlink paths resolve to one entry.
 fn password_key(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// 密码本自动尝试的候选列表：密码本排序候选（use_count 降序）中排除该路径
+/// 会话里已试过的密码（裸路径与 canonical key 两处都查）。
+fn password_candidates_for(
+    path: &Path,
+    passwords: &HashMap<PathBuf, String>,
+    book: &PasswordBook,
+) -> Vec<String> {
+    let tried: Vec<&str> = [password_key(path), path.to_path_buf()]
+        .iter()
+        .filter_map(|k| passwords.get(k))
+        .map(String::as_str)
+        .collect();
+    book.candidates()
+        .into_iter()
+        .filter(|c| !tried.contains(&c.as_str()))
+        .collect()
+}
+
+/// 后台线程依次尝试候选密码，返回第一个能解析成功的；全部失败返回 None。
+fn first_working_password(path: &Path, candidates: &[String]) -> Option<String> {
+    candidates
+        .iter()
+        .find(|pw| openitgo_parser::parse_with_password(path, Some(pw)).is_ok())
+        .cloned()
+}
+
+/// 解压输出目录：设置的 extract_dir 为空时用包同目录，否则用设置的目录；
+/// 两种情况下都以包名建子目录，重名追加 " (N)"。
+fn extract_output_dir(settings: &Settings, archive: &Path) -> PathBuf {
+    let custom = settings.extract_dir.trim();
+    let parent = if custom.is_empty() {
+        archive.parent().map(Path::to_path_buf).unwrap_or_default()
+    } else {
+        PathBuf::from(custom)
+    };
+    uniquified_subdir(&parent, &archive_stem(archive))
+}
+
+/// `parent/stem`，已存在则 "stem (1)"、"stem (2)"… 直到不重名。
+fn uniquified_subdir(parent: &Path, stem: &str) -> PathBuf {
+    let candidate = parent.join(stem);
+    if !candidate.exists() {
+        return candidate;
+    }
+    for i in 1..1000u32 {
+        let renamed = parent.join(format!("{stem} ({i})"));
+        if !renamed.exists() {
+            return renamed;
+        }
+    }
+    candidate
+}
+
+/// 包名去扩展名；.tar.gz 等双后缀一并去除。
+fn archive_stem(archive: &Path) -> String {
+    let Some(name) = archive.file_name().and_then(|s| s.to_str()) else {
+        return "archive".to_string();
+    };
+    let lower = name.to_ascii_lowercase();
+    for suffix in [".tar.gz", ".tar.xz", ".tar.bz2", ".tar.zst"] {
+        if lower.ends_with(suffix) {
+            return name[..name.len() - suffix.len()].to_string();
+        }
+    }
+    archive
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name)
+        .to_string()
+}
+
+/// 解压失败消息的中文化（引擎透传 ParseError 英文串）。
+fn extract_error_text(err: &str) -> String {
+    match err {
+        "archive is encrypted and requires a password" => "需要密码".to_string(),
+        "incorrect archive password" => "密码错误".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Confirm 分支：trim 后为空则保留对话框（不打开/不导入）；非空则携带密码继续。
@@ -4010,6 +4419,7 @@ pub struct PasswordDialog {
     path: PathBuf,
     input: String,
     incorrect: bool,
+    kind: PasswordPromptKind,
 }
 
 impl PasswordDialog {
@@ -4017,7 +4427,11 @@ impl PasswordDialog {
         Self {
             path,
             input: String::new(),
-            incorrect: matches!(kind, PasswordPromptKind::Incorrect),
+            incorrect: matches!(
+                kind,
+                PasswordPromptKind::Incorrect | PasswordPromptKind::ArchiveListIncorrect
+            ),
+            kind,
         }
     }
 }
@@ -4401,6 +4815,9 @@ mod tests {
             );
             let cover_loader = PageLoader::new_with_compress(false, 1);
             let (media_cover_tx, media_cover_rx) = crossbeam_channel::unbounded();
+            let password_book = store.load_password_book().unwrap_or_else(|_| PasswordBook {
+                entries: PasswordBook::builtin_defaults(),
+            });
             Self {
                 current_view: View::Library,
                 last_view: View::Library,
@@ -4410,6 +4827,8 @@ mod tests {
                 ebook_view: EbookView::default(),
                 media_view: MediaView::default(),
                 settings_view: SettingsView::default(),
+                archive_view: ArchiveView::default(),
+                extract_manager: ExtractManager::new(),
                 store,
                 history,
                 bookmarks,
@@ -4428,6 +4847,9 @@ mod tests {
                 last_saved_comic_settings: None,
                 show_shortcuts: false,
                 passwords: HashMap::new(),
+                password_book,
+                password_probe: None,
+                password_probe_done: HashSet::new(),
                 password_dialog: None,
                 pending_password_imports: Vec::new(),
                 skipped_encrypted_imports: 0,
@@ -4444,6 +4866,53 @@ mod tests {
                 last_window_title: String::new(),
             }
         }
+    }
+
+    #[test]
+    fn password_candidates_for_orders_and_excludes_tried() {
+        use openitgo_storage::models::PasswordBookEntry;
+        let entry = |pw: &str, use_count: u32| PasswordBookEntry {
+            password: pw.to_string(),
+            use_count,
+            ..Default::default()
+        };
+        let book = PasswordBook {
+            entries: vec![entry("low", 1), entry("high", 5), entry("mid", 3)],
+        };
+        let path = PathBuf::from("/tmp/enc.cbz");
+        // 无会话密码：按 use_count 降序。
+        let candidates = password_candidates_for(&path, &HashMap::new(), &book);
+        assert_eq!(candidates, vec!["high", "mid", "low"]);
+        // 会话里已试过的密码被排除。
+        let mut passwords = HashMap::new();
+        passwords.insert(password_key(&path), "high".to_string());
+        let candidates = password_candidates_for(&path, &passwords, &book);
+        assert_eq!(candidates, vec!["mid", "low"]);
+        // 空密码本 → 空候选（不发起自动尝试）。
+        let empty = PasswordBook::default();
+        assert!(password_candidates_for(&path, &HashMap::new(), &empty).is_empty());
+    }
+
+    #[test]
+    fn extract_output_dir_uses_custom_dir_when_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = tmp.path().join("out");
+        std::fs::create_dir(&custom).unwrap();
+        let archive = tmp.path().join("pack.cbz");
+        // 空设置：包同目录的同名子目录。
+        let default_dir = extract_output_dir(&Settings::default(), &archive);
+        assert_eq!(default_dir, tmp.path().join("pack"));
+        // 自定义目录：设置目录下的包名子目录。
+        let settings = Settings {
+            extract_dir: custom.display().to_string(),
+            ..Default::default()
+        };
+        let dir = extract_output_dir(&settings, &archive);
+        assert_eq!(dir, custom.join("pack"));
+        // 重名时追加 " (1)"。
+        std::fs::create_dir(custom.join("pack")).unwrap();
+        let dir = extract_output_dir(&settings, &archive);
+        assert_eq!(dir, custom.join("pack (1)"));
     }
 
     #[test]
@@ -4470,6 +4939,37 @@ mod tests {
         assert_eq!(password_key(&with_dot), abs);
         assert_eq!(password_key(&abs), abs);
         assert_eq!(password_key(&with_dot), password_key(&abs));
+    }
+
+    #[test]
+    fn archive_stem_strips_single_and_double_extensions() {
+        assert_eq!(archive_stem(Path::new("/x/a.zip")), "a");
+        assert_eq!(archive_stem(Path::new("/x/a.CBZ")), "a");
+        assert_eq!(archive_stem(Path::new("/x/b.tar.gz")), "b");
+        assert_eq!(archive_stem(Path::new("/x/c.TAR.XZ")), "c");
+        assert_eq!(archive_stem(Path::new("/x/d.tgz")), "d");
+    }
+
+    #[test]
+    fn extract_output_dir_default_uniquifies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("pack.cbz");
+        std::fs::write(&archive, b"x").unwrap();
+        let first = extract_output_dir(&Settings::default(), &archive);
+        assert_eq!(first, tmp.path().join("pack"));
+        std::fs::create_dir_all(&first).unwrap();
+        let second = extract_output_dir(&Settings::default(), &archive);
+        assert_eq!(second, tmp.path().join("pack (1)"));
+    }
+
+    #[test]
+    fn extract_error_text_translates_known_parse_errors() {
+        assert_eq!(
+            extract_error_text("archive is encrypted and requires a password"),
+            "需要密码"
+        );
+        assert_eq!(extract_error_text("incorrect archive password"), "密码错误");
+        assert_eq!(extract_error_text("IO error: x"), "IO error: x");
     }
 
     #[test]

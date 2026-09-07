@@ -56,6 +56,10 @@ pub struct LibraryCallbacks<'a> {
     pub on_clear_history: &'a mut dyn FnMut(),
     pub on_delete_history: &'a mut dyn FnMut(usize),
     pub on_update_tags: &'a mut dyn FnMut(usize, Vec<String>),
+    /// 浏览压缩包内容（仅 archive_kind 识别的包显示该菜单项）。
+    pub on_browse_archive: &'a mut dyn FnMut(usize),
+    /// 解压全部到用户选择的目录（仅 archive_kind 识别的包显示该菜单项）。
+    pub on_extract_archive: &'a mut dyn FnMut(usize),
 }
 
 impl LibraryView {
@@ -423,6 +427,16 @@ impl LibraryView {
                             self.pending_delete = None;
                             self.edit_buffer = None;
                             ui.close();
+                        }
+                        if openitgo_parser::archive::archive_kind(&entry.path).is_some() {
+                            if ui.button("浏览压缩包").clicked() {
+                                (callbacks.on_browse_archive)(original_idx);
+                                ui.close();
+                            }
+                            if ui.button("解压到…").clicked() {
+                                (callbacks.on_extract_archive)(original_idx);
+                                ui.close();
+                            }
                         }
                         if self.pending_delete == Some(original_idx) {
                             ui.label("确定删除？");

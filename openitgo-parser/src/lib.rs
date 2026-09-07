@@ -4,6 +4,7 @@
 #[link(name = "advapi32")]
 unsafe extern "C" {}
 
+pub mod archive;
 mod chapters;
 pub mod epub;
 pub mod folder;

@@ -45,6 +45,15 @@ pub struct Settings {
     /// 媒体播放到结尾时的行为。
     #[serde(default)]
     pub media_end_action: MediaEndAction,
+    /// 解压输出目录；空 = 压缩包同目录下的同名子目录。
+    #[serde(default)]
+    pub extract_dir: String,
+    /// 解压并行线程数，0 = 自动。
+    #[serde(default)]
+    pub extract_threads: u32,
+    /// 解压时同名文件是否覆盖（false = 自动改名 "name (1).ext"）。
+    #[serde(default)]
+    pub extract_overwrite: bool,
 }
 
 fn default_chrome_opacity() -> f32 {
@@ -82,6 +91,9 @@ impl Default for Settings {
             media_audio_device: String::new(),
             comic_end_action: ComicEndAction::default(),
             media_end_action: MediaEndAction::default(),
+            extract_dir: String::new(),
+            extract_threads: 0,
+            extract_overwrite: false,
         }
     }
 }
@@ -171,6 +183,12 @@ impl Settings {
                 self.media_speed
             ));
         }
+        if self.extract_threads > 32 {
+            return Err(format!(
+                "extract_threads must be <= 32, got {}",
+                self.extract_threads
+            ));
+        }
         Ok(())
     }
 
@@ -194,6 +212,7 @@ impl Settings {
         }
         self.media_volume = self.media_volume.clamp(0.0, 100.0);
         self.media_speed = self.media_speed.clamp(0.1, 16.0);
+        self.extract_threads = self.extract_threads.min(32);
     }
 }
 
@@ -458,9 +477,137 @@ pub fn format_reading_duration(total_seconds: u64) -> String {
     }
 }
 
+/// 密码字段的 base64 混淆序列化。
+/// 注意：这只是防止浏览配置文件时一眼看到明文，并非加密——
+/// base64 可逆且无密钥，任何拿到文件的人都能还原。
+mod password_base64 {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(password: &str, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(password))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .map_err(serde::de::Error::custom)?;
+        String::from_utf8(bytes).map_err(serde::de::Error::custom)
+    }
+}
+
+/// 密码本单条记录。内存中 `password` 始终是明文，仅在 JSON 序列化时
+/// 做 base64 混淆（见 `password_base64` 模块注释）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PasswordBookEntry {
+    #[serde(with = "password_base64")]
+    pub password: String,
+    /// 是否为内置常见密码（内置条目可被用户删除，删除后不复活）。
+    pub builtin: bool,
+    pub note: String,
+    pub use_count: u32,
+    pub last_used_unix: u64,
+}
+
+/// 加密压缩包密码本，持久化于 password_book.json。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PasswordBook {
+    pub entries: Vec<PasswordBookEntry>,
+}
+
+impl PasswordBook {
+    /// 内置常见漫画资源站默认密码表（kox.moe/mox.moe 等站点与常见弱密码）。
+    pub fn builtin_defaults() -> Vec<PasswordBookEntry> {
+        const BUILTIN: &[&str] = &[
+            "123456", "1234", "12345", "password", "manga", "54188", "acg", "gumeng", "kox.moe",
+            "mox.moe", "666666", "123123", "111111", "888888", "5201314", "sosg", "tlacg", "cy-cd",
+            "acg12", "acgng",
+        ];
+        BUILTIN
+            .iter()
+            .map(|pw| PasswordBookEntry {
+                password: pw.to_string(),
+                builtin: true,
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    /// 候选密码列表：use_count 降序、再 last_used_unix 降序，去重。
+    pub fn candidates(&self) -> Vec<String> {
+        let mut entries: Vec<&PasswordBookEntry> = self
+            .entries
+            .iter()
+            .filter(|e| !e.password.is_empty())
+            .collect();
+        entries.sort_by(|a, b| {
+            b.use_count
+                .cmp(&a.use_count)
+                .then(b.last_used_unix.cmp(&a.last_used_unix))
+        });
+        let mut seen = std::collections::HashSet::new();
+        entries
+            .into_iter()
+            .filter(|e| seen.insert(e.password.clone()))
+            .map(|e| e.password.clone())
+            .collect()
+    }
+
+    /// 记录一次密码命中：已有条目 use_count+1 并刷新 last_used_unix；
+    /// 没有则追加用户条目（builtin=false，note 为空）。
+    pub fn record_success(&mut self, pw: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.password == pw) {
+            entry.use_count = entry.use_count.saturating_add(1);
+            entry.last_used_unix = now;
+        } else {
+            self.entries.push(PasswordBookEntry {
+                password: pw.to_string(),
+                builtin: false,
+                note: String::new(),
+                use_count: 1,
+                last_used_unix: now,
+            });
+        }
+    }
+
+    pub fn remove(&mut self, pw: &str) {
+        self.entries.retain(|e| e.password != pw);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_settings_deserialize_missing_extract_fields() {
+        // 旧版 settings.json 无解压相关字段 → 取默认值
+        let json = r#"{"theme":"Dark"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.extract_dir, "");
+        assert_eq!(s.extract_threads, 0);
+        assert!(!s.extract_overwrite);
+    }
+
+    #[test]
+    fn test_settings_extract_threads_validate_and_clamp() {
+        assert!(Settings::default().validate().is_ok());
+        let mut s = Settings {
+            extract_threads: 33,
+            ..Default::default()
+        };
+        assert!(s.validate().is_err());
+        s.clamp();
+        assert_eq!(s.extract_threads, 32);
+        assert!(s.validate().is_ok());
+    }
 
     #[test]
     fn test_comic_reading_settings_serde_roundtrip() {
@@ -833,5 +980,118 @@ mod tests {
         assert_eq!(format_reading_duration(3_599), "59 分钟");
         assert_eq!(format_reading_duration(3_600), "1 小时 0 分");
         assert_eq!(format_reading_duration(5_460), "1 小时 31 分");
+    }
+
+    #[test]
+    fn test_password_book_entry_base64_roundtrip() {
+        // 含空格与 unicode 的密码、中文 note，往返一致
+        let entry = PasswordBookEntry {
+            password: "密 码🔒 pass".to_string(),
+            builtin: false,
+            note: "资源站默认密码".to_string(),
+            use_count: 3,
+            last_used_unix: 1_700_000_000,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let loaded: PasswordBookEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, loaded);
+    }
+
+    #[test]
+    fn test_password_book_serialized_json_hides_plaintext() {
+        // base64 混淆：序列化后的 JSON 中不出现明文密码
+        let book = PasswordBook {
+            entries: vec![PasswordBookEntry {
+                password: "super-secret-pw".to_string(),
+                ..Default::default()
+            }],
+        };
+        let json = serde_json::to_string(&book).unwrap();
+        assert!(!json.contains("super-secret-pw"));
+        let loaded: PasswordBook = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.entries[0].password, "super-secret-pw");
+    }
+
+    #[test]
+    fn test_password_book_deserializes_missing_fields() {
+        // 旧文件/手编文件缺字段 → 默认填充
+        let json = r#"{"entries":[{"password":"MTIzNDU2"}]}"#;
+        let book: PasswordBook = serde_json::from_str(json).unwrap();
+        assert_eq!(book.entries[0].password, "123456");
+        assert!(!book.entries[0].builtin);
+        assert_eq!(book.entries[0].use_count, 0);
+    }
+
+    #[test]
+    fn test_password_book_builtin_defaults_all_builtin() {
+        let defaults = PasswordBook::builtin_defaults();
+        assert!(!defaults.is_empty());
+        assert!(defaults.iter().all(|e| e.builtin));
+        assert!(defaults.iter().any(|e| e.password == "123456"));
+        // 无重复
+        let mut seen = std::collections::HashSet::new();
+        assert!(defaults.iter().all(|e| seen.insert(e.password.as_str())));
+    }
+
+    #[test]
+    fn test_password_book_candidates_sort_and_dedup() {
+        let entry = |pw: &str, use_count: u32, last_used_unix: u64| PasswordBookEntry {
+            password: pw.to_string(),
+            use_count,
+            last_used_unix,
+            ..Default::default()
+        };
+        let book = PasswordBook {
+            entries: vec![
+                entry("a", 1, 100),
+                entry("b", 5, 50),  // use_count 最高 → 第一
+                entry("c", 1, 200), // 与 a 同 use_count，last_used 更新 → 排 a 前
+                entry("b", 9, 999), // 重复密码 → 去重后只出现一次
+                entry("", 99, 999), // 空密码忽略
+            ],
+        };
+        let candidates = book.candidates();
+        assert_eq!(candidates, vec!["b", "c", "a"]);
+    }
+
+    #[test]
+    fn test_password_book_record_success_new_and_existing() {
+        let mut book = PasswordBook::default();
+        // 新密码：追加用户条目
+        book.record_success("mypw");
+        assert_eq!(book.entries.len(), 1);
+        let e = &book.entries[0];
+        assert_eq!(e.password, "mypw");
+        assert!(!e.builtin);
+        assert_eq!(e.use_count, 1);
+        assert!(e.last_used_unix > 0);
+
+        // 命中已有条目（含内置条目）：计数+1、刷新时间，不新增
+        let mut book = PasswordBook {
+            entries: PasswordBook::builtin_defaults(),
+        };
+        let len = book.entries.len();
+        book.record_success("123456");
+        assert_eq!(book.entries.len(), len);
+        let e = book
+            .entries
+            .iter()
+            .find(|e| e.password == "123456")
+            .unwrap();
+        assert_eq!(e.use_count, 1);
+        assert!(e.builtin);
+        assert!(e.last_used_unix > 0);
+    }
+
+    #[test]
+    fn test_password_book_remove() {
+        let mut book = PasswordBook {
+            entries: PasswordBook::builtin_defaults(),
+        };
+        assert!(book.entries.iter().any(|e| e.password == "123456"));
+        book.remove("123456");
+        assert!(!book.entries.iter().any(|e| e.password == "123456"));
+        // 删除不存在的密码不炸
+        book.remove("no-such-pw");
     }
 }

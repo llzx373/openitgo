@@ -223,7 +223,9 @@ impl SharedRawCache {
 }
 
 /// Session-only archive password cache shared between the app and every IO
-/// worker. Never persisted (spec: passwords live for the app session only).
+/// worker. This map itself is never persisted; passwords that successfully
+/// unlock an archive are additionally recorded into the persistent password
+/// book (`password_book.json`, base64-obfuscated) — that is intentional.
 pub type SharedPasswords = Arc<RwLock<HashMap<PathBuf, String>>>;
 
 pub type Epoch = u64;

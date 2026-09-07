@@ -1,9 +1,11 @@
+use egui_phosphor_icons::icons;
 use openitgo_core::ebook::EbookReadingMode;
 use openitgo_core::models::{FitMode, ReadingMode};
 use openitgo_storage::models::{
-    ComicEndAction, EbookTheme, MediaEndAction, Settings, Theme, ToolbarDisplayMode,
+    ComicEndAction, EbookTheme, MediaEndAction, PasswordBook, PasswordBookEntry, Settings, Theme,
+    ToolbarDisplayMode,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsTab {
@@ -12,16 +14,18 @@ pub enum SettingsTab {
     Comic,
     Ebook,
     Media,
+    Archive,
     Performance,
     Shortcuts,
 }
 
 impl SettingsTab {
-    const ALL: [(SettingsTab, &'static str); 6] = [
+    const ALL: [(SettingsTab, &'static str); 7] = [
         (SettingsTab::Appearance, "外观"),
         (SettingsTab::Comic, "漫画"),
         (SettingsTab::Ebook, "电子书"),
         (SettingsTab::Media, "媒体"),
+        (SettingsTab::Archive, "压缩包"),
         (SettingsTab::Performance, "性能"),
         (SettingsTab::Shortcuts, "快捷键"),
     ];
@@ -31,6 +35,12 @@ impl SettingsTab {
 pub struct SettingsView {
     pub tab: SettingsTab,
     shortcut_add_buffer: HashMap<&'static str, String>,
+    /// 密码本列表中切换为明文显示的行索引。
+    password_show: HashSet<usize>,
+    /// 密码本「添加」输入框：密码。
+    password_add_input: String,
+    /// 密码本「添加」输入框：可选备注。
+    password_add_note: String,
 }
 
 impl SettingsView {
@@ -38,10 +48,17 @@ impl SettingsView {
         self.tab = tab;
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {
+    /// 返回密码本是否有变更（变更即由调用方落盘）。
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        settings: &mut Settings,
+        password_book: &mut PasswordBook,
+    ) -> bool {
         ui.heading(egui::RichText::new("设置").size(22.0).strong());
         ui.add_space(10.0);
 
+        let mut book_changed = false;
         self.tab = crate::theme::tabbed_page(ui, &SettingsTab::ALL, self.tab, |ui, tab| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -52,11 +69,15 @@ impl SettingsView {
                         SettingsTab::Comic => self.comic_ui(ui, settings),
                         SettingsTab::Ebook => self.ebook_settings_ui(ui, settings),
                         SettingsTab::Media => self.media_ui(ui, settings),
+                        SettingsTab::Archive => {
+                            book_changed = self.archive_ui(ui, settings, password_book);
+                        }
                         SettingsTab::Performance => self.performance_ui(ui, settings),
                         SettingsTab::Shortcuts => self.shortcut_editor(ui, &mut settings.shortcuts),
                     }
                 });
         });
+        book_changed
     }
 
     fn appearance_ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {
@@ -374,6 +395,148 @@ impl SettingsView {
             &mut settings.ebook.invert_scroll,
             "反转滚轮方向（适用于 macOS 自然滚动）",
         );
+    }
+
+    /// 压缩包 tab：解压目录/线程/覆盖 + 密码本管理。返回密码本是否有变更。
+    fn archive_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        settings: &mut Settings,
+        book: &mut PasswordBook,
+    ) -> bool {
+        let mut book_changed = false;
+
+        ui.label("解压目录");
+        ui.horizontal(|ui| {
+            let display = if settings.extract_dir.is_empty() {
+                "默认（压缩包同目录的同名子目录）".to_string()
+            } else {
+                settings.extract_dir.clone()
+            };
+            ui.add(egui::Label::new(egui::RichText::new(display).weak()).truncate());
+            if ui.button("浏览…").clicked() {
+                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    settings.extract_dir = dir.display().to_string();
+                }
+            }
+            if ui.button("清空").clicked() {
+                settings.extract_dir.clear();
+            }
+        });
+        hint(
+            ui,
+            "留空则解压到压缩包同目录下以包名命名的子目录（重名自动加序号）",
+        );
+
+        ui.horizontal(|ui| {
+            ui.label("解压线程数:");
+            ui.add(egui::DragValue::new(&mut settings.extract_threads).range(0..=32));
+        });
+        hint(ui, "0 = 自动；仅 ZIP 按条目并行解压，RAR/7z/TAR 始终单线程");
+
+        ui.checkbox(&mut settings.extract_overwrite, "同名文件覆盖");
+        hint(ui, "关闭时同名文件自动改名为 \"name (1).ext\"");
+
+        ui.add_space(4.0);
+        ui.separator();
+        ui.label(egui::RichText::new("密码本").strong());
+        let total = book.entries.len();
+        let builtin = book.entries.iter().filter(|e| e.builtin).count();
+        hint(
+            ui,
+            &format!("共 {total} 条（内置 {builtin} 条）；打开加密压缩包时按使用频率自动尝试"),
+        );
+
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.password_add_input)
+                    .hint_text("新密码")
+                    .desired_width(160.0),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut self.password_add_note)
+                    .hint_text("备注（可选）")
+                    .desired_width(140.0),
+            );
+            if ui.button("添加").clicked() {
+                let pw = self.password_add_input.trim().to_string();
+                if !pw.is_empty() && !book.entries.iter().any(|e| e.password == pw) {
+                    book.entries.push(PasswordBookEntry {
+                        password: pw,
+                        builtin: false,
+                        note: self.password_add_note.trim().to_string(),
+                        use_count: 0,
+                        last_used_unix: 0,
+                    });
+                    book_changed = true;
+                }
+                self.password_add_input.clear();
+                self.password_add_note.clear();
+            }
+        });
+
+        egui::ScrollArea::vertical()
+            .max_height(240.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                let mut remove_idx: Option<usize> = None;
+                for (idx, entry) in book.entries.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        let shown = self.password_show.contains(&idx);
+                        let text = if shown {
+                            entry.password.clone()
+                        } else {
+                            "***".to_string()
+                        };
+                        ui.add(egui::Label::new(egui::RichText::new(text).monospace()).truncate());
+                        let eye = if shown { icons::EYE_SLASH } else { icons::EYE };
+                        if ui.button(eye).on_hover_text("显示 / 隐藏密码").clicked() {
+                            if shown {
+                                self.password_show.remove(&idx);
+                            } else {
+                                self.password_show.insert(idx);
+                            }
+                        }
+                        if entry.builtin {
+                            ui.label(egui::RichText::new("内置").weak().size(11.0));
+                        }
+                        if !entry.note.is_empty() {
+                            ui.label(egui::RichText::new(&entry.note).weak());
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(icons::TRASH).on_hover_text("删除").clicked() {
+                                remove_idx = Some(idx);
+                            }
+                            ui.label(
+                                egui::RichText::new(format!("用过 {} 次", entry.use_count))
+                                    .weak()
+                                    .size(11.0),
+                            );
+                        });
+                    });
+                }
+                if let Some(idx) = remove_idx {
+                    book.entries.remove(idx);
+                    // 行索引位移，重置展开态。
+                    self.password_show.clear();
+                    book_changed = true;
+                }
+            });
+
+        if ui
+            .button("恢复内置密码")
+            .on_hover_text("把被删除的内置常见密码补回密码本")
+            .clicked()
+        {
+            for entry in PasswordBook::builtin_defaults() {
+                if !book.entries.iter().any(|e| e.password == entry.password) {
+                    book.entries.push(entry);
+                    book_changed = true;
+                }
+            }
+        }
+
+        book_changed
     }
 
     fn shortcut_editor(

@@ -13,8 +13,10 @@ through an embedded `libmpv` backend.
 - `openitgo-parser/` — archive/folder/PDF parsers and comic ID generation.
   Image-page listing uses `is_comic_image_name` (skips macOS `._*` AppleDouble
   sidecars and `__MACOSX/` trees so they are not treated as pages).
+  `archive/` 模块是通用压缩包浏览/解压引擎（ZIP/RAR/7z/TAR 系，见下文）。
 - `openitgo-storage/` — JSON persistence for settings, library, history, bookmarks,
-  per-comic reading settings, and reading stats (`reading_stats.json`).
+  per-comic reading settings, reading stats (`reading_stats.json`), and the
+  password book (`password_book.json`).
 - `openitgo-media/` — libmpv wrapper: commands, event pump, property observation,
   OpenGL render context, and headless cover generation. `args.rs`/`apply.rs`
   为 FFI-free 纯函数模块（命令参数构造、事件状态迁移），ubuntu CI 可测。
@@ -62,12 +64,38 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
 - **Comic IDs** are generated deterministically from the file/folder path via
   `openitgo_parser::stable_comic_id`. Never use the filename alone.
 - **加密压缩包密码**：`parse_with_password(path, Option<&str>)` 是带密码入口
-  （`parse` 转调 None）；密码只存会话级 `ReaderApp.passwords`
-  （`HashMap<PathBuf, String>`，不落盘），经 `PageLoader::passwords()` 共享给
-  IO worker 用于 `by_index_decrypt` / `Archive::with_password` 解密读取；
+  （`parse` 转调 None）；会话级 `ReaderApp.passwords`
+  （`HashMap<PathBuf, String>`，该表自身不落盘）经 `PageLoader::passwords()`
+  共享给 IO worker 用于 `by_index_decrypt` / `Archive::with_password` 解密读取；
   AsyncOpener 错误串用 `\u{1}` 前缀标记密码类错误供 poll_opener 识别。
   RAR 数据加密包（`rar -p`）列表可读，解析期靠首条目读探针分类
   （`MissingPassword`/`BadPassword`/CRC `BadData` → 密码错误）。
+  **密码本（`password_book.json`，有意变更"密码不落盘"旧 spec）**：
+  `PasswordBook`（openitgo-storage）= 内置常见资源站密码表（`builtin=true`）
+  + 验证成功的用户密码自动收录（`record_success`），`candidates()` 按
+  use_count/last_used 排序；JSON 中密码字段 base64 混淆（仅防明文浏览，
+  非加密）。打开加密漫画时 `poll_opener` 先经 `start_password_probe` 后台
+  逐个静默尝试候选（每路径每会话一次，`password_probe_done` 去重，保持
+  `View::Loading`），全灭才弹密码框；命中/手动输密码验证成功后统一在
+  成功路径 `record_success` + 落盘（密码框确认时不 record，避免收录错密码）。
+  设置页「压缩包」tab 可管理密码本（增删/掩码显示/恢复内置）。
+- **压缩包浏览/解压**：`openitgo_parser::archive`（`archive/mod.rs` +
+  `extract.rs`）是独立于漫画解析的通用引擎：`archive_kind()` 按扩展名
+  分发（zip/cbz、rar/cbr、7z、tar/tgz/tar.gz/txz/tar.xz/tar.zst/tar.bz2/
+  tbz2，注意双后缀），`list_entries()` 列全量条目（含目录与非图片），
+  `extract_archive()` 解压全部/选中条目到磁盘，带 `ExtractProgress`
+  channel 事件与 `Arc<AtomicBool>` 取消（取消约定：发 `Failed("已取消")`
+  并返回 Ok，半成品删除）。并行模型：**ZIP 条目级并行**（每 worker 独立
+  `ZipArchive` 句柄 + crossbeam 派活，`io::copy` 流式写盘）；RAR/7z/TAR
+  受格式限制单线程流式，批量解压多个包时由 app 侧包级并行
+  （`ExtractManager`，上限 4）。条目名统一做路径穿越防护（拒绝 `..`/
+  绝对路径/盘符）。密码错误分类与漫画解析一致（ZIP `InvalidPassword`、
+  RAR `classify_rar_error` + CRC `BadData`、7z 错密码表现为 CRC 校验失败
+  经 `classify_sevenz_io_error` 归一为 `PasswordIncorrect`）。app 侧：
+  `View::Archive(PathBuf)` + `views/archive.rs`（条目列表/勾选/过滤，
+  加密包经 `open_with_password` 重列）+ `extract_manager.rs`（每任务一
+  线程 + 右下角进度面板，`poll_extracts` 每帧汇总写 `error_message`）；
+  入口为 Library 卡片右键「浏览压缩包」/「解压到…」。
 - **PageLoader** runs IO and decode workers in background threads; results are
   sent back to the UI thread via channels. The app also maintains a separate
   `cover_loader` for library cover thumbnails.
@@ -83,6 +111,9 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
   `page_scroll_threshold`,
   `media_volume`, `media_speed`, `media_audio_device`,
   `comic_end_action`, and `media_end_action`.
+  压缩包解压相关：`extract_dir`（解压输出目录，空 = 包同目录下同名子目录）、
+  `extract_threads`（0 = 自动，≤ 32）、`extract_overwrite`（false = 同名
+  自动改名 `name (1).ext`）。
 - **History entries** store both `comic_id` and `path` for robust matching.
 - **Per-comic reading settings** (`comic_settings.json`,
   `HashMap<String, ComicReadingSettings>` keyed by comic_id) remember each
