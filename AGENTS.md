@@ -94,10 +94,14 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
   经 `classify_sevenz_io_error` 归一为 `PasswordIncorrect`）。`classify_archive()`
   按图片占比 ≥80% 启发式分类 Comic/Files，`read_entry()` 读单条目不预览上限
   由 app 侧控制。app 侧：
-  `View::Archive(PathBuf)` + `views/archive.rs`（条目列表/树形双模式
-  （`views/archive_tree.rs` 纯函数构树，`\\` 也作分隔符、隐式目录补全、
-  目录勾选级联后代文件）、勾选/过滤、右侧预览面板（图片解码/UTF-8 文本
-  嗅探前 256KB、>64MB 不预览，密码经 `preview_password` 由 app 每帧写入），
+  `View::Archive(PathBuf)` + `views/archive.rs`（资源管理器式三栏：
+  左栏目录树（仅目录节点 + 「全部文件」根，折叠/级联勾选/单击设
+  `current_dir`）/ 中栏面包屑 + 当前目录直接子项（`current_dir` None =
+  全部文件扁平；子目录行双击进入；过滤激活时忽略 `current_dir` 全包
+  搜索）/ 右栏预览面板（图片解码/UTF-8 文本嗅探前 256KB、>64MB 不预览，
+  密码经 `preview_password` 由 app 每帧写入）；`views/archive_tree.rs`
+  纯函数查询：`build_dir_rows`/`direct_children`/`breadcrumb_paths`，
+  `\\` 也作分隔符、隐式目录补全、目录勾选级联后代文件），
   加密包经 `open_with_password` 重列）+ `extract_manager.rs`（每任务一
   线程 + 右下角进度面板，`poll_extracts` 每帧汇总写 `error_message`）；
   入口：Library 卡片右键「浏览压缩包」/「解压到…」；`open_path` 对

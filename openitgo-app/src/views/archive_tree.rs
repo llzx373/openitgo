@@ -1,32 +1,29 @@
-//! 压缩包树形视图的纯函数行构建：把扁平条目列表展开为带缩进层级的
-//! 目录/文件行，供 `ArchiveView` 树形模式渲染。不依赖 egui，便于单测。
+//! 压缩包三栏视图的纯函数查询：目录树行构建（左栏）、当前目录直接子项
+//! （中栏）、面包屑路径段。不依赖 egui，便于单测。
+//! 统一约定：条目名按 `/` 与 `\\` 切分；目录 full_path 归一化为 `/`
+//! 分隔、无尾部分隔符；选择/解压身份恒用原始 entry.name（不经此处）。
 
 use openitgo_parser::archive::ArchiveEntry;
 use std::collections::HashSet;
 
-/// 树形模式下的一行：目录行（可折叠/级联勾选）或文件行（对应一个条目）。
+/// 目录树（左栏）中的一行。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeRow {
     /// 缩进层级（顶层为 0）。
     pub depth: usize,
-    /// 展示名（该级组件名，非完整路径）。
+    /// 目录名（该级组件名，非完整路径）。
     pub name: String,
-    /// 归一化完整路径（`/` 分隔，无尾部分隔符）：目录行用作折叠集合的
-    /// key 与级联勾选的前缀；文件行仅供调试，选择/解压恒用原始 entry.name。
+    /// 归一化完整路径（`/` 分隔，无尾部分隔符）：折叠集合的 key、
+    /// 级联勾选的前缀、current_dir 的值。
     pub full_path: String,
-    pub is_dir: bool,
-    /// 文件行对应 `entries` 的下标；目录行（含显式目录条目）恒为 None。
-    pub entry_idx: Option<usize>,
-    /// 是否有可见子节点（决定折叠三角的绘制）。
+    /// 是否有子目录（决定折叠三角的绘制）。
     pub has_children: bool,
 }
 
-/// 树节点（构建期内部结构）。
+/// 目录树节点（构建期内部结构，只含目录）。
 struct Node {
     name: String,
     full_path: String,
-    is_dir: bool,
-    entry_idx: Option<usize>,
     children: Vec<Node>,
 }
 
@@ -35,59 +32,39 @@ impl Node {
         Self {
             name: String::new(),
             full_path: String::new(),
-            is_dir: true,
-            entry_idx: None,
             children: Vec::new(),
         }
     }
 
     /// 取或建名为 `name` 的子目录节点。
     fn dir_child_mut(&mut self, name: &str, full_path: String) -> &mut Node {
-        if let Some(pos) = self
-            .children
-            .iter()
-            .position(|c| c.is_dir && c.name == name)
-        {
+        if let Some(pos) = self.children.iter().position(|c| c.name == name) {
             return &mut self.children[pos];
         }
         self.children.push(Node {
             name: name.to_string(),
             full_path,
-            is_dir: true,
-            entry_idx: None,
             children: Vec::new(),
         });
         self.children.last_mut().expect("just pushed")
     }
 }
 
-/// 把扁平条目列表展开为树形行。
-///
-/// - 条目名按 `/` 与 `\\` 切分（`\\` 仅参与建树，文件行身份仍是原始名）。
-/// - 隐式目录（条目 `a/b.png` 而无 `a/` 条目）也会生成目录行。
-/// - 每级排序：目录在前，同级内按名字节序。
-/// - 目录子树默认展开；`collapsed` 含其 full_path 时隐藏子树。
-/// - 过滤（大小写不敏感子串，与列表模式同语义）：保留匹配的文件行及其
-///   祖先目录行；过滤激活时忽略折叠集合（展示全部匹配项）。
-pub fn build_tree_rows(
-    entries: &[ArchiveEntry],
-    collapsed: &HashSet<String>,
-    filter: &str,
-) -> Vec<TreeRow> {
+/// 由条目列表建目录树（`/`、`\\` 均作分隔符；隐式目录补全：
+/// 条目 `a/b.png` 而无 `a/` 条目时也生成 `a` 节点）。
+fn build_dir_root(entries: &[ArchiveEntry]) -> Node {
     let mut root = Node::root();
-    for (idx, entry) in entries.iter().enumerate() {
+    for entry in entries {
         let components: Vec<&str> = entry
             .name
             .split(['/', '\\'])
             .filter(|c| !c.is_empty())
             .collect();
-        if components.is_empty() {
-            continue;
-        }
+        // 文件条目的最后一个组件是文件名，不进目录树。
         let dir_depth = if entry.is_dir {
             components.len()
         } else {
-            components.len() - 1
+            components.len().saturating_sub(1)
         };
         let mut node = &mut root;
         let mut path = String::new();
@@ -98,76 +75,102 @@ pub fn build_tree_rows(
             path.push_str(comp);
             node = node.dir_child_mut(comp, path.clone());
         }
-        if !entry.is_dir {
-            let name = components[components.len() - 1];
-            let full_path = if path.is_empty() {
-                name.to_string()
-            } else {
-                format!("{path}/{name}")
-            };
-            node.children.push(Node {
-                name: name.to_string(),
-                full_path,
-                is_dir: false,
-                entry_idx: Some(idx),
-                children: Vec::new(),
-            });
-        }
     }
+    root
+}
 
-    let needle = filter.trim().to_lowercase();
-    let filter_active = !needle.is_empty();
-    if filter_active {
-        prune(&mut root, &needle, entries);
-    }
-
+/// 左栏目录树行：仅目录节点，同级按名字节序；子树默认展开，
+/// `collapsed` 含目录 full_path 时隐藏其子树。
+pub fn build_dir_rows(entries: &[ArchiveEntry], collapsed: &HashSet<String>) -> Vec<TreeRow> {
+    let root = build_dir_root(entries);
     let mut rows = Vec::new();
-    emit_rows(&root, 0, collapsed, filter_active, &mut rows);
+    emit_dir_rows(&root, 0, collapsed, &mut rows);
     rows
 }
 
-/// 过滤剪枝：文件节点按条目名匹配保留，目录节点有存活子节点才保留。
-/// 返回该节点是否有存活子节点（root 调用的返回值无意义）。
-fn prune(node: &mut Node, needle: &str, entries: &[ArchiveEntry]) -> bool {
-    node.children.retain_mut(|child| {
-        if child.is_dir {
-            prune(child, needle, entries)
-        } else {
-            child
-                .entry_idx
-                .is_some_and(|i| entries[i].name.to_lowercase().contains(needle))
-        }
-    });
-    !node.children.is_empty()
-}
-
-fn emit_rows(
-    node: &Node,
-    depth: usize,
-    collapsed: &HashSet<String>,
-    filter_active: bool,
-    rows: &mut Vec<TreeRow>,
-) {
-    let mut ordered: Vec<&Node> = node.children.iter().collect();
-    ordered.sort_by(|a, b| {
-        b.is_dir
-            .cmp(&a.is_dir)
-            .then_with(|| a.name.as_bytes().cmp(b.name.as_bytes()))
-    });
-    for child in ordered {
-        let hidden = child.is_dir && !filter_active && collapsed.contains(&child.full_path);
+fn emit_dir_rows(node: &Node, depth: usize, collapsed: &HashSet<String>, rows: &mut Vec<TreeRow>) {
+    let mut dirs: Vec<&Node> = node.children.iter().collect();
+    dirs.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+    for child in dirs {
         rows.push(TreeRow {
             depth,
             name: child.name.clone(),
             full_path: child.full_path.clone(),
-            is_dir: child.is_dir,
-            entry_idx: child.entry_idx,
             has_children: !child.children.is_empty(),
         });
-        if child.is_dir && !hidden {
-            emit_rows(child, depth + 1, collapsed, filter_active, rows);
+        if !collapsed.contains(&child.full_path) {
+            emit_dir_rows(child, depth + 1, collapsed, rows);
         }
     }
+}
+
+/// 当前目录的直接子项：(文件条目索引（包内顺序）, 直接子目录名（字节序排序去重）)。
+/// `current_dir` 为 None 时返回全部文件条目索引（「全部文件」扁平模式），
+/// 子目录列表为空。目录前缀边界严格（`a` 不命中 `ab/` 与同名文件 `a.txt`），
+/// `/` 与 `\\` 均作分隔符；子目录同时来自显式目录条目与更深路径的隐式首组件。
+pub fn direct_children(
+    entries: &[ArchiveEntry],
+    current_dir: Option<&str>,
+) -> (Vec<usize>, Vec<String>) {
+    let Some(dir) = current_dir else {
+        return (
+            entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| !e.is_dir)
+                .map(|(i, _)| i)
+                .collect(),
+            Vec::new(),
+        );
+    };
+    let dir = dir.trim_end_matches(['/', '\\']);
+    let prefix_slash = format!("{dir}/");
+    let prefix_backslash = format!("{dir}\\");
+    let mut files = Vec::new();
+    let mut subdirs: Vec<String> = Vec::new();
+    for (i, e) in entries.iter().enumerate() {
+        let remainder = if let Some(r) = e.name.strip_prefix(&prefix_slash) {
+            r
+        } else if let Some(r) = e.name.strip_prefix(&prefix_backslash) {
+            r
+        } else {
+            continue;
+        };
+        let remainder = remainder.trim_end_matches(['/', '\\']);
+        // 目录条目自身（如 dir == "a" 时的 "a/" 条目）不算子项。
+        if remainder.is_empty() {
+            continue;
+        }
+        if remainder.contains(['/', '\\']) {
+            // 更深层级：首组件是一个（隐式或显式）直接子目录。
+            let first = remainder.split(['/', '\\']).next().unwrap_or_default();
+            if !first.is_empty() && !subdirs.iter().any(|d| d == first) {
+                subdirs.push(first.to_string());
+            }
+        } else if e.is_dir {
+            if !subdirs.iter().any(|d| d == remainder) {
+                subdirs.push(remainder.to_string());
+            }
+        } else {
+            files.push(i);
+        }
+    }
+    subdirs.sort();
+    (files, subdirs)
+}
+
+/// 面包屑累计路径段：`a/b/c` → `["a", "a/b", "a/b/c"]`（`\\` 同样切分）。
+pub fn breadcrumb_paths(dir: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut current = String::new();
+    for comp in dir.split(['/', '\\']).filter(|c| !c.is_empty()) {
+        if !current.is_empty() {
+            current.push('/');
+        }
+        current.push_str(comp);
+        paths.push(current.clone());
+    }
+    paths
 }
 
 #[cfg(test)]
@@ -183,118 +186,114 @@ mod tests {
         }
     }
 
-    fn rows_of(entries: &[ArchiveEntry]) -> Vec<TreeRow> {
-        build_tree_rows(entries, &HashSet::new(), "")
-    }
-
     #[test]
-    fn nested_entries_build_indented_rows() {
+    fn dir_rows_build_nested_indented_dirs() {
         let entries = vec![
             entry("a/b/c.png", false),
             entry("a/d.png", false),
             entry("top.png", false),
         ];
-        let rows = rows_of(&entries);
-        let summary: Vec<(usize, &str, bool)> = rows
-            .iter()
-            .map(|r| (r.depth, r.name.as_str(), r.is_dir))
-            .collect();
-        assert_eq!(
-            summary,
-            vec![
-                (0, "a", true),
-                (1, "b", true),
-                (2, "c.png", false),
-                (1, "d.png", false),
-                (0, "top.png", false),
-            ]
-        );
-        // 文件行带 entry_idx，目录行不带。
-        let c_row = rows.iter().find(|r| r.name == "c.png").unwrap();
-        assert_eq!(c_row.entry_idx, Some(0));
-        assert_eq!(c_row.full_path, "a/b/c.png");
-        assert!(rows
-            .iter()
-            .find(|r| r.name == "a")
-            .unwrap()
-            .entry_idx
-            .is_none());
-        assert!(rows.iter().find(|r| r.name == "a").unwrap().has_children);
+        let rows = build_dir_rows(&entries, &HashSet::new());
+        let summary: Vec<(usize, &str)> = rows.iter().map(|r| (r.depth, r.name.as_str())).collect();
+        // 只有目录行；"b" 只含文件、无子目录，故无折叠三角。
+        assert_eq!(summary, vec![(0, "a"), (1, "b")]);
+        assert_eq!(rows[0].full_path, "a");
+        assert_eq!(rows[1].full_path, "a/b");
+        assert!(rows[0].has_children);
+        assert!(!rows[1].has_children);
     }
 
     #[test]
-    fn implicit_dirs_appear_as_dir_rows() {
-        // 无显式 "a/" 目录条目，仅文件路径蕴含。
-        let entries = vec![entry("a/b.png", false)];
-        let rows = rows_of(&entries);
-        assert_eq!(rows.len(), 2);
-        assert!(rows[0].is_dir);
-        assert_eq!(rows[0].name, "a");
-        assert_eq!(rows[0].entry_idx, None);
-        assert_eq!(rows[1].depth, 1);
-    }
-
-    #[test]
-    fn explicit_dir_entry_merges_with_implicit() {
+    fn dir_rows_merge_explicit_and_implicit_and_handle_backslash() {
+        // 显式 "a/" 与隐式 "a"（来自 a/b.png）合并为单节点。
         let entries = vec![entry("a/", true), entry("a/b.png", false)];
-        let rows = rows_of(&entries);
-        // 显式与隐式 "a" 合并为单行。
-        assert_eq!(rows.iter().filter(|r| r.name == "a").count(), 1);
+        let rows = build_dir_rows(&entries, &HashSet::new());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "a");
         // 反斜杠同样视为分隔符。
         let entries = vec![entry("x\\y.png", false)];
-        let rows = rows_of(&entries);
-        assert!(rows[0].is_dir && rows[0].name == "x");
-        assert_eq!(rows[1].full_path, "x/y.png");
-        assert_eq!(rows[1].entry_idx, Some(0));
+        let rows = build_dir_rows(&entries, &HashSet::new());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].full_path, "x");
     }
 
     #[test]
-    fn filter_keeps_matching_files_and_ancestors() {
+    fn dir_rows_sort_byte_wise_and_respect_collapse() {
         let entries = vec![
-            entry("a/b/page1.png", false),
-            entry("a/c/notes.txt", false),
-            entry("readme.md", false),
+            entry("m/f.png", false),
+            entry("a/f.png", false),
+            entry("a/b/f.png", false),
         ];
-        let rows = build_tree_rows(&entries, &HashSet::new(), "PAGE");
+        let rows = build_dir_rows(&entries, &HashSet::new());
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
-        // 匹配文件与其祖先目录保留，不匹配的子树与顶层文件消失。
-        assert_eq!(names, vec!["a", "b", "page1.png"]);
-    }
-
-    #[test]
-    fn collapse_hides_subtree_and_filter_ignores_collapse() {
-        let entries = vec![entry("a/b.png", false), entry("c.png", false)];
-        let mut collapsed = HashSet::new();
-        collapsed.insert("a".to_string());
-        let rows = build_tree_rows(&entries, &collapsed, "");
+        assert_eq!(names, vec!["a", "b", "m"]);
+        // 折叠 "a" 隐藏其子目录（"a" 行保留且仍标 has_children）。
+        let collapsed = HashSet::from(["a".to_string()]);
+        let rows = build_dir_rows(&entries, &collapsed);
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, vec!["a", "c.png"]);
-        // 折叠的目录行仍标有 has_children（三角显示为收起态）。
+        assert_eq!(names, vec!["a", "m"]);
         assert!(rows[0].has_children);
-        // 过滤激活时忽略折叠集合。
-        let rows = build_tree_rows(&entries, &collapsed, "b.png");
-        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, vec!["a", "b.png"]);
     }
 
     #[test]
-    fn sort_is_dirs_first_then_byte_wise() {
+    fn dir_rows_empty_entries_and_blank_names() {
+        assert!(build_dir_rows(&[], &HashSet::new()).is_empty());
+        // 全为分隔符的名字不产生目录节点。
+        assert!(build_dir_rows(&[entry("/", true)], &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn direct_children_flat_mode_returns_all_files() {
         let entries = vec![
-            entry("z.txt", false),
-            entry("B.txt", false),
-            entry("m/", true),
-            entry("a/", true),
+            entry("d/", true),
+            entry("d/a.png", false),
+            entry("b.txt", false),
         ];
-        let rows = rows_of(&entries);
-        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
-        // 目录在前（字节序 a < m），文件字节序 B(0x42) < z(0x7A)。
-        assert_eq!(names, vec!["a", "m", "B.txt", "z.txt"]);
+        let (files, subdirs) = direct_children(&entries, None);
+        assert_eq!(files, vec![1, 2]);
+        assert!(subdirs.is_empty());
     }
 
     #[test]
-    fn empty_entries_and_blank_names() {
-        assert!(rows_of(&[]).is_empty());
-        // 全为分隔符的名字不产生行。
-        assert!(rows_of(&[entry("/", true)]).is_empty());
+    fn direct_children_splits_files_and_subdirs() {
+        let entries = vec![
+            entry("a/x.png", false),
+            entry("a/y.txt", false),
+            entry("a/sub/z.png", false),
+            entry("a/sub2/", true),
+            entry("a/", true),
+            entry("b.png", false),
+        ];
+        let (files, subdirs) = direct_children(&entries, Some("a"));
+        // 直接文件（包内顺序），更深层文件不进列表。
+        assert_eq!(files, vec![0, 1]);
+        // 隐式（sub，来自 a/sub/z.png）与显式（sub2）子目录，字节序排序。
+        assert_eq!(subdirs, vec!["sub", "sub2"]);
+    }
+
+    #[test]
+    fn direct_children_boundary_and_backslash() {
+        let entries = vec![
+            entry("a/b.png", false),
+            entry("ab/c.png", false),
+            entry("a.txt", false),
+            entry("a\\d.png", false),
+        ];
+        let (files, subdirs) = direct_children(&entries, Some("a"));
+        // 边界：`a/` 不命中 `ab/` 与同名文件 `a.txt`；反斜杠条目算直接子项。
+        assert_eq!(files, vec![0, 3]);
+        assert!(subdirs.is_empty());
+        // 尾部斜杠剥掉后照常工作。
+        let (files, _) = direct_children(&entries, Some("a/"));
+        assert_eq!(files, vec![0, 3]);
+    }
+
+    #[test]
+    fn breadcrumb_paths_accumulate_segments() {
+        assert_eq!(breadcrumb_paths("a"), vec!["a"]);
+        assert_eq!(breadcrumb_paths("a/b/c"), vec!["a", "a/b", "a/b/c"]);
+        assert_eq!(breadcrumb_paths("a\\b"), vec!["a", "a/b"]);
+        assert_eq!(breadcrumb_paths("a/b/"), vec!["a", "a/b"]);
+        assert!(breadcrumb_paths("").is_empty());
     }
 }

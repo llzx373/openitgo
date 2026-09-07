@@ -1,9 +1,10 @@
-//! 压缩包浏览视图：后台列出全部条目（含目录与非图片），勾选后外抛
-//! 解压意图；状态机 Idle → Listing → Ready / NeedPassword / Failed。
+//! 压缩包浏览视图：资源管理器式三栏布局（左栏目录树 / 中栏面包屑+当前
+//! 目录文件列表 / 右栏预览面板）。后台列出全部条目（含目录与非图片），
+//! 勾选后外抛解压意图；状态机 Idle → Listing → Ready / NeedPassword / Failed。
 
 use crate::app::{PASSWORD_INCORRECT_MARKER, PASSWORD_REQUIRED_MARKER};
 use crate::opener::{AsyncOpener, OpenStatus};
-use crate::views::archive_tree::{build_tree_rows, TreeRow};
+use crate::views::archive_tree::{breadcrumb_paths, build_dir_rows, direct_children, TreeRow};
 use egui_phosphor_icons::icons;
 use openitgo_parser::archive::{list_entries, read_entry, ArchiveEntry};
 use openitgo_parser::traits::ParseError;
@@ -29,14 +30,6 @@ pub enum ArchiveViewState {
     Failed(String),
 }
 
-/// 条目区的展示模式：扁平列表或目录树。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ArchiveViewMode {
-    #[default]
-    List,
-    Tree,
-}
-
 /// 后台线程产出的预览内容。
 #[derive(Debug, Clone)]
 enum PreviewData {
@@ -59,10 +52,10 @@ pub struct ArchiveView {
     /// 带密码列目录仍遇密码错误：app 据此以 incorrect 复现密码对话框。
     pub password_failed: bool,
     listing: Option<AsyncOpener<Vec<ArchiveEntry>>>,
-    /// 条目区展示模式（列表/树形）。
-    pub view_mode: ArchiveViewMode,
-    /// 树形模式下折叠的目录 full_path（`/` 分隔归一化路径）。
+    /// 目录树中折叠的目录 full_path（`/` 分隔归一化路径）。
     pub collapsed: HashSet<String>,
+    /// 中栏当前目录（`/` 分隔归一化路径）；None = 「全部文件」扁平模式。
+    pub current_dir: Option<String>,
     /// 右侧预览面板开关。
     pub preview_open: bool,
     /// 当前预览目标条目名（单击文件条目设置）。
@@ -90,8 +83,8 @@ impl Default for ArchiveView {
             tried_password: None,
             password_failed: false,
             listing: None,
-            view_mode: ArchiveViewMode::List,
             collapsed: HashSet::new(),
+            current_dir: None,
             preview_open: false,
             preview_entry: None,
             preview_requested: None,
@@ -118,12 +111,13 @@ pub struct ArchiveCallbacks<'a> {
 }
 
 impl ArchiveView {
-    /// 清空条目相关状态（选择/过滤/折叠/预览），供 open* 系列复用。
+    /// 清空条目相关状态（选择/过滤/折叠/当前目录/预览），供 open* 系列复用。
     fn clear_entries_state(&mut self) {
         self.entries.clear();
         self.selected.clear();
         self.filter.clear();
         self.collapsed.clear();
+        self.current_dir = None;
         self.preview_entry = None;
         self.preview_requested = None;
         self.preview = None;
@@ -284,15 +278,21 @@ impl ArchiveView {
         }
     }
 
-    /// 当前过滤条件下的可见条目索引（大小写不敏感子串匹配）。
-    fn visible_indices(&self) -> Vec<usize> {
+    /// 当前可见文件条目索引（中栏文件列表与「全选」共用）：
+    /// 过滤激活时忽略 current_dir 全包子串匹配（大小写不敏感）；
+    /// 否则 current_dir None = 全部文件，Some(dir) = dir 的直接子文件。
+    fn visible_file_indices(&self) -> Vec<usize> {
         let needle = self.filter.trim().to_lowercase();
-        self.entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| needle.is_empty() || e.name.to_lowercase().contains(&needle))
-            .map(|(i, _)| i)
-            .collect()
+        if !needle.is_empty() {
+            return self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| !e.is_dir && e.name.to_lowercase().contains(&needle))
+                .map(|(i, _)| i)
+                .collect();
+        }
+        direct_children(&self.entries, self.current_dir.as_deref()).0
     }
 
     /// 选中文件条目数与总大小（解压后字节）。
@@ -303,13 +303,10 @@ impl ArchiveView {
             .fold((0, 0), |(n, bytes), e| (n + 1, bytes + e.size))
     }
 
-    /// 全选：选中当前过滤条件下的全部文件条目。
+    /// 全选：选中当前可见的全部文件条目。
     fn select_all_visible_files(&mut self) {
-        for idx in self.visible_indices() {
-            let entry = &self.entries[idx];
-            if !entry.is_dir {
-                self.selected.insert(entry.name.clone());
-            }
+        for idx in self.visible_file_indices() {
+            self.selected.insert(self.entries[idx].name.clone());
         }
     }
 
@@ -353,25 +350,6 @@ impl ArchiveView {
                 on_open_as_comic();
             }
             if self.state == ArchiveViewState::Ready {
-                ui.separator();
-                if ui
-                    .selectable_label(
-                        self.view_mode == ArchiveViewMode::List,
-                        (icons::LIST, " 列表"),
-                    )
-                    .clicked()
-                {
-                    self.view_mode = ArchiveViewMode::List;
-                }
-                if ui
-                    .selectable_label(
-                        self.view_mode == ArchiveViewMode::Tree,
-                        (icons::TREE_STRUCTURE, " 树形"),
-                    )
-                    .clicked()
-                {
-                    self.view_mode = ArchiveViewMode::Tree;
-                }
                 ui.separator();
                 if ui
                     .add(egui::Button::new((icons::EYE, " 预览")).selected(self.preview_open))
@@ -447,6 +425,11 @@ impl ArchiveView {
                         self.render_preview(ui);
                     });
             }
+            egui::Panel::left("archive_tree_pane")
+                .default_size(180.0)
+                .show(ui, |ui| {
+                    self.render_dir_pane(ui);
+                });
             // 预览在途时主动重绘以排空后台读取结果。
             if self.preview.is_some() {
                 ui.ctx().request_repaint_after(Duration::from_millis(100));
@@ -486,101 +469,38 @@ impl ArchiveView {
                     );
                 });
             }
-            ArchiveViewState::Ready => match self.view_mode {
-                ArchiveViewMode::List => self.render_entry_list(ui, on_open_entry_as_comic),
-                ArchiveViewMode::Tree => self.render_entry_tree(ui, on_open_entry_as_comic),
-            },
+            ArchiveViewState::Ready => {
+                self.render_breadcrumb(ui);
+                self.render_file_list(ui, on_open_entry_as_comic);
+            }
         }
     }
 
-    fn render_entry_list(
-        &mut self,
-        ui: &mut egui::Ui,
-        on_open_entry_as_comic: &mut dyn FnMut(String),
-    ) {
-        let visible = self.visible_indices();
-        if visible.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(40.0);
-                ui.label(egui::RichText::new("没有匹配的条目").weak());
-            });
-            return;
-        }
-        let openable_comic = self
-            .path
-            .as_deref()
-            .is_some_and(crate::app::is_supported_comic_file);
+    /// 左栏目录树：特殊根节点「全部文件」+ 仅目录节点（折叠三角 /
+    /// 级联勾选 / 单击设为当前目录 / 当前目录高亮）。
+    fn render_dir_pane(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
+            .auto_shrink([false, true])
             .show(ui, |ui| {
-                for idx in visible {
-                    let entry = &self.entries[idx];
-                    let is_dir = entry.is_dir;
-                    let name = entry.name.clone();
-                    ui.horizontal(|ui| {
-                        if is_dir {
-                            // 目录条目不可勾选，置灰展示。
-                            ui.add_enabled_ui(false, |ui| {
-                                ui.checkbox(&mut false, "");
-                            });
-                            ui.label(egui::RichText::new(icons::FOLDER.as_str()).weak());
-                            ui.label(egui::RichText::new(&name).weak());
-                        } else {
-                            self.file_entry_row(
-                                ui,
-                                idx,
-                                &name,
-                                openable_comic,
-                                on_open_entry_as_comic,
-                            );
-                        }
-                    });
+                let all_selected = self.current_dir.is_none();
+                if ui
+                    .selectable_label(all_selected, (icons::FILES, " 全部文件"))
+                    .clicked()
+                {
+                    self.current_dir = None;
                 }
-            });
-    }
-
-    fn render_entry_tree(
-        &mut self,
-        ui: &mut egui::Ui,
-        on_open_entry_as_comic: &mut dyn FnMut(String),
-    ) {
-        let rows = build_tree_rows(&self.entries, &self.collapsed, &self.filter);
-        if rows.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(40.0);
-                ui.label(egui::RichText::new("没有匹配的条目").weak());
-            });
-            return;
-        }
-        let openable_comic = self
-            .path
-            .as_deref()
-            .is_some_and(crate::app::is_supported_comic_file);
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
+                let rows = build_dir_rows(&self.entries, &self.collapsed);
                 for row in rows {
                     ui.horizontal(|ui| {
                         ui.add_space(row.depth as f32 * 16.0);
-                        if row.is_dir {
-                            self.dir_tree_row(ui, &row);
-                        } else if let Some(idx) = row.entry_idx {
-                            ui.add_space(16.0);
-                            self.file_entry_row(
-                                ui,
-                                idx,
-                                &row.name,
-                                openable_comic,
-                                on_open_entry_as_comic,
-                            );
-                        }
+                        self.dir_pane_row(ui, &row);
                     });
                 }
             });
     }
 
-    /// 树形目录行：折叠三角 + 级联勾选框 + 目录名。
-    fn dir_tree_row(&mut self, ui: &mut egui::Ui, row: &TreeRow) {
+    /// 目录树行：折叠三角 + 级联勾选框 + 可单击的目录名（高亮当前目录）。
+    fn dir_pane_row(&mut self, ui: &mut egui::Ui, row: &TreeRow) {
         if row.has_children {
             let is_collapsed = self.collapsed.contains(&row.full_path);
             let triangle = if is_collapsed { "▸" } else { "▾" };
@@ -602,12 +522,108 @@ impl ArchiveView {
         if ui.checkbox(&mut now, "").clicked() {
             self.cascade_set(&row.full_path, now);
         }
-        ui.label(egui::RichText::new(icons::FOLDER.as_str()).weak());
-        ui.label(egui::RichText::new(&row.name).weak());
+        let is_current = self.current_dir.as_deref() == Some(row.full_path.as_str());
+        if ui
+            .selectable_label(
+                is_current,
+                format!("{} {}", icons::FOLDER.as_str(), row.name),
+            )
+            .clicked()
+        {
+            self.current_dir = Some(row.full_path.clone());
+        }
     }
 
-    /// 文件条目行（列表/树形共用）：勾选框、可单击/双击的文件名、大小。
-    /// `display` 为展示名（树形模式为 basename），选择/预览/解压身份恒用
+    /// 面包屑：「全部文件 / dir1 / dir2」，每段可点击跳回；
+    /// 仅 current_dir 非 None 时显示路径段。
+    fn render_breadcrumb(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .selectable_label(self.current_dir.is_none(), "全部文件")
+                .clicked()
+            {
+                self.current_dir = None;
+            }
+            if let Some(dir) = self.current_dir.clone() {
+                for path in breadcrumb_paths(&dir) {
+                    let label = path.rsplit('/').next().unwrap_or(&path).to_string();
+                    ui.label(egui::RichText::new("/").weak());
+                    let is_current = path == dir;
+                    if ui.selectable_label(is_current, label).clicked() {
+                        self.current_dir = Some(path);
+                    }
+                }
+            }
+        });
+        ui.separator();
+    }
+
+    /// 中栏文件列表：过滤激活时全包匹配（忽略 current_dir）；
+    /// current_dir None = 全部文件扁平展示；Some(dir) = 子目录行
+    /// （不可勾选，双击进入）+ 直接子文件行。
+    fn render_file_list(
+        &mut self,
+        ui: &mut egui::Ui,
+        on_open_entry_as_comic: &mut dyn FnMut(String),
+    ) {
+        let filter_active = !self.filter.trim().is_empty();
+        let (files, subdirs) = if filter_active {
+            (self.visible_file_indices(), Vec::new())
+        } else {
+            direct_children(&self.entries, self.current_dir.as_deref())
+        };
+        if files.is_empty() && subdirs.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.label(egui::RichText::new("没有匹配的条目").weak());
+            });
+            return;
+        }
+        let openable_comic = self
+            .path
+            .as_deref()
+            .is_some_and(crate::app::is_supported_comic_file);
+        let flat = filter_active || self.current_dir.is_none();
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for subdir in subdirs {
+                    ui.horizontal(|ui| {
+                        // 子目录行不可勾选，占位对齐文件行。
+                        ui.add_space(16.0);
+                        ui.label(egui::RichText::new(icons::FOLDER.as_str()).weak());
+                        let label = ui.add(egui::Label::new(&subdir).sense(egui::Sense::click()));
+                        if label.double_clicked() {
+                            if let Some(dir) = &self.current_dir {
+                                self.current_dir = Some(format!("{dir}/{subdir}"));
+                            }
+                        }
+                        label.on_hover_text("双击进入该目录");
+                    });
+                }
+                for idx in files {
+                    let name = self.entries[idx].name.clone();
+                    // 目录模式下展示 basename，扁平/过滤模式展示完整路径名。
+                    let display = if flat {
+                        name.clone()
+                    } else {
+                        name.rsplit(['/', '\\']).next().unwrap_or(&name).to_string()
+                    };
+                    ui.horizontal(|ui| {
+                        self.file_entry_row(
+                            ui,
+                            idx,
+                            &display,
+                            openable_comic,
+                            on_open_entry_as_comic,
+                        );
+                    });
+                }
+            });
+    }
+
+    /// 文件条目行：勾选框、可单击/双击的文件名、大小。
+    /// `display` 为展示名（目录模式下为 basename），选择/预览/解压身份恒用
     /// 原始 entry.name。
     fn file_entry_row(
         &mut self,
@@ -816,20 +832,29 @@ mod tests {
     }
 
     #[test]
-    fn visible_indices_filter_is_case_insensitive() {
+    fn visible_file_indices_respects_filter_and_current_dir() {
         let mut view = ArchiveView {
             entries: vec![
                 entry("Dir/", true, 0),
                 entry("Page01.PNG", false, 10),
                 entry("notes.md", false, 5),
+                entry("Dir/inner.png", false, 3),
             ],
             ..Default::default()
         };
-        assert_eq!(view.visible_indices(), vec![0, 1, 2]);
+        // 默认「全部文件」扁平模式：全部文件条目，目录条目不参与。
+        assert_eq!(view.visible_file_indices(), vec![1, 2, 3]);
         view.filter = "png".to_string();
-        assert_eq!(view.visible_indices(), vec![1]);
+        assert_eq!(view.visible_file_indices(), vec![1, 3]);
         view.filter = " PAGE ".to_string();
-        assert_eq!(view.visible_indices(), vec![1]);
+        assert_eq!(view.visible_file_indices(), vec![1]);
+        // 进入目录：仅直接子文件。
+        view.filter.clear();
+        view.current_dir = Some("Dir".to_string());
+        assert_eq!(view.visible_file_indices(), vec![3]);
+        // 过滤激活时忽略 current_dir，全包搜索。
+        view.filter = "page".to_string();
+        assert_eq!(view.visible_file_indices(), vec![1]);
     }
 
     #[test]
@@ -919,6 +944,7 @@ mod tests {
             selected: HashSet::from(["old.png".to_string()]),
             filter: "old".to_string(),
             collapsed: HashSet::from(["d".to_string()]),
+            current_dir: Some("d".to_string()),
             preview_entry: Some("old.png".to_string()),
             preview_text: Some("txt".to_string()),
             tried_password: Some("pw".to_string()),
@@ -935,6 +961,7 @@ mod tests {
         assert!(view.selected.is_empty());
         assert!(view.filter.is_empty());
         assert!(view.collapsed.is_empty());
+        assert_eq!(view.current_dir, None);
         assert_eq!(view.preview_entry, None);
         assert_eq!(view.preview_text, None);
         assert_eq!(view.tried_password, None);
