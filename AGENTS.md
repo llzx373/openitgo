@@ -93,7 +93,14 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
   RAR `classify_rar_error` + CRC `BadData`、7z 错密码表现为 CRC 校验失败
   经 `classify_sevenz_io_error` 归一为 `PasswordIncorrect`）。`classify_archive()`
   按图片占比 ≥80% 启发式分类 Comic/Files，`read_entry()` 读单条目不预览上限
-  由 app 侧控制。app 侧：
+  由 app 侧控制。ZIP 条目名/注释经 `decode_zip_entry_name`（`archive/encoding.rs`）
+  重解码：UTF-8 优先，否则 SJIS（半角假名解码视为误判拒绝）→ chardetng
+  统计识别（GBK/EUC-KR/Big5）→ 有序严格解码兜底；条目名一经重解码即与
+  zip crate 内部 CP437 名不一致，按名查条目只能索引扫描比较（`find_zip_index`）。
+  `read_comment()` 读 zip 注释（其他格式恒 None）；`needs_wrapper_dir()`
+  为 Bandizip 式智能解压目录判定。`ExtractProgress::Started.total_bytes` 为
+  `Option<u64>`（仅 ZIP 预知 Some，流式格式 None 由 app 按自带条目清单补充）。
+  app 侧：
   `View::Archive(PathBuf)` + `views/archive.rs`（资源管理器式三栏：
   左栏目录树（仅目录节点 + 「全部文件」根，折叠/级联勾选/单击设
   `current_dir`）/ 中栏面包屑 + 当前目录直接子项（`current_dir` None =
@@ -116,7 +123,30 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
   显示，Archive 视图自愈守卫保证同路径不重列）；双击图片条目
   （`on_open_entry_as_comic` → `open_entry_as_comic`：同漫画已打开则
   `find_entry_page_index` 直接跳页，否则 `open_comic` +
-  `PendingOpenOptions.start_entry` 由 poll_opener 定位，不强制单页）。
+  `PendingOpenOptions.start_entry` 由 poll_opener 定位，不强制单页）；
+  双击其他条目（或非漫画格式包的图片）走 `on_open_entry_external` →
+  `temp_open::open_entry_external`（`temp_open.rs`：提取到
+  temp_dir()/openitgo-open/<包hash>/ 后 `cmd /c start` 外部打开，临时文件
+  同名覆盖复用，启动时 `clean_stale` 回收 24h 前的 open/drag 目录；
+  `safe_basename` 只取末段防路径穿越）。**拖出解压（Windows only）**：
+  文件条目 label 用 `Sense::click_and_drag()`，`drag_started` 时按
+  `ArchiveView::drag_entry_set`（拖动项在多选集合 → 整组，否则单条目）
+  后台 `extract_entry_to_temp("drag",…)` 逐条解压；指针按住离开窗口且
+  解压就绪时调 `platform::drag_out::do_drag_drop`（OLE `IDataObject`
+  CF_HDROP/DROPFILES UTF-16 + `IDropSource`，`DoDragDrop` 模态阻塞自带
+  消息循环；非 Windows 为 stub 静默不可用；左键松开即放弃本次）。
+  **多卷 RAR 归一**：`open_path` 最前面经 `normalize_rar_volume_path`
+  把 partN.rar（N>1，part1 存在才换）/旧式 .r00/.r01（.rar 存在才换）
+  改写为首卷，保证历史/密码表 key 稳定。**智能解压目录**：
+  `extract_output_base`（自定义 extract_dir 或包同目录）+
+  `resolve_extract_output`（`needs_wrapper_dir` 判定：包内无单一顶层
+  目录才建 `uniquified_subdir` 包名子目录）；库卡片右键「解压到…」无
+  条目清单，由 `ExtractManager::start(smart_wrap=true)` 在 worker 内
+  先 `list_entries` 再判定（失败按 wrap=true）。**ZIP 注释栏**：列目录
+  顺带 `read_comment`，Ready 时面包屑上方可折叠注释栏。**解压进度增强**：
+  面板显示 速度（`format_speed`）/剩余（`format_eta`）/百分比，
+  流式格式 total_bytes 为 None 时由 `ExtractTask.total_bytes_hint`
+  （浏览器路径按勾选条目求和 `selection_total_bytes`）补充。
 - **PageLoader** runs IO and decode workers in background threads; results are
   sent back to the UI thread via channels. The app also maintains a separate
   `cover_loader` for library cover thumbnails.
@@ -132,7 +162,9 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
   `page_scroll_threshold`,
   `media_volume`, `media_speed`, `media_audio_device`,
   `comic_end_action`, and `media_end_action`.
-  压缩包解压相关：`extract_dir`（解压输出目录，空 = 包同目录下同名子目录）、
+  压缩包解压相关：`extract_dir`（解压输出基准目录，空 = 包同目录；最终
+  落点经 `resolve_extract_output` 智能判定，内容无单一顶层目录时自动建
+  包名子目录）、
   `extract_threads`（0 = 自动，≤ 32）、`extract_overwrite`（false = 同名
   自动改名 `name (1).ext`）。
 - **History entries** store both `comic_id` and `path` for robust matching.

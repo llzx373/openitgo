@@ -4,7 +4,10 @@
 //! `Failed("已取消")` 事件感知取消，`extract_archive` 返回 `Ok(())`。
 //! 已完整写出的文件保留，半成品文件删除。
 
-use super::{archive_kind, classify_sevenz_error, sevenz_password, tar_reader, ArchiveKind};
+use super::{
+    archive_kind, classify_sevenz_error, decode_zip_entry_name, sevenz_password, tar_reader,
+    ArchiveKind,
+};
 use crate::traits::ParseError;
 use crossbeam_channel::Sender;
 use std::collections::HashSet;
@@ -25,7 +28,9 @@ pub struct ExtractOptions {
 pub enum ExtractProgress {
     Started {
         total_entries: usize,
-        total_bytes: u64,
+        /// 解压总字节数（未压缩）：仅 ZIP 可廉价预知（Some）；
+        /// RAR/7z/TAR 流式格式不预扫描，恒 None（由调用方按自带条目清单补充）。
+        total_bytes: Option<u64>,
     },
     EntryDone {
         name: String,
@@ -149,28 +154,27 @@ fn selection_set(selection: Option<&[String]>) -> Option<HashSet<&str>> {
     selection.map(|s| s.iter().map(String::as_str).collect())
 }
 
-/// 汇总 selection 过滤后的条目数/字节数并发 Started 事件。
+/// 汇总 selection 过滤后的条目数并发 Started 事件。
+/// 流式格式（RAR/7z/TAR）不汇总字节数（total_bytes 恒 None，见枚举注释）。
 fn send_started<'a>(
     progress: &Sender<ExtractProgress>,
     entries: impl Iterator<Item = (&'a str, bool, u64)>,
     selected: &Option<HashSet<&str>>,
 ) {
     let mut total_entries = 0usize;
-    let mut total_bytes = 0u64;
-    for (name, _, size) in entries {
+    for (name, _, _) in entries {
         if let Some(sel) = selected {
             if !sel.contains(name) {
                 continue;
             }
         }
         total_entries += 1;
-        total_bytes += size;
     }
     send_progress(
         progress,
         ExtractProgress::Started {
             total_entries,
-            total_bytes,
+            total_bytes: None,
         },
     );
 }
@@ -208,7 +212,7 @@ fn extract_zip(
         let entry = archive
             .by_index_raw(i)
             .map_err(|e| ParseError::InvalidArchive(e.to_string()))?;
-        let name = entry.name().to_string();
+        let name = decode_zip_entry_name(entry.name_raw(), false);
         if let Some(sel) = &selected {
             if !sel.contains(name.as_str()) {
                 continue;
@@ -245,7 +249,7 @@ fn extract_zip(
         progress,
         ExtractProgress::Started {
             total_entries,
-            total_bytes,
+            total_bytes: Some(total_bytes),
         },
     );
 
@@ -756,7 +760,8 @@ fn extract_tar(
 mod tests {
     use super::*;
     use crate::archive::tests::{
-        write_encrypted_7z, write_encrypted_zip, write_test_7z, write_test_tar_gz, write_test_zip,
+        write_encrypted_7z, write_encrypted_zip, write_raw_zip, write_test_7z, write_test_tar_gz,
+        write_test_zip,
     };
     use std::io::Write as _;
     use zip::write::SimpleFileOptions;
@@ -798,7 +803,7 @@ mod tests {
             events.first(),
             Some(ExtractProgress::Started {
                 total_entries: 4,
-                total_bytes: 23,
+                total_bytes: Some(23),
             })
         ));
         assert_eq!(
@@ -812,6 +817,40 @@ mod tests {
             events.last(),
             Some(ExtractProgress::Finished { written: 23, .. })
         ));
+    }
+
+    #[test]
+    fn extract_zip_shift_jis_name_decoded_to_disk() {
+        // 非 UTF-8 原始条目名：落盘文件名与 selection 匹配都用解码后的名字。
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("sjis.zip");
+        let (raw_name, _, _) = encoding_rs::SHIFT_JIS.encode("日本語.txt");
+        write_raw_zip(&zip_path, &[(&raw_name, b"hello")], b"");
+        let out = tmp.path().join("out");
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        extract_archive(&zip_path, &out, None, &default_opts(), tx, no_cancel()).unwrap();
+        assert_eq!(std::fs::read(out.join("日本語.txt")).unwrap(), b"hello");
+        let events = collect_events(rx);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ExtractProgress::EntryDone { name, .. } if name == "日本語.txt"
+        )));
+
+        // selection 按解码后的名字精确匹配
+        let out2 = tmp.path().join("out2");
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let selection = vec!["日本語.txt".to_string()];
+        extract_archive(
+            &zip_path,
+            &out2,
+            Some(&selection),
+            &default_opts(),
+            tx,
+            no_cancel(),
+        )
+        .unwrap();
+        assert!(out2.join("日本語.txt").exists());
     }
 
     #[test]
@@ -1169,6 +1208,26 @@ mod tests {
         assert!(matches!(
             events.last(),
             Some(ExtractProgress::Finished { written: 16, .. })
+        ));
+    }
+
+    #[test]
+    fn extract_tar_started_has_no_total_bytes() {
+        // 流式格式不预扫描：Started 只带条目数，total_bytes 恒 None。
+        let tmp = tempfile::tempdir().unwrap();
+        let tar_path = tmp.path().join("test.tar.gz");
+        write_test_tar_gz(&tar_path);
+        let out = tmp.path().join("out");
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        extract_archive(&tar_path, &out, None, &default_opts(), tx, no_cancel()).unwrap();
+        let events = collect_events(rx);
+        assert!(matches!(
+            events.first(),
+            Some(ExtractProgress::Started {
+                total_entries: 3,
+                total_bytes: None,
+            })
         ));
     }
 

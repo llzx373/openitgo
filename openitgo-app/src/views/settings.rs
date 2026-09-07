@@ -417,7 +417,7 @@ impl SettingsView {
         ui.label("解压目录");
         ui.horizontal(|ui| {
             let display = if settings.extract_dir.is_empty() {
-                "默认（压缩包同目录的同名子目录）".to_string()
+                "默认（压缩包同目录；内容无单一顶层目录时自动建包名子目录）".to_string()
             } else {
                 settings.extract_dir.clone()
             };
@@ -433,7 +433,7 @@ impl SettingsView {
         });
         hint(
             ui,
-            "留空则解压到压缩包同目录下以包名命名的子目录（重名自动加序号）",
+            "留空则解压到压缩包同目录；包内无单一顶层目录时自动放入以包名命名的子目录（重名自动加序号）",
         );
 
         ui.horizontal(|ui| {

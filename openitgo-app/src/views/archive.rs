@@ -6,7 +6,7 @@ use crate::app::{PASSWORD_INCORRECT_MARKER, PASSWORD_REQUIRED_MARKER};
 use crate::opener::{AsyncOpener, OpenStatus};
 use crate::views::archive_tree::{breadcrumb_paths, build_dir_rows, direct_children, TreeRow};
 use egui_phosphor_icons::icons;
-use openitgo_parser::archive::{list_entries, read_entry, ArchiveEntry};
+use openitgo_parser::archive::{list_entries, read_comment, read_entry, ArchiveEntry};
 use openitgo_parser::traits::ParseError;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -51,7 +51,9 @@ pub struct ArchiveView {
     pub tried_password: Option<String>,
     /// 带密码列目录仍遇密码错误：app 据此以 incorrect 复现密码对话框。
     pub password_failed: bool,
-    listing: Option<AsyncOpener<Vec<ArchiveEntry>>>,
+    /// ZIP 注释（其他格式恒 None）；列目录时顺带读出。
+    pub comment: Option<String>,
+    listing: Option<AsyncOpener<(Vec<ArchiveEntry>, Option<String>)>>,
     /// 目录树中折叠的目录 full_path（`/` 分隔归一化路径）。
     pub collapsed: HashSet<String>,
     /// 中栏当前目录（`/` 分隔归一化路径）；None = 「全部文件」扁平模式。
@@ -70,6 +72,12 @@ pub struct ArchiveView {
     preview_note: Option<String>,
     /// 会话密码（app 每帧从会话密码表写入），预览读取加密条目用。
     pub preview_password: Option<String>,
+    /// 拖出：拖动起始时锁定的条目集 + 后台解压任务（一次一个）。
+    drag_out: Option<(Vec<String>, AsyncOpener<Vec<PathBuf>>)>,
+    /// 拖出解压就绪的临时文件，等指针拖出窗口后交给 OLE DoDragDrop。
+    drag_out_ready: Option<Vec<PathBuf>>,
+    /// 拖出错误（app render_archive 取走写入 error_message）。
+    pub drag_error: Option<String>,
 }
 
 impl Default for ArchiveView {
@@ -82,6 +90,7 @@ impl Default for ArchiveView {
             state: ArchiveViewState::Idle,
             tried_password: None,
             password_failed: false,
+            comment: None,
             listing: None,
             collapsed: HashSet::new(),
             current_dir: None,
@@ -94,6 +103,9 @@ impl Default for ArchiveView {
             preview_text: None,
             preview_note: None,
             preview_password: None,
+            drag_out: None,
+            drag_out_ready: None,
+            drag_error: None,
         }
     }
 }
@@ -102,8 +114,10 @@ pub struct ArchiveCallbacks<'a> {
     pub on_back: &'a mut dyn FnMut(),
     /// 「作为漫画打开」：仅当包本身是支持的漫画格式（zip/cbz/rar/cbr）时展示。
     pub on_open_as_comic: &'a mut dyn FnMut(),
-    /// 双击图片条目：以漫画打开并定位到该页。
+    /// 双击图片条目（漫画格式包）：以漫画打开并定位到该页。
     pub on_open_entry_as_comic: &'a mut dyn FnMut(String),
+    /// 双击其他条目（或非漫画格式包的图片）：临时解压后用系统程序打开。
+    pub on_open_entry_external: &'a mut dyn FnMut(String),
     pub on_extract_all: &'a mut dyn FnMut(),
     pub on_extract_selected: &'a mut dyn FnMut(Vec<String>),
     /// NeedPassword 状态下点击「输入密码」。
@@ -118,6 +132,7 @@ impl ArchiveView {
         self.filter.clear();
         self.collapsed.clear();
         self.current_dir = None;
+        self.comment = None;
         self.preview_entry = None;
         self.preview_requested = None;
         self.preview = None;
@@ -125,6 +140,9 @@ impl ArchiveView {
         self.preview_tex = None;
         self.preview_text = None;
         self.preview_note = None;
+        self.drag_out = None;
+        self.drag_out_ready = None;
+        self.drag_error = None;
     }
 
     /// 后台列出条目（不带密码；加密包落入 NeedPassword 状态）。
@@ -135,11 +153,14 @@ impl ArchiveView {
         self.tried_password = None;
         self.password_failed = false;
         self.listing = Some(AsyncOpener::open(path, |p| {
-            list_entries(p, None).map_err(|e| match e {
-                ParseError::PasswordRequired => PASSWORD_REQUIRED_MARKER.to_string(),
-                ParseError::PasswordIncorrect => PASSWORD_INCORRECT_MARKER.to_string(),
-                other => other.to_string(),
-            })
+            // 列目录顺带读 ZIP 注释（其他格式 read_comment 恒 None）。
+            list_entries(p, None)
+                .map(|entries| (entries, read_comment(p)))
+                .map_err(|e| match e {
+                    ParseError::PasswordRequired => PASSWORD_REQUIRED_MARKER.to_string(),
+                    ParseError::PasswordIncorrect => PASSWORD_INCORRECT_MARKER.to_string(),
+                    other => other.to_string(),
+                })
         }));
     }
 
@@ -151,11 +172,13 @@ impl ArchiveView {
         self.password_failed = false;
         self.tried_password = Some(password.clone());
         self.listing = Some(AsyncOpener::open(path, move |p| {
-            list_entries(p, Some(&password)).map_err(|e| match e {
-                ParseError::PasswordRequired => PASSWORD_REQUIRED_MARKER.to_string(),
-                ParseError::PasswordIncorrect => PASSWORD_INCORRECT_MARKER.to_string(),
-                other => other.to_string(),
-            })
+            list_entries(p, Some(&password))
+                .map(|entries| (entries, read_comment(p)))
+                .map_err(|e| match e {
+                    ParseError::PasswordRequired => PASSWORD_REQUIRED_MARKER.to_string(),
+                    ParseError::PasswordIncorrect => PASSWORD_INCORRECT_MARKER.to_string(),
+                    other => other.to_string(),
+                })
         }));
     }
 
@@ -180,12 +203,109 @@ impl ArchiveView {
             }
         }
         self.poll_preview();
+        self.poll_drag_out();
     }
 
-    fn apply_listing_result(&mut self, result: Result<Vec<ArchiveEntry>, String>) {
+    /// 拖出的条目集：拖动项在多选集合中 → 整个选中集（包内顺序），否则单条目。
+    pub(crate) fn drag_entry_set(selected_in_order: &[String], dragged: &str) -> Vec<String> {
+        if selected_in_order.len() > 1 && selected_in_order.iter().any(|n| n == dragged) {
+            selected_in_order.to_vec()
+        } else {
+            vec![dragged.to_string()]
+        }
+    }
+
+    /// 拖动起始：后台把条目集解压到 openitgo-drag 临时目录。
+    fn start_drag_out(&mut self, names: Vec<String>) {
+        if names.is_empty() || self.drag_out.is_some() || self.drag_out_ready.is_some() {
+            return;
+        }
+        if !crate::platform::drag_out::is_supported() {
+            return;
+        }
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let archive = path.clone();
+        let password = self.preview_password.clone();
+        let names_in_task = names.clone();
+        let task = AsyncOpener::open(path, move |_p| {
+            let mut out = Vec::with_capacity(names_in_task.len());
+            for n in &names_in_task {
+                match crate::temp_open::extract_entry_to_temp(
+                    "drag",
+                    &archive,
+                    n,
+                    password.as_deref(),
+                ) {
+                    Ok(p) => out.push(p),
+                    Err(e) => return Err(format!("{n}: {e}")),
+                }
+            }
+            Ok(out)
+        });
+        self.drag_out = Some((names, task));
+    }
+
+    /// 排空拖出后台解压：成功 → drag_out_ready，失败 → drag_error。
+    fn poll_drag_out(&mut self) {
+        let Some((names, mut task)) = self.drag_out.take() else {
+            return;
+        };
+        match task.poll() {
+            OpenStatus::Loading => self.drag_out = Some((names, task)),
+            OpenStatus::Ready(Ok(files)) => self.drag_out_ready = Some(files),
+            OpenStatus::Ready(Err(e)) => self.drag_error = Some(format!("拖出解压失败: {e}")),
+        }
+    }
+
+    /// 拖出主流程：指针按住并离开窗口时，解压就绪则交给 OLE DoDragDrop
+    /// （模态阻塞，自带消息循环），未就绪则保持状态继续等；松开左键即收尾。
+    fn maybe_begin_os_drag(&mut self, ctx: &egui::Context) {
+        if self.drag_out.is_none() && self.drag_out_ready.is_none() {
+            return;
+        }
+        let (primary_down, left_window) = ctx.input(|i| {
+            let rect = i.viewport_rect();
+            let pos = i.pointer.latest_pos();
+            (
+                i.pointer.primary_down(),
+                pos.is_none_or(|p| !rect.contains(p)),
+            )
+        });
+        if !primary_down {
+            // 键已松开：本次拖出结束（未出窗或已放弃）。
+            self.drag_out = None;
+            self.drag_out_ready = None;
+            return;
+        }
+        if !left_window {
+            // 指针还在窗口内：持续重绘以便排空后台解压。
+            ctx.request_repaint_after(Duration::from_millis(100));
+            return;
+        }
+        match self.drag_out_ready.take() {
+            Some(files) => {
+                self.drag_out = None;
+                if let Err(e) = crate::platform::drag_out::do_drag_drop(&files) {
+                    self.drag_error = Some(e);
+                }
+            }
+            None => {
+                // 解压未就绪：保持拖动状态等解压完成，持续重绘轮询。
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+        }
+    }
+
+    fn apply_listing_result(
+        &mut self,
+        result: Result<(Vec<ArchiveEntry>, Option<String>), String>,
+    ) {
         match result {
-            Ok(entries) => {
+            Ok((entries, comment)) => {
                 self.entries = entries;
+                self.comment = comment;
                 self.state = ArchiveViewState::Ready;
                 self.password_failed = false;
             }
@@ -324,10 +444,14 @@ impl ArchiveView {
             on_back,
             on_open_as_comic,
             on_open_entry_as_comic,
+            on_open_entry_external,
             on_extract_all,
             on_extract_selected,
             on_need_password,
         } = callbacks;
+
+        // 拖出：指针按住离开窗口时发起 OLE DoDragDrop（Windows）。
+        self.maybe_begin_os_drag(ui.ctx());
 
         ui.horizontal(|ui| {
             if ui
@@ -470,8 +594,9 @@ impl ArchiveView {
                 });
             }
             ArchiveViewState::Ready => {
+                self.render_comment_bar(ui);
                 self.render_breadcrumb(ui);
-                self.render_file_list(ui, on_open_entry_as_comic);
+                self.render_file_list(ui, on_open_entry_as_comic, on_open_entry_external);
             }
         }
     }
@@ -534,6 +659,28 @@ impl ArchiveView {
         }
     }
 
+    /// 面包屑上方的 ZIP 注释栏：可折叠（默认收起，标题为首行），
+    /// 弱色全文 + Tooltip 显示全文；无注释不渲染。
+    fn render_comment_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(comment) = self.comment.clone() else {
+            return;
+        };
+        let first_line: String = comment
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(60)
+            .collect();
+        egui::CollapsingHeader::new(format!("{} 注释: {first_line}", icons::NOTE.as_str()))
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.add(egui::Label::new(egui::RichText::new(&comment).weak()).wrap());
+            })
+            .header_response
+            .on_hover_text(comment);
+    }
+
     /// 面包屑：「全部文件 / dir1 / dir2」，每段可点击跳回；
     /// 仅 current_dir 非 None 时显示路径段。
     fn render_breadcrumb(&mut self, ui: &mut egui::Ui) {
@@ -565,6 +712,7 @@ impl ArchiveView {
         &mut self,
         ui: &mut egui::Ui,
         on_open_entry_as_comic: &mut dyn FnMut(String),
+        on_open_entry_external: &mut dyn FnMut(String),
     ) {
         let filter_active = !self.filter.trim().is_empty();
         let (files, subdirs) = if filter_active {
@@ -616,6 +764,7 @@ impl ArchiveView {
                             &display,
                             openable_comic,
                             on_open_entry_as_comic,
+                            on_open_entry_external,
                         );
                     });
                 }
@@ -624,7 +773,7 @@ impl ArchiveView {
 
     /// 文件条目行：勾选框、可单击/双击的文件名、大小。
     /// `display` 为展示名（目录模式下为 basename），选择/预览/解压身份恒用
-    /// 原始 entry.name。
+    /// 原始 entry.name。双击：漫画格式包的图片条目进漫画链路，其余外部打开。
     fn file_entry_row(
         &mut self,
         ui: &mut egui::Ui,
@@ -632,9 +781,12 @@ impl ArchiveView {
         display: &str,
         openable_comic: bool,
         on_open_entry_as_comic: &mut dyn FnMut(String),
+        on_open_entry_external: &mut dyn FnMut(String),
     ) {
         let entry = &self.entries[idx];
         let name = entry.name.clone();
+        let size = entry.size;
+        let compressed_size = entry.compressed_size;
         let mut now = self.selected.contains(&name);
         if ui.checkbox(&mut now, "").clicked() {
             if now {
@@ -644,19 +796,25 @@ impl ArchiveView {
             }
         }
         ui.label(icons::FILE);
-        let label = ui.add(egui::Label::new(display).sense(egui::Sense::click()));
+        let label = ui.add(egui::Label::new(display).sense(egui::Sense::click_and_drag()));
         if label.clicked() {
             self.preview_entry = Some(name.clone());
         }
-        if openable_comic
-            && label.double_clicked()
-            && openitgo_parser::traits::is_comic_image_name(&name)
-        {
-            on_open_entry_as_comic(name.clone());
+        if label.double_clicked() {
+            if openable_comic && openitgo_parser::traits::is_comic_image_name(&name) {
+                on_open_entry_as_comic(name.clone());
+            } else {
+                on_open_entry_external(name.clone());
+            }
         }
+        if label.drag_started_by(egui::PointerButton::Primary) {
+            let names = Self::drag_entry_set(&self.selected_names_in_order(), &name);
+            self.start_drag_out(names);
+        }
+        label.on_hover_text("单击预览，双击打开，按住拖出窗口即解压");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(egui::RichText::new(human_size(entry.size)).weak());
-            if let Some(compressed) = entry.compressed_size {
+            ui.label(egui::RichText::new(human_size(size)).weak());
+            if let Some(compressed) = compressed_size {
                 ui.label(egui::RichText::new(format!("压缩 {}", human_size(compressed))).weak());
             }
         });
@@ -796,7 +954,7 @@ mod tests {
     #[test]
     fn apply_listing_result_state_transitions() {
         let mut view = ArchiveView::default();
-        view.apply_listing_result(Ok(vec![entry("a.txt", false, 1)]));
+        view.apply_listing_result(Ok((vec![entry("a.txt", false, 1)], None)));
         assert_eq!(view.state, ArchiveViewState::Ready);
         assert_eq!(view.entries.len(), 1);
 
@@ -825,7 +983,7 @@ mod tests {
         assert_eq!(view.state, ArchiveViewState::NeedPassword);
         assert!(view.password_failed);
         // 带密码尝试成功：Ready 且 password_failed 清除。
-        view.apply_listing_result(Ok(vec![entry("a.txt", false, 1)]));
+        view.apply_listing_result(Ok((vec![entry("a.txt", false, 1)], None)));
         assert_eq!(view.state, ArchiveViewState::Ready);
         assert!(!view.password_failed);
         assert_eq!(view.tried_password.as_deref(), Some("pw"));
@@ -1041,5 +1199,32 @@ mod tests {
             }
             other => panic!("expected Text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn drag_entry_set_prefers_whole_multi_selection() {
+        let selected = vec![
+            "a.txt".to_string(),
+            "b.txt".to_string(),
+            "c.txt".to_string(),
+        ];
+        // 拖动项在多选集合中 → 整个选中集（保持包内顺序）。
+        assert_eq!(ArchiveView::drag_entry_set(&selected, "b.txt"), selected);
+        // 拖动项不在选中集 → 仅单条目。
+        assert_eq!(
+            ArchiveView::drag_entry_set(&selected, "z.txt"),
+            vec!["z.txt".to_string()]
+        );
+        // 单选集合 → 单条目。
+        let single = vec!["a.txt".to_string()];
+        assert_eq!(
+            ArchiveView::drag_entry_set(&single, "a.txt"),
+            vec!["a.txt".to_string()]
+        );
+        // 空选中 → 单条目。
+        assert_eq!(
+            ArchiveView::drag_entry_set(&[], "a.txt"),
+            vec!["a.txt".to_string()]
+        );
     }
 }

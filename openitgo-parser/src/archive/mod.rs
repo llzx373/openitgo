@@ -1,8 +1,10 @@
 //! 通用压缩包浏览：统一列出 ZIP/RAR/7z/TAR 的条目清单，
 //! 解压引擎见同目录 `extract.rs`。
 
+mod encoding;
 mod extract;
 
+pub use encoding::decode_zip_entry_name;
 pub use extract::{extract_archive, ExtractOptions, ExtractProgress};
 
 use crate::traits::ParseError;
@@ -120,7 +122,7 @@ fn list_zip(path: &Path, password: Option<&str>) -> Result<Vec<ArchiveEntry>, Pa
             first_encrypted = Some(i);
         }
         entries.push(ArchiveEntry {
-            name: entry.name().to_string(),
+            name: decode_zip_entry_name(entry.name_raw(), false),
             is_dir: entry.is_dir(),
             size: entry.size(),
             compressed_size: Some(entry.compressed_size()),
@@ -251,6 +253,26 @@ pub fn read_entry(path: &Path, name: &str, password: Option<&str>) -> Result<Vec
     }
 }
 
+/// ZIP 条目名经 `decode_zip_entry_name` 重解码，与 zip crate 内部的
+/// CP437 解码名不再一致，因此 `by_name` 无法命中——改为按索引扫描比较
+/// 解码后的名字（首个命中生效）。
+fn find_zip_index(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    name: &str,
+) -> Result<usize, ParseError> {
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index_raw(i)
+            .map_err(|e| ParseError::InvalidArchive(e.to_string()))?;
+        if decode_zip_entry_name(entry.name_raw(), false) == name {
+            return Ok(i);
+        }
+    }
+    Err(ParseError::InvalidArchive(format!(
+        "entry not found: {name}"
+    )))
+}
+
 fn read_zip_entry(path: &Path, name: &str, password: Option<&str>) -> Result<Vec<u8>, ParseError> {
     use zip::result::ZipError;
     let map_open_err = |e: ZipError| match e {
@@ -264,11 +286,12 @@ fn read_zip_entry(path: &Path, name: &str, password: Option<&str>) -> Result<Vec
     let file = std::fs::File::open(path)?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| ParseError::InvalidArchive(e.to_string()))?;
+    let index = find_zip_index(&mut archive, name)?;
     let mut entry = match password {
         Some(pw) => archive
-            .by_name_decrypt(name, pw.as_bytes())
+            .by_index_decrypt(index, pw.as_bytes())
             .map_err(map_open_err)?,
-        None => archive.by_name(name).map_err(map_open_err)?,
+        None => archive.by_index(index).map_err(map_open_err)?,
     };
     let mut data = Vec::with_capacity(entry.size() as usize);
     entry.read_to_end(&mut data)?;
@@ -352,6 +375,42 @@ fn list_tar(path: &Path) -> Result<Vec<ArchiveEntry>, ParseError> {
         });
     }
     Ok(entries)
+}
+
+/// 读取压缩包注释；非 zip / 无注释 / 读取失败 → None。
+/// RAR/7z/TAR 暂不支持（unrar/sevenz/tar API 不暴露注释），恒 None。
+/// zip 注释无 UTF-8 标志位，按 `decode_zip_entry_name` 同一启发式解码。
+pub fn read_comment(path: &Path) -> Option<String> {
+    if archive_kind(path) != Some(ArchiveKind::Zip) {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let archive = zip::ZipArchive::new(file).ok()?;
+    let raw = archive.comment();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(decode_zip_entry_name(raw, false))
+}
+
+/// Bandizip 式智能解压目录判定：包内文件全部同居单一顶层组件（单个顶层
+/// 目录，或只有一个顶层文件）→ false（直接解压进输出目录）；顶层散乱
+/// （多个顶层文件/目录混合）或没有文件条目 → true（需再包一层同名子目录）。
+pub fn needs_wrapper_dir(entries: &[ArchiveEntry]) -> bool {
+    let mut top: Option<&str> = None;
+    for e in entries.iter().filter(|e| !e.is_dir) {
+        // 取首个非空路径组件（'/' 与 '\' 都算分隔符）。
+        let Some(comp) = e.name.split(['/', '\\']).find(|s| !s.is_empty()) else {
+            continue;
+        };
+        match top {
+            None => top = Some(comp),
+            Some(t) if t == comp => {}
+            Some(_) => return true,
+        }
+    }
+    // 无文件条目 → true（无害）；恰好一个顶层组件 → false。
+    top.is_none()
 }
 
 // pub(crate) 以便 extract.rs 的测试复用造包辅助函数。
@@ -749,5 +808,165 @@ pub(crate) mod tests {
             read_entry(Path::new("a.pdf"), "x", None),
             Err(ParseError::Unsupported)
         ));
+    }
+
+    /// 手写最小 stored zip（原始字节文件名 + 可选归档注释），用于测试
+    /// 非 UTF-8 条目名——zip crate 的 writer 只接受 &str 且会自置 UTF-8 位。
+    pub(crate) fn write_raw_zip(path: &Path, files: &[(&[u8], &[u8])], comment: &[u8]) {
+        let mut out: Vec<u8> = Vec::new();
+        let mut central: Vec<u8> = Vec::new();
+        for (name, data) in files {
+            let mut crc = flate2::Crc::new();
+            crc.update(data);
+            let crc = crc.sum();
+            let offset = out.len() as u32;
+            // local file header
+            out.extend_from_slice(&0x04034b50u32.to_le_bytes());
+            out.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            out.extend_from_slice(&0u16.to_le_bytes()); // flags（不置 UTF-8 位）
+            out.extend_from_slice(&0u16.to_le_bytes()); // method: stored
+            out.extend_from_slice(&0u16.to_le_bytes()); // mod time
+            out.extend_from_slice(&0u16.to_le_bytes()); // mod date
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes()); // extra len
+            out.extend_from_slice(name);
+            out.extend_from_slice(data);
+            // central directory entry
+            central.extend_from_slice(&0x02014b50u32.to_le_bytes());
+            central.extend_from_slice(&20u16.to_le_bytes()); // version made by
+            central.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            central.extend_from_slice(&0u16.to_le_bytes()); // flags
+            central.extend_from_slice(&0u16.to_le_bytes()); // method
+            central.extend_from_slice(&0u16.to_le_bytes()); // mod time
+            central.extend_from_slice(&0u16.to_le_bytes()); // mod date
+            central.extend_from_slice(&crc.to_le_bytes());
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes()); // extra len
+            central.extend_from_slice(&0u16.to_le_bytes()); // file comment len
+            central.extend_from_slice(&0u16.to_le_bytes()); // disk number
+            central.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+            central.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+            central.extend_from_slice(&offset.to_le_bytes());
+            central.extend_from_slice(name);
+        }
+        let cd_offset = out.len() as u32;
+        out.extend_from_slice(&central);
+        // end of central directory
+        out.extend_from_slice(&0x06054b50u32.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        out.extend_from_slice(&0u16.to_le_bytes()); // cd start disk
+        out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&(comment.len() as u16).to_le_bytes());
+        out.extend_from_slice(comment);
+        std::fs::write(path, out).unwrap();
+    }
+
+    #[test]
+    fn list_and_read_zip_shift_jis_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sjis.zip");
+        let (raw_name, _, _) = encoding_rs::SHIFT_JIS.encode("日本語.txt");
+        write_raw_zip(&path, &[(&raw_name, b"hello")], b"");
+        let entries = list_entries(&path, None).unwrap();
+        assert_eq!(entries[0].name, "日本語.txt");
+        // 解码后的名字必须能反向读回条目内容
+        assert_eq!(read_entry(&path, "日本語.txt", None).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn list_and_read_zip_gbk_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("gbk.zip");
+        let (raw_name, _, _) = encoding_rs::GBK.encode("中文漫画.txt");
+        write_raw_zip(&path, &[(&raw_name, b"hello")], b"");
+        let entries = list_entries(&path, None).unwrap();
+        assert_eq!(entries[0].name, "中文漫画.txt");
+        assert_eq!(read_entry(&path, "中文漫画.txt", None).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn list_zip_utf8_name_without_flag_unaffected() {
+        // 未置 UTF-8 标志位但原始字节本身是合法 UTF-8 → 直用，不走 CJK 猜测。
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("utf8.zip");
+        write_raw_zip(&path, &[("中文名.txt".as_bytes(), b"hello")], b"");
+        let entries = list_entries(&path, None).unwrap();
+        assert_eq!(entries[0].name, "中文名.txt");
+    }
+
+    #[test]
+    fn read_comment_roundtrip_and_absence() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 无注释 → None
+        let plain = tmp.path().join("plain.zip");
+        write_test_zip(&plain);
+        assert_eq!(read_comment(&plain), None);
+        // GBK 注释 → 启发式解码
+        let gbk = tmp.path().join("gbk-comment.zip");
+        let (raw_comment, _, _) = encoding_rs::GBK.encode("中文漫画 第一卷");
+        write_raw_zip(&gbk, &[(b"a.txt", b"hi")], &raw_comment);
+        assert_eq!(read_comment(&gbk).as_deref(), Some("中文漫画 第一卷"));
+        // 非 zip → None
+        let tar = tmp.path().join("t.tar.gz");
+        write_test_tar_gz(&tar);
+        assert_eq!(read_comment(&tar), None);
+    }
+
+    fn wrapper_entry(name: &str, is_dir: bool) -> ArchiveEntry {
+        ArchiveEntry {
+            name: name.to_string(),
+            is_dir,
+            size: 0,
+            compressed_size: None,
+        }
+    }
+
+    #[test]
+    fn needs_wrapper_dir_cases() {
+        // 单一顶层目录 → 直接解压
+        let single_dir = [
+            wrapper_entry("sub", true),
+            wrapper_entry("sub/a.png", false),
+            wrapper_entry("sub/b.png", false),
+        ];
+        assert!(!needs_wrapper_dir(&single_dir));
+        // 文件全部同居一个顶层目录（无目录条目）→ 直接解压
+        let implicit_dir = [
+            wrapper_entry("sub/a.png", false),
+            wrapper_entry("sub/b.png", false),
+        ];
+        assert!(!needs_wrapper_dir(&implicit_dir));
+        // 只有一个顶层文件 → 直接解压
+        assert!(!needs_wrapper_dir(&[wrapper_entry("a.png", false)]));
+        // 顶层散乱 → 需包一层
+        let scattered = [
+            wrapper_entry("a.png", false),
+            wrapper_entry("sub/b.png", false),
+        ];
+        assert!(needs_wrapper_dir(&scattered));
+        // 顶层目录 + 裸文件混合 → 需包一层
+        let mixed = [
+            wrapper_entry("sub", true),
+            wrapper_entry("sub/a.png", false),
+            wrapper_entry("loose.txt", false),
+        ];
+        assert!(needs_wrapper_dir(&mixed));
+        // 反斜杠分隔符同样按组件切分
+        let backslash = [
+            wrapper_entry("sub\\a.png", false),
+            wrapper_entry("sub\\b.png", false),
+        ];
+        assert!(!needs_wrapper_dir(&backslash));
+        // 无文件条目 → true（无害）
+        assert!(needs_wrapper_dir(&[]));
+        assert!(needs_wrapper_dir(&[wrapper_entry("sub", true)]));
     }
 }

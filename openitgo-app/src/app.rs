@@ -388,6 +388,8 @@ pub struct ReaderApp {
     /// zip/cbz/rar/cbr 打开时的启发式分流任务：后台列条目，
     /// 按图片占比决定进漫画链路还是压缩包浏览视图。
     archive_router: Option<(PathBuf, AsyncOpener<Vec<ArchiveEntry>>)>,
+    /// 双击压缩包条目的外部打开任务（临时解压 + 系统程序打开）。
+    pending_external_open: Option<AsyncOpener<PathBuf>>,
     pub pending_media_open: Option<PendingMediaOpen>,
     /// 双击图片打开所在文件夹的一次性选项（起始图/强制单页），poll_opener 消费。
     pending_open_options: Option<PendingOpenOptions>,
@@ -505,6 +507,7 @@ impl Default for ReaderApp {
             opener: None,
             ebook_opener: None,
             archive_router: None,
+            pending_external_open: None,
             pending_media_open: None,
             pending_open_options: None,
             pending_covers: HashMap::new(),
@@ -610,6 +613,7 @@ impl eframe::App for ReaderApp {
         }
         self.poll_opener(&ctx);
         self.poll_archive_router(&ctx);
+        self.poll_external_open(&ctx);
         self.poll_password_probe(&ctx);
         self.poll_ebook_opener(&ctx, frame);
         self.poll_media_open(&ctx, frame);
@@ -732,6 +736,8 @@ impl ReaderApp {
         if let Some(path) = initial_open_path(env_open, arg1) {
             app.open_path(path);
         }
+        // 启动时回收临时打开/拖出目录中的陈旧文件（24h，失败静默）。
+        crate::temp_open::clean_stale(crate::temp_open::STALE_MAX_AGE);
         app
     }
 
@@ -1031,6 +1037,9 @@ impl ReaderApp {
                             password,
                             self.settings.extract_threads as usize,
                             self.settings.extract_overwrite,
+                            None,
+                            // 智能解压目录：worker 内先列条目再判定是否建包名子目录。
+                            true,
                         );
                     }
                 }
@@ -2340,6 +2349,10 @@ impl ReaderApp {
             self.archive_view.open(path.to_path_buf());
         }
         self.archive_view.poll();
+        // 拖出（OLE DoDragDrop）/后台解压错误统一进 error_message。
+        if let Some(err) = self.archive_view.drag_error.take() {
+            self.error_message = Some(err);
+        }
         // 带密码列目录成功：记入密码本（对话框确认时已写入会话密码表）。
         if self.archive_view.state == ArchiveViewState::Ready {
             if let Some(pw) = self.archive_view.tried_password.take() {
@@ -2373,6 +2386,7 @@ impl ReaderApp {
             let mut back = false;
             let mut open_as_comic = false;
             let mut entry_as_comic: Option<String> = None;
+            let mut entry_external: Option<String> = None;
             let mut extract_all = false;
             let mut extract_selected: Option<Vec<String>> = None;
             let mut need_password = false;
@@ -2382,6 +2396,7 @@ impl ReaderApp {
                     on_back: &mut || back = true,
                     on_open_as_comic: &mut || open_as_comic = true,
                     on_open_entry_as_comic: &mut |name| entry_as_comic = Some(name),
+                    on_open_entry_external: &mut |name| entry_external = Some(name),
                     on_extract_all: &mut || extract_all = true,
                     on_extract_selected: &mut |sel| extract_selected = Some(sel),
                     on_need_password: &mut || need_password = true,
@@ -2398,6 +2413,19 @@ impl ReaderApp {
             }
             if let Some(name) = entry_as_comic {
                 self.open_entry_as_comic(path, name);
+            }
+            if let Some(name) = entry_external {
+                // 双击非图片条目（或 7z/tar 的图片）：临时解压后系统程序打开。
+                let password = self
+                    .passwords
+                    .get(&password_key(path))
+                    .or_else(|| self.passwords.get(path))
+                    .cloned();
+                self.pending_external_open = Some(crate::temp_open::open_entry_external(
+                    path.to_path_buf(),
+                    name,
+                    password,
+                ));
             }
             if need_password {
                 if let Some(path) = self.archive_view.path.clone() {
@@ -2419,8 +2447,13 @@ impl ReaderApp {
         let Some(path) = self.archive_view.path.clone() else {
             return;
         };
-        let output_dir = extract_output_dir(&self.settings, &path);
+        let base = extract_output_base(&self.settings, &path);
+        // 智能解压目录：包内容无单一顶层目录才建包名子目录。
+        let output_dir =
+            resolve_extract_output(&base, &archive_stem(&path), &self.archive_view.entries);
         let password = self.passwords.get(&password_key(&path)).cloned();
+        // 流式格式引擎不给字节总量：按选中条目 size 求和作估值。
+        let hint = selection_total_bytes(&self.archive_view.entries, selection.as_deref());
         self.extract_manager.start(
             path,
             output_dir,
@@ -2428,6 +2461,8 @@ impl ReaderApp {
             password,
             self.settings.extract_threads as usize,
             self.settings.extract_overwrite,
+            hint,
+            false,
         );
     }
 
@@ -2487,6 +2522,24 @@ impl ReaderApp {
                                     ui.add(
                                         egui::ProgressBar::new(task.fraction()).show_percentage(),
                                     );
+                                    let mut info =
+                                        format!("{}/{} 项", task.done_entries, task.total_entries);
+                                    if task.total_bytes > 0 {
+                                        let pct = task.done_bytes as f64 / task.total_bytes as f64
+                                            * 100.0;
+                                        info += &format!(
+                                            " · {}/{} ({:.0}%)",
+                                            crate::views::archive::human_size(task.done_bytes),
+                                            crate::views::archive::human_size(task.total_bytes),
+                                            pct
+                                        );
+                                    }
+                                    info += &format!(
+                                        " · {} · 剩余 {}",
+                                        task.speed_text(),
+                                        task.eta_text()
+                                    );
+                                    ui.label(egui::RichText::new(info).weak());
                                     if !task.current_entry.is_empty() {
                                         ui.add(
                                             egui::Label::new(
@@ -4248,6 +4301,8 @@ impl ReaderApp {
     fn open_path(&mut self, path: std::path::PathBuf) {
         // 新的打开请求取代在途的启发式分流任务。
         self.archive_router = None;
+        // 多卷 RAR 归一到首卷（存在才换；卷链由 unrar 处理）。
+        let path = normalize_rar_volume_path(&path);
         if is_ebook_file(&path) {
             self.open_ebook(path);
         } else if is_media_file(&path) {
@@ -4263,6 +4318,24 @@ impl ReaderApp {
             self.open_archive_browser(path);
         } else {
             self.open_comic(path);
+        }
+    }
+
+    /// 每帧排空外部打开任务：失败写 error_message；成功无需处理
+    /// （系统程序已在后台线程拉起）。
+    fn poll_external_open(&mut self, ctx: &egui::Context) {
+        let Some(mut opener) = self.pending_external_open.take() else {
+            return;
+        };
+        match opener.poll() {
+            OpenStatus::Loading => {
+                self.pending_external_open = Some(opener);
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            OpenStatus::Ready(Ok(_)) => {}
+            OpenStatus::Ready(Err(e)) => {
+                self.error_message = Some(format!("无法打开条目: {e}"));
+            }
         }
     }
 
@@ -4302,6 +4375,9 @@ impl ReaderApp {
                 ArchiveClass::Comic => self.open_comic(path),
                 ArchiveClass::Files => {
                     self.archive_view.open_with_entries(path.clone(), entries);
+                    // open_with_entries 路径未经过列目录闭包，注释在此同步读
+                    // （只读文件尾 64KB，快）。
+                    self.archive_view.comment = openitgo_parser::archive::read_comment(&path);
                     self.current_view = View::Archive(path);
                     self.error_message = None;
                 }
@@ -4537,20 +4613,81 @@ fn first_working_password(path: &Path, candidates: &[String]) -> Option<String> 
         .cloned()
 }
 
-/// 解压输出目录：设置的 extract_dir 为空时用包同目录，否则用设置的目录；
-/// 两种情况下都以包名建子目录，重名追加 " (N)"。
-fn extract_output_dir(settings: &Settings, archive: &Path) -> PathBuf {
+/// 多卷 RAR 归一到首卷：`xxx.partN.rar`（N>1）→ 同目录 `xxx.part1.rar`
+/// （存在才换）；旧式 `xxx.r00`/`.r01`… → `xxx.rar`（存在才换）。
+/// 其他路径原样返回。卷链本身由 unrar 库处理（文档行为）；本机无 rar.exe，
+/// 多卷场景只做了路径归一化 + 单元测试，未经端到端验证。
+fn normalize_rar_volume_path(path: &Path) -> PathBuf {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return path.to_path_buf();
+    };
+    let lower = name.to_ascii_lowercase();
+    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    // 新分卷：xxx.partN.rar
+    if let Some(base) = lower.strip_suffix(".rar") {
+        if let Some(part_pos) = base.rfind(".part") {
+            let digits = &base[part_pos + 5..];
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                let n: u64 = digits.parse().unwrap_or(0);
+                if n > 1 {
+                    let stem = &name[..part_pos];
+                    let first = parent.join(format!("{stem}.part1.rar"));
+                    if first.exists() {
+                        return first;
+                    }
+                }
+            }
+        }
+        return path.to_path_buf();
+    }
+    // 旧分卷：xxx.r00 / xxx.r01 …（扩展名 r + 两位数字）。
+    if let Some(dot) = lower.rfind('.') {
+        let ext = &lower[dot + 1..];
+        if ext.len() == 3 && ext.starts_with('r') && ext[1..].bytes().all(|b| b.is_ascii_digit()) {
+            let first = parent.join(format!("{}.rar", &name[..dot]));
+            if first.exists() {
+                return first;
+            }
+        }
+    }
+    path.to_path_buf()
+}
+
+/// 浏览视图发起解压的字节量估值：选中文件条目 size 求和（None = 全部文件）；
+/// 全为 0 字节时返回 None（无法估值）。
+fn selection_total_bytes(entries: &[ArchiveEntry], selection: Option<&[String]>) -> Option<u64> {
+    let sum: u64 = entries
+        .iter()
+        .filter(|e| !e.is_dir)
+        .filter(|e| selection.is_none_or(|sel| sel.contains(&e.name)))
+        .map(|e| e.size)
+        .sum();
+    (sum > 0).then_some(sum)
+}
+
+/// 解压基底目录：设置的 extract_dir 为空时用包同目录，否则用设置的目录。
+fn extract_output_base(settings: &Settings, archive: &Path) -> PathBuf {
     let custom = settings.extract_dir.trim();
-    let parent = if custom.is_empty() {
+    if custom.is_empty() {
         archive.parent().map(Path::to_path_buf).unwrap_or_default()
     } else {
         PathBuf::from(custom)
-    };
-    uniquified_subdir(&parent, &archive_stem(archive))
+    }
+}
+
+/// 智能解压目录（Bandizip 语义）：包内容无单一顶层目录时（`needs_wrapper_dir`）
+/// 在基底目录下建 `stem/` 子目录（重名追加 " (N)"）；已有单一顶层目录时
+/// 直接解压进基底目录。
+fn resolve_extract_output(base: &Path, stem: &str, entries: &[ArchiveEntry]) -> PathBuf {
+    if openitgo_parser::archive::needs_wrapper_dir(entries) {
+        uniquified_subdir(base, stem)
+    } else {
+        base.to_path_buf()
+    }
 }
 
 /// `parent/stem`，已存在则 "stem (1)"、"stem (2)"… 直到不重名。
-fn uniquified_subdir(parent: &Path, stem: &str) -> PathBuf {
+pub(crate) fn uniquified_subdir(parent: &Path, stem: &str) -> PathBuf {
     let candidate = parent.join(stem);
     if !candidate.exists() {
         return candidate;
@@ -4565,7 +4702,7 @@ fn uniquified_subdir(parent: &Path, stem: &str) -> PathBuf {
 }
 
 /// 包名去扩展名；.tar.gz 等双后缀一并去除。
-fn archive_stem(archive: &Path) -> String {
+pub(crate) fn archive_stem(archive: &Path) -> String {
     let Some(name) = archive.file_name().and_then(|s| s.to_str()) else {
         return "archive".to_string();
     };
@@ -5093,6 +5230,7 @@ mod tests {
                 opener: None,
                 ebook_opener: None,
                 archive_router: None,
+                pending_external_open: None,
                 pending_media_open: None,
                 pending_open_options: None,
                 pending_covers: HashMap::new(),
@@ -5151,25 +5289,120 @@ mod tests {
     }
 
     #[test]
-    fn extract_output_dir_uses_custom_dir_when_set() {
+    fn normalize_rar_volume_path_rewrites_to_first_volume() {
+        let dir = tempfile::tempdir().unwrap();
+        let part1 = dir.path().join("comic.part1.rar");
+        let part3 = dir.path().join("comic.part3.rar");
+        std::fs::write(&part1, b"x").unwrap();
+        std::fs::write(&part3, b"x").unwrap();
+        // N>1 且首卷存在 → 归一到 part1。
+        assert_eq!(normalize_rar_volume_path(&part3), part1);
+        // part1 本身不动。
+        assert_eq!(normalize_rar_volume_path(&part1), part1);
+        // 首卷不存在 → 原样。
+        let orphan = dir.path().join("other.part2.rar");
+        assert_eq!(normalize_rar_volume_path(&orphan), orphan);
+        // 大小写不敏感（保留原 stem 大小写；Windows 文件系统大小写不敏感）。
+        let upper = dir.path().join("COMIC.PART2.RAR");
+        std::fs::write(&upper, b"x").unwrap();
+        assert_eq!(
+            normalize_rar_volume_path(&upper),
+            dir.path().join("COMIC.part1.rar")
+        );
+        // 旧式 .r00 → .rar（.rar 存在才换）。
+        let old = dir.path().join("old.r00");
+        std::fs::write(&old, b"x").unwrap();
+        assert_eq!(normalize_rar_volume_path(&old), old);
+        let old_rar = dir.path().join("old.rar");
+        std::fs::write(&old_rar, b"x").unwrap();
+        assert_eq!(normalize_rar_volume_path(&old), old_rar);
+        // 非分卷/非 RAR 原样返回。
+        let zip = dir.path().join("pack.zip");
+        assert_eq!(normalize_rar_volume_path(&zip), zip);
+        let plain = dir.path().join("plain.rar");
+        assert_eq!(normalize_rar_volume_path(&plain), plain);
+        // 无扩展名 / 无文件名组件不 panic。
+        assert_eq!(
+            normalize_rar_volume_path(Path::new("noext")),
+            PathBuf::from("noext")
+        );
+    }
+
+    #[test]
+    fn selection_total_bytes_sums_selected_files() {
+        let entries = vec![
+            ArchiveEntry {
+                name: "d/".into(),
+                is_dir: true,
+                size: 0,
+                compressed_size: None,
+            },
+            ArchiveEntry {
+                name: "a.png".into(),
+                is_dir: false,
+                size: 10,
+                compressed_size: None,
+            },
+            ArchiveEntry {
+                name: "d/b.png".into(),
+                is_dir: false,
+                size: 20,
+                compressed_size: None,
+            },
+        ];
+        // 全部文件。
+        assert_eq!(selection_total_bytes(&entries, None), Some(30));
+        // 仅选中项（目录条目不计）。
+        let sel = vec!["d/".to_string(), "d/b.png".to_string()];
+        assert_eq!(selection_total_bytes(&entries, Some(&sel)), Some(20));
+        // 零字节 → None（无法估值）。
+        let empty_sel: Vec<String> = Vec::new();
+        assert_eq!(selection_total_bytes(&entries, Some(&empty_sel)), None);
+    }
+
+    #[test]
+    fn extract_output_base_uses_custom_dir_when_set() {
         let tmp = tempfile::tempdir().unwrap();
         let custom = tmp.path().join("out");
-        std::fs::create_dir(&custom).unwrap();
         let archive = tmp.path().join("pack.cbz");
-        // 空设置：包同目录的同名子目录。
-        let default_dir = extract_output_dir(&Settings::default(), &archive);
-        assert_eq!(default_dir, tmp.path().join("pack"));
-        // 自定义目录：设置目录下的包名子目录。
+        // 空设置：包同目录。
+        assert_eq!(
+            extract_output_base(&Settings::default(), &archive),
+            tmp.path().to_path_buf()
+        );
+        // 自定义目录：设置目录本身（包名子目录由 resolve_extract_output 决定）。
         let settings = Settings {
             extract_dir: custom.display().to_string(),
             ..Default::default()
         };
-        let dir = extract_output_dir(&settings, &archive);
-        assert_eq!(dir, custom.join("pack"));
-        // 重名时追加 " (1)"。
-        std::fs::create_dir(custom.join("pack")).unwrap();
-        let dir = extract_output_dir(&settings, &archive);
-        assert_eq!(dir, custom.join("pack (1)"));
+        assert_eq!(extract_output_base(&settings, &archive), custom);
+    }
+
+    #[test]
+    fn resolve_extract_output_smart_wrapper_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let file_entry = |name: &str| ArchiveEntry {
+            name: name.to_string(),
+            is_dir: false,
+            size: 1,
+            compressed_size: None,
+        };
+        // 多个顶层文件 → 建包名子目录。
+        let scattered = vec![file_entry("a.png"), file_entry("b.png")];
+        assert_eq!(
+            resolve_extract_output(base, "pack", &scattered),
+            base.join("pack")
+        );
+        // 重名追加 " (1)"。
+        std::fs::create_dir(base.join("pack")).unwrap();
+        assert_eq!(
+            resolve_extract_output(base, "pack", &scattered),
+            base.join("pack (1)")
+        );
+        // 单一顶层目录 → 直接解压进基底目录。
+        let wrapped = vec![file_entry("vol1/a.png"), file_entry("vol1/b.png")];
+        assert_eq!(resolve_extract_output(base, "pack", &wrapped), base);
     }
 
     #[test]
@@ -5205,18 +5438,6 @@ mod tests {
         assert_eq!(archive_stem(Path::new("/x/b.tar.gz")), "b");
         assert_eq!(archive_stem(Path::new("/x/c.TAR.XZ")), "c");
         assert_eq!(archive_stem(Path::new("/x/d.tgz")), "d");
-    }
-
-    #[test]
-    fn extract_output_dir_default_uniquifies() {
-        let tmp = tempfile::tempdir().unwrap();
-        let archive = tmp.path().join("pack.cbz");
-        std::fs::write(&archive, b"x").unwrap();
-        let first = extract_output_dir(&Settings::default(), &archive);
-        assert_eq!(first, tmp.path().join("pack"));
-        std::fs::create_dir_all(&first).unwrap();
-        let second = extract_output_dir(&Settings::default(), &archive);
-        assert_eq!(second, tmp.path().join("pack (1)"));
     }
 
     #[test]

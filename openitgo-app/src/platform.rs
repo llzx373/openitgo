@@ -796,6 +796,7 @@ pub mod macos {
 
 #[cfg(target_os = "windows")]
 pub mod windows {
+    pub mod drag_out;
     pub mod file_assoc;
     pub mod mpv_view;
 }
@@ -894,6 +895,26 @@ pub mod file_assoc {
 /// Unified file-association API (`crate::platform::file_assoc`)。
 #[cfg(target_os = "windows")]
 pub use windows::file_assoc;
+
+/// OLE 拖出解压 stub（非 Windows）：`is_supported` 恒 false，`do_drag_drop` 返回 Err。
+#[cfg(not(target_os = "windows"))]
+pub mod drag_out {
+    use std::path::PathBuf;
+
+    /// 非 Windows 不支持 OLE 拖出。
+    pub fn is_supported() -> bool {
+        false
+    }
+
+    /// 非 Windows 不支持 OLE 拖出。
+    pub fn do_drag_drop(_files: &[PathBuf]) -> Result<(), String> {
+        Err("拖出解压仅支持 Windows".to_string())
+    }
+}
+
+/// Unified drag-out API (`crate::platform::drag_out`)。
+#[cfg(target_os = "windows")]
+pub use windows::drag_out;
 
 /// Unified video-view API used by views/media.rs (`PendingVideoView`
 /// two-phase construction + `MpvNativeView`).

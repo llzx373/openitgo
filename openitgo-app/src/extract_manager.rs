@@ -7,12 +7,34 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// 同时运行的解压任务上限，超出排队。
 pub const MAX_CONCURRENT_EXTRACTS: usize = 4;
 
 /// 引擎取消约定的 Failed 消息（extract.rs 模块头注释）。
 const CANCELLED_MESSAGE: &str = "已取消";
+
+/// 速度文本：不足 1s 样本不可靠显示 "--"，否则 "x.x MB/s"。
+fn format_speed(done_bytes: u64, elapsed: Duration) -> String {
+    let secs = elapsed.as_secs_f64();
+    if secs < 1.0 {
+        return "--".to_string();
+    }
+    format!("{:.1} MB/s", done_bytes as f64 / secs / 1e6)
+}
+
+/// ETA 文本：总量已知且速度 > 0 → 剩余时间的 mm:ss；否则 "--"。
+fn format_eta(done_bytes: u64, total_bytes: u64, elapsed: Duration) -> String {
+    let secs = elapsed.as_secs_f64();
+    if total_bytes == 0 || secs < 1.0 || done_bytes == 0 {
+        return "--".to_string();
+    }
+    let rate = done_bytes as f64 / secs;
+    let remaining = total_bytes.saturating_sub(done_bytes) as f64 / rate;
+    let total_secs = remaining.round() as u64;
+    format!("{:02}:{:02}", total_secs / 60, total_secs % 60)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtractTaskStatus {
@@ -45,6 +67,10 @@ pub struct ExtractTask {
     /// 最近完成的条目名（进行中显示用）。
     pub current_entry: String,
     pub error: Option<String>,
+    /// Started 事件到达时刻（速度/ETA 计时基准）。
+    pub started_at: Option<Instant>,
+    /// 引擎不给总量时（RAR/7z/TAR）的发起方估值（浏览视图按条目求和）。
+    total_bytes_hint: Option<u64>,
     cancel: Arc<AtomicBool>,
 }
 
@@ -66,6 +92,24 @@ impl ExtractTask {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| self.archive_path.display().to_string())
     }
+
+    /// 实时速度文本（"--" 表示样本不足）。
+    pub fn speed_text(&self) -> String {
+        let elapsed = self
+            .started_at
+            .map(|t| t.elapsed())
+            .unwrap_or(Duration::ZERO);
+        format_speed(self.done_bytes, elapsed)
+    }
+
+    /// 预计剩余时间文本（"--" 表示不可估）。
+    pub fn eta_text(&self) -> String {
+        let elapsed = self
+            .started_at
+            .map(|t| t.elapsed())
+            .unwrap_or(Duration::ZERO);
+        format_eta(self.done_bytes, self.total_bytes, elapsed)
+    }
 }
 
 /// 排队中的解压请求（任务行已建，工作线程待启动）。
@@ -75,6 +119,9 @@ struct PendingExtract {
     output_dir: PathBuf,
     selection: Option<Vec<String>>,
     options: ExtractOptions,
+    /// 智能解压目录：worker 内先列条目判定是否追加包名子目录
+    /// （库卡片「解压到…」路径在 UI 线程没有条目清单）。
+    smart_wrap: bool,
 }
 
 /// `poll` 一帧的汇总：供 app 写 `error_message` / 决定重绘节奏。
@@ -128,6 +175,10 @@ impl ExtractManager {
     }
 
     /// 启动一个解压任务，返回任务 id；超过并发上限时排队。
+    /// `total_bytes_hint`：流式格式（RAR/7z/TAR）引擎不给字节总量时，
+    /// 用发起方估值顶替（浏览视图按选中条目 size 求和；其他入口传 None）。
+    /// `smart_wrap`：true 时 worker 先列条目按 `needs_wrapper_dir` 判定，
+    /// 需要才在 `output_dir`（基底）下追加包名子目录。
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         &mut self,
@@ -137,6 +188,8 @@ impl ExtractManager {
         password: Option<String>,
         threads: usize,
         overwrite: bool,
+        total_bytes_hint: Option<u64>,
+        smart_wrap: bool,
     ) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
@@ -167,6 +220,8 @@ impl ExtractManager {
             done_bytes: 0,
             current_entry: String::new(),
             error: None,
+            started_at: None,
+            total_bytes_hint,
             cancel: cancel.clone(),
         });
         if status == ExtractTaskStatus::Running {
@@ -178,6 +233,7 @@ impl ExtractManager {
                 selection,
                 options,
                 cancel,
+                smart_wrap,
             );
         } else {
             self.pending.push_back(PendingExtract {
@@ -186,6 +242,7 @@ impl ExtractManager {
                 output_dir,
                 selection,
                 options,
+                smart_wrap,
             });
         }
         self.panel_open = true;
@@ -227,7 +284,10 @@ impl ExtractManager {
                     total_bytes,
                 } => {
                     task.total_entries = total_entries;
-                    task.total_bytes = total_bytes;
+                    // 流式格式（RAR/7z/TAR）引擎不给总量（None），
+                    // 用发起方估值顶替，再退回按条目数估算进度。
+                    task.total_bytes = total_bytes.or(task.total_bytes_hint).unwrap_or(0);
+                    task.started_at = Some(Instant::now());
                 }
                 ExtractProgress::EntryDone { name, bytes } => {
                     task.done_entries += 1;
@@ -288,6 +348,7 @@ impl ExtractManager {
                 p.selection,
                 p.options,
                 cancel,
+                p.smart_wrap,
             );
         }
     }
@@ -297,6 +358,7 @@ impl ExtractManager {
 /// Err 不发 Failed 事件，这里兜底补发，保证任务必然收敛到终态。
 /// 引擎只认 `Sender<ExtractProgress>`（不带任务 id），因此每任务一条私有
 /// 通道 + 一条转发线程贴上 id 送入管理器的汇总通道。
+#[allow(clippy::too_many_arguments)]
 fn spawn_worker(
     tx: &Sender<(u64, ExtractProgress)>,
     id: u64,
@@ -305,6 +367,7 @@ fn spawn_worker(
     selection: Option<Vec<String>>,
     options: ExtractOptions,
     cancel: Arc<AtomicBool>,
+    smart_wrap: bool,
 ) {
     let tx = tx.clone();
     let (task_tx, task_rx) = crossbeam_channel::unbounded::<ExtractProgress>();
@@ -318,6 +381,21 @@ fn spawn_worker(
         }
     });
     std::thread::spawn(move || {
+        // 智能解压目录：提取本来就在后台线程，先列条目判定是否加包名子目录；
+        // 列目录失败按「需要子目录」处理（与原行为一致，也最不容易弄脏基底目录）。
+        let output_dir = if smart_wrap {
+            let wrap =
+                openitgo_parser::archive::list_entries(&archive_path, options.password.as_deref())
+                    .map(|entries| openitgo_parser::archive::needs_wrapper_dir(&entries))
+                    .unwrap_or(true);
+            if wrap {
+                crate::app::uniquified_subdir(&output_dir, &crate::app::archive_stem(&archive_path))
+            } else {
+                output_dir
+            }
+        } else {
+            output_dir
+        };
         let result = extract_archive(
             &archive_path,
             &output_dir,
@@ -353,6 +431,8 @@ mod tests {
             done_bytes: 0,
             current_entry: String::new(),
             error: None,
+            started_at: None,
+            total_bytes_hint: None,
             cancel: Arc::new(AtomicBool::new(false)),
         });
         m.next_id = m.next_id.max(id);
@@ -372,6 +452,8 @@ mod tests {
             None,
             0,
             false,
+            None,
+            false,
         );
         let task = m.tasks.iter().find(|t| t.id == id).unwrap();
         assert_eq!(task.status, ExtractTaskStatus::Queued);
@@ -387,7 +469,7 @@ mod tests {
             1,
             ExtractProgress::Started {
                 total_entries: 2,
-                total_bytes: 100,
+                total_bytes: Some(100),
             },
         ))
         .unwrap();
@@ -472,6 +554,8 @@ mod tests {
             None,
             0,
             false,
+            None,
+            false,
         );
         m.cancel(id);
         let task = m.tasks.iter().find(|t| t.id == id).unwrap();
@@ -508,6 +592,8 @@ mod tests {
                 done_bytes: 0,
                 current_entry: String::new(),
                 error: None,
+                started_at: None,
+                total_bytes_hint: None,
                 cancel: Arc::new(AtomicBool::new(false)),
             });
             m.pending.push_back(PendingExtract {
@@ -520,6 +606,7 @@ mod tests {
                     threads: 0,
                     overwrite: false,
                 },
+                smart_wrap: false,
             });
         }
         m.promote_pending();
@@ -545,6 +632,7 @@ mod tests {
                 threads: 0,
                 overwrite: false,
             },
+            smart_wrap: false,
         });
         push_task(&mut m, 99, ExtractTaskStatus::Queued);
         m.promote_pending();
@@ -568,5 +656,55 @@ mod tests {
         task.total_bytes = 200;
         task.done_bytes = 50;
         assert!((task.fraction() - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn started_event_falls_back_to_total_bytes_hint() {
+        let mut m = manager();
+        push_task(&mut m, 1, ExtractTaskStatus::Running);
+        m.tasks[0].total_bytes_hint = Some(500);
+        // 流式格式：Started 不带总量 → 用 hint。
+        m.tx.send((
+            1,
+            ExtractProgress::Started {
+                total_entries: 3,
+                total_bytes: None,
+            },
+        ))
+        .unwrap();
+        m.poll();
+        assert_eq!(m.tasks[0].total_bytes, 500);
+        assert!(m.tasks[0].started_at.is_some());
+        // ZIP：引擎给了总量 → 引擎优先。
+        push_task(&mut m, 2, ExtractTaskStatus::Running);
+        m.tasks[1].total_bytes_hint = Some(500);
+        m.tx.send((
+            2,
+            ExtractProgress::Started {
+                total_entries: 3,
+                total_bytes: Some(900),
+            },
+        ))
+        .unwrap();
+        m.poll();
+        assert_eq!(m.tasks[1].total_bytes, 900);
+    }
+
+    #[test]
+    fn format_speed_and_eta() {
+        // 不足 1s：样本不可靠。
+        assert_eq!(format_speed(10_000_000, Duration::from_millis(500)), "--");
+        assert_eq!(
+            format_speed(20_000_000, Duration::from_secs(2)),
+            "10.0 MB/s"
+        );
+        // 总量未知/零进度/样本不足 → "--"。
+        assert_eq!(format_eta(0, 100, Duration::from_secs(2)), "--");
+        assert_eq!(format_eta(10, 0, Duration::from_secs(2)), "--");
+        assert_eq!(format_eta(10, 100, Duration::from_millis(500)), "--");
+        // 2s 完成 50/100 → 速率 25/s，剩 50 → 2s → 00:02。
+        assert_eq!(format_eta(50, 100, Duration::from_secs(2)), "00:02");
+        // 2s 完成 100/6100 → 剩 6000/50=120s → 02:00。
+        assert_eq!(format_eta(100, 6100, Duration::from_secs(2)), "02:00");
     }
 }

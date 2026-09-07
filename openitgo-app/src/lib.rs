@@ -7,6 +7,7 @@ pub mod loader;
 pub mod opener;
 pub mod platform;
 pub mod shortcuts;
+pub mod temp_open;
 pub mod theme;
 pub mod timing;
 pub mod views;

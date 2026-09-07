@@ -49,6 +49,10 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Wind
 libmpv-sys = "3.1"
 # HKCU\Software\Classes 文件关联注册（platform/windows/file_assoc.rs）。
 winreg = "0.55"
+# OLE 拖出解压（platform/windows/drag_out.rs）：IDataObject(CF_HDROP)/IDropSource/DoDragDrop。
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_System_Memory", "Win32_Graphics_Gdi", "Win32_UI_Shell"] }
+# `#[implement]` 宏展开引用 windows_core 根 crate，需直接依赖。
+windows-core = "0.61"
 
 [dev-dependencies]
 tempfile = "3.14"

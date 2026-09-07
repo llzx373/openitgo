@@ -31,10 +31,13 @@ pub fn parse_zip(path: &Path, password: Option<&str>) -> Result<Comic, ParseErro
     for i in 0..archive.len() {
         // The `by_index` temporary borrows `archive` until this statement
         // ends, so the decrypt retry happens in a separate statement below.
+        // 条目名经 decode_zip_entry_name 重解码（zip crate 对非 UTF-8 名字
+        // 按 CP437 解码会乱码；UTF-8 标志位未公开暴露，靠原始字节自判）。
         let encrypted = match archive.by_index(i) {
             Ok(entry) => {
-                if entry.is_file() && is_comic_image_name(entry.name()) {
-                    entries.push((i, entry.name().to_string()));
+                let name = crate::archive::decode_zip_entry_name(entry.name_raw(), false);
+                if entry.is_file() && is_comic_image_name(&name) {
+                    entries.push((i, name));
                 }
                 false
             }
@@ -51,8 +54,9 @@ pub fn parse_zip(path: &Path, password: Option<&str>) -> Result<Comic, ParseErro
             };
             match archive.by_index_decrypt(i, pw.as_bytes()) {
                 Ok(entry) => {
-                    if entry.is_file() && is_comic_image_name(entry.name()) {
-                        entries.push((i, entry.name().to_string()));
+                    let name = crate::archive::decode_zip_entry_name(entry.name_raw(), false);
+                    if entry.is_file() && is_comic_image_name(&name) {
+                        entries.push((i, name));
                     }
                 }
                 Err(zip::result::ZipError::InvalidPassword) => {
@@ -181,6 +185,22 @@ mod tests {
         }
         let comic = ZipParser::parse(&path).unwrap();
         assert_eq!(comic.volumes[0].pages.len(), IMAGE_EXTENSIONS.len());
+    }
+
+    #[test]
+    fn test_parse_cbz_decodes_shift_jis_names() {
+        // 非 UTF-8 原始条目名（手写 stored zip，未置 UTF-8 标志位）：
+        // 页面名按 CJK 启发式解码，而非 CP437 乱码。
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sjis.cbz");
+        let (raw_name, _, _) = encoding_rs::SHIFT_JIS.encode("日本語01.png");
+        crate::archive::tests::write_raw_zip(&path, &[(&raw_name, b"fake")], b"");
+        let comic = ZipParser::parse(&path).unwrap();
+        assert_eq!(comic.volumes[0].pages.len(), 1);
+        match &comic.volumes[0].pages[0].source {
+            PageSource::ZipEntry { name, .. } => assert_eq!(name, "日本語01.png"),
+            other => panic!("unexpected source: {other:?}"),
+        }
     }
 
     fn write_encrypted_cbz(path: &std::path::Path, password: &str) {
