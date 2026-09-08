@@ -43,6 +43,19 @@ pub fn decode_zip_entry_name(raw: &[u8], utf8_flag: bool) -> String {
     WINDOWS_1252.decode_without_bom_handling(raw).0.into_owned()
 }
 
+/// 猜测并解码文本字节：严格 UTF-8 成功直接返回；否则经 chardetng 统计
+/// 识别（GBK/EUC-KR/Big5/…）并严格解码（无 replacement 才接受），
+/// 全部失败返回 None。用于压缩包文本预览（GBK 编码的 txt 等）。
+pub fn decode_text_guess(bytes: &[u8]) -> Option<String> {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return Some(s.to_string());
+    }
+    let mut detector = chardetng::EncodingDetector::new();
+    detector.feed(bytes, true);
+    let guessed = detector.guess(None, true);
+    strict(guessed, bytes)
+}
+
 fn strict(encoding: &'static encoding_rs::Encoding, raw: &[u8]) -> Option<String> {
     encoding
         .decode_without_bom_handling_and_without_replacement(raw)
@@ -125,5 +138,25 @@ mod tests {
         let raw = b"\xff.txt";
         let expected = WINDOWS_1252.decode_without_bom_handling(raw).0.into_owned();
         assert_eq!(decode_zip_entry_name(raw, false), expected);
+    }
+
+    #[test]
+    fn decode_text_guess_utf8_and_gbk() {
+        assert_eq!(
+            decode_text_guess("你好 world".as_bytes()),
+            Some("你好 world".to_string())
+        );
+        // "你好，世界！这是一段用于编码识别的中文测试文本。" 的 GBK 编码
+        // （chardetng 是统计识别，样本太短不可靠，故用较长句）。
+        let gbk: &[u8] = &[
+            0xC4, 0xE3, 0xBA, 0xC3, 0xA3, 0xAC, 0xCA, 0xC0, 0xBD, 0xE7, 0xA3, 0xA1, 0xD5, 0xE2,
+            0xCA, 0xC7, 0xD2, 0xBB, 0xB6, 0xCE, 0xD3, 0xC3, 0xD3, 0xDA, 0xB1, 0xE0, 0xC2, 0xEB,
+            0xCA, 0xB6, 0xB1, 0xF0, 0xB5, 0xC4, 0xD6, 0xD0, 0xCE, 0xC4, 0xB2, 0xE2, 0xCA, 0xD4,
+            0xCE, 0xC4, 0xB1, 0xBE, 0xA1, 0xA3,
+        ];
+        assert_eq!(
+            decode_text_guess(gbk),
+            Some("你好，世界！这是一段用于编码识别的中文测试文本。".to_string())
+        );
     }
 }

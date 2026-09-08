@@ -400,7 +400,9 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
 - **图标字体（egui_phosphor_icons）**：图标经 `icons::X`（`Icon`）以
   `FontFamily::Name("phosphor-regular")` 渲染，并由
   `fonts::setup_fonts` 把 `phosphor-icons` 追加进 Proportional 回退链以支持
-  "图标+文字" 混排字符串。**字体未注册时 epaint 0.35 直接 panic**（旧
+  "图标+文字" 混排字符串；系统 CJK 字体（`cjk`）同时挂进 Proportional 与
+  Monospace 回退链（Monospace 用于压缩包预览面板文本，缺挂会中文豆腐块；
+  非 UTF-8 文本经 `decode_text_guess` chardetng 识别 GBK 等编码）。**字体未注册时 epaint 0.35 直接 panic**（旧
   egui-phosphor 是静默豆腐块），所以任何构造 `ReaderApp` 的 example
   都必须在 `run_native` creator 里先调 `openitgo_app::fonts::setup_fonts`
   （`fonts` 模块为此在 lib.rs 公开）。带 UI 的 example 还需每帧

@@ -45,6 +45,11 @@ pub fn setup_fonts(ctx: &egui::Context) {
             if let Some(proportional) = fonts.families.get_mut(&FontFamily::Proportional) {
                 proportional.push("cjk".to_owned());
             }
+            // 预览面板等用 Monospace 渲染的文本同样需要 CJK 回退，
+            // 否则中文显示为豆腐块。
+            if let Some(monospace) = fonts.families.get_mut(&FontFamily::Monospace) {
+                monospace.push("cjk".to_owned());
+            }
         }
     }
 

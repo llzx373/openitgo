@@ -4,7 +4,7 @@
 mod encoding;
 mod extract;
 
-pub use encoding::decode_zip_entry_name;
+pub use encoding::{decode_text_guess, decode_zip_entry_name};
 pub use extract::{extract_archive, ExtractOptions, ExtractProgress};
 
 use crate::traits::ParseError;

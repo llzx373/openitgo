@@ -1283,8 +1283,8 @@ impl ArchiveView {
     }
 }
 
-/// 后台读取并分类预览内容：图片解码、UTF-8 文本（嗅探前 256KB）、
-/// 其余不支持；超过 64MB 的条目不读取。
+/// 后台读取并分类预览内容：图片解码、文本（UTF-8 直读，否则 chardetng
+/// 识别 GBK 等编码，嗅探前 256KB）、其余不支持；超过 64MB 的条目不读取。
 fn load_preview(
     path: &Path,
     entry_name: &str,
@@ -1315,12 +1315,7 @@ fn classify_preview_bytes(name: &str, bytes: &[u8]) -> PreviewData {
         };
     }
     let prefix = &bytes[..bytes.len().min(TEXT_SNIFF_BYTES)];
-    let text = match std::str::from_utf8(prefix) {
-        Ok(s) => Some(s),
-        Err(e) if e.valid_up_to() > 0 => std::str::from_utf8(&prefix[..e.valid_up_to()]).ok(),
-        Err(_) => None,
-    };
-    match text {
+    match openitgo_parser::archive::decode_text_guess(prefix) {
         Some(s) if !s.contains('\0') => {
             let mut truncated: String = s.chars().take(TEXT_PREVIEW_MAX_CHARS).collect();
             if s.chars().count() > TEXT_PREVIEW_MAX_CHARS {
@@ -1723,14 +1718,24 @@ mod tests {
             classify_preview_bytes("a.bin", b"ab\0cd"),
             PreviewData::Unsupported
         ));
-        // 起始即非法 UTF-8 → 不支持。
+        // 起始即非法 UTF-8 且无法识别 → 不支持。
         assert!(matches!(
             classify_preview_bytes("a.bin", &[0xFF, 0xFE, 0x00]),
             PreviewData::Unsupported
         ));
-        // 前段是合法 UTF-8、后段非法 → 取合法前缀。
-        match classify_preview_bytes("a.txt", &[b'a', b'b', 0xFF]) {
-            PreviewData::Text(t) => assert_eq!(t, "ab"),
+        // GBK 编码的中文文本经 chardetng 识别后可预览
+        // （"你好，世界！这是一段用于编码识别的中文测试文本。" 的 GBK 字节；
+        // 统计识别需要较长样本）。
+        let gbk: &[u8] = &[
+            0xC4, 0xE3, 0xBA, 0xC3, 0xA3, 0xAC, 0xCA, 0xC0, 0xBD, 0xE7, 0xA3, 0xA1, 0xD5, 0xE2,
+            0xCA, 0xC7, 0xD2, 0xBB, 0xB6, 0xCE, 0xD3, 0xC3, 0xD3, 0xDA, 0xB1, 0xE0, 0xC2, 0xEB,
+            0xCA, 0xB6, 0xB1, 0xF0, 0xB5, 0xC4, 0xD6, 0xD0, 0xCE, 0xC4, 0xB2, 0xE2, 0xCA, 0xD4,
+            0xCE, 0xC4, 0xB1, 0xBE, 0xA1, 0xA3,
+        ];
+        match classify_preview_bytes("a.txt", gbk) {
+            PreviewData::Text(t) => {
+                assert_eq!(t, "你好，世界！这是一段用于编码识别的中文测试文本。")
+            }
             other => panic!("expected Text, got {other:?}"),
         }
     }
