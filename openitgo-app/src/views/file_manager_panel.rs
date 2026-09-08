@@ -260,6 +260,16 @@ impl FsPanel {
         rows.get(row - 1).map(|&i| self.entries[i].path.clone())
     }
 
+    /// 焦点行对应的条目（「..」行/无焦点/越界 → None）。预览跟随用。
+    pub fn focused_entry(&mut self) -> Option<FsEntry> {
+        let row = self.focus?;
+        if row == 0 {
+            return None;
+        }
+        let rows = self.rows();
+        rows.get(row - 1).map(|&i| self.entries[i].clone())
+    }
+
     fn set_row_selected(&mut self, row: usize, on: bool) {
         if let Some(path) = self.row_path(row) {
             if on {

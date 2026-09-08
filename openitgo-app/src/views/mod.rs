@@ -6,5 +6,6 @@ pub mod file_manager_panel;
 pub mod file_manager_rows;
 pub mod library;
 pub mod media;
+pub mod preview_bytes;
 pub mod reader;
 pub mod settings;

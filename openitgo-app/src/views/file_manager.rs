@@ -1,18 +1,21 @@
 //! 双栏文件管理器视图（Total Commander 形态）：左右两个 `FsPanel` 各自独立
 //! 浏览本地文件系统，Tab 切换焦点栏，单击/Ctrl/Shift 选择，双击分发打开
 //! （目录 → 栏内进入；压缩包 → Archive 视图；其余 → open_path 分发）。
-//! 单栏模式右半为预览面板（本阶段为占位，预览本体在阶段三）。
+//! 单栏模式右半为预览面板（图片/文本/元信息占位，选中即预览）；
+//! 双栏模式 F3 对焦点文件弹临时预览窗，复用同一预览管线。
 //!
 //! 行渲染严格遵循 AGENTS.md 的列布局约定（与 archive.rs 明细列表同范式）：
 //! 固定行高 + show_rows 虚拟化、item_spacing.y 归零、行内容 scope 内
 //! interact_size.y 压回 ROW_HEIGHT-4、scope 后 advance_cursor_after_rect
 //! 钉回行底、右两列 painter.text 右对齐直绘（禁止 RTL 嵌套）。
 
+use crate::opener::{AsyncOpener, OpenStatus};
 use crate::views::archive::{format_mtime, human_size};
 use crate::views::file_manager_panel::{
     FocusMove, FsPanel, PanelLoadState, COL_RIGHT_PAD, ROW_HEIGHT,
 };
 use crate::views::file_manager_rows::{FsEntry, SortKey};
+use crate::views::preview_bytes::{is_previewable_name, load_file_preview, PreviewData};
 use egui_phosphor_icons::{icons, Icon};
 use openitgo_parser::archive::archive_kind;
 use std::path::{Component, Path, PathBuf};
@@ -44,6 +47,21 @@ pub struct FileManagerView {
     saved_ratio: f32,
     /// 单栏模式预览面板宽度占比（拖动分隔条可调）。
     preview_ratio: f32,
+    /// 当前预览目标文件（「选中即预览」：焦点行落到的文件）。
+    preview_path: Option<PathBuf>,
+    /// 预览目标的条目快照（元信息占位用；目录列举刷新后可能已失效）。
+    preview_entry: Option<FsEntry>,
+    /// 在途的后台预览读取。
+    preview: Option<AsyncOpener<PreviewData>>,
+    /// poll 拿到、待 ui() 上传为纹理的图片。
+    pending_preview_image: Option<egui::ColorImage>,
+    preview_tex: Option<egui::TextureHandle>,
+    preview_text: Option<String>,
+    preview_note: Option<String>,
+    /// 图片预览「原始尺寸」模式（false = 适应宽度）。
+    preview_full_size: bool,
+    /// F3 临时预览弹窗开关（双栏模式）。
+    preview_window_open: bool,
 }
 
 /// 帧内意图：行内交互写入，帧尾统一触发回调（避免回调嵌套借用）。
@@ -109,6 +127,15 @@ impl FileManagerView {
             active: 0,
             saved_ratio: ratio,
             preview_ratio: 0.35,
+            preview_path: None,
+            preview_entry: None,
+            preview: None,
+            pending_preview_image: None,
+            preview_tex: None,
+            preview_text: None,
+            preview_note: None,
+            preview_full_size: false,
+            preview_window_open: false,
         }
     }
 
@@ -123,12 +150,28 @@ impl FileManagerView {
 
         // 每帧排空两栏的列举结果；Loading 期间主动重绘（egui 空闲不重绘）。
         let mut loading = false;
+        let mut drop_preview = false;
         for panel in &mut self.panels {
+            let was_loading = matches!(panel.state, PanelLoadState::Loading(_));
             loading |= panel.poll();
+            // 列举完成（navigate/refresh）：预览目标属于该栏且已消失则清预览。
+            if was_loading && !matches!(panel.state, PanelLoadState::Loading(_)) {
+                if let Some(target) = &self.preview_path {
+                    if target.parent() == Some(panel.dir.as_path())
+                        && !panel.entries.iter().any(|e| &e.path == target)
+                    {
+                        drop_preview = true;
+                    }
+                }
+            }
+        }
+        if drop_preview {
+            self.clear_preview();
         }
         if loading {
             ui.ctx().request_repaint_after(Duration::from_millis(100));
         }
+        self.poll_preview(ui.ctx());
 
         self.render_top_bar(ui, &mut intents);
         ui.separator();
@@ -175,6 +218,10 @@ impl FileManagerView {
         }
 
         self.handle_keyboard(ui, &mut intents);
+        // 「选中即预览」跟随焦点行（键盘/鼠标改动焦点之后统一同步）。
+        self.sync_preview_target();
+        // F3 临时预览弹窗（双栏模式）。
+        self.render_preview_window(ui.ctx());
 
         // 帧尾统一外抛回调。
         if intents.back {
@@ -223,13 +270,19 @@ impl FileManagerView {
                 if let PanelLayout::Dual { ratio } = self.layout {
                     self.saved_ratio = ratio;
                 }
+                // 保留焦点栏内容到左栏（单栏只渲染 panels[0]）。
+                if self.active == 1 {
+                    self.panels.swap(0, 1);
+                }
+                self.active = 0;
+                self.preview_window_open = false;
                 self.layout = PanelLayout::Single { preview_open: true };
             }
             if let PanelLayout::Single { preview_open } = &mut self.layout {
                 ui.separator();
                 if ui
                     .add(egui::Button::new((icons::EYE, " 预览")).selected(*preview_open))
-                    .on_hover_text("切换预览面板（预览本体在下一阶段）")
+                    .on_hover_text("切换预览面板")
                     .clicked()
                 {
                     *preview_open = !*preview_open;
@@ -305,15 +358,7 @@ impl FileManagerView {
                         ui.allocate_ui_with_layout(
                             egui::vec2(w, height),
                             egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                ui.vertical_centered(|ui| {
-                                    ui.add_space(60.0);
-                                    ui.label(
-                                        egui::RichText::new(icons::EYE.as_str()).size(28.0).weak(),
-                                    );
-                                    ui.label(egui::RichText::new("预览（下一阶段）").weak());
-                                });
-                            },
+                            |ui| self.draw_preview_content(ui),
                         );
                     });
                     self.preview_ratio = preview_ratio;
@@ -870,14 +915,227 @@ impl FileManagerView {
                 self.open_ui_row(active, &rows, row, intents);
             }
         }
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            let panel = &mut self.panels[active];
-            if !panel.filter.is_empty() {
-                panel.filter.clear();
-            } else {
-                panel.clear_selection();
+        // F3：双栏模式对焦点文件弹临时预览窗（再按 F3 / Esc / 关闭按钮关窗）。
+        if ui.input(|i| i.key_pressed(egui::Key::F3)) {
+            if self.preview_window_open {
+                self.preview_window_open = false;
+            } else if matches!(self.layout, PanelLayout::Dual { .. }) {
+                if let Some(entry) = self.panels[active].focused_entry() {
+                    if !entry.is_dir {
+                        self.set_preview_target(entry);
+                        self.preview_window_open = true;
+                    }
+                }
             }
         }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.preview_window_open {
+                self.preview_window_open = false;
+            } else {
+                let panel = &mut self.panels[active];
+                if !panel.filter.is_empty() {
+                    panel.filter.clear();
+                } else {
+                    panel.clear_selection();
+                }
+            }
+        }
+    }
+
+    /// 「选中即预览」：焦点栏焦点行落到文件时更新预览目标（可预览类型后台
+    /// 加载，不可预览类型直接显示元信息占位，不读内容）；焦点不在文件上
+    /// （目录/「..」/无焦点）时清空预览——单栏预览面板恒在，内容切占位。
+    /// 仅单栏预览开 / F3 弹窗开时跟随焦点，双栏闲置时不发起后台读取。
+    fn sync_preview_target(&mut self) {
+        let follows = matches!(self.layout, PanelLayout::Single { preview_open: true })
+            || self.preview_window_open;
+        if !follows {
+            return;
+        }
+        match self.panels[self.active].focused_entry() {
+            Some(entry) if !entry.is_dir => {
+                if self.preview_path.as_ref() != Some(&entry.path) {
+                    self.set_preview_target(entry);
+                }
+            }
+            _ => self.clear_preview(),
+        }
+    }
+
+    /// 设置预览目标并发起后台读取（不可预览类型直接置元信息占位说明）。
+    fn set_preview_target(&mut self, entry: FsEntry) {
+        self.preview = None;
+        self.pending_preview_image = None;
+        self.preview_tex = None;
+        self.preview_text = None;
+        self.preview_note = None;
+        self.preview_full_size = false;
+        if is_previewable_name(&entry.name) {
+            let path = entry.path.clone();
+            self.preview = Some(AsyncOpener::open(path, load_file_preview));
+        } else {
+            self.preview_note = Some("不支持预览该类型".to_string());
+        }
+        self.preview_path = Some(entry.path.clone());
+        self.preview_entry = Some(entry);
+    }
+
+    /// 清空预览目标与全部预览内容（焦点离开文件 / 目标消失时）。
+    fn clear_preview(&mut self) {
+        self.preview_path = None;
+        self.preview_entry = None;
+        self.preview = None;
+        self.pending_preview_image = None;
+        self.preview_tex = None;
+        self.preview_text = None;
+        self.preview_note = None;
+        self.preview_full_size = false;
+    }
+
+    /// 每帧排空预览后台读取；在途时主动重绘（egui 空闲不重绘）。
+    fn poll_preview(&mut self, ctx: &egui::Context) {
+        let Some(mut preview) = self.preview.take() else {
+            return;
+        };
+        match preview.poll() {
+            OpenStatus::Loading => {
+                self.preview = Some(preview);
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            OpenStatus::Ready(result) => self.apply_preview_result(result),
+        }
+    }
+
+    fn apply_preview_result(&mut self, result: Result<PreviewData, String>) {
+        match result {
+            Ok(PreviewData::Image(img)) => self.pending_preview_image = Some(img),
+            Ok(PreviewData::Text(text)) => self.preview_text = Some(text),
+            Ok(PreviewData::Unsupported) => {
+                self.preview_note = Some("不支持预览该类型".to_string());
+            }
+            Ok(PreviewData::Note(note)) => self.preview_note = Some(note),
+            Err(e) => self.preview_note = Some(e),
+        }
+    }
+
+    /// F3 临时预览弹窗（双栏模式）：与单栏预览面板共用绘制代码。
+    fn render_preview_window(&mut self, ctx: &egui::Context) {
+        if !self.preview_window_open {
+            return;
+        }
+        let title = self
+            .preview_entry
+            .as_ref()
+            .map(|e| e.name.clone())
+            .unwrap_or_else(|| "预览".to_string());
+        let mut open = true;
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(true)
+            .default_size([420.0, 520.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                self.draw_preview_content(ui);
+            });
+        if !open {
+            self.preview_window_open = false;
+        }
+    }
+
+    /// 预览内容绘制（单栏预览面板与 F3 弹窗共用）：名称/大小/时间头部、
+    /// 图片适应宽度/原始尺寸切换、文本 Monospace 只读可选中、
+    /// 不支持类型显示元信息占位。
+    fn draw_preview_content(&mut self, ui: &mut egui::Ui) {
+        // poll 收到的 ColorImage 在此（有 ctx）惰性上传为纹理。
+        if let Some(img) = self.pending_preview_image.take() {
+            self.preview_tex = Some(ui.ctx().load_texture(
+                "fm-preview",
+                img,
+                egui::TextureOptions::LINEAR,
+            ));
+        }
+        let Some(entry) = self.preview_entry.clone() else {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("选中文件以预览").weak());
+            return;
+        };
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new(&entry.name).strong());
+        let mut meta = entry.size.map(human_size).unwrap_or_default();
+        let mtime = format_mtime(system_time_to_unix(entry.mtime));
+        if !mtime.is_empty() {
+            if !meta.is_empty() {
+                meta.push_str(" · ");
+            }
+            meta.push_str(&mtime);
+        }
+        if !meta.is_empty() {
+            ui.label(egui::RichText::new(meta).weak());
+        }
+        // 图片预览的「适应宽度 / 原始尺寸」切换。
+        if self.preview_tex.is_some() {
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(!self.preview_full_size, "适应宽度")
+                    .clicked()
+                {
+                    self.preview_full_size = false;
+                }
+                if ui
+                    .selectable_label(self.preview_full_size, "原始尺寸")
+                    .clicked()
+                {
+                    self.preview_full_size = true;
+                }
+            });
+        }
+        ui.separator();
+        // 原始尺寸模式：按纹理原始大小显示，独立双向滚动区。
+        if self.preview_full_size {
+            if let Some(tex) = &self.preview_tex {
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.image(egui::load::SizedTexture::new(tex.id(), tex.size_vec2()));
+                    });
+                return;
+            }
+        }
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if let Some(tex) = &self.preview_tex {
+                    let width = ui.available_width();
+                    let size = tex.size_vec2();
+                    let height = if size.x > 0.0 {
+                        width * size.y / size.x
+                    } else {
+                        width
+                    };
+                    ui.image(egui::load::SizedTexture::new(
+                        tex.id(),
+                        egui::vec2(width, height),
+                    ));
+                } else if let Some(text) = &self.preview_text {
+                    // 只读 &str 缓冲（TextBuffer for &str 拒绝修改）：可选中复制。
+                    let mut text = text.as_str();
+                    ui.add(
+                        egui::TextEdit::multiline(&mut text)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY),
+                    );
+                }
+                if let Some(note) = &self.preview_note {
+                    ui.label(egui::RichText::new(note).weak());
+                }
+                if self.preview.is_some()
+                    && self.preview_tex.is_none()
+                    && self.preview_text.is_none()
+                    && self.preview_note.is_none()
+                {
+                    ui.label(egui::RichText::new("正在读取…").weak());
+                }
+            });
     }
 }
 
