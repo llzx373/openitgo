@@ -31,6 +31,8 @@ const MTIME_COL_WIDTH: f32 = 110.0;
 /// 列宽拖拽的取值范围（pt）。
 const COL_MIN_WIDTH: f32 = 60.0;
 const COL_MAX_WIDTH: f32 = 400.0;
+/// 名称列最小宽度（pt）：分隔线左拖 / 列块左移的下限。
+const NAME_COL_MIN: f32 = 80.0;
 /// 列内容右缘内边距（pt）：列锚点在右缘内 6pt 处，表头与行内容共用。
 const COL_RIGHT_PAD: f32 = 6.0;
 /// 表头「名称」文字的左缩进（pt）：与行内容对齐
@@ -51,9 +53,11 @@ struct ColumnLayout {
     content_right: f32,
 }
 
-/// 由行/表头 rect 的右缘与三列宽度算出各列坐标。
-fn column_layout(right: f32, size_w: f32, packed_w: f32, mtime_w: f32) -> ColumnLayout {
-    let content_right = right - COL_RIGHT_PAD;
+/// 由行/表头 rect 的右缘、列块平移量与三列宽度算出各列坐标。
+/// shift ≤ 0：0 = 列块贴右缘（名称列吃满剩余宽度）；<0 = 列块整体左移，
+/// 右侧留出空白（用户拖出来的状态）。
+fn column_layout(right: f32, shift: f32, size_w: f32, packed_w: f32, mtime_w: f32) -> ColumnLayout {
+    let content_right = right - COL_RIGHT_PAD + shift;
     let mtime_left = content_right - mtime_w;
     let packed_left = mtime_left - packed_w;
     let size_left = packed_left - size_w;
@@ -224,6 +228,9 @@ pub struct ArchiveView {
     /// 上一帧明细列表的滚动偏移与视口高度（最小滚动计算的基准；0 = 未知）。
     last_scroll_offset: f32,
     last_viewport_height: f32,
+    /// 实际行距（ROW_HEIGHT + item_spacing.y，渲染明细列表时每帧更新）：
+    /// PgUp/PgDn 步进与焦点滚动定位用，须与 show_rows 的假定行距一致。
+    last_row_pitch: f32,
     /// 明细列表排序（默认名称升序）。
     sort_key: SortKey,
     sort_asc: bool,
@@ -232,6 +239,9 @@ pub struct ArchiveView {
     col_width_size: f32,
     col_width_packed: f32,
     col_width_mtime: f32,
+    /// 右侧三列的整体平移（pt，≤0）：拖分隔线时其右侧列保持宽度随鼠标平移
+    /// （Explorer 手感）；0 = 列块贴右缘。同样跨包保留、不落盘。
+    col_shift: f32,
     /// 右侧预览面板开关。
     pub preview_open: bool,
     /// 当前预览目标条目名（单击文件条目设置）。
@@ -289,11 +299,13 @@ impl Default for ArchiveView {
             tree_reveal_pending: false,
             last_scroll_offset: 0.0,
             last_viewport_height: 0.0,
+            last_row_pitch: 0.0,
             sort_key: SortKey::Name,
             sort_asc: true,
             col_width_size: SIZE_COL_WIDTH,
             col_width_packed: PACKED_COL_WIDTH,
             col_width_mtime: MTIME_COL_WIDTH,
+            col_shift: 0.0,
             preview_open: false,
             preview_entry: None,
             preview_requested: None,
@@ -347,6 +359,7 @@ impl ArchiveView {
         self.tree_reveal_pending = false;
         self.last_scroll_offset = 0.0;
         self.last_viewport_height = 0.0;
+        self.last_row_pitch = 0.0;
         self.sort_key = SortKey::Name;
         self.sort_asc = true;
         self.comment = None;
@@ -960,10 +973,16 @@ impl ArchiveView {
         self.apply_focus_move(&keys, next, mode);
     }
 
-    /// PgUp/PgDn 的整页步进：视口高 / 行高取整；视口高度未知（0）时按 10 行兜底。
+    /// PgUp/PgDn 的整页步进：视口高 / 行距取整；行距未知（0）时按行高兜底，
+    /// 视口高度未知时按 10 行兜底。
     fn page_step(&self) -> isize {
         if self.last_viewport_height > 0.0 {
-            (self.last_viewport_height / ROW_HEIGHT).floor().max(1.0) as isize
+            let pitch = if self.last_row_pitch > 0.0 {
+                self.last_row_pitch
+            } else {
+                ROW_HEIGHT
+            };
+            (self.last_viewport_height / pitch).floor().max(1.0) as isize
         } else {
             10
         }
@@ -979,14 +998,57 @@ impl ArchiveView {
         }
     }
 
-    /// 当前列宽下的列坐标（表头、数据行、竖线共用同一来源）。
+    /// 当前列宽与列块平移下的列坐标（表头、数据行、竖线共用同一来源）。
     fn layout(&self, right: f32) -> ColumnLayout {
         column_layout(
             right,
+            self.col_shift,
             self.col_width_size,
             self.col_width_packed,
             self.col_width_mtime,
         )
+    }
+
+    /// 分隔线拖动（Explorer 语义）：分隔线跟随鼠标，其右侧各列保持宽度整体
+    /// 平移，左侧列吸收等量宽度变化（sep0 的左侧是弹性的名称列 → 只动
+    /// col_shift）。列块平移范围：右不越行右缘（≤0），左不把名称列压到
+    /// NAME_COL_MIN 以下；宽度撞 COL_MIN/COL_MAX 或平移撞限时同步停住。
+    fn drag_column_sep(&mut self, sep: usize, dx: f32, header_rect: egui::Rect) {
+        let min_shift = (header_rect.left()
+            + NAME_COL_MIN
+            + self.col_width_size
+            + self.col_width_packed
+            + self.col_width_mtime
+            - (header_rect.right() - COL_RIGHT_PAD))
+            .min(0.0);
+        let shift_room = (self.col_shift + dx).clamp(min_shift, 0.0) - self.col_shift;
+        let d = match sep {
+            // 名称列是弹性宽度，没有独立字段，列块平移即名称列缩放。
+            0 => shift_room,
+            1 => {
+                let width_room = (self.col_width_size + dx).clamp(COL_MIN_WIDTH, COL_MAX_WIDTH)
+                    - self.col_width_size;
+                let d = if dx > 0.0 {
+                    width_room.min(shift_room)
+                } else {
+                    width_room.max(shift_room)
+                };
+                self.col_width_size += d;
+                d
+            }
+            _ => {
+                let width_room = (self.col_width_packed + dx).clamp(COL_MIN_WIDTH, COL_MAX_WIDTH)
+                    - self.col_width_packed;
+                let d = if dx > 0.0 {
+                    width_room.min(shift_room)
+                } else {
+                    width_room.max(shift_room)
+                };
+                self.col_width_packed += d;
+                d
+            }
+        };
+        self.col_shift += d;
     }
 
     /// 选中文件条目数与总大小（解压后字节）。
@@ -1540,7 +1602,7 @@ impl ArchiveView {
     /// 名称列左对齐并带图标占位缩进（与行内名称 x 对齐），右侧三列右对齐。
     /// 整行铺淡底色 + hover 列高亮 + 列间竖线 + 底部描边（WinRAR 式表头）。
     /// 三条分隔竖线各带 6pt 拖拽热区（后注册于列点击格，拖拽优先），
-    /// 拖动调整右侧列宽（clamp COL_MIN..=COL_MAX），hover 显示横向调整光标。
+    /// 拖动时右侧各列随鼠标整体平移、左侧列吸收宽度变化（drag_column_sep）。
     fn render_column_header(&mut self, ui: &mut egui::Ui) {
         let (header_rect, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), ROW_HEIGHT),
@@ -1628,7 +1690,8 @@ impl ArchiveView {
             texts.push((egui::pos2(anchor_x, cy), align, format!("{label}{arrow}")));
         }
         // 列宽拖拽热区：三条分隔竖线各 ±3pt，后注册于列点击格使拖拽优先。
-        // 拖动竖线调整其右侧列宽（右移 = 变窄），hover/拖拽时换光标并加深竖线。
+        // Explorer 语义：分隔线跟随鼠标，其右侧各列保持宽度整体平移，左侧列
+        // 吸收宽度变化；hover/拖拽时换光标并加深竖线。
         let sep_xs = [layout.size_left, layout.packed_left, layout.mtime_left];
         let mut hovered_sep: Option<usize> = None;
         for (i, &x) in sep_xs.iter().enumerate() {
@@ -1648,12 +1711,7 @@ impl ArchiveView {
             if response.dragged() {
                 let dx = response.drag_motion().x;
                 if dx != 0.0 {
-                    let width = match i {
-                        0 => &mut self.col_width_size,
-                        1 => &mut self.col_width_packed,
-                        _ => &mut self.col_width_mtime,
-                    };
-                    *width = (*width - dx).clamp(COL_MIN_WIDTH, COL_MAX_WIDTH);
+                    self.drag_column_sep(i, dx, header_rect);
                 }
             }
         }
@@ -1702,6 +1760,10 @@ impl ArchiveView {
             return;
         }
         let flat = self.flat_all || !self.filter.trim().is_empty();
+        // 行距 = 行高 + 行间距：show_rows 内部也按这个值定位可见行，
+        // 焦点滚动/PgUp/PgDn 必须用同一 pitch，否则定位偏 6pt/行。
+        let row_pitch = ROW_HEIGHT + ui.spacing().item_spacing.y;
+        self.last_row_pitch = row_pitch;
         // 滚动条恒显：内容溢出与否行区宽度恒定，表头与行内容/竖线恒对齐。
         // 键盘移动焦点：show_rows 只渲染可见行，按 Explorer 最小滚动语义
         // 仅当焦点行越出视口时把偏移调到行上缘/下缘贴边。
@@ -1716,7 +1778,7 @@ impl ArchiveView {
                         let new_offset = min_scroll_to_reveal(
                             self.last_scroll_offset,
                             self.last_viewport_height,
-                            i as f32 * ROW_HEIGHT,
+                            i as f32 * row_pitch,
                         );
                         if (new_offset - self.last_scroll_offset).abs() > 0.01 {
                             area = area.vertical_scroll_offset(new_offset);
@@ -1839,6 +1901,11 @@ impl ArchiveView {
         };
         let content = rect.shrink2(egui::vec2(6.0, 2.0));
         ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+            // ui.horizontal 的初始行高取 interact_size.y（全局 28pt，为工具栏
+            // 按钮而设），不压回会撑爆 18pt 的内容区：文字随之下沉约 5pt 贴到
+            // 条纹下缘（"条纹与行对不上"），且 scope 结束时列表竖向光标被
+            // 多推 8pt，实际行距 36pt 与 show_rows 假定的 28pt 逐行漂移。
+            ui.spacing_mut().interact_size.y = ROW_HEIGHT - 4.0;
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 match row {
@@ -1892,6 +1959,10 @@ impl ArchiveView {
                 });
             });
         });
+        // scope_dyn 结束时会用「内容区底 + item_spacing」改写列表竖向光标
+        // （内容区比行高矮 4pt，会回退光标、行距偏离 show_rows 的假定），
+        // 钉回「行底 + item_spacing」。
+        ui.advance_cursor_after_rect(rect);
 
         let mods = ui.input(|i| i.modifiers);
         if response.clicked() {
@@ -2440,6 +2511,41 @@ mod tests {
         assert!(view.tree_reveal_pending);
         assert!(view.flat_all);
         assert_eq!(view.current_dir, None);
+    }
+
+    #[test]
+    fn drag_column_sep_moves_right_columns_together() {
+        let header = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 22.0));
+        // sep0（名称|大小）：三列宽度不变，列块整体平移；列块不越过右缘。
+        let mut view = ArchiveView::default();
+        let base = view.layout(800.0);
+        view.drag_column_sep(0, 30.0, header);
+        assert_eq!(view.col_shift, 0.0);
+        view.drag_column_sep(0, -50.0, header);
+        assert_eq!(view.col_shift, -50.0);
+        assert_eq!(view.col_width_size, SIZE_COL_WIDTH);
+        let moved = view.layout(800.0);
+        assert_eq!(moved.size_left, base.size_left - 50.0);
+        assert_eq!(moved.mtime_left, base.mtime_left - 50.0);
+        assert_eq!(moved.content_right, base.content_right - 50.0);
+
+        // sep1（大小|压缩后）：大小列吸收宽度变化，压缩后/时间随线平移，
+        // 名称列右缘（size_left）不动。
+        let mut view = ArchiveView::default();
+        let base = view.layout(800.0);
+        view.drag_column_sep(1, -20.0, header);
+        assert_eq!(view.col_width_size, SIZE_COL_WIDTH - 20.0);
+        assert_eq!(view.col_shift, -20.0);
+        let moved = view.layout(800.0);
+        assert_eq!(moved.size_left, base.size_left);
+        assert_eq!(moved.packed_left, base.packed_left - 20.0);
+        assert_eq!(moved.mtime_left, base.mtime_left - 20.0);
+
+        // sep2（压缩后|时间）：宽度撞 COL_MIN 后宽度与平移同步停住。
+        let mut view = ArchiveView::default();
+        view.drag_column_sep(2, -1000.0, header);
+        assert_eq!(view.col_width_packed, COL_MIN_WIDTH);
+        assert_eq!(view.col_shift, -(PACKED_COL_WIDTH - COL_MIN_WIDTH));
     }
 
     #[test]

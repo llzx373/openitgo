@@ -86,6 +86,15 @@ cargo clippy --workspace --all-targets -- -D warnings
   选中态派生自后代统计；`click_row(key, ctrl, shift)` 与 `move_focus` 实现
   Explorer 式单选/Ctrl/Shift/键盘语义；焦点揭示用最小滚动（`min_scroll_to_reveal`，
   勿回退绝对置顶）。「..」上级行（`ListRow::Parent`）恒居行首、不可选。
+  **明细列表行布局**：行高 `ROW_HEIGHT`（22pt）+ `item_spacing.y` = 行距，
+  `show_rows` 虚拟化假定同一 pitch——行内容 scope 里必须把
+  `interact_size.y` 局部压回 `ROW_HEIGHT - 4.0`（`ui.horizontal` 初始行高取
+  全局 `interact_size.y` = 28pt 工具栏值，不压会撑爆行、文字下沉贴条纹下缘、
+  行距漂移），且 scope 结束后要 `advance_cursor_after_rect(rect)` 钉回行底
+  （scope_dyn 会用内容区底改写竖向光标）。**列拖动**：`col_shift`（≤0，列块
+  整体平移，0 = 贴右缘）+ 三列宽字段；`drag_column_sep` = Explorer 语义
+  （分隔线右侧列保持宽度随鼠标平移，左侧列吸收宽度变化；名称列弹性由
+  col_shift 吸收；撞限同步停住）。
   **入口/分流**：`open_path` 对纯压缩包（7z/tar 系）直接进 Archive 视图；
   zip/cbz/rar/cbr 经 `open_archive_auto` + `poll_archive_router` 启发式分流
   （Comic → 漫画链路，Files → Archive 视图，列目录错误含密码错误回落漫画链路）；
