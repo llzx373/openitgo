@@ -1760,8 +1760,11 @@ impl ArchiveView {
             return;
         }
         let flat = self.flat_all || !self.filter.trim().is_empty();
-        // 行距 = 行高 + 行间距：show_rows 内部也按这个值定位可见行，
-        // 焦点滚动/PgUp/PgDn 必须用同一 pitch，否则定位偏 6pt/行。
+        // 行间不留缝（Explorer/WinRAR 式紧密列表）：item_spacing.y 归零后
+        // 行距 = ROW_HEIGHT，条纹带两两相接，行间不再露出面板底色。
+        // 注意 show_rows 在调用时捕获本 ui 的 item_spacing 计算 pitch，
+        // 行内 advance_cursor_after_rect 也读同一值，三处天然一致。
+        ui.spacing_mut().item_spacing.y = 0.0;
         let row_pitch = ROW_HEIGHT + ui.spacing().item_spacing.y;
         self.last_row_pitch = row_pitch;
         // 滚动条恒显：内容溢出与否行区宽度恒定，表头与行内容/竖线恒对齐。
