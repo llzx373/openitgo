@@ -4,6 +4,8 @@ use crate::loader::PageLoader;
 use crate::opener::{AsyncOpener, OpenStatus};
 use crate::shortcuts::is_shortcut_pressed;
 use crate::timing;
+use crate::views::file_manager::{FileManagerView, FmCallbacks};
+use crate::views::file_manager_panel::PanelLoadState;
 use crate::views::file_manager_rows::natural_cmp;
 use crate::views::settings::{SettingsTab, SettingsView};
 use crate::views::{
@@ -330,6 +332,8 @@ pub struct ReaderApp {
     pub settings_view: SettingsView,
     /// 压缩包浏览视图（View::Archive 时前台展示）。
     pub archive_view: ArchiveView,
+    /// 双栏文件管理器视图（View::FileManager 时前台展示）。
+    pub file_manager_view: FileManagerView,
     /// 后台解压任务管理（并发 4，超出排队；右下进度面板）。
     pub extract_manager: ExtractManager,
     /// 解压目的地与选项对话框状态；Some 时渲染模态窗口。
@@ -446,6 +450,12 @@ impl Default for ReaderApp {
         let password_book = store.load_password_book().unwrap_or_else(|_| PasswordBook {
             entries: PasswordBook::builtin_defaults(),
         });
+        let file_manager_view = FileManagerView::new(
+            &settings.fm_layout,
+            settings.fm_dual_ratio,
+            &settings.fm_sort_key,
+            settings.fm_sort_asc,
+        );
         Self {
             current_view: View::Library,
             last_view: View::Library,
@@ -456,6 +466,7 @@ impl Default for ReaderApp {
             media_view: MediaView::default(),
             settings_view: SettingsView::default(),
             archive_view: ArchiveView::default(),
+            file_manager_view,
             extract_manager: ExtractManager::new(),
             extract_dialog: None,
             extract_post: HashMap::new(),
@@ -605,6 +616,7 @@ impl eframe::App for ReaderApp {
             View::Media => self.render_media(ui),
             View::Settings => self.render_settings(ui),
             View::Archive(path) => self.render_archive(ui, &path),
+            View::FileManager => self.render_file_manager(ui),
             View::Loading(path) => self.render_loading(ui, path),
         }
         self.render_shortcuts_window(&ctx);
@@ -628,6 +640,7 @@ pub enum View {
     Media,
     Settings,
     Archive(PathBuf),
+    FileManager,
     Loading(PathBuf),
 }
 
@@ -682,6 +695,24 @@ fn initial_open_path(
     arg1: Option<std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
     [env_open, arg1].into_iter().flatten().find(|p| p.exists())
+}
+
+/// 文件管理器目录恢复（决策 5）：空串或目录不存在 → 逐级回退最近存在
+/// 祖先 → 最终回退用户主目录。
+fn resolve_fm_dir(saved: &str) -> PathBuf {
+    let home = || dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    if saved.is_empty() {
+        return home();
+    }
+    let mut path = PathBuf::from(saved);
+    loop {
+        if path.is_dir() {
+            return path;
+        }
+        if !path.pop() {
+            return home();
+        }
+    }
 }
 
 impl ReaderApp {
@@ -892,6 +923,7 @@ impl ReaderApp {
             let mut delete_history_idx: Option<usize> = None;
             let mut browse_archive_idx: Option<usize> = None;
             let mut extract_archive_idx: Option<usize> = None;
+            let mut open_file_manager = false;
             self.library_view.ui(
                 ui,
                 &self.history,
@@ -913,8 +945,12 @@ impl ReaderApp {
                     on_delete_history: &mut |idx| delete_history_idx = Some(idx),
                     on_browse_archive: &mut |idx| browse_archive_idx = Some(idx),
                     on_extract_archive: &mut |idx| extract_archive_idx = Some(idx),
+                    on_open_file_manager: &mut || open_file_manager = true,
                 },
             );
+            if open_file_manager {
+                self.current_view = View::FileManager;
+            }
             if add_requested {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     self.add_folder_to_library(path);
@@ -2398,6 +2434,58 @@ impl ReaderApp {
         });
     }
 
+    /// 双栏文件管理器视图：首次进入（面板 Idle）按 settings.fm_dir_left/right
+    /// 恢复两栏目录；行内意图经 FmCallbacks 帧尾翻译为打开动作。
+    fn render_file_manager(&mut self, ui: &mut egui::Ui) {
+        for (idx, saved) in [
+            self.settings.fm_dir_left.clone(),
+            self.settings.fm_dir_right.clone(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if matches!(
+                self.file_manager_view.panels[idx].state,
+                PanelLoadState::Idle
+            ) {
+                let dir = resolve_fm_dir(&saved);
+                self.file_manager_view.panels[idx].navigate_to(dir);
+            }
+        }
+        egui::CentralPanel::default().show(ui, |ui| {
+            if let Some(err) = &self.error_message {
+                ui.colored_label(ui.visuals().error_fg_color, err);
+            }
+            let mut back = false;
+            let mut open_path: Option<PathBuf> = None;
+            let mut open_archive: Option<PathBuf> = None;
+            let mut open_as_comic: Option<PathBuf> = None;
+            self.file_manager_view.ui(
+                ui,
+                FmCallbacks {
+                    on_back: &mut || back = true,
+                    on_open_path: &mut |p| open_path = Some(p),
+                    on_open_archive: &mut |p| open_archive = Some(p),
+                    on_open_as_comic: &mut |p| open_as_comic = Some(p),
+                },
+            );
+            if back {
+                self.current_view = View::Library;
+            }
+            if let Some(path) = open_archive {
+                // 双击压缩包 → 压缩包浏览视图（设计决策 3，不做面板内浏览）。
+                self.open_archive_browser(path);
+            }
+            if let Some(path) = open_path {
+                self.open_path(path);
+            }
+            if let Some(path) = open_as_comic {
+                // 显式「作为漫画打开」：跳过启发式分流，直接走漫画链路。
+                self.open_comic(path);
+            }
+        });
+    }
+
     /// 从浏览视图发起解压：弹「解压到」对话框（确认后才真正启动任务）。
     /// 密码在确认时取会话级缓存（验证成功的密码才入密码本）。
     fn start_extract_from_browser(&mut self, selection: Option<Vec<String>>) {
@@ -2616,6 +2704,10 @@ impl ReaderApp {
                         if let Some(path) = rfd::FileDialog::new().pick_folder() {
                             self.add_folder_to_library(path);
                         }
+                        ui.close();
+                    }
+                    if ui.button("文件管理器").clicked() {
+                        self.current_view = View::FileManager;
                         ui.close();
                     }
                     ui.menu_button("打开最近", |ui| {
@@ -3703,6 +3795,7 @@ impl ReaderApp {
             View::Loading(path) => format_content_window_title(&path_display_name(path)),
             View::Archive(path) => format_content_window_title(&path_display_name(path)),
             View::Library | View::Settings => APP_WINDOW_TITLE.to_string(),
+            View::FileManager => format!("文件管理器 - {APP_WINDOW_TITLE}"),
         }
     }
 
@@ -5244,6 +5337,12 @@ mod tests {
             let password_book = store.load_password_book().unwrap_or_else(|_| PasswordBook {
                 entries: PasswordBook::builtin_defaults(),
             });
+            let file_manager_view = FileManagerView::new(
+                &settings.fm_layout,
+                settings.fm_dual_ratio,
+                &settings.fm_sort_key,
+                settings.fm_sort_asc,
+            );
             Self {
                 current_view: View::Library,
                 last_view: View::Library,
@@ -5254,6 +5353,7 @@ mod tests {
                 media_view: MediaView::default(),
                 settings_view: SettingsView::default(),
                 archive_view: ArchiveView::default(),
+                file_manager_view,
                 extract_manager: ExtractManager::new(),
                 extract_dialog: None,
                 extract_post: HashMap::new(),

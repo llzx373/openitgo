@@ -7,8 +7,6 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 /// 文件系统目录列表中的一个条目（由调用方经 `read_dir` 收集）。
-// 阶段一仅有行模型与测试，UI 尚未接入；接入后移除 dead_code。
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsEntry {
     pub name: String,
@@ -21,7 +19,6 @@ pub struct FsEntry {
 }
 
 /// 排序键。
-#[allow(dead_code)] // 见 FsEntry
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
     Name,
@@ -76,7 +73,6 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
 
 /// 返回排序+过滤后的条目索引。目录恒排在文件前；
 /// 过滤为不区分大小写的 name 子串匹配（trim 后为空则不过滤）。
-#[allow(dead_code)] // 见 FsEntry
 pub fn list_rows(entries: &[FsEntry], filter: &str, sort: SortKey, asc: bool) -> Vec<usize> {
     let needle = filter.trim().to_lowercase();
     let mut dirs: Vec<usize> = Vec::new();

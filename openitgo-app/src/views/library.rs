@@ -60,6 +60,8 @@ pub struct LibraryCallbacks<'a> {
     pub on_browse_archive: &'a mut dyn FnMut(usize),
     /// 解压全部到用户选择的目录（仅 archive_kind 识别的包显示该菜单项）。
     pub on_extract_archive: &'a mut dyn FnMut(usize),
+    /// 顶栏「文件管理器」按钮：进入双栏文件管理器视图。
+    pub on_open_file_manager: &'a mut dyn FnMut(),
 }
 
 impl LibraryView {
@@ -115,6 +117,16 @@ impl LibraryView {
                     });
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(format!(
+                        "{} 文件管理器",
+                        egui_phosphor_icons::icons::COLUMNS.as_str()
+                    ))
+                    .on_hover_text("打开双栏文件管理器")
+                    .clicked()
+                {
+                    (callbacks.on_open_file_manager)();
+                }
                 if matches!(self.mode, LibraryMode::Library | LibraryMode::Ebooks)
                     && ui
                         .button("清理已删除")
