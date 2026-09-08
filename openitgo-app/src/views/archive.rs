@@ -9,7 +9,7 @@ use crate::opener::{AsyncOpener, OpenStatus};
 use crate::views::archive_tree::{
     breadcrumb_paths, build_dir_rows, list_rows, ListRow, SortKey, TreeRow,
 };
-use egui_phosphor_icons::icons;
+use egui_phosphor_icons::{icons, Icon};
 use openitgo_parser::archive::{list_entries, read_comment, read_entry, ArchiveEntry};
 use openitgo_parser::traits::ParseError;
 use std::collections::HashSet;
@@ -962,7 +962,8 @@ impl ArchiveView {
     }
 
     /// 列头：名称 / 大小 / 压缩后，点击切换排序键与升降序，当前键显示 ▲/▼。
-    /// 右侧两列与行内容共用固定列宽、右对齐。
+    /// 右侧两列与行内容共用固定列宽、右对齐。整行铺淡底色 + 列间竖线 +
+    /// 底部描边（WinRAR 式表头）。
     fn render_column_header(&mut self, ui: &mut egui::Ui) {
         let arrow = |key: SortKey| {
             if self.sort_key == key {
@@ -978,42 +979,64 @@ impl ArchiveView {
         let name_arrow = arrow(SortKey::Name);
         let size_arrow = arrow(SortKey::Size);
         let packed_arrow = arrow(SortKey::Packed);
-        ui.horizontal(|ui| {
-            ui.add_space(6.0);
-            if ui
-                .selectable_label(false, format!("名称{name_arrow}"))
-                .clicked()
-            {
-                self.toggle_sort(SortKey::Name);
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(PACKED_COL_WIDTH, ROW_HEIGHT),
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |ui| {
-                        if ui
-                            .selectable_label(false, format!("压缩后{packed_arrow}"))
-                            .clicked()
-                        {
-                            self.toggle_sort(SortKey::Packed);
-                        }
-                    },
-                );
-                ui.allocate_ui_with_layout(
-                    egui::vec2(SIZE_COL_WIDTH, ROW_HEIGHT),
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |ui| {
-                        if ui
-                            .selectable_label(false, format!("大小{size_arrow}"))
-                            .clicked()
-                        {
-                            self.toggle_sort(SortKey::Size);
-                        }
-                    },
-                );
+        // 先按整行区域铺底色/描边，再在同一区域里画可点击的列标题。
+        let (header_rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), ROW_HEIGHT),
+            egui::Sense::hover(),
+        );
+        let painter = ui.painter();
+        painter.rect_filled(
+            header_rect,
+            0.0,
+            ui.visuals().widgets.noninteractive.bg_fill,
+        );
+        let line_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
+        paint_column_separators(painter, header_rect, line_color);
+        painter.hline(
+            header_rect.x_range(),
+            header_rect.bottom(),
+            egui::Stroke::new(1.0, line_color),
+        );
+        // 右缘留 6pt 内边距，与行内容的列锚点对齐。
+        let content =
+            egui::Rect::from_min_max(header_rect.min, header_rect.max - egui::vec2(6.0, 0.0));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(6.0);
+                if ui
+                    .selectable_label(false, format!("名称{name_arrow}"))
+                    .clicked()
+                {
+                    self.toggle_sort(SortKey::Name);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(PACKED_COL_WIDTH, ROW_HEIGHT),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            if ui
+                                .selectable_label(false, format!("压缩后{packed_arrow}"))
+                                .clicked()
+                            {
+                                self.toggle_sort(SortKey::Packed);
+                            }
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(SIZE_COL_WIDTH, ROW_HEIGHT),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            if ui
+                                .selectable_label(false, format!("大小{size_arrow}"))
+                                .clicked()
+                            {
+                                self.toggle_sort(SortKey::Size);
+                            }
+                        },
+                    );
+                });
             });
         });
-        ui.separator();
     }
 
     /// 中栏明细列表：行模型见 archive_tree::list_rows（目录优先 + 排序 +
@@ -1052,10 +1075,12 @@ impl ArchiveView {
         let mut extract_selected = false;
         let mut preview_name: Option<String> = None;
         area.show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
-            for row in &rows[range] {
+            let first = range.start;
+            for (offset, row) in rows[range].iter().enumerate() {
                 self.render_list_row(
                     ui,
                     row,
+                    first + offset,
                     flat,
                     &mut open_key,
                     &mut extract_selected,
@@ -1080,12 +1105,14 @@ impl ArchiveView {
         }
     }
 
-    /// 明细列表一行：整行 allocate 交互 + 高亮/焦点描边，名称列截断、
-    /// 大小/压缩后列右对齐固定宽。目录行：双击进入、拖动 = 后代文件集。
+    /// 明细列表一行：整行 allocate 交互 + 斑马纹/高亮/焦点描边 + 列分隔竖线，
+    /// 名称列截断、大小/压缩后列右对齐固定宽。目录行：双击进入、拖动 = 后代文件集。
+    #[allow(clippy::too_many_arguments)]
     fn render_list_row(
         &mut self,
         ui: &mut egui::Ui,
         row: &ListRow,
+        row_index: usize,
         flat: bool,
         open_key: &mut Option<RowKey>,
         extract_selected: &mut bool,
@@ -1098,6 +1125,11 @@ impl ArchiveView {
             egui::vec2(ui.available_width(), ROW_HEIGHT),
             egui::Sense::click_and_drag(),
         );
+        // 斑马纹（全局行号，滚动时条纹不闪动）先铺底，再叠加选中/悬停高亮。
+        if row_index.is_multiple_of(2) {
+            ui.painter()
+                .rect_filled(rect, 0.0, ui.visuals().faint_bg_color);
+        }
         if selected {
             ui.painter()
                 .rect_filled(rect, 2.0, ui.visuals().selection.bg_fill);
@@ -1113,6 +1145,11 @@ impl ArchiveView {
                 egui::StrokeKind::Inside,
             );
         }
+        paint_column_separators(
+            ui.painter(),
+            rect,
+            ui.visuals().widgets.noninteractive.bg_stroke.color,
+        );
 
         // 行内容：图标 + 名称（目录模式显示 basename，扁平/过滤显示全路径），
         // 右侧固定宽的大小/压缩后列（目录行留空）。
@@ -1130,8 +1167,8 @@ impl ArchiveView {
                         ui.add(egui::Label::new(name).truncate());
                     }
                     ListRow::File { .. } => {
-                        ui.label(egui::RichText::new(icons::FILE.as_str()).weak());
                         let name = &file.expect("file row").name;
+                        ui.label(egui::RichText::new(entry_icon(name).as_str()).weak());
                         let display = if flat {
                             name.as_str()
                         } else {
@@ -1324,6 +1361,38 @@ fn classify_preview_bytes(name: &str, bytes: &[u8]) -> PreviewData {
             PreviewData::Text(truncated)
         }
         _ => PreviewData::Unsupported,
+    }
+}
+
+/// 名称列与「大小」「压缩后」列之间的淡竖线（表头与数据行共用；
+/// 列锚点在右缘内 6pt 处，与行内容的 shrink 对齐）。
+fn paint_column_separators(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.0, color);
+    let right = rect.right() - 6.0;
+    let x_packed = right - PACKED_COL_WIDTH;
+    let x_size = x_packed - SIZE_COL_WIDTH;
+    for x in [x_size, x_packed] {
+        painter.vline(x, rect.y_range(), stroke);
+    }
+}
+
+/// 明细列表文件行的类型图标（按扩展名，大小写不敏感）；目录行恒用 FOLDER。
+fn entry_icon(name: &str) -> Icon {
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        e if openitgo_parser::traits::is_image_extension(e) => icons::FILE_IMAGE,
+        "txt" | "md" | "log" => icons::FILE_TEXT,
+        "pdf" => icons::FILE_PDF,
+        "mp4" | "mkv" | "avi" | "mov" | "webm" => icons::FILE_VIDEO,
+        "mp3" | "flac" | "aac" | "ogg" | "wav" => icons::FILE_AUDIO,
+        "zip" | "cbz" | "rar" | "cbr" | "7z" | "tar" | "gz" | "xz" | "zst" | "bz2" => {
+            icons::FILE_ARCHIVE
+        }
+        _ => icons::FILE,
     }
 }
 
@@ -1750,6 +1819,21 @@ mod tests {
             }
             other => panic!("expected Text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn entry_icon_by_extension() {
+        // Icon 无 PartialEq，按码位字符串比较。
+        let icon_str = |name: &str| entry_icon(name).as_str().to_string();
+        assert_eq!(icon_str("p01.png"), icons::FILE_IMAGE.as_str());
+        assert_eq!(icon_str("dir/p02.JPG"), icons::FILE_IMAGE.as_str());
+        assert_eq!(icon_str("notes.txt"), icons::FILE_TEXT.as_str());
+        assert_eq!(icon_str("README.md"), icons::FILE_TEXT.as_str());
+        assert_eq!(icon_str("doc.pdf"), icons::FILE_PDF.as_str());
+        assert_eq!(icon_str("ep01.mkv"), icons::FILE_VIDEO.as_str());
+        assert_eq!(icon_str("song.flac"), icons::FILE_AUDIO.as_str());
+        assert_eq!(icon_str("pack.tar.gz"), icons::FILE_ARCHIVE.as_str());
+        assert_eq!(icon_str("noext"), icons::FILE.as_str());
     }
 
     #[test]
