@@ -663,6 +663,15 @@ impl ArchiveView {
         }
     }
 
+    /// 设置预览目标（鼠标单击与键盘焦点共用）；可预览类型顺带自动打开
+    /// 预览面板——选中即预览，不用再点顶栏「预览」。
+    fn set_preview_target(&mut self, name: &str) {
+        if is_previewable_name(name) {
+            self.preview_open = true;
+        }
+        self.preview_entry = Some(name.to_string());
+    }
+
     /// 为 preview_entry 发起后台读取；目标变化时丢弃旧纹理与旧结果。
     fn start_preview(&mut self) {
         self.preview_requested = self.preview_entry.clone();
@@ -934,7 +943,7 @@ impl ArchiveView {
         self.focus = Some(key.clone());
         // 预览跟随键盘：文件行同步预览目标（与鼠标单击一致），其余行不动。
         if let RowKey::File(name) = &key {
-            self.preview_entry = Some(name.clone());
+            self.set_preview_target(name);
         }
         self.focus_scroll_pending = true;
     }
@@ -1979,7 +1988,7 @@ impl ArchiveView {
         if response.clicked() {
             self.click_row(key.clone(), mods.command, mods.shift);
             if let RowKey::File(name) = &key {
-                self.preview_entry = Some(name.clone());
+                self.set_preview_target(name);
             }
         }
         if response.double_clicked() {
@@ -2207,6 +2216,55 @@ fn classify_preview_bytes(name: &str, bytes: &[u8]) -> PreviewData {
         }
         _ => PreviewData::Unsupported,
     }
+}
+
+/// 按名字判断「大概率可预览」（图片扩展名或常见文本扩展名）——选中时
+/// 自动打开预览面板的门槛；最终能否预览仍由 load_preview 的内容嗅探决定。
+fn is_previewable_name(name: &str) -> bool {
+    let Some(ext) = Path::new(name).extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    if openitgo_parser::traits::is_image_extension(ext) {
+        return true;
+    }
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "txt"
+            | "md"
+            | "markdown"
+            | "log"
+            | "json"
+            | "xml"
+            | "yaml"
+            | "yml"
+            | "toml"
+            | "ini"
+            | "cfg"
+            | "conf"
+            | "csv"
+            | "tsv"
+            | "html"
+            | "htm"
+            | "css"
+            | "js"
+            | "ts"
+            | "rs"
+            | "py"
+            | "java"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "go"
+            | "sh"
+            | "bat"
+            | "ps1"
+            | "sql"
+            | "srt"
+            | "ass"
+            | "vtt"
+            | "nfo"
+    )
 }
 
 /// 名称列与「大小」「压缩后」「时间」列之间的淡竖线（表头与数据行共用；
@@ -2637,6 +2695,47 @@ mod tests {
                 (moved - (base - 50.0)).abs() < 1.0,
                 "{text}: {moved} vs {base}"
             );
+        }
+    }
+
+    #[test]
+    fn selecting_previewable_file_auto_opens_preview() {
+        let mut view = ArchiveView {
+            entries: vec![
+                entry("a.png", false, 1),
+                entry("notes.txt", false, 1),
+                entry("setup.exe", false, 1),
+                entry("noext", false, 1),
+            ],
+            ..Default::default()
+        };
+        assert!(!view.preview_open);
+        // 图片 / 文本扩展名：选中自动打开预览。
+        view.set_preview_target("a.png");
+        assert!(view.preview_open);
+        assert_eq!(view.preview_entry.as_deref(), Some("a.png"));
+        // 不支持预览的类型：不动面板开关，只更新预览目标。
+        view.preview_open = false;
+        view.set_preview_target("setup.exe");
+        assert!(!view.preview_open);
+        assert_eq!(view.preview_entry.as_deref(), Some("setup.exe"));
+        view.set_preview_target("noext");
+        assert!(!view.preview_open);
+        // 面板已关时再选文本文件：重新自动打开。
+        view.set_preview_target("notes.txt");
+        assert!(view.preview_open);
+        assert_eq!(view.preview_entry.as_deref(), Some("notes.txt"));
+    }
+
+    #[test]
+    fn is_previewable_name_covers_image_and_text() {
+        for name in [
+            "a.png", "b.JPG", "c.webp", "d.txt", "e.md", "f.json", "g.log",
+        ] {
+            assert!(is_previewable_name(name), "{name}");
+        }
+        for name in ["a.exe", "b.dll", "c.zip", "d.bin", "noext", ".gitignore"] {
+            assert!(!is_previewable_name(name), "{name}");
         }
     }
 

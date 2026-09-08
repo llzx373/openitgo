@@ -86,6 +86,9 @@ cargo clippy --workspace --all-targets -- -D warnings
   选中态派生自后代统计；`click_row(key, ctrl, shift)` 与 `move_focus` 实现
   Explorer 式单选/Ctrl/Shift/键盘语义；焦点揭示用最小滚动（`min_scroll_to_reveal`，
   勿回退绝对置顶）。「..」上级行（`ListRow::Parent`）恒居行首、不可选。
+  **选中即预览**：单击/键盘焦点落到文件行经 `set_preview_target` 更新预览目标；
+  可预览类型（图片或常见文本扩展名，`is_previewable_name` 门槛，最终能否预览由
+  `load_preview` 内容嗅探决定）顺带自动打开预览面板，不可预览类型不动面板开关。
   **明细列表行布局**：行距 = `ROW_HEIGHT`（22pt；列表把 `item_spacing.y`
   归零，行间不留缝），`show_rows` 虚拟化假定同一 pitch——行内容 scope 里必须把
   `interact_size.y` 局部压回 `ROW_HEIGHT - 4.0`（`ui.horizontal` 初始行高取
