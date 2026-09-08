@@ -12,5 +12,6 @@ pub mod temp_open;
 pub mod theme;
 pub mod timing;
 pub mod views;
+pub mod webp_thumb;
 pub mod widgets;
 pub mod window_geometry;

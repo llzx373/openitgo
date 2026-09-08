@@ -36,6 +36,10 @@ fn main() {
     let mut latencies = Vec::with_capacity(total);
     while received < total && start.elapsed() < timeout {
         if let Some(result) = loader.try_recv() {
+            // Full decodes piggyback a thumbnail result; skip those.
+            if result.thumbnail {
+                continue;
+            }
             if result.epoch == epoch {
                 match result.image {
                     Ok(img) => {

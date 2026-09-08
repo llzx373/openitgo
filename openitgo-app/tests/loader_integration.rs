@@ -31,8 +31,11 @@ fn test_loader_concurrent_image_loads() {
     let mut received = 0;
     while received < count {
         if let Some(result) = loader.try_recv() {
+            // Full decodes piggyback a thumbnail result; skip those here.
+            if result.thumbnail {
+                continue;
+            }
             assert_eq!(result.epoch, epoch);
-            assert!(!result.thumbnail);
             let image = result.image.expect("image should decode");
             let size = image.original_size();
             assert!(size[0] > 0 && size[1] > 0);

@@ -480,6 +480,26 @@ impl PageLoader {
                                 let decoded = image.original_size();
                                 let original_size =
                                     image_dimensions_from_bytes(&job.bytes).unwrap_or(decoded);
+                                // Piggyback: the full decode already paid for the pixels,
+                                // so deriving a 256px thumbnail here is nearly free and
+                                // covers the pages the user is actually reading. Skipped
+                                // when DXT5 compression is on — a compressed image would
+                                // need an expensive decompress_dxt5 first; the idle
+                                // thumbnail batch covers those instead.
+                                if !compress {
+                                    if let Ok((thumb, _)) =
+                                        make_thumbnail_from_loaded(image.clone())
+                                    {
+                                        let _ = result_sender.send(LoadResult {
+                                            epoch: job.epoch,
+                                            page_index: job.page_index,
+                                            thumbnail: true,
+                                            dropped: false,
+                                            original_size,
+                                            image: Ok(LoadedImage::Color(thumb)),
+                                        });
+                                    }
+                                }
                                 LoadResult {
                                     epoch: job.epoch,
                                     page_index: job.page_index,
@@ -1235,6 +1255,16 @@ fn decode_thumbnail_bytes(
         }
     }
 
+    // WebP fast path: libwebp (SIMD) can scale while decoding, which is much
+    // cheaper than the pure-Rust decoder + downscale. Fall back on any failure.
+    if image::guess_format(bytes).ok() == Some(image::ImageFormat::WebP) {
+        if let Some(thumb) = timing::time("decode_thumbnail_bytes (libwebp)", || {
+            crate::webp_thumb::decode_webp_thumbnail(bytes, THUMBNAIL_MAX_DIMENSION)
+        }) {
+            return Ok(thumb);
+        }
+    }
+
     // Fall back to full decode + fast resize.
     let loaded = decode_image_bytes(bytes, format_hint, false)?;
     make_thumbnail_from_loaded(loaded)
@@ -1488,6 +1518,11 @@ mod tests {
         let start = Instant::now();
         while received < count && start.elapsed() < Duration::from_secs(10) {
             if let Some(result) = loader.try_recv() {
+                // Full decodes piggyback a thumbnail result; those are not part
+                // of the expected per-request results and share the same epoch.
+                if result.thumbnail {
+                    continue;
+                }
                 let pos = epochs
                     .iter()
                     .position(|&e| e == result.epoch)

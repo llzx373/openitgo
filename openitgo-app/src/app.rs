@@ -1100,8 +1100,12 @@ impl ReaderApp {
 
             // Floating thumbnail tooltip above the cursor when hovering the progress bar.
             if progress_bar_rect.is_some() {
-                self.reader_view
-                    .render_progress_thumbnail(&ctx, ui, hovered_page);
+                self.reader_view.render_progress_thumbnail(
+                    &ctx,
+                    ui,
+                    &self.page_loader,
+                    hovered_page,
+                );
             }
 
             // Right-click context menu on the page area.

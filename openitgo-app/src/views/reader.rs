@@ -79,6 +79,9 @@ pub struct OpenReader {
     pub pending_thumbnails: HashSet<usize>,
     /// Next page index to request during the background thumbnail batch.
     pub thumbnail_batch_next: usize,
+    /// Last progress-bar page the pointer hovered, used to prefetch thumbnails
+    /// in the direction the pointer is moving.
+    pub last_hover_thumb_page: Option<usize>,
     pub page_errors: HashMap<usize, String>,
     pub page_error_retries: HashMap<usize, PageErrorRetry>,
     pub thumbnail_errors: HashMap<usize, ThumbnailError>,
@@ -517,6 +520,7 @@ impl ReaderView {
             pending_pages: HashMap::new(),
             pending_thumbnails: HashSet::new(),
             thumbnail_batch_next: 0,
+            last_hover_thumb_page: None,
             page_errors: HashMap::new(),
             page_error_retries: HashMap::new(),
             thumbnail_errors: HashMap::new(),
@@ -553,6 +557,14 @@ impl ReaderView {
         let budget = cache_size_mb * 1024 * 1024;
         if let Some(reader) = &mut self.open {
             reader.update(ctx, loader, budget);
+            // While the throttled thumbnail batch is in flight, keep polling so
+            // results drain and the batch advances even when the app is idle
+            // (same pattern as the password probe in app.rs). Note update() runs
+            // before request_preloads() in the frame, so this must not depend on
+            // pending_thumbnails — they are only populated later in the frame.
+            if reader.thumbnail_batch_next < reader.total_pages() {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
         }
     }
 
@@ -590,29 +602,34 @@ impl ReaderView {
                 return;
             }
 
-            // Background batch: generate thumbnails for every page. This is gated
-            // so we never flood the low-priority queue in a single frame.
-            const THUMBNAILS_PER_FRAME: usize = 32;
-            let mut thumb_enqueued = 0;
-            while reader.thumbnail_batch_next < total && thumb_enqueued < THUMBNAILS_PER_FRAME {
-                let idx = reader.thumbnail_batch_next;
-                reader.thumbnail_batch_next += 1;
-                if reader.cache.contains_thumbnail(idx)
-                    || reader.cache.contains_full(idx)
-                    || reader.pending_thumbnails.contains(&idx)
+            // Background batch: generate thumbnails for every page, throttled by
+            // an in-flight cap so opening a comic never floods all decode workers
+            // (the previous 32-per-frame enqueue caused a full-core CPU burst).
+            // Hover requests share the same pending set, so scrubbing the
+            // progress bar naturally pauses the batch.
+            const THUMBNAIL_BATCH_MAX_INFLIGHT: usize = 2;
+            if reader.last_page_turn.elapsed() >= PRELOAD_COOLDOWN_AFTER_TURN {
+                while reader.thumbnail_batch_next < total
+                    && reader.pending_thumbnails.len() < THUMBNAIL_BATCH_MAX_INFLIGHT
                 {
-                    continue;
-                }
-                let Some(source) = reader.comic.page_source(idx).cloned() else {
-                    continue;
-                };
-                if loader.request_thumbnail(reader.current_epoch, idx, source) {
-                    reader.pending_thumbnails.insert(idx);
-                    thumb_enqueued += 1;
-                } else {
-                    // Channel is full; retry next frame from the same index.
-                    reader.thumbnail_batch_next = idx;
-                    break;
+                    let idx = reader.thumbnail_batch_next;
+                    reader.thumbnail_batch_next += 1;
+                    if reader.cache.contains_thumbnail(idx)
+                        || reader.cache.contains_full(idx)
+                        || reader.pending_thumbnails.contains(&idx)
+                    {
+                        continue;
+                    }
+                    let Some(source) = reader.comic.page_source(idx).cloned() else {
+                        continue;
+                    };
+                    if loader.request_thumbnail(reader.current_epoch, idx, source) {
+                        reader.pending_thumbnails.insert(idx);
+                    } else {
+                        // Channel is full; retry next frame from the same index.
+                        reader.thumbnail_batch_next = idx;
+                        break;
+                    }
                 }
             }
 
@@ -1122,11 +1139,37 @@ impl ReaderView {
         &mut self,
         ctx: &egui::Context,
         ui: &mut egui::Ui,
+        loader: &PageLoader,
         hovered_page: Option<usize>,
     ) -> Option<egui::Response> {
         let reader = self.open.as_mut()?;
         let page_index = hovered_page?;
         let pointer_pos = ui.input(|i| i.pointer.hover_pos())?;
+
+        // On-demand decode: the hovered page jumps the low-priority queue, and
+        // a few neighbors ahead of the pointer's movement direction prefetch in
+        // the background, so scrubbing the bar stays ahead of the decode cost.
+        if !reader.cache.contains_thumbnail(page_index) && !reader.cache.contains_full(page_index) {
+            request_page_thumbnail(loader, reader, page_index);
+        }
+        for idx in hover_prefetch_indices(
+            page_index,
+            reader.last_hover_thumb_page,
+            reader.total_pages(),
+        ) {
+            if !reader.cache.contains_thumbnail(idx)
+                && !reader.cache.contains_full(idx)
+                && !reader.pending_thumbnails.contains(&idx)
+            {
+                if let Some(source) = reader.comic.page_source(idx).cloned() {
+                    if loader.request_thumbnail(reader.current_epoch, idx, source) {
+                        reader.pending_thumbnails.insert(idx);
+                    }
+                }
+            }
+        }
+        reader.last_hover_thumb_page = Some(page_index);
+
         Some(page_thumbnail_tooltip(
             ui,
             ctx,
@@ -1135,6 +1178,36 @@ impl ReaderView {
             pointer_pos,
         ))
     }
+}
+
+/// Pages to prefetch thumbnails for when hovering the progress bar: up to 8
+/// pages ahead in the direction the hover is moving. Returns empty when the
+/// hover did not move (no direction to extrapolate).
+fn hover_prefetch_indices(hover: usize, last: Option<usize>, total: usize) -> Vec<usize> {
+    const HOVER_PREFETCH_PAGES: usize = 8;
+    let Some(last) = last else {
+        return Vec::new();
+    };
+    if hover == last || total == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(HOVER_PREFETCH_PAGES);
+    if hover > last {
+        for idx in hover + 1..=hover + HOVER_PREFETCH_PAGES {
+            if idx >= total {
+                break;
+            }
+            out.push(idx);
+        }
+    } else {
+        for i in 1..=HOVER_PREFETCH_PAGES {
+            match hover.checked_sub(i) {
+                Some(idx) => out.push(idx),
+                None => break,
+            }
+        }
+    }
+    out
 }
 
 fn request_page(loader: &PageLoader, reader: &mut OpenReader, page_index: usize) {
@@ -1436,6 +1509,7 @@ mod tests {
             pending_pages: HashMap::new(),
             pending_thumbnails: HashSet::new(),
             thumbnail_batch_next: 0,
+            last_hover_thumb_page: None,
             page_errors: HashMap::new(),
             page_error_retries: HashMap::new(),
             thumbnail_errors: HashMap::new(),
@@ -1683,5 +1757,37 @@ mod tests {
         };
         assert_eq!(sync_page_dimensions(&source, Some("wrong")), None);
         assert_eq!(sync_page_dimensions(&source, None), None);
+    }
+
+    #[test]
+    fn hover_prefetch_forward_direction() {
+        // Moving right: prefetch up to 8 pages ahead.
+        assert_eq!(
+            hover_prefetch_indices(10, Some(8), 100),
+            vec![11, 12, 13, 14, 15, 16, 17, 18]
+        );
+    }
+
+    #[test]
+    fn hover_prefetch_backward_direction() {
+        // Moving left: prefetch up to 8 pages behind, in nearest-first order.
+        assert_eq!(
+            hover_prefetch_indices(10, Some(12), 100),
+            vec![9, 8, 7, 6, 5, 4, 3, 2]
+        );
+    }
+
+    #[test]
+    fn hover_prefetch_no_direction_is_empty() {
+        assert!(hover_prefetch_indices(5, None, 100).is_empty());
+        assert!(hover_prefetch_indices(5, Some(5), 100).is_empty());
+    }
+
+    #[test]
+    fn hover_prefetch_clamps_at_bounds() {
+        assert_eq!(hover_prefetch_indices(97, Some(96), 100), vec![98, 99]);
+        assert_eq!(hover_prefetch_indices(2, Some(3), 100), vec![1, 0]);
+        assert!(hover_prefetch_indices(0, Some(1), 100).is_empty());
+        assert!(hover_prefetch_indices(3, Some(1), 0).is_empty());
     }
 }

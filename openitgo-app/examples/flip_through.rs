@@ -41,6 +41,11 @@ fn main() {
         let mut got = false;
         while start.elapsed() < timeout {
             if let Some(result) = loader.try_recv() {
+                // Full decodes piggyback a thumbnail result; only the full
+                // result is what this probe is waiting for.
+                if result.thumbnail {
+                    continue;
+                }
                 if result.epoch == epoch && result.page_index == page_index {
                     match result.image {
                         Ok(img) => {

@@ -27,6 +27,8 @@ dirs = { workspace = true }
 percent-encoding = "2"
 zip = { version = "2.2", default-features = false, features = ["deflate", "aes-crypto"] }
 unrar = "0.5"
+# libwebp(SIMD)缩略图解码(webp_thumb.rs):缩放解码 + 全解码兜底。
+libwebp-sys = "0.14"
 # 解压完成后「删除压缩包」移入回收站。
 trash = "5"
 

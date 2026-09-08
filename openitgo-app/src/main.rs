@@ -14,6 +14,7 @@ mod temp_open;
 mod theme;
 mod timing;
 mod views;
+mod webp_thumb;
 mod widgets;
 mod window_geometry;
 

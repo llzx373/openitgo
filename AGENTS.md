@@ -176,6 +176,18 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
 - **PageLoader** runs IO and decode workers in background threads; results are
   sent back to the UI thread via channels. The app also maintains a separate
   `cover_loader` for library cover thumbnails.
+  **进度条悬停缩略图（三层机制）**：① 全尺寸解码成功且 compress=false 时在
+  decode worker 内顺产生成 256px 缩略图（piggyback 额外发一个
+  `thumbnail=true` 的 LoadResult，覆盖当前页 ±预载窗口）；② 悬停进度条时
+  `render_progress_thumbnail` 对悬停页发高优先级请求（`request_page_thumbnail`），
+  并按指针移动方向低优先级预取 8 页（`hover_prefetch_indices`，
+  `last_hover_thumb_page` 记方向）；③ 全本后台批量由在途并发闸门节流
+  （`THUMBNAIL_BATCH_MAX_INFLIGHT=2`，翻页冷却期内暂停，与悬停预取共享
+  `pending_thumbnails` 计数），`ReaderView::update` 在批量未完成时
+  `request_repaint_after(100ms)` 保证空闲时结果排空。webp 缩略图走
+  `webp_thumb.rs` 的 libwebp(SIMD）缩放解码（`decode_thumbnail_bytes`
+  内优先尝试，失败回退 image crate；lossless webp 的缩放解码会被
+  libwebp 拒绝，内部自动回退无缩放解码 + image::thumbnail 兜底）。
 - **PageCache** stores GPU textures and keeps `size_bytes` as an estimate of
   either CPU image memory or equivalent GPU memory. CPU-side `ColorImage` is
   released after upload when possible.
