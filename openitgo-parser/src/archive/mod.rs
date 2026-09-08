@@ -21,6 +21,47 @@ pub struct ArchiveEntry {
     pub size: u64,
     /// 压缩后大小；RAR/TAR 接口拿不到时为 None。
     pub compressed_size: Option<u64>,
+    /// 修改时间（unix 秒，UTC）；格式不携带时 None。
+    pub mtime: Option<i64>,
+}
+
+/// DOS 日期时间分量 → unix 秒（UTC），zip/rar 共用；任何非法输入 → None。
+pub(crate) fn dos_datetime_to_unix(
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+) -> Option<i64> {
+    let month = time::Month::try_from(month).ok()?;
+    let date = time::Date::from_calendar_date(year, month, day).ok()?;
+    let time = time::Time::from_hms(hour, minute, second).ok()?;
+    Some(
+        time::PrimitiveDateTime::new(date, time)
+            .assume_utc()
+            .unix_timestamp(),
+    )
+}
+
+/// RAR `file_time`（DOS 位打包格式）→ unix 秒；0 表示不携带 → None。
+fn rar_file_time_to_unix(t: u32) -> Option<i64> {
+    if t == 0 {
+        return None;
+    }
+    dos_datetime_to_unix(
+        1980 + ((t >> 25) & 127) as i32,
+        ((t >> 21) & 15) as u8,
+        ((t >> 16) & 31) as u8,
+        ((t >> 11) & 31) as u8,
+        ((t >> 5) & 63) as u8,
+        ((t & 31) * 2) as u8,
+    )
+}
+
+/// 7z NT FILETIME（100ns 间隔，自 1601-01-01 UTC）原始值 → unix 秒。
+pub(crate) fn nt_time_raw_to_unix(raw: u64) -> i64 {
+    (raw / 10_000_000) as i64 - 11_644_473_600
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +167,16 @@ fn list_zip(path: &Path, password: Option<&str>) -> Result<Vec<ArchiveEntry>, Pa
             is_dir: entry.is_dir(),
             size: entry.size(),
             compressed_size: Some(entry.compressed_size()),
+            mtime: entry.last_modified().and_then(|dt| {
+                dos_datetime_to_unix(
+                    i32::from(dt.year()),
+                    dt.month(),
+                    dt.day(),
+                    dt.hour(),
+                    dt.minute(),
+                    dt.second(),
+                )
+            }),
         });
     }
 
@@ -160,6 +211,7 @@ fn list_rar(path: &Path, password: Option<&str>) -> Result<Vec<ArchiveEntry>, Pa
             is_dir: header.is_directory(),
             size: header.unpacked_size,
             compressed_size: None,
+            mtime: rar_file_time_to_unix(header.file_time),
         });
     }
     Ok(entries)
@@ -200,6 +252,9 @@ fn list_sevenz(path: &Path, password: Option<&str>) -> Result<Vec<ArchiveEntry>,
             is_dir: f.is_directory,
             size: f.size,
             compressed_size: f.has_stream.then_some(f.compressed_size),
+            mtime: f
+                .has_last_modified_date
+                .then(|| nt_time_raw_to_unix(f.last_modified_date().into())),
         })
         .collect())
 }
@@ -372,6 +427,7 @@ fn list_tar(path: &Path) -> Result<Vec<ArchiveEntry>, ParseError> {
             is_dir: entry.header().entry_type().is_dir(),
             size: entry.header().size().unwrap_or(0),
             compressed_size: None,
+            mtime: entry.header().mtime().ok().map(|v| v as i64),
         });
     }
     Ok(entries)
@@ -444,6 +500,67 @@ pub(crate) mod tests {
         for (name, want) in cases {
             assert_eq!(archive_kind(Path::new(name)), *want, "case: {name}");
         }
+    }
+
+    #[test]
+    fn dos_datetime_to_unix_cases() {
+        // 1980-01-01 00:00:00 UTC
+        assert_eq!(dos_datetime_to_unix(1980, 1, 1, 0, 0, 0), Some(315532800));
+        // 非法输入 → None
+        assert_eq!(dos_datetime_to_unix(1980, 0, 1, 0, 0, 0), None);
+        assert_eq!(dos_datetime_to_unix(1980, 2, 30, 0, 0, 0), None);
+        assert_eq!(dos_datetime_to_unix(1980, 1, 1, 24, 0, 0), None);
+    }
+
+    #[test]
+    fn rar_file_time_to_unix_cases() {
+        // 0 表示不携带
+        assert_eq!(rar_file_time_to_unix(0), None);
+        // 1980-01-01 00:00:00：day=1<<16，month=1<<21
+        assert_eq!(rar_file_time_to_unix(0x0021_0000), Some(315532800));
+    }
+
+    #[test]
+    fn nt_time_raw_to_unix_cases() {
+        // unix epoch 对应的 NT FILETIME 原始值
+        assert_eq!(nt_time_raw_to_unix(11_644_473_600 * 10_000_000), 0);
+        assert_eq!(nt_time_raw_to_unix(11_644_473_601 * 10_000_000), 1);
+    }
+
+    #[test]
+    fn list_zip_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("mtime.zip");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(zip::DateTime::from_date_and_time(2020, 3, 4, 5, 6, 8).unwrap());
+        zip.start_file("a.txt", options).unwrap();
+        zip.write_all(b"hi").unwrap();
+        zip.finish().unwrap();
+        let entries = list_entries(&path, None).unwrap();
+        assert_eq!(entries[0].mtime, Some(1583298368));
+    }
+
+    #[test]
+    fn list_tar_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("mtime.tar");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut builder = tar::Builder::new(file);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(2);
+        header.set_mode(0o644);
+        header.set_mtime(1_600_000_000);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "a.txt", &b"hi"[..])
+            .unwrap();
+        builder.finish().unwrap();
+        let entries = list_entries(&path, None).unwrap();
+        assert_eq!(entries[0].mtime, Some(1_600_000_000));
     }
 
     /// 写测试 zip：含子目录、目录项、非图片文件。
@@ -653,6 +770,7 @@ pub(crate) mod tests {
             is_dir: false,
             size: 0,
             compressed_size: None,
+            mtime: None,
         }
     }
 
@@ -703,6 +821,7 @@ pub(crate) mod tests {
                 is_dir: true,
                 size: 0,
                 compressed_size: None,
+                mtime: None,
             })
             .collect();
         assert_eq!(classify_archive(&entries), ArchiveClass::Files);
@@ -926,6 +1045,7 @@ pub(crate) mod tests {
             is_dir,
             size: 0,
             compressed_size: None,
+            mtime: None,
         }
     }
 
