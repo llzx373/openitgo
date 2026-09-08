@@ -94,7 +94,11 @@ cargo clippy --workspace --all-targets -- -D warnings
   （scope_dyn 会用内容区底改写竖向光标）。**列拖动**：`col_shift`（≤0，列块
   整体平移，0 = 贴右缘）+ 三列宽字段；`drag_column_sep` = Explorer 语义
   （分隔线右侧列保持宽度随鼠标平移，左侧列吸收宽度变化；名称列弹性由
-  col_shift 吸收；撞限同步停住）。
+  col_shift 吸收；撞限同步停住）。**列内容绘制**：行内大小/压缩后/时间三列用
+  `column_layout` 锚点（含 col_shift）`painter.text` 右对齐直绘，与表头/竖线同一
+  坐标源——**不要改回 `with_layout(right_to_left)`**：egui 0.35 外层 horizontal +
+  RTL 嵌套（格子内再 RTL）会把文字画到格子右缘之外（右移一格宽，被滚动区 clip），
+  且该布局不读 col_shift。名称列在 `layout.size_left` 前截断。
   **入口/分流**：`open_path` 对纯压缩包（7z/tar 系）直接进 Archive 视图；
   zip/cbz/rar/cbr 经 `open_archive_auto` + `poll_archive_router` 启发式分流
   （Comic → 漫画链路，Files → Archive 视图，列目录错误含密码错误回落漫画链路）；

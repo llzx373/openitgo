@@ -1903,7 +1903,11 @@ impl ArchiveView {
             ListRow::Parent | ListRow::Dir { .. } => None,
         };
         let content = rect.shrink2(egui::vec2(6.0, 2.0));
-        ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+        // 名称列在列块左缘前截断（跟随 col_shift），不与大小列文字叠字。
+        let name_right = (layout.size_left - 6.0).max(content.min.x + 20.0);
+        let name_rect =
+            egui::Rect::from_min_max(content.min, egui::pos2(name_right, content.max.y));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(name_rect), |ui| {
             // ui.horizontal 的初始行高取 interact_size.y（全局 28pt，为工具栏
             // 按钮而设），不压回会撑爆 18pt 的内容区：文字随之下沉约 5pt 贴到
             // 条纹下缘（"条纹与行对不上"），且 scope 结束时列表竖向光标被
@@ -1931,35 +1935,39 @@ impl ArchiveView {
                         ui.add(egui::Label::new(display).truncate());
                     }
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(self.col_width_mtime, ROW_HEIGHT - 4.0),
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            if let Some(e) = file {
-                                ui.label(egui::RichText::new(format_mtime(e.mtime)).weak());
-                            }
-                        },
+                // 右对齐列：与表头/竖线共用 column_layout 锚点直接绘制，天然跟随
+                // col_shift（拖分隔线时一起动）且无间距误差。不走 right_to_left
+                // 布局——egui 0.35 RTL 嵌套（外层 RTL + 格子内层 RTL）会把文字
+                // 画到格子右缘之外（右移一个格子宽，被滚动区 clip 掉）。
+                if let Some(e) = file {
+                    let painter = ui.painter();
+                    let font_id = egui::TextStyle::Body.resolve(ui.style());
+                    let col = ui.visuals().weak_text_color();
+                    let cy = rect.center().y;
+                    painter.text(
+                        egui::pos2(layout.packed_left, cy),
+                        egui::Align2::RIGHT_CENTER,
+                        human_size(e.size),
+                        font_id.clone(),
+                        col,
                     );
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(self.col_width_packed, ROW_HEIGHT - 4.0),
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            if let Some(packed) = file.and_then(|e| e.compressed_size) {
-                                ui.label(egui::RichText::new(human_size(packed)).weak());
-                            }
-                        },
+                    if let Some(packed) = e.compressed_size {
+                        painter.text(
+                            egui::pos2(layout.mtime_left, cy),
+                            egui::Align2::RIGHT_CENTER,
+                            human_size(packed),
+                            font_id.clone(),
+                            col,
+                        );
+                    }
+                    painter.text(
+                        egui::pos2(layout.content_right, cy),
+                        egui::Align2::RIGHT_CENTER,
+                        format_mtime(e.mtime),
+                        font_id,
+                        col,
                     );
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(self.col_width_size, ROW_HEIGHT - 4.0),
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            if let Some(e) = file {
-                                ui.label(egui::RichText::new(human_size(e.size)).weak());
-                            }
-                        },
-                    );
-                });
+                }
             });
         });
         // scope_dyn 结束时会用「内容区底 + item_spacing」改写列表竖向光标
@@ -2549,6 +2557,87 @@ mod tests {
         view.drag_column_sep(2, -1000.0, header);
         assert_eq!(view.col_width_packed, COL_MIN_WIDTH);
         assert_eq!(view.col_shift, -(PACKED_COL_WIDTH - COL_MIN_WIDTH));
+    }
+
+    /// 渲染一帧取某文本 galley 的右缘 x（headless：仅排版，不栅格化）。
+    fn rendered_text_right(col_shift: f32, needle: &str) -> f32 {
+        let ctx = egui::Context::default();
+        let mut e = entry("a.txt", false, 42);
+        e.mtime = Some(1_700_000_000);
+        e.compressed_size = Some(29);
+        let mut view = ArchiveView {
+            entries: vec![e],
+            col_shift,
+            ..Default::default()
+        };
+        let out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let row = ListRow::File { idx: 0 };
+                let mut open_key = None;
+                let mut extract_selected = false;
+                let mut extract_all = false;
+                let mut preview_name = None;
+                view.render_list_row(
+                    ui,
+                    &row,
+                    0,
+                    true,
+                    &mut open_key,
+                    &mut extract_selected,
+                    &mut extract_all,
+                    &mut preview_name,
+                );
+            },
+        );
+        out.shapes
+            .iter()
+            .find_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) if t.galley.job.text == needle => {
+                    Some(t.pos.x + t.galley.size().x)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("galley not found for {needle:?}"))
+    }
+
+    /// 列内容跟随列头拖动（regression：行格子曾不读 col_shift，且 egui 0.35
+    /// 嵌套 RTL 布局把文字画到格子右缘之外被 clip 掉）。行宽 800，右对齐列的
+    /// 文字右缘 = column_layout 锚点。
+    #[test]
+    fn row_columns_follow_header_shift_and_stay_gapless() {
+        let mtime_text = format_mtime(Some(1_700_000_000));
+        assert!(!mtime_text.is_empty());
+        let (m0, p0, s0) = (
+            rendered_text_right(0.0, &mtime_text),
+            rendered_text_right(0.0, "29 B"),
+            rendered_text_right(0.0, "42 B"),
+        );
+        // 绝对锚点：与表头/竖线共用 column_layout(800)。
+        let layout = column_layout(
+            800.0,
+            0.0,
+            SIZE_COL_WIDTH,
+            PACKED_COL_WIDTH,
+            MTIME_COL_WIDTH,
+        );
+        assert!((m0 - layout.content_right).abs() < 1.0, "m0={m0}");
+        assert!((p0 - layout.mtime_left).abs() < 1.0, "p0={p0}");
+        assert!((s0 - layout.packed_left).abs() < 1.0, "s0={s0}");
+        // col_shift = -50：三列文字随表头等量左移。
+        for (text, base) in [(mtime_text.as_str(), m0), ("29 B", p0), ("42 B", s0)] {
+            let moved = rendered_text_right(-50.0, text);
+            assert!(
+                (moved - (base - 50.0)).abs() < 1.0,
+                "{text}: {moved} vs {base}"
+            );
+        }
     }
 
     #[test]
