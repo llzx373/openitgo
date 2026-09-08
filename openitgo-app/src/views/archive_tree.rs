@@ -80,7 +80,7 @@ fn build_dir_root(entries: &[ArchiveEntry]) -> Node {
     root
 }
 
-/// 左栏目录树行：仅目录节点，同级按名字节序；子树默认展开，
+/// 左栏目录树行：仅目录节点，同级按名字自然序；子树默认展开，
 /// `collapsed` 含目录 full_path 时隐藏其子树。
 pub fn build_dir_rows(entries: &[ArchiveEntry], collapsed: &HashSet<String>) -> Vec<TreeRow> {
     let root = build_dir_root(entries);
@@ -91,7 +91,7 @@ pub fn build_dir_rows(entries: &[ArchiveEntry], collapsed: &HashSet<String>) -> 
 
 fn emit_dir_rows(node: &Node, depth: usize, collapsed: &HashSet<String>, rows: &mut Vec<TreeRow>) {
     let mut dirs: Vec<&Node> = node.children.iter().collect();
-    dirs.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+    dirs.sort_by(|a, b| natural_cmp(&a.name, &b.name));
     for child in dirs {
         rows.push(TreeRow {
             depth,
@@ -315,20 +315,22 @@ mod tests {
     }
 
     #[test]
-    fn dir_rows_sort_byte_wise_and_respect_collapse() {
+    fn dir_rows_sort_natural_and_respect_collapse() {
         let entries = vec![
             entry("m/f.png", false),
-            entry("a/f.png", false),
-            entry("a/b/f.png", false),
+            entry("a10/f.png", false),
+            entry("a2/f.png", false),
+            entry("a2/b/f.png", false),
         ];
         let rows = build_dir_rows(&entries, &HashSet::new());
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, vec!["a", "b", "m"]);
-        // 折叠 "a" 隐藏其子目录（"a" 行保留且仍标 has_children）。
-        let collapsed = HashSet::from(["a".to_string()]);
+        // 自然序：a2 < a10（字节序下 a10 会排在 a2 前面）。
+        assert_eq!(names, vec!["a2", "b", "a10", "m"]);
+        // 折叠 "a2" 隐藏其子目录（"a2" 行保留且仍标 has_children）。
+        let collapsed = HashSet::from(["a2".to_string()]);
         let rows = build_dir_rows(&entries, &collapsed);
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, vec!["a", "m"]);
+        assert_eq!(names, vec!["a2", "a10", "m"]);
         assert!(rows[0].has_children);
     }
 

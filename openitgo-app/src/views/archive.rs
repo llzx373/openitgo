@@ -184,6 +184,9 @@ pub struct ArchiveView {
     focus: Option<RowKey>,
     /// 键盘移动焦点后置位，下一帧按 Explorer 最小滚动语义揭示焦点行。
     focus_scroll_pending: bool,
+    /// 树跟随当前目录：enter_dir/go_up/show_all_files 置位，下一帧渲染目录树时
+    /// 自动展开 current_dir 的全部祖先并滚动揭示该行（「全部文件」模式揭示根行）。
+    tree_reveal_pending: bool,
     /// 上一帧明细列表的滚动偏移与视口高度（最小滚动计算的基准；0 = 未知）。
     last_scroll_offset: f32,
     last_viewport_height: f32,
@@ -230,6 +233,7 @@ impl Default for ArchiveView {
             anchor: None,
             focus: None,
             focus_scroll_pending: false,
+            tree_reveal_pending: false,
             last_scroll_offset: 0.0,
             last_viewport_height: 0.0,
             sort_key: SortKey::Name,
@@ -276,6 +280,7 @@ impl ArchiveView {
         self.anchor = None;
         self.focus = None;
         self.focus_scroll_pending = false;
+        self.tree_reveal_pending = false;
         self.last_scroll_offset = 0.0;
         self.last_viewport_height = 0.0;
         self.sort_key = SortKey::Name;
@@ -718,6 +723,7 @@ impl ArchiveView {
         self.flat_all = false;
         self.current_dir = Some(full_path);
         self.clear_selection();
+        self.tree_reveal_pending = true;
     }
 
     /// 切到「全部文件」扁平模式（左栏特殊根节点/面包屑）。
@@ -725,6 +731,7 @@ impl ArchiveView {
         self.flat_all = true;
         self.current_dir = None;
         self.clear_selection();
+        self.tree_reveal_pending = true;
     }
 
     /// Backspace 上级：扁平模式 → 根目录；目录 → 截掉末段；根目录 no-op。
@@ -733,6 +740,7 @@ impl ArchiveView {
             self.flat_all = false;
             self.current_dir = None;
             self.clear_selection();
+            self.tree_reveal_pending = true;
             return;
         }
         let Some(dir) = self.current_dir.clone() else {
@@ -741,6 +749,7 @@ impl ArchiveView {
         let dir = dir.trim_end_matches(['/', '\\']);
         self.current_dir = dir.rfind(['/', '\\']).map(|i| dir[..i].to_string());
         self.clear_selection();
+        self.tree_reveal_pending = true;
     }
 
     /// ↑/↓ 移动焦点：无焦点时选中首行/末行；有焦点按行序步进并单选。
@@ -762,7 +771,11 @@ impl ArchiveView {
         self.selected.clear();
         self.set_row_selected(&key, true);
         self.anchor = Some(key.clone());
-        self.focus = Some(key);
+        self.focus = Some(key.clone());
+        // 预览跟随键盘：文件行同步预览目标（与鼠标单击一致），目录行不动。
+        if let RowKey::File(name) = &key {
+            self.preview_entry = Some(name.clone());
+        }
         self.focus_scroll_pending = true;
     }
 
@@ -834,7 +847,7 @@ impl ArchiveView {
                 ui.separator();
                 if ui
                     .button((icons::EXPORT, " 解压全部"))
-                    .on_hover_text("解压到包同目录的同名子目录")
+                    .on_hover_text("选择目标位置并解压全部条目")
                     .clicked()
                 {
                     on_extract_all();
@@ -882,13 +895,25 @@ impl ArchiveView {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     let file_count = self.entries.iter().filter(|e| !e.is_dir).count();
-                    let (selected_count, selected_bytes) = self.selected_stats();
-                    ui.label(format!("共 {file_count} 个文件"));
-                    ui.separator();
+                    let total_bytes: u64 = self
+                        .entries
+                        .iter()
+                        .filter(|e| !e.is_dir)
+                        .map(|e| e.size)
+                        .sum();
                     ui.label(format!(
-                        "已选 {selected_count} 项 · {}",
-                        human_size(selected_bytes)
+                        "共 {file_count} 个文件 · 总大小 {}",
+                        human_size(total_bytes)
                     ));
+                    let (selected_count, selected_bytes) = self.selected_stats();
+                    // 无选中时不显示选中统计（避免恒在的「已选 0 项 · 0 B」噪音）。
+                    if selected_count > 0 {
+                        ui.separator();
+                        ui.label(format!(
+                            "已选 {selected_count} 项 · {}",
+                            human_size(selected_bytes)
+                        ));
+                    }
                     ui.separator();
                     let hint = if crate::platform::drag_out::is_supported() {
                         "双击打开 · 右键菜单 · 按住拖出窗口解压"
@@ -974,6 +999,7 @@ impl ArchiveView {
                     openable_comic,
                     on_open_entry_as_comic,
                     on_open_entry_external,
+                    on_extract_all,
                     on_extract_selected,
                 );
             }
@@ -1050,10 +1076,25 @@ impl ArchiveView {
     /// 整行可点（Explorer 式，行右侧空白同样有效），横向滚动容纳长目录名；
     /// 行内手画 缩进 → 折叠三角（独立热区，只切折叠不进入）→ 图标 → 名称；
     /// 当前目录高亮铺整行，行高与明细列表同为 ROW_HEIGHT。
+    /// tree_reveal_pending 置位时（导航变更）先统一展开 current_dir 的全部
+    /// 祖先（祖先展开会影响行序列，故在建行之前处理），再滚动揭示命中行。
     fn render_dir_pane(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                let mut reveal_all_files = false;
+                let mut reveal_current = false;
+                if self.tree_reveal_pending {
+                    self.tree_reveal_pending = false;
+                    if self.flat_all {
+                        reveal_all_files = true;
+                    } else if let Some(dir) = self.current_dir.clone() {
+                        for path in breadcrumb_paths(&dir) {
+                            self.collapsed.remove(&path);
+                        }
+                        reveal_current = true;
+                    }
+                }
                 let rows = build_dir_rows(&self.entries, &self.collapsed);
                 let font_id = egui::TextStyle::Body.resolve(ui.style());
                 let painter = ui.painter().clone();
@@ -1074,17 +1115,20 @@ impl ArchiveView {
                     width = width.max(content_w(row.depth, true, &row.name));
                 }
                 let width = width.max(ui.clip_rect().width());
-                self.dir_all_files_row(ui, width);
+                self.dir_all_files_row(ui, width, reveal_all_files);
                 for row in &rows {
-                    self.dir_pane_row(ui, row, width);
+                    self.dir_pane_row(ui, row, width, reveal_current);
                 }
             });
     }
 
     /// 「全部文件」特殊根行：整行可点，高亮扁平模式。
-    fn dir_all_files_row(&mut self, ui: &mut egui::Ui, width: f32) {
+    fn dir_all_files_row(&mut self, ui: &mut egui::Ui, width: f32, reveal: bool) {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click());
+        if reveal {
+            response.scroll_to_me(Some(egui::Align::Center));
+        }
         let painter = ui.painter().clone();
         if self.flat_all {
             painter.rect_filled(rect, 2.0, ui.visuals().selection.bg_fill);
@@ -1114,11 +1158,14 @@ impl ArchiveView {
 
     /// 目录树行：整行可点（单击设为当前目录，高亮铺整行）；行内手画
     /// 缩进 → 折叠三角（独立小热区，只切折叠不进入）→ 文件夹图标 → 名称。
-    fn dir_pane_row(&mut self, ui: &mut egui::Ui, row: &TreeRow, width: f32) {
+    fn dir_pane_row(&mut self, ui: &mut egui::Ui, row: &TreeRow, width: f32, reveal: bool) {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click());
         let is_current =
             !self.flat_all && self.current_dir.as_deref() == Some(row.full_path.as_str());
+        if reveal && is_current {
+            response.scroll_to_me(Some(egui::Align::Center));
+        }
         let painter = ui.painter().clone();
         if is_current {
             painter.rect_filled(rect, 2.0, ui.visuals().selection.bg_fill);
@@ -1204,9 +1251,29 @@ impl ArchiveView {
             .on_hover_text(comment);
     }
 
-    /// 面包屑：扁平模式显示「全部文件」；否则「根目录 / dir1 / dir2」，
-    /// 每段可点击跳回。
+    /// 面包屑：过滤激活时显示「<过滤词>（N 个匹配）」（列表已是全包匹配，
+    /// 显示路径段会自相矛盾）；扁平模式显示「全部文件」；否则
+    /// 「根目录 / dir1 / dir2」，每段可点击跳回。
     fn render_breadcrumb(&mut self, ui: &mut egui::Ui) {
+        let needle = self.filter.trim();
+        if !needle.is_empty() {
+            let matches = self
+                .rows()
+                .iter()
+                .filter(|r| matches!(r, ListRow::File { .. }))
+                .count();
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} {needle}（{matches} 个匹配）",
+                        icons::MAGNIFYING_GLASS.as_str()
+                    ))
+                    .strong(),
+                );
+            });
+            ui.separator();
+            return;
+        }
         ui.horizontal_wrapped(|ui| {
             if self.flat_all {
                 ui.label(egui::RichText::new("全部文件").strong());
@@ -1336,6 +1403,7 @@ impl ArchiveView {
         openable_comic: bool,
         on_open_entry_as_comic: &mut dyn FnMut(String),
         on_open_entry_external: &mut dyn FnMut(String),
+        on_extract_all: &mut dyn FnMut(),
         on_extract_selected: &mut dyn FnMut(Vec<String>),
     ) {
         self.render_column_header(ui);
@@ -1374,6 +1442,7 @@ impl ArchiveView {
         // 每帧意图：行交互/右键菜单设置，帧尾统一外抛（避免回调嵌套借用）。
         let mut open_key: Option<RowKey> = None;
         let mut extract_selected = false;
+        let mut extract_all = false;
         let mut preview_name: Option<String> = None;
         let output = area.show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
             let first = range.start;
@@ -1385,6 +1454,7 @@ impl ArchiveView {
                     flat,
                     &mut open_key,
                     &mut extract_selected,
+                    &mut extract_all,
                     &mut preview_name,
                 );
             }
@@ -1406,6 +1476,9 @@ impl ArchiveView {
         if extract_selected {
             on_extract_selected(self.selected_names_in_order());
         }
+        if extract_all {
+            on_extract_all();
+        }
     }
 
     /// 明细列表一行：整行 allocate 交互 + 斑马纹/高亮/焦点描边 + 列分隔竖线，
@@ -1419,6 +1492,7 @@ impl ArchiveView {
         flat: bool,
         open_key: &mut Option<RowKey>,
         extract_selected: &mut bool,
+        extract_all: &mut bool,
         preview_name: &mut Option<String>,
     ) {
         let key = self.row_key(row);
@@ -1533,17 +1607,17 @@ impl ArchiveView {
             }
             match &key {
                 RowKey::Dir(_) => {
-                    if ui.button("进入").clicked() {
+                    if ui.button((icons::FOLDER_OPEN, " 进入")).clicked() {
                         *open_key = Some(key.clone());
                         ui.close();
                     }
                 }
                 RowKey::File(_) => {
-                    if ui.button("打开").clicked() {
+                    if ui.button((icons::ARROW_SQUARE_OUT, " 打开")).clicked() {
                         *open_key = Some(key.clone());
                         ui.close();
                     }
-                    if ui.button("预览").clicked() {
+                    if ui.button((icons::EYE, " 预览")).clicked() {
                         if let RowKey::File(name) = &key {
                             *preview_name = Some(name.clone());
                         }
@@ -1554,18 +1628,26 @@ impl ArchiveView {
             ui.separator();
             let (count, _) = self.selected_stats();
             if ui
-                .add_enabled(count > 0, egui::Button::new(format!("解压选中 ({count})")))
+                .add_enabled(
+                    count > 0,
+                    egui::Button::new((icons::EXPORT, format!(" 解压选中到… ({count})"))),
+                )
                 .clicked()
             {
                 *extract_selected = true;
                 ui.close();
             }
+            if matches!(&key, RowKey::Dir(_)) && ui.button((icons::EXPORT, " 解压全部…")).clicked()
+            {
+                *extract_all = true;
+                ui.close();
+            }
             ui.separator();
-            if ui.button("全选").clicked() {
+            if ui.button((icons::CHECK_SQUARE, " 全选")).clicked() {
                 self.select_all_visible();
                 ui.close();
             }
-            if ui.button("清空选中").clicked() {
+            if ui.button((icons::X, " 清空选中")).clicked() {
                 self.clear_selection();
                 ui.close();
             }
@@ -1928,15 +2010,34 @@ mod tests {
         };
         view.go_up();
         assert_eq!(view.current_dir.as_deref(), Some("a"));
+        assert!(view.tree_reveal_pending);
+        view.tree_reveal_pending = false;
         view.go_up();
         assert_eq!(view.current_dir, None);
-        // 根目录再向上为 no-op。
+        assert!(view.tree_reveal_pending);
+        // 根目录再向上为 no-op（不置揭示标记）。
+        view.tree_reveal_pending = false;
         view.go_up();
         assert_eq!(view.current_dir, None);
+        assert!(!view.tree_reveal_pending);
         // 扁平模式向上回到根目录。
         view.flat_all = true;
         view.go_up();
         assert!(!view.flat_all);
+        assert_eq!(view.current_dir, None);
+        assert!(view.tree_reveal_pending);
+    }
+
+    #[test]
+    fn enter_dir_and_show_all_files_set_tree_reveal() {
+        let mut view = ArchiveView::default();
+        assert!(!view.tree_reveal_pending);
+        view.enter_dir("a/b".to_string());
+        assert!(view.tree_reveal_pending);
+        view.tree_reveal_pending = false;
+        view.show_all_files();
+        assert!(view.tree_reveal_pending);
+        assert!(view.flat_all);
         assert_eq!(view.current_dir, None);
     }
 
@@ -1950,21 +2051,26 @@ mod tests {
             ],
             ..Default::default()
         };
-        // 无焦点时向下 = 首行（目录行，级联选中）。
+        // 无焦点时向下 = 首行（目录行，级联选中；预览目标不动）。
         view.move_focus(1);
         assert_eq!(view.focus, Some(RowKey::Dir("d".to_string())));
         assert!(view.selected.contains("d/f.png"));
         assert!(view.focus_scroll_pending);
+        assert_eq!(view.preview_entry, None);
         view.focus_scroll_pending = false;
+        // 文件行：预览跟随键盘焦点（与鼠标单击一致）。
         view.move_focus(1);
         assert_eq!(view.focus, Some(RowKey::File("a.png".to_string())));
         assert_eq!(view.selected.len(), 1);
+        assert_eq!(view.preview_entry.as_deref(), Some("a.png"));
         // 末行钳位。
         view.move_focus(5);
         assert_eq!(view.focus, Some(RowKey::File("b.png".to_string())));
-        // 顶部再向上停在首行。
+        assert_eq!(view.preview_entry.as_deref(), Some("b.png"));
+        // 顶部再向上停在首行（目录行不改预览目标）。
         view.move_focus(-10);
         assert_eq!(view.focus, Some(RowKey::Dir("d".to_string())));
+        assert_eq!(view.preview_entry.as_deref(), Some("b.png"));
     }
 
     #[test]
@@ -2074,6 +2180,7 @@ mod tests {
             preview_text: Some("txt".to_string()),
             tried_password: Some("pw".to_string()),
             password_failed: true,
+            tree_reveal_pending: true,
             state: ArchiveViewState::Failed("x".to_string()),
             ..Default::default()
         };
@@ -2091,6 +2198,7 @@ mod tests {
         assert_eq!(view.preview_text, None);
         assert_eq!(view.tried_password, None);
         assert!(!view.password_failed);
+        assert!(!view.tree_reveal_pending);
         assert!(view.listing.is_none());
         assert_eq!(view.path.as_deref(), Some(Path::new("/tmp/pack.zip")));
     }
