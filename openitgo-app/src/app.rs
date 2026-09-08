@@ -2460,6 +2460,8 @@ impl ReaderApp {
             let mut open_path: Option<PathBuf> = None;
             let mut open_archive: Option<PathBuf> = None;
             let mut open_as_comic: Option<PathBuf> = None;
+            let mut op_error: Option<String> = None;
+            let mut confirm_change: Option<bool> = None;
             self.file_manager_view.ui(
                 ui,
                 FmCallbacks {
@@ -2467,7 +2469,10 @@ impl ReaderApp {
                     on_open_path: &mut |p| open_path = Some(p),
                     on_open_archive: &mut |p| open_archive = Some(p),
                     on_open_as_comic: &mut |p| open_as_comic = Some(p),
+                    on_op_error: &mut |msg| op_error = Some(msg),
+                    on_confirm_delete_change: &mut |confirm| confirm_change = Some(confirm),
                 },
+                self.settings.fm_confirm_delete,
             );
             if back {
                 self.current_view = View::Library;
@@ -2482,6 +2487,13 @@ impl ReaderApp {
             if let Some(path) = open_as_comic {
                 // 显式「作为漫画打开」：跳过启发式分流，直接走漫画链路。
                 self.open_comic(path);
+            }
+            if let Some(msg) = op_error {
+                self.error_message = Some(msg);
+            }
+            if let Some(confirm) = confirm_change {
+                // 「不再询问」勾选：写回 settings（退出时统一落盘）。
+                self.settings.fm_confirm_delete = confirm;
             }
         });
     }

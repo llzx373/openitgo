@@ -11,10 +11,16 @@
 
 use crate::opener::{AsyncOpener, OpenStatus};
 use crate::views::archive::{format_mtime, human_size};
+use crate::views::file_manager_dialog::{
+    CopyMoveDialog, DeleteDialog, FmDialog, FmDialogOutcome, NewDirDialog, RenameDialog,
+};
 use crate::views::file_manager_panel::{
     FocusMove, FsPanel, PanelLoadState, COL_RIGHT_PAD, ROW_HEIGHT,
 };
 use crate::views::file_manager_rows::{FsEntry, SortKey};
+use crate::views::file_ops::{
+    create_dir, rename_entry, suggest_folder_name, FileOpManager, FinishedOp, OpKind,
+};
 use crate::views::preview_bytes::{is_previewable_name, load_file_preview, PreviewData};
 use egui_phosphor_icons::{icons, Icon};
 use openitgo_parser::archive::archive_kind;
@@ -62,6 +68,15 @@ pub struct FileManagerView {
     preview_full_size: bool,
     /// F3 临时预览弹窗开关（双栏模式）。
     preview_window_open: bool,
+    /// 后台文件操作（复制/移动/删除）。
+    ops: FileOpManager,
+    /// 操作确认对话框；Some 时渲染模态窗口并屏蔽面板键盘。
+    dialog: Option<FmDialog>,
+    /// 应用内剪贴板（Ctrl+C/X 复制/剪切，Ctrl+V 粘贴到焦点栏）。
+    clipboard: Vec<PathBuf>,
+    clipboard_cut: bool,
+    /// 删除前是否弹确认框（settings.fm_confirm_delete 快照，供右键菜单使用）。
+    confirm_delete: bool,
 }
 
 /// 帧内意图：行内交互写入，帧尾统一触发回调（避免回调嵌套借用）。
@@ -71,6 +86,10 @@ struct FmIntents {
     open_path: Option<PathBuf>,
     open_archive: Option<PathBuf>,
     open_as_comic: Option<PathBuf>,
+    /// 文件操作汇总/错误（完成/取消/失败时上报给 app error_message）。
+    op_error: Option<String>,
+    /// 删除确认框「不再询问」勾选（false = 仍需确认）。
+    confirm_delete_change: Option<bool>,
 }
 
 pub struct FmCallbacks<'a> {
@@ -81,6 +100,10 @@ pub struct FmCallbacks<'a> {
     pub on_open_archive: &'a mut dyn FnMut(PathBuf),
     /// 右键「作为漫画打开」（目录与压缩包可用）。
     pub on_open_as_comic: &'a mut dyn FnMut(PathBuf),
+    /// 文件操作完成/取消/失败的汇总消息。
+    pub on_op_error: &'a mut dyn FnMut(String),
+    /// 删除确认框「不再询问」勾选变化（写回 settings.fm_confirm_delete）。
+    pub on_confirm_delete_change: &'a mut dyn FnMut(bool),
 }
 
 /// 名称/大小/修改时间三列的 x 坐标单一来源（表头 paint、行列分隔竖线、
@@ -136,15 +159,23 @@ impl FileManagerView {
             preview_note: None,
             preview_full_size: false,
             preview_window_open: false,
+            ops: FileOpManager::default(),
+            dialog: None,
+            clipboard: Vec::new(),
+            clipboard_cut: false,
+            confirm_delete: true,
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, callbacks: FmCallbacks<'_>) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, callbacks: FmCallbacks<'_>, confirm_delete: bool) {
+        self.confirm_delete = confirm_delete;
         let FmCallbacks {
             on_back,
             on_open_path,
             on_open_archive,
             on_open_as_comic,
+            on_op_error,
+            on_confirm_delete_change,
         } = callbacks;
         let mut intents = FmIntents::default();
 
@@ -172,11 +203,21 @@ impl FileManagerView {
             ui.ctx().request_repaint_after(Duration::from_millis(100));
         }
         self.poll_preview(ui.ctx());
+        // 文件操作：每帧排空进度/完成事件；活动任务期间主动重绘。
+        let op_summary = self.ops.poll();
+        if op_summary.has_active {
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
+        }
+        for finished in op_summary.finished {
+            self.on_op_finished(finished, &mut intents);
+        }
+        let active_op = op_summary.active;
 
         self.render_top_bar(ui, &mut intents);
         ui.separator();
 
-        // 底栏：当前栏选中/条目统计。
+        // 底栏：当前栏选中/条目统计 + 操作进度。
+        let mut cancel_op: Option<u64> = None;
         egui::Panel::bottom("fm_status_bar").show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -190,12 +231,39 @@ impl FileManagerView {
                 }
                 ui.separator();
                 ui.label(egui::RichText::new("Tab 切换栏 · 双击打开 · 右键菜单").weak());
+                // 活动文件操作：进度条 + 百分比 + 取消按钮。
+                if let Some(op) = &active_op {
+                    ui.separator();
+                    let fraction = op.progress.fraction();
+                    let pct = (fraction * 100.0).round() as u32;
+                    ui.add(
+                        egui::ProgressBar::new(fraction)
+                            .desired_width(160.0)
+                            .text(format!("{} {pct}%", op.kind.verb())),
+                    );
+                    let current = op
+                        .progress
+                        .current
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if !current.is_empty() {
+                        ui.label(egui::RichText::new(current).weak())
+                            .on_hover_text(op.progress.current.display().to_string());
+                    }
+                    if ui.small_button("取消").clicked() {
+                        cancel_op = Some(op.id);
+                    }
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(egui::RichText::new(panel.dir.display().to_string()).weak());
                 });
             });
             ui.add_space(4.0);
         });
+        if let Some(id) = cancel_op {
+            self.ops.cancel(id);
+        }
 
         // 中央：双栏 + 可拖分隔条 / 单栏 + 预览占位。
         let panel_rects = self.render_panels(ui, &mut intents);
@@ -217,11 +285,13 @@ impl FileManagerView {
             }
         }
 
-        self.handle_keyboard(ui, &mut intents);
+        self.handle_keyboard(ui, &mut intents, confirm_delete);
         // 「选中即预览」跟随焦点行（键盘/鼠标改动焦点之后统一同步）。
         self.sync_preview_target();
         // F3 临时预览弹窗（双栏模式）。
         self.render_preview_window(ui.ctx());
+        // 文件操作确认对话框（复制/移动/删除/重命名/新建文件夹）。
+        self.render_dialog(ui.ctx(), &mut intents);
 
         // 帧尾统一外抛回调。
         if intents.back {
@@ -235,6 +305,12 @@ impl FileManagerView {
         }
         if let Some(path) = intents.open_as_comic {
             on_open_as_comic(path);
+        }
+        if let Some(msg) = intents.op_error {
+            on_op_error(msg);
+        }
+        if let Some(confirm) = intents.confirm_delete_change {
+            on_confirm_delete_change(confirm);
         }
     }
 
@@ -807,7 +883,51 @@ impl FileManagerView {
                     self.panels[idx].refresh();
                     ui.close();
                 }
-                // TODO(阶段四): 复制/移动/删除/重命名/新建文件夹 菜单项。
+                ui.separator();
+                if ui.button((icons::PENCIL_SIMPLE, " 重命名")).clicked() {
+                    self.dialog = Some(FmDialog::Rename(RenameDialog::new(e.path.clone())));
+                    ui.close();
+                }
+                let dual = matches!(self.layout, PanelLayout::Dual { .. });
+                let dest_label = if dual { "另一栏" } else { "当前目录" };
+                if ui
+                    .button((icons::COPY, format!(" 复制到{dest_label}…")))
+                    .clicked()
+                {
+                    let targets = self.op_targets(idx);
+                    if !targets.is_empty() {
+                        self.open_copy_move_dialog(OpKind::Copy, targets, idx);
+                    }
+                    ui.close();
+                }
+                if ui
+                    .button((icons::EXPORT, format!(" 移动到{dest_label}…")))
+                    .clicked()
+                {
+                    let targets = self.op_targets(idx);
+                    if !targets.is_empty() {
+                        self.open_copy_move_dialog(OpKind::Move, targets, idx);
+                    }
+                    ui.close();
+                }
+                if ui.button((icons::FOLDER_PLUS, " 新建文件夹")).clicked() {
+                    let parent = self.panels[idx].dir.clone();
+                    let suggested = suggest_folder_name(&parent);
+                    self.dialog = Some(FmDialog::NewDir(NewDirDialog::new(parent, suggested)));
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button((icons::TRASH, " 删除")).clicked() {
+                    let targets = self.op_targets(idx);
+                    if !targets.is_empty() {
+                        if self.confirm_delete {
+                            self.dialog = Some(FmDialog::Delete(DeleteDialog::new(targets)));
+                        } else {
+                            self.start_delete(targets);
+                        }
+                    }
+                    ui.close();
+                }
             });
         }
         // 悬停信息提示（被截断名称的完整信息）：全路径 + 大小；「..」= 上级目录提示。
@@ -846,13 +966,151 @@ impl FileManagerView {
         }
     }
 
+    /// 操作目标：selected 非空用选中集（按栏内顺序），否则用焦点项。
+    fn op_targets(&mut self, idx: usize) -> Vec<PathBuf> {
+        let panel = &mut self.panels[idx];
+        if panel.selected.is_empty() {
+            return panel
+                .focused_entry()
+                .map(|e| vec![e.path])
+                .unwrap_or_default();
+        }
+        panel
+            .entries
+            .iter()
+            .filter(|e| panel.selected.contains(&e.path))
+            .map(|e| e.path.clone())
+            .collect()
+    }
+
+    /// 复制/移动确认框：目标默认非焦点栏目录（单栏模式 = 本栏目录）。
+    fn open_copy_move_dialog(&mut self, kind: OpKind, sources: Vec<PathBuf>, from_panel: usize) {
+        let dest = match self.layout {
+            PanelLayout::Dual { .. } => self.panels[1 - from_panel].dir.clone(),
+            PanelLayout::Single { .. } => self.panels[from_panel].dir.clone(),
+        };
+        self.dialog = Some(FmDialog::CopyMove(CopyMoveDialog::new(
+            kind, sources, &dest,
+        )));
+    }
+
+    /// 删除（确认框已把关或 fm_confirm_delete=false）：预览目标在被删项中
+    /// 先清预览，然后起后台任务。
+    fn start_delete(&mut self, sources: Vec<PathBuf>) {
+        if let Some(tp) = &self.preview_path {
+            if sources.contains(tp) {
+                self.clear_preview();
+            }
+        }
+        self.ops.start_delete(sources);
+    }
+
+    /// 渲染操作确认对话框；Some(outcome) 时统一执行。
+    fn render_dialog(&mut self, ctx: &egui::Context, intents: &mut FmIntents) {
+        let Some(mut dialog) = self.dialog.take() else {
+            return;
+        };
+        match dialog.ui(ctx) {
+            None => self.dialog = Some(dialog),
+            Some(outcome) => self.apply_dialog_outcome(outcome, intents),
+        }
+    }
+
+    fn apply_dialog_outcome(&mut self, outcome: FmDialogOutcome, intents: &mut FmIntents) {
+        match outcome {
+            FmDialogOutcome::Cancelled => {}
+            FmDialogOutcome::ConfirmCopyMove {
+                kind,
+                sources,
+                dest,
+                conflict,
+            } => {
+                match kind {
+                    OpKind::Copy => self.ops.start_copy(sources, dest, conflict),
+                    OpKind::Move => self.ops.start_move(sources, dest, conflict),
+                    OpKind::Delete => unreachable!("Delete 走 DeleteDialog"),
+                };
+            }
+            FmDialogOutcome::ConfirmDelete {
+                sources,
+                dont_ask_again,
+            } => {
+                if dont_ask_again {
+                    intents.confirm_delete_change = Some(false);
+                }
+                self.start_delete(sources);
+            }
+            FmDialogOutcome::ConfirmRename { path, new_name } => {
+                match rename_entry(&path, &new_name) {
+                    Ok(new_path) => self.refresh_panel_of(&new_path),
+                    Err(e) => intents.op_error = Some(e),
+                }
+            }
+            FmDialogOutcome::ConfirmNewDir { parent, name } => match create_dir(&parent, &name) {
+                Ok(new_path) => self.refresh_panel_of(&new_path),
+                Err(e) => intents.op_error = Some(e),
+            },
+        }
+    }
+
+    /// 重命名/新建文件夹完成：刷新所在栏并选中新条目（refresh 保留选中，
+    /// 列举完成后新路径仍在选中集内）。
+    fn refresh_panel_of(&mut self, new_path: &Path) {
+        for panel in &mut self.panels {
+            if new_path.parent() == Some(panel.dir.as_path()) {
+                panel.selected.insert(new_path.to_path_buf());
+                panel.refresh();
+            }
+        }
+    }
+
+    /// 操作完成：刷新涉及的两栏（目标栏 + 源栏），汇总错误经回调上报。
+    fn on_op_finished(&mut self, op: FinishedOp, intents: &mut FmIntents) {
+        for panel in &mut self.panels {
+            let involved =
+                op.dest_dir.as_ref() == Some(&panel.dir) || op.src_dirs.contains(&panel.dir);
+            if involved {
+                panel.refresh();
+            }
+        }
+        let verb = op.kind.verb();
+        let mut parts = Vec::new();
+        if op.cancelled {
+            parts.push(format!("{verb}已取消（已处理部分保留）"));
+        }
+        if let Some(fatal) = &op.fatal {
+            parts.push(format!("{verb}失败: {fatal}"));
+        }
+        if !op.errors.is_empty() {
+            let first: Vec<String> = op
+                .errors
+                .iter()
+                .take(3)
+                .map(|(p, e)| format!("{}: {e}", p.display()))
+                .collect();
+            parts.push(format!(
+                "{verb}完成，{} 项失败:\n{}",
+                op.errors.len(),
+                first.join("\n")
+            ));
+        }
+        if !parts.is_empty() {
+            intents.op_error = Some(parts.join("\n"));
+        }
+    }
+
     /// 键盘导航（Explorer/TC 式）：Tab 切换焦点栏、↑/↓ 移动焦点并单选、
     /// Shift+↑/↓ 从 anchor 扩选、Ctrl+↑/↓ 只移焦点、Home/End 跳首/末行、
     /// PgUp/PgDn 整页步进、Enter 打开焦点行、Backspace 上级、Ctrl+A 全选可见、
     /// Ctrl+R 刷新、Alt+←/→ 导航历史、Esc 清过滤或清空选中。
     /// 过滤框等文本输入占用键盘时不处理。
-    /// TODO(阶段四): F2 重命名 / F5 复制 / F6 移动 / F7 新建文件夹 / F8 删除。
-    fn handle_keyboard(&mut self, ui: &egui::Ui, intents: &mut FmIntents) {
+    /// 文件操作键：F2 重命名 / F5 复制 / F6 移动 / F7 新建文件夹 /
+    /// F8(Delete) 删除（confirm_delete 时先弹确认框）；Ctrl+C/X/V 剪贴板。
+    fn handle_keyboard(&mut self, ui: &egui::Ui, intents: &mut FmIntents, confirm_delete: bool) {
+        // 对话框打开时屏蔽面板键盘（输入归对话框）。
+        if self.dialog.is_some() {
+            return;
+        }
         if ui.ctx().egui_wants_keyboard_input() {
             return;
         }
@@ -879,6 +1137,62 @@ impl FileManagerView {
         }
         if mods.alt && ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
             self.panels[active].go_forward();
+        }
+        // 应用内剪贴板：Ctrl+C 复制 / Ctrl+X 剪切 / Ctrl+V 粘贴（经确认框）。
+        if mods.command && ui.input(|i| i.key_pressed(egui::Key::C)) {
+            let targets = self.op_targets(active);
+            if !targets.is_empty() {
+                self.clipboard = targets;
+                self.clipboard_cut = false;
+            }
+        }
+        if mods.command && ui.input(|i| i.key_pressed(egui::Key::X)) {
+            let targets = self.op_targets(active);
+            if !targets.is_empty() {
+                self.clipboard = targets;
+                self.clipboard_cut = true;
+            }
+        }
+        if mods.command && ui.input(|i| i.key_pressed(egui::Key::V)) && !self.clipboard.is_empty() {
+            let kind = if self.clipboard_cut {
+                OpKind::Move
+            } else {
+                OpKind::Copy
+            };
+            self.open_copy_move_dialog(kind, self.clipboard.clone(), active);
+        }
+        // 文件操作：F2 重命名 / F5 复制 / F6 移动 / F7 新建文件夹 / F8(Del) 删除。
+        if ui.input(|i| i.key_pressed(egui::Key::F2)) {
+            if let Some(entry) = self.panels[active].focused_entry() {
+                self.dialog = Some(FmDialog::Rename(RenameDialog::new(entry.path)));
+            }
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::F5)) {
+            let targets = self.op_targets(active);
+            if !targets.is_empty() {
+                self.open_copy_move_dialog(OpKind::Copy, targets, active);
+            }
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::F6)) {
+            let targets = self.op_targets(active);
+            if !targets.is_empty() {
+                self.open_copy_move_dialog(OpKind::Move, targets, active);
+            }
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::F7)) {
+            let parent = self.panels[active].dir.clone();
+            let suggested = suggest_folder_name(&parent);
+            self.dialog = Some(FmDialog::NewDir(NewDirDialog::new(parent, suggested)));
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::F8) || i.key_pressed(egui::Key::Delete)) {
+            let targets = self.op_targets(active);
+            if !targets.is_empty() {
+                if confirm_delete {
+                    self.dialog = Some(FmDialog::Delete(DeleteDialog::new(targets)));
+                } else {
+                    self.start_delete(targets);
+                }
+            }
         }
         if ui.input(|i| i.key_pressed(egui::Key::Backspace)) {
             self.panels[active].parent_dir();
