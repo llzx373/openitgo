@@ -82,6 +82,7 @@ impl ExtractDialogState {
                     }
                 });
                 ui.add_space(4.0);
+                ui.label(egui::RichText::new("子目录").weak());
                 ui.radio_value(
                     &mut self.wrap,
                     ExtractWrap::Smart,
@@ -94,6 +95,7 @@ impl ExtractDialogState {
                 );
                 ui.radio_value(&mut self.wrap, ExtractWrap::Never, "直接解压进目标文件夹");
                 ui.add_space(4.0);
+                ui.label(egui::RichText::new("完成后（可多选）").weak());
                 ui.checkbox(
                     &mut self.delete_archive,
                     "解压完成后删除压缩包（移入回收站）",
