@@ -1,3 +1,4 @@
+use crate::extract_dialog::{ExtractDialogState, ExtractWrap};
 use crate::extract_manager::ExtractManager;
 use crate::loader::PageLoader;
 use crate::opener::{AsyncOpener, OpenStatus};
@@ -378,6 +379,10 @@ pub struct ReaderApp {
     pub archive_view: ArchiveView,
     /// 后台解压任务管理（并发 4，超出排队；右下进度面板）。
     pub extract_manager: ExtractManager,
+    /// 解压目的地与选项对话框状态；Some 时渲染模态窗口。
+    pub extract_dialog: Option<ExtractDialogState>,
+    /// 解压完成后的动作：任务 id -> (删除压缩包到回收站, 打开目标文件夹)。
+    pub extract_post: HashMap<u64, (bool, bool)>,
     pub store: JsonStore,
     pub history: History,
     pub bookmarks: Bookmarks,
@@ -499,6 +504,8 @@ impl Default for ReaderApp {
             settings_view: SettingsView::default(),
             archive_view: ArchiveView::default(),
             extract_manager: ExtractManager::new(),
+            extract_dialog: None,
+            extract_post: HashMap::new(),
             store,
             history,
             bookmarks,
@@ -650,6 +657,7 @@ impl eframe::App for ReaderApp {
         self.render_shortcuts_window(&ctx);
         self.render_extract_panel(&ctx);
         self.render_password_dialog(&ctx);
+        self.render_extract_dialog(&ctx);
         self.maybe_save_comic_settings();
         self.tick_reading_stats();
         self.tick_persist_history_bookmarks();
@@ -1028,21 +1036,12 @@ impl ReaderApp {
             }
             if let Some(idx) = extract_archive_idx {
                 if let Some(entry) = self.library_view.entry_at(idx).cloned() {
-                    // 用户取消文件夹选择则什么都不做。
-                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                        let password = self.passwords.get(&password_key(&entry.path)).cloned();
-                        self.extract_manager.start(
-                            entry.path,
-                            dir,
-                            None,
-                            password,
-                            self.settings.extract_threads as usize,
-                            self.settings.extract_overwrite,
-                            None,
-                            // 智能解压目录：worker 内先列条目再判定是否建包名子目录。
-                            true,
-                        );
-                    }
+                    self.extract_dialog = Some(ExtractDialogState::new(
+                        entry.path,
+                        None,
+                        None,
+                        &self.settings,
+                    ));
                 }
             }
         });
@@ -2442,41 +2441,118 @@ impl ReaderApp {
         });
     }
 
-    /// 从浏览视图发起解压：输出目录由设置决定（默认包同目录的同名子目录，
-    /// 重名加 " (N)"）。密码用会话级缓存（验证成功的密码才入密码本）。
+    /// 从浏览视图发起解压：弹「解压到」对话框（确认后才真正启动任务）。
+    /// 密码在确认时取会话级缓存（验证成功的密码才入密码本）。
     fn start_extract_from_browser(&mut self, selection: Option<Vec<String>>) {
         let Some(path) = self.archive_view.path.clone() else {
             return;
         };
-        let base = extract_output_base(&self.settings, &path);
-        // 智能解压目录：包内容无单一顶层目录才建包名子目录。
-        let output_dir =
-            resolve_extract_output(&base, &archive_stem(&path), &self.archive_view.entries);
-        let password = self.passwords.get(&password_key(&path)).cloned();
         // 流式格式引擎不给字节总量：按选中条目 size 求和作估值。
         let hint = selection_total_bytes(&self.archive_view.entries, selection.as_deref());
-        self.extract_manager.start(
+        self.extract_dialog = Some(ExtractDialogState::new(
+            path,
+            selection,
+            hint,
+            &self.settings,
+        ));
+    }
+
+    /// 渲染「解压到」对话框（任何视图下都可用）；确认后启动解压任务。
+    fn render_extract_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.extract_dialog.as_mut() else {
+            return;
+        };
+        let start = dialog.ui(ctx);
+        let cancelled = dialog.cancelled;
+        if !start && !cancelled {
+            return;
+        }
+        let Some(dialog) = self.extract_dialog.take() else {
+            return;
+        };
+        if start {
+            self.confirm_extract_dialog(dialog);
+        }
+    }
+
+    /// 对话框「开始解压」：选项写回设置并落盘，按 wrap 策略计算输出目录后
+    /// 启动任务；勾选了删除/打开文件夹时登记 extract_post 供完成后执行。
+    fn confirm_extract_dialog(&mut self, dialog: ExtractDialogState) {
+        let path = dialog.archive.clone();
+        self.settings.extract_wrap = match dialog.wrap {
+            ExtractWrap::Smart => "smart",
+            ExtractWrap::Always => "always",
+            ExtractWrap::Never => "never",
+        }
+        .to_string();
+        self.settings.extract_delete_archive = dialog.delete_archive;
+        self.settings.extract_open_folder = dialog.open_folder;
+        let _ = self.store.save_settings(&self.settings);
+
+        let base = PathBuf::from(dialog.dest.trim());
+        let (output_dir, smart_wrap) = match dialog.wrap {
+            ExtractWrap::Smart => {
+                // 浏览视图已列出该包条目时 UI 线程直接判定；否则（库卡片入口）
+                // 维持 worker 内先列条目再判定。
+                if self.archive_view.path.as_deref() == Some(path.as_path()) {
+                    (
+                        resolve_extract_output(
+                            &base,
+                            &archive_stem(&path),
+                            &self.archive_view.entries,
+                        ),
+                        false,
+                    )
+                } else {
+                    (base, true)
+                }
+            }
+            ExtractWrap::Always => (uniquified_subdir(&base, &archive_stem(&path)), false),
+            ExtractWrap::Never => (base, false),
+        };
+        let password = self.passwords.get(&password_key(&path)).cloned();
+        let id = self.extract_manager.start(
             path,
             output_dir,
-            selection,
+            dialog.selection,
             password,
             self.settings.extract_threads as usize,
             self.settings.extract_overwrite,
-            hint,
-            false,
+            dialog.total_bytes_hint,
+            smart_wrap,
         );
+        if dialog.delete_archive || dialog.open_folder {
+            self.extract_post
+                .insert(id, (dialog.delete_archive, dialog.open_folder));
+        }
     }
 
     /// 每帧汇总解压任务结果 → `error_message`；有活动任务时驱动进度刷新。
+    /// 完成任务的登记后处理（删除压缩包到回收站 / 打开目标文件夹）在此执行；
+    /// 失败/取消不执行后处理。
     fn poll_extracts(&mut self, ctx: &egui::Context) {
         let summary = self.extract_manager.poll();
         let mut messages: Vec<String> = Vec::new();
-        for (archive, output_dir) in &summary.finished {
-            messages.push(format!(
+        for (id, archive, output_dir) in &summary.finished {
+            let mut msg = format!(
                 "已解压 {} 到 {}",
                 path_display_name(archive),
                 output_dir.display()
-            ));
+            );
+            if let Some((delete_archive, open_folder)) = self.extract_post.remove(id) {
+                if delete_archive {
+                    match trash::delete(archive) {
+                        Ok(()) => msg.push_str("，压缩包已移入回收站"),
+                        Err(e) => msg.push_str(&format!("，删除压缩包失败: {e}")),
+                    }
+                }
+                if open_folder {
+                    if let Err(e) = crate::temp_open::open_with_os(output_dir) {
+                        msg.push_str(&format!("，打开目标文件夹失败: {e}"));
+                    }
+                }
+            }
+            messages.push(msg);
         }
         for (archive, err) in &summary.failed {
             messages.push(format!(
@@ -4667,7 +4743,7 @@ fn selection_total_bytes(entries: &[ArchiveEntry], selection: Option<&[String]>)
 }
 
 /// 解压基底目录：设置的 extract_dir 为空时用包同目录，否则用设置的目录。
-fn extract_output_base(settings: &Settings, archive: &Path) -> PathBuf {
+pub(crate) fn extract_output_base(settings: &Settings, archive: &Path) -> PathBuf {
     let custom = settings.extract_dir.trim();
     if custom.is_empty() {
         archive.parent().map(Path::to_path_buf).unwrap_or_default()
@@ -5222,6 +5298,8 @@ mod tests {
                 settings_view: SettingsView::default(),
                 archive_view: ArchiveView::default(),
                 extract_manager: ExtractManager::new(),
+                extract_dialog: None,
+                extract_post: HashMap::new(),
                 store,
                 history,
                 bookmarks,

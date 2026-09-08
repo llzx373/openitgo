@@ -4,6 +4,7 @@
 mod app;
 mod cache;
 mod ebook_renderer;
+mod extract_dialog;
 mod extract_manager;
 mod loader;
 mod opener;

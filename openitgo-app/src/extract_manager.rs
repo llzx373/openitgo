@@ -127,8 +127,8 @@ struct PendingExtract {
 /// `poll` 一帧的汇总：供 app 写 `error_message` / 决定重绘节奏。
 #[derive(Debug, Default)]
 pub struct ExtractSummary {
-    /// 完成的包：(包路径, 输出目录)。
-    pub finished: Vec<(PathBuf, PathBuf)>,
+    /// 完成的包：(任务 id, 包路径, 输出目录)。
+    pub finished: Vec<(u64, PathBuf, PathBuf)>,
     /// 失败的包：(包路径, 错误消息)。
     pub failed: Vec<(PathBuf, String)>,
     /// 被取消的包路径。
@@ -298,7 +298,7 @@ impl ExtractManager {
                     task.status = ExtractTaskStatus::Done;
                     summary
                         .finished
-                        .push((task.archive_path.clone(), output_dir));
+                        .push((task.id, task.archive_path.clone(), output_dir));
                 }
                 ExtractProgress::Failed(message) => {
                     if message == CANCELLED_MESSAGE {
@@ -500,7 +500,7 @@ mod tests {
         assert!(!summary.has_active);
         assert_eq!(
             summary.finished,
-            vec![(PathBuf::from("pack1.zip"), PathBuf::from("out"))]
+            vec![(1, PathBuf::from("pack1.zip"), PathBuf::from("out"))]
         );
         assert!(m.tasks.is_empty(), "终态任务应在无活动时清理");
     }

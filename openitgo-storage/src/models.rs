@@ -54,10 +54,24 @@ pub struct Settings {
     /// 解压时同名文件是否覆盖（false = 自动改名 "name (1).ext"）。
     #[serde(default)]
     pub extract_overwrite: bool,
+    /// 解压对话框的子目录策略："smart"（包内无单一顶层目录才建包名子目录）/
+    /// "always"（总是建包名子目录）/ "never"（直接解压进目标文件夹）。
+    #[serde(default = "default_extract_wrap")]
+    pub extract_wrap: String,
+    /// 解压完成后删除压缩包（移入回收站）。
+    #[serde(default)]
+    pub extract_delete_archive: bool,
+    /// 解压完成后打开目标文件夹。
+    #[serde(default)]
+    pub extract_open_folder: bool,
 }
 
 fn default_chrome_opacity() -> f32 {
     0.85
+}
+
+fn default_extract_wrap() -> String {
+    "smart".to_string()
 }
 
 impl Default for Settings {
@@ -94,6 +108,9 @@ impl Default for Settings {
             extract_dir: String::new(),
             extract_threads: 0,
             extract_overwrite: false,
+            extract_wrap: default_extract_wrap(),
+            extract_delete_archive: false,
+            extract_open_folder: false,
         }
     }
 }
@@ -189,6 +206,12 @@ impl Settings {
                 self.extract_threads
             ));
         }
+        if !matches!(self.extract_wrap.as_str(), "smart" | "always" | "never") {
+            return Err(format!(
+                "extract_wrap must be smart/always/never, got {}",
+                self.extract_wrap
+            ));
+        }
         Ok(())
     }
 
@@ -213,6 +236,9 @@ impl Settings {
         self.media_volume = self.media_volume.clamp(0.0, 100.0);
         self.media_speed = self.media_speed.clamp(0.1, 16.0);
         self.extract_threads = self.extract_threads.min(32);
+        if !matches!(self.extract_wrap.as_str(), "smart" | "always" | "never") {
+            self.extract_wrap = default_extract_wrap();
+        }
     }
 }
 
@@ -594,6 +620,29 @@ mod tests {
         assert_eq!(s.extract_dir, "");
         assert_eq!(s.extract_threads, 0);
         assert!(!s.extract_overwrite);
+        assert_eq!(s.extract_wrap, "smart");
+        assert!(!s.extract_delete_archive);
+        assert!(!s.extract_open_folder);
+    }
+
+    #[test]
+    fn test_settings_extract_wrap_validate_and_clamp() {
+        assert!(Settings::default().validate().is_ok());
+        for wrap in ["smart", "always", "never"] {
+            let s = Settings {
+                extract_wrap: wrap.to_string(),
+                ..Default::default()
+            };
+            assert!(s.validate().is_ok());
+        }
+        let mut s = Settings {
+            extract_wrap: "bogus".to_string(),
+            ..Default::default()
+        };
+        assert!(s.validate().is_err());
+        s.clamp();
+        assert_eq!(s.extract_wrap, "smart");
+        assert!(s.validate().is_ok());
     }
 
     #[test]

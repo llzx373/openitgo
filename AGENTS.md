@@ -162,6 +162,17 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
   面板显示 速度（`format_speed`）/剩余（`format_eta`）/百分比，
   流式格式 total_bytes 为 None 时由 `ExtractTask.total_bytes_hint`
   （浏览器路径按勾选条目求和 `selection_total_bytes`）补充。
+  **解压对话框（`extract_dialog.rs`）**：浏览视图「解压全部/选中」与库
+  卡片「解压到…」统一先弹 `ExtractDialogState` 对话框（`ui()` 返回
+  true = 开始解压，`cancelled` = 取消），可选目标文件夹（rfd）、三档
+  wrap（Smart 智能/Always 总建同名子目录/Never 直接进目标目录，
+  `confirm_extract_dialog` 据此算 output_dir 与 smart_wrap）、「完成后
+  删除压缩包（`trash::delete` 移回收站，trash = "5" 依赖）」「完成后打开
+  目标文件夹（`temp_open::open_with_os`，已改 pub(crate) 复用）」；
+  三选项确认时写回 settings 落盘，删除/打开登记进
+  `ReaderApp.extract_post`（task_id → (delete, open)），`poll_extracts`
+  按 `ExtractSummary.finished`（含 task id 三元组）在成功时执行，
+  失败/取消不执行。
 - **PageLoader** runs IO and decode workers in background threads; results are
   sent back to the UI thread via channels. The app also maintains a separate
   `cover_loader` for library cover thumbnails.
@@ -181,7 +192,10 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
   落点经 `resolve_extract_output` 智能判定，内容无单一顶层目录时自动建
   包名子目录）、
   `extract_threads`（0 = 自动，≤ 32）、`extract_overwrite`（false = 同名
-  自动改名 `name (1).ext`）。
+  自动改名 `name (1).ext`）、`extract_wrap`（解压对话框子目录策略
+  "smart"/"always"/"never"，脏值回 "smart"）、`extract_delete_archive`
+  /`extract_open_folder`（解压完成后删除压缩包到回收站/打开目标文件夹，
+  默认均 false）。
 - **History entries** store both `comic_id` and `path` for robust matching.
 - **Per-comic reading settings** (`comic_settings.json`,
   `HashMap<String, ComicReadingSettings>` keyed by comic_id) remember each

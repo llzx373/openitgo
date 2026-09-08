@@ -61,7 +61,7 @@ pub fn open_entry_external(
 }
 
 /// 用系统默认程序打开文件。
-fn open_with_os(path: &Path) -> Result<(), String> {
+pub(crate) fn open_with_os(path: &Path) -> Result<(), String> {
     open_with_os_impl(path).map_err(|e| e.to_string())
 }
 
