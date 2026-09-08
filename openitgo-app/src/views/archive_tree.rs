@@ -3,7 +3,7 @@
 //! 统一约定：条目名按 `/` 与 `\\` 切分；目录 full_path 归一化为 `/`
 //! 分隔、无尾部分隔符；选择/解压身份恒用原始 entry.name（不经此处）。
 
-use crate::app::natural_cmp;
+use crate::views::file_manager_rows::natural_cmp;
 use openitgo_parser::archive::ArchiveEntry;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};

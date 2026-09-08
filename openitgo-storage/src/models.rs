@@ -64,6 +64,28 @@ pub struct Settings {
     /// 解压完成后打开目标文件夹。
     #[serde(default)]
     pub extract_open_folder: bool,
+    /// 文件管理器布局："dual"（双栏）| "single"（单栏+预览）。
+    #[serde(default = "default_fm_layout")]
+    pub fm_layout: String,
+    /// 双栏模式左栏宽度比例。
+    #[serde(default = "default_fm_dual_ratio")]
+    pub fm_dual_ratio: f32,
+    /// 单栏模式预览面板开关。
+    #[serde(default = "default_true")]
+    pub fm_preview_open: bool,
+    /// 文件管理器排序键："name"|"size"|"mtime"。
+    #[serde(default = "default_fm_sort_key")]
+    pub fm_sort_key: String,
+    #[serde(default = "default_true")]
+    pub fm_sort_asc: bool,
+    /// 删除前确认（防误删）。
+    #[serde(default = "default_true")]
+    pub fm_confirm_delete: bool,
+    /// 左/右栏持久化目录；空 = 用户主目录。
+    #[serde(default)]
+    pub fm_dir_left: String,
+    #[serde(default)]
+    pub fm_dir_right: String,
 }
 
 fn default_chrome_opacity() -> f32 {
@@ -72,6 +94,22 @@ fn default_chrome_opacity() -> f32 {
 
 fn default_extract_wrap() -> String {
     "smart".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_fm_layout() -> String {
+    "dual".to_string()
+}
+
+fn default_fm_dual_ratio() -> f32 {
+    0.5
+}
+
+fn default_fm_sort_key() -> String {
+    "name".to_string()
 }
 
 impl Default for Settings {
@@ -111,6 +149,14 @@ impl Default for Settings {
             extract_wrap: default_extract_wrap(),
             extract_delete_archive: false,
             extract_open_folder: false,
+            fm_layout: default_fm_layout(),
+            fm_dual_ratio: default_fm_dual_ratio(),
+            fm_preview_open: true,
+            fm_sort_key: default_fm_sort_key(),
+            fm_sort_asc: true,
+            fm_confirm_delete: true,
+            fm_dir_left: String::new(),
+            fm_dir_right: String::new(),
         }
     }
 }
@@ -212,6 +258,24 @@ impl Settings {
                 self.extract_wrap
             ));
         }
+        if !(0.2..=0.8).contains(&self.fm_dual_ratio) {
+            return Err(format!(
+                "fm_dual_ratio must be between 0.2 and 0.8, got {}",
+                self.fm_dual_ratio
+            ));
+        }
+        if !matches!(self.fm_layout.as_str(), "dual" | "single") {
+            return Err(format!(
+                "fm_layout must be dual/single, got {}",
+                self.fm_layout
+            ));
+        }
+        if !matches!(self.fm_sort_key.as_str(), "name" | "size" | "mtime") {
+            return Err(format!(
+                "fm_sort_key must be name/size/mtime, got {}",
+                self.fm_sort_key
+            ));
+        }
         Ok(())
     }
 
@@ -238,6 +302,13 @@ impl Settings {
         self.extract_threads = self.extract_threads.min(32);
         if !matches!(self.extract_wrap.as_str(), "smart" | "always" | "never") {
             self.extract_wrap = default_extract_wrap();
+        }
+        self.fm_dual_ratio = self.fm_dual_ratio.clamp(0.2, 0.8);
+        if self.fm_layout != "single" {
+            self.fm_layout = default_fm_layout();
+        }
+        if !matches!(self.fm_sort_key.as_str(), "size" | "mtime") {
+            self.fm_sort_key = default_fm_sort_key();
         }
     }
 }
