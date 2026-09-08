@@ -103,29 +103,51 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
   app 侧：
   `View::Archive(PathBuf)` + `views/archive.rs`（资源管理器式三栏，操作手感
   对齐 WinRAR/Explorer：左栏目录树（纯导航：仅目录节点 + 「全部文件」
-  特殊根，折叠/单击设 `current_dir`）/ 中栏面包屑（「根目录 / a / b」）
-  + 明细列表（列头 名称/大小/压缩后 点击排序 ▲▼、目录行恒在前、固定行高
-  `show_rows` 虚拟化）/ 右栏预览面板（图片解码/UTF-8 文本嗅探前 256KB、
-  >64MB 不预览，密码经 `preview_password` 由 app 每帧写入）。
+  特殊根，整行可点、折叠三角独立热区、横向滚动容纳长名，同级自然序；
+  `tree_reveal_pending` 导航后自动展开 current_dir 祖先并 scroll_to_me
+  揭示命中行）/ 中栏面包屑（「根目录 / a / b」，过滤激活时改显
+  「🔍 过滤词（N 个匹配）」）+ 明细列表（四列 名称/大小/压缩后/时间，
+  整格列头点击排序 ▲▼，三条列分隔竖线可拖宽（60..=400pt，会话内不落盘），
+  滚动条恒显稳住列对齐，目录行恒在前、固定行高 `show_rows` 虚拟化、
+  斑马纹 + 焦点描边，悬停 tooltip 显示全路径/大小/压缩后）/ 右栏预览面板
+  （图片解码/UTF-8 文本嗅探前 256KB、>64MB 不预览，密码经
+  `preview_password` 由 app 每帧写入；文本为只读 `TextEdit::multiline`
+  （&str 缓冲）可选中复制，图片可切换「适应宽度 / 原始尺寸」
+  （`preview_full_size`，原始尺寸进 ScrollArea::both）；键盘移动焦点到
+  文件行时预览跟随）。
   **选择模型（Explorer 式，无勾选框）**：`selected: HashSet<String>` 只存
-  文件条目名，目录行选中态派生自 `dir_all_selected`（单击目录行级联
-  `cascade_set` 全部后代文件）；`click_row(key, ctrl, shift)`：无修饰单选、
-  Ctrl 切换、Shift 以 `anchor` 到目标行序区间替换式选中（Ctrl+Shift 追加）；
-  键盘（`egui_wants_keyboard_input` 为假时）：Backspace=`go_up` 上级、
-  Enter=打开焦点行（`open_row`：目录进入/文件按双击语义）、↑/↓=`move_focus`
-  步进单选（`focus_scroll_pending` + 绝对滚动定位，show_rows 下
-  scroll_to_me 不可靠）、Ctrl+A=全选可见、Esc=清过滤或清空选中；右键菜单
-  （打开/进入/预览/解压选中/全选/清空选中，右键未选中行先单选）。
-  导航语义：`current_dir: Option<String>` 的 None = **根目录**，
-  「全部文件」扁平模式由独立 `flat_all: bool` 表示；
+  文件条目名，目录行选中态派生自后代文件统计（`dir_stats_cache`，
+  按 (entries_version, selection_version) 缓存、`build_dir_stats` 单遍
+  构建：dir → (已选, 总数)；部分选中时目录行左缘画 3pt selection.stroke
+  竖条），单击目录行级联 `cascade_set` 全部后代文件；`click_row(key,
+  ctrl, shift)`：无修饰单选、Ctrl 切换、Shift 以 `anchor` 到目标行序
+  区间替换式选中（Ctrl+Shift 追加）；键盘（`egui_wants_keyboard_input`
+  为假时，`move_focus(delta, FocusMove)` 共用核心）：Backspace/←=`go_up`
+  上级、→=进入焦点目录行、Enter=打开焦点行（`open_row`：「..」/目录=
+  导航、文件按双击语义）、↑/↓=步进单选、Shift+↑/↓=anchor..焦点区间
+  替换式扩选（anchor 不动）、Ctrl+↑/↓=只移焦点不改选中、Home/End=首/
+  末行、PgUp/PgDn=按视口高/行高整页步进（视口未知按 10 行兜底）、
+  Ctrl+A=全选可见、F5=重列当前包（列完经 `dir_exists` 判定恢复
+  current_dir，不存在则回根目录）、Esc=清过滤或清空选中；焦点揭示用
+  Explorer 最小滚动（`focus_scroll_pending` + `min_scroll_to_reveal`，
+  越界才贴边，勿回退绝对置顶）；右键菜单（打开/进入/预览/解压选中到…/
+  全选/清空选中，右键未选中行先单选）。「..」上级行
+  （`ListRow::Parent`/`RowKey::Parent`）：非根且非扁平/过滤时恒居行首
+  不参与排序，不可选（单击只设焦点），双击/Enter=上级，无右键菜单、
+  不参与拖出。导航语义：`current_dir: Option<String>` 的 None =
+  **根目录**，「全部文件」扁平模式由独立 `flat_all: bool` 表示；
   `views/archive_tree.rs` 纯函数：`build_dir_rows`/`direct_children`
   （None=根目录）/`all_file_indices`/`breadcrumb_paths`/`list_rows`
-  （ListRow::Dir/File 行模型：flat_all 或过滤激活 → 全包文件行并忽略
-  current_dir，否则目录优先；Name 排序按显示名自然序（复用 app.rs
-  `natural_cmp`，`pub(crate)`），Size/Packed 按数值、名称兜底，desc 仅
-  反转文件行），`\\` 也作分隔符、隐式目录补全、目录勾选级联后代文件），
-  加密包经 `open_with_password` 重列）+ `extract_manager.rs`（每任务一
-  线程 + 右下角进度面板，`poll_extracts` 每帧汇总写 `error_message`）；
+  （ListRow::Parent/Dir/File 行模型：flat_all 或过滤激活 → 全包文件行
+  并忽略 current_dir，否则目录优先；Name 按显示名自然序（复用 app.rs
+  `natural_cmp`，`pub(crate)`），Size/Packed 按数值、名称兜底，Modified
+  按 mtime、None 恒垫底，desc 整体反转含目录行）/`build_dir_stats`，
+  `\\` 也作分隔符、隐式目录补全、目录勾选级联后代文件；行模型经
+  `rows_cache`（RowsKey = entries_version + current_dir + flat_all +
+  filter + 排序键与升降序）避免每帧重算），加密包经 `open_with_password`
+  重列）+ `extract_manager.rs`（每任务一线程 + 右下角进度面板，
+  `poll_extracts` 每帧汇总写 `error_message`）；底栏：共 N 个文件 ·
+  总大小（有选中时追加「已选 n 项 · 大小」）+ 右侧操作提示与当前位置。
   入口：Library 卡片右键「浏览压缩包」/「解压到…」；`open_path` 对
   `archive_kind` 命中但 `is_supported_comic_file` 不命中的纯压缩包
   （7z/tar 系）直接分流进 Archive 视图；zip/cbz/rar/cbr 经
@@ -144,12 +166,18 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
   temp_dir()/openitgo-open/<包hash>/ 后 `cmd /c start` 外部打开，临时文件
   同名覆盖复用，启动时 `clean_stale` 回收 24h 前的 open/drag 目录；
   `safe_basename` 只取末段防路径穿越）。**拖出解压（Windows only）**：
-  文件条目 label 用 `Sense::click_and_drag()`，`drag_started` 时按
-  `ArchiveView::drag_entry_set`（拖动项在多选集合 → 整组，否则单条目）
-  后台 `extract_entry_to_temp("drag",…)` 逐条解压；指针按住离开窗口且
-  解压就绪时调 `platform::drag_out::do_drag_drop`（OLE `IDataObject`
-  CF_HDROP/DROPFILES UTF-16 + `IDropSource`，`DoDragDrop` 模态阻塞自带
-  消息循环；非 Windows 为 stub 静默不可用；左键松开即放弃本次）。
+  状态机 `DragOutState`：Potential（按下刚拖动，只锁条目集与起点）→
+  指针位移 >40pt 或出窗才 Extracting（后台 `extract_entry_to_staging`
+  按包内相对路径保结构解压进本次专属暂存目录 temp_root("drag")/<递增
+  计数>/，手滑 6pt 拖动阈值不触发 IO）→ Ready（出窗即
+  `platform::drag_out::do_drag_drop`，OLE `IDataObject` CF_HDROP/
+  DROPFILES UTF-16 + `IDropSource`，COPY-only，`DoDragDrop` 模态阻塞
+  自带消息循环；HDROP 负载 = 暂存目录顶层项，拖单目录即完整文件夹）。
+  Potential/Extracting 期间指针旁画幽灵浮层（`paint_drag_ghost`，
+  非 Windows 显示不支持）；主键松开且未进 DoDragDrop = 取消并
+  best-effort 清理暂存目录（非模态路径不留垃圾，落点读取中的目录由
+  24h `clean_stale` 兜底）。拖出条目集按 `ArchiveView::drag_entry_set`
+  （拖动项在多选集合 → 整组，目录行 → 全部后代文件）。
   **多卷 RAR 归一**：`open_path` 最前面经 `normalize_rar_volume_path`
   把 partN.rar（N>1，part1 存在才换）/旧式 .r00/.r01（.rar 存在才换）
   改写为首卷，保证历史/密码表 key 稳定。**智能解压目录**：

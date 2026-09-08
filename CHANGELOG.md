@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 压缩包浏览视图增强（对齐 WinRAR/Explorer）：新增「修改时间」列（本地时区显示，无时间的条目排序恒垫底）与列分隔竖线拖宽（会话内有效）；「..」上级行；键盘补全（Home/End 跳首末行、PgUp/PgDn 整页步进、← 上级 / → 进入目录、Shift+↑/↓ 区间扩选、Ctrl+↑/↓ 只移焦点、F5 重列并恢复当前目录）；目录行后代部分选中时左缘竖条指示；预览面板文本可选中复制、图片支持适应宽度/原始尺寸切换；明细列表行模型与目录选中统计按版本号缓存，消除每帧重复计算。
 - 文件菜单新增「打开文件…」（rfd 文件对话框，过滤器分漫画/电子书/图片/媒体/压缩包），选中后走 `open_path` 完整分发链。
 - Archive 视图顶栏「作为漫画打开」按钮（仅 zip/cbz/rar/cbr 显示）。
 - Windows 文件关联分组图标：基于主图标生成橙「A」/绿「P」/蓝「V」圆形角标 ico（`assets/icon/generate_type_icons.py`），经 rc 资源 ID 2/3/4 嵌入 exe，三类 ProgID 的 DefaultIcon 分别指向对应图标。
@@ -23,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- 压缩包浏览视图拖出解压重做：>40pt 位移或指针出窗才启动后台解压（手滑不再触发 IO）；暂存目录保留包内目录结构、HDROP 负载为暂存顶层项（拖目录即完整文件夹）；仅 COPY 语义；取消即清理暂存目录；拖动期间显示幽灵浮层。
 - 「密码不落盘」旧约定有意变更：会话密码表（`ReaderApp.passwords`）仍不落盘，但验证成功的密码会收录进持久化密码本（见上）。
 
 ### Fixed

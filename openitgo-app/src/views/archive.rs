@@ -7,12 +7,12 @@
 use crate::app::{PASSWORD_INCORRECT_MARKER, PASSWORD_REQUIRED_MARKER};
 use crate::opener::{AsyncOpener, OpenStatus};
 use crate::views::archive_tree::{
-    breadcrumb_paths, build_dir_rows, list_rows, ListRow, SortKey, TreeRow,
+    breadcrumb_paths, build_dir_rows, build_dir_stats, list_rows, ListRow, SortKey, TreeRow,
 };
 use egui_phosphor_icons::{icons, Icon};
 use openitgo_parser::archive::{list_entries, read_comment, read_entry, ArchiveEntry};
 use openitgo_parser::traits::ParseError;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -77,11 +77,37 @@ pub enum ArchiveViewState {
 }
 
 /// 明细列表行的身份（选择锚点/焦点用）：目录用归一化 full_path，
-/// 文件用原始 entry.name。
+/// 文件用原始 entry.name；Parent = 「..」上级行（不可选，仅焦点/打开）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RowKey {
+    Parent,
     Dir(String),
     File(String),
+}
+
+/// 键盘焦点移动模式（move_focus 共用核心）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusMove {
+    /// 单选新焦点行（↑/↓、Home/End、PgUp/PgDn 默认；anchor 跟随）。
+    Select,
+    /// Shift：替换为 anchor 到新焦点行的行序区间选中，anchor 不动。
+    Extend,
+    /// Ctrl：只移焦点，选中与 anchor 均不动。
+    FocusOnly,
+}
+
+/// 每目录的（已选, 总数）选中统计（archive_tree::build_dir_stats 的产物）。
+type DirStats = HashMap<String, (usize, usize)>;
+
+/// rows_cache 的命中键：条目版本 + 影响行模型的全部视图状态。
+#[derive(Debug, Clone, PartialEq)]
+struct RowsKey {
+    entries_version: u64,
+    current_dir: Option<String>,
+    flat_all: bool,
+    filter: String,
+    sort_key: SortKey,
+    sort_asc: bool,
 }
 
 /// 拖出解压的触发阈值（pt）：指针距起点超过该距离或已出窗才开始后台解压，
@@ -226,6 +252,20 @@ pub struct ArchiveView {
     drag_out_counter: u64,
     /// 拖出错误（app render_archive 取走写入 error_message）。
     pub drag_error: Option<String>,
+    /// 条目版本号：entries 变更（列目录完成/open_with_entries/清空）时 +1，
+    /// rows_cache 与 dir_stats_cache 的失效依据。
+    entries_version: u64,
+    /// 选择版本号：selected 一切变更点 +1，dir_stats_cache 的失效依据。
+    selection_version: u64,
+    /// 行模型缓存：RowsKey 命中直接复用，避免每帧重算 list_rows。
+    rows_cache: Option<(RowsKey, Vec<ListRow>)>,
+    /// 目录选中统计缓存：key = (entries_version, selection_version)，
+    /// 按需单遍重建（archive_tree::build_dir_stats）。
+    dir_stats_cache: Option<((u64, u64), DirStats)>,
+    /// F5 重列时期望恢复的 current_dir（列完仍存在才恢复，否则回根目录）。
+    pending_restore_dir: Option<String>,
+    /// 图片预览「原始尺寸」模式（false = 适应宽度）。
+    preview_full_size: bool,
 }
 
 impl Default for ArchiveView {
@@ -266,6 +306,12 @@ impl Default for ArchiveView {
             drag_out: None,
             drag_out_counter: 0,
             drag_error: None,
+            entries_version: 0,
+            selection_version: 0,
+            rows_cache: None,
+            dir_stats_cache: None,
+            pending_restore_dir: None,
+            preview_full_size: false,
         }
     }
 }
@@ -288,7 +334,9 @@ impl ArchiveView {
     /// 清空条目相关状态（选择/过滤/折叠/当前目录/预览/排序），供 open* 系列复用。
     fn clear_entries_state(&mut self) {
         self.entries.clear();
+        self.entries_version += 1;
         self.selected.clear();
+        self.selection_version += 1;
         self.filter.clear();
         self.collapsed.clear();
         self.current_dir = None;
@@ -309,6 +357,8 @@ impl ArchiveView {
         self.preview_tex = None;
         self.preview_text = None;
         self.preview_note = None;
+        self.preview_full_size = false;
+        self.pending_restore_dir = None;
         self.cancel_drag_out();
         self.drag_error = None;
     }
@@ -355,10 +405,22 @@ impl ArchiveView {
         self.path = Some(path);
         self.clear_entries_state();
         self.entries = entries;
+        self.entries_version += 1;
         self.state = ArchiveViewState::Ready;
         self.tried_password = None;
         self.password_failed = false;
         self.listing = None;
+    }
+
+    /// F5 重列当前包：列完若旧 current_dir 仍存在则恢复，否则回根目录
+    /// （恢复在 apply_listing_result 里做）。
+    fn refresh(&mut self) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let keep_dir = self.current_dir.clone();
+        self.open(path);
+        self.pending_restore_dir = keep_dir;
     }
 
     /// 每帧排空列表与预览结果；视图不处于前台时结果留在通道里，
@@ -549,16 +611,28 @@ impl ArchiveView {
         match result {
             Ok((entries, comment)) => {
                 self.entries = entries;
+                self.entries_version += 1;
                 self.comment = comment;
                 self.state = ArchiveViewState::Ready;
                 self.password_failed = false;
+                // F5 重列：旧 current_dir 在新条目里仍存在才恢复，否则回根目录。
+                if let Some(dir) = self.pending_restore_dir.take() {
+                    if dir_exists(&self.entries, &dir) {
+                        self.current_dir = Some(dir);
+                        self.tree_reveal_pending = true;
+                    }
+                }
             }
             Err(e) if e == PASSWORD_REQUIRED_MARKER || e == PASSWORD_INCORRECT_MARKER => {
                 // 带密码尝试后仍失败 = 密码错误，对话框以 incorrect 复现。
                 self.password_failed = self.tried_password.is_some();
                 self.state = ArchiveViewState::NeedPassword;
+                self.pending_restore_dir = None;
             }
-            Err(e) => self.state = ArchiveViewState::Failed(e),
+            Err(e) => {
+                self.state = ArchiveViewState::Failed(e);
+                self.pending_restore_dir = None;
+            }
         }
     }
 
@@ -625,10 +699,24 @@ impl ArchiveView {
             .collect()
     }
 
-    /// 目录勾选态：有后代文件且全部被选中。
-    fn dir_all_selected(&self, dir_full_path: &str) -> bool {
-        let names = self.descendant_file_names(dir_full_path);
-        !names.is_empty() && names.iter().all(|n| self.selected.contains(n))
+    /// 目录勾选态：有后代文件且全部被选中（查 dir_stats 缓存，不逐行全扫）。
+    fn dir_all_selected(&mut self, dir_full_path: &str) -> bool {
+        let dir = dir_full_path.trim_end_matches(['/', '\\']);
+        match self.dir_stats().get(dir) {
+            Some(&(selected, total)) => total > 0 && selected == total,
+            None => false,
+        }
+    }
+
+    /// 每目录的（已选, 总数）统计：按 (entries_version, selection_version)
+    /// 缓存，失效时单遍重建（archive_tree::build_dir_stats）。
+    fn dir_stats(&mut self) -> &DirStats {
+        let key = (self.entries_version, self.selection_version);
+        if self.dir_stats_cache.as_ref().is_none_or(|(k, _)| *k != key) {
+            let stats = build_dir_stats(&self.entries, &self.selected);
+            self.dir_stats_cache = Some((key, stats));
+        }
+        &self.dir_stats_cache.as_ref().expect("just built").1
     }
 
     /// 目录勾选级联：勾选/取消勾选其全部后代文件条目。
@@ -640,39 +728,59 @@ impl ArchiveView {
                 self.selected.remove(&name);
             }
         }
+        self.selection_version += 1;
     }
 
-    /// 中栏当前行模型（目录优先 + 排序 + 过滤，见 archive_tree::list_rows）。
-    fn rows(&self) -> Vec<ListRow> {
-        list_rows(
+    /// 中栏当前行模型（目录优先 + 排序 + 过滤，见 archive_tree::list_rows）；
+    /// RowsKey 命中时直接复用缓存，避免每帧重算。
+    fn rows(&mut self) -> Vec<ListRow> {
+        let key = RowsKey {
+            entries_version: self.entries_version,
+            current_dir: self.current_dir.clone(),
+            flat_all: self.flat_all,
+            filter: self.filter.clone(),
+            sort_key: self.sort_key,
+            sort_asc: self.sort_asc,
+        };
+        if let Some((k, rows)) = &self.rows_cache {
+            if *k == key {
+                return rows.clone();
+            }
+        }
+        let rows = list_rows(
             &self.entries,
             self.current_dir.as_deref(),
             self.flat_all,
             &self.filter,
             self.sort_key,
             self.sort_asc,
-        )
+        );
+        self.rows_cache = Some((key, rows.clone()));
+        rows
     }
 
     /// 行的身份键（选择锚点/焦点/高亮判定用）。
     fn row_key(&self, row: &ListRow) -> RowKey {
         match row {
+            ListRow::Parent => RowKey::Parent,
             ListRow::Dir { full_path, .. } => RowKey::Dir(full_path.clone()),
             ListRow::File { idx } => RowKey::File(self.entries[*idx].name.clone()),
         }
     }
 
-    /// 行的选中态：文件查 selected，目录看后代文件是否全选。
-    fn row_selected(&self, key: &RowKey) -> bool {
+    /// 行的选中态：文件查 selected，目录看后代文件是否全选；「..」行恒 false。
+    fn row_selected(&mut self, key: &RowKey) -> bool {
         match key {
+            RowKey::Parent => false,
             RowKey::Dir(dir) => self.dir_all_selected(dir),
             RowKey::File(name) => self.selected.contains(name),
         }
     }
 
-    /// 选中/取消一行：目录行级联到全部后代文件。
+    /// 选中/取消一行：目录行级联到全部后代文件；「..」行不可选（no-op）。
     fn set_row_selected(&mut self, key: &RowKey, on: bool) {
         match key {
+            RowKey::Parent => {}
             RowKey::Dir(dir) => self.cascade_set(dir, on),
             RowKey::File(name) => {
                 if on {
@@ -680,14 +788,19 @@ impl ArchiveView {
                 } else {
                     self.selected.remove(name);
                 }
+                self.selection_version += 1;
             }
         }
     }
 
     /// Explorer 式点击选择：无修饰 = 单选；Ctrl = 切换；Shift = 以 anchor
     /// 到目标的行序区间替换式选中（Ctrl+Shift 追加；无锚点退化为普通点击）。
-    /// 任何点击都更新 anchor 与 focus。
+    /// 任何点击都更新 anchor 与 focus；「..」行例外：只设焦点，不动选中/anchor。
     fn click_row(&mut self, key: RowKey, ctrl: bool, shift: bool) {
+        if matches!(key, RowKey::Parent) {
+            self.focus = Some(key);
+            return;
+        }
         if shift {
             if let Some(anchor) = self.anchor.clone() {
                 let keys: Vec<RowKey> = self.rows().iter().map(|r| self.row_key(r)).collect();
@@ -697,6 +810,7 @@ impl ArchiveView {
                 ) {
                     if !ctrl {
                         self.selected.clear();
+                        self.selection_version += 1;
                     }
                     let (lo, hi) = if a <= t { (a, t) } else { (t, a) };
                     for k in &keys[lo..=hi] {
@@ -713,6 +827,7 @@ impl ArchiveView {
             self.set_row_selected(&key, on);
         } else {
             self.selected.clear();
+            self.selection_version += 1;
             self.set_row_selected(&key, true);
         }
         self.anchor = Some(key.clone());
@@ -730,6 +845,7 @@ impl ArchiveView {
     /// 清空选中与锚点/焦点（导航切换目录、Esc 时用）。
     fn clear_selection(&mut self) {
         self.selected.clear();
+        self.selection_version += 1;
         self.anchor = None;
         self.focus = None;
     }
@@ -768,9 +884,57 @@ impl ArchiveView {
         self.tree_reveal_pending = true;
     }
 
-    /// ↑/↓ 移动焦点：无焦点时选中首行/末行；有焦点按行序步进并单选。
-    fn move_focus(&mut self, delta: isize) {
-        let keys: Vec<RowKey> = self.rows().iter().map(|r| self.row_key(r)).collect();
+    /// 焦点移动的应用核心（↑/↓、Home/End、PgUp/PgDn 共用）：按模式改选中，
+    /// 焦点落到 keys[next]，文件行同步预览目标，置最小滚动揭示标记。
+    fn apply_focus_move(&mut self, keys: &[RowKey], next: usize, mode: FocusMove) {
+        let key = keys[next].clone();
+        match mode {
+            FocusMove::Select => {
+                self.selected.clear();
+                self.selection_version += 1;
+                self.set_row_selected(&key, true);
+                self.anchor = Some(key.clone());
+            }
+            FocusMove::Extend => {
+                // 与 Shift+click 同语义：替换为 anchor..focus 区间，anchor 不动。
+                let anchor_pos = self
+                    .anchor
+                    .as_ref()
+                    .and_then(|a| keys.iter().position(|k| k == a));
+                if let Some(a) = anchor_pos {
+                    self.selected.clear();
+                    self.selection_version += 1;
+                    let (lo, hi) = if a <= next { (a, next) } else { (next, a) };
+                    for k in &keys[lo..=hi] {
+                        self.set_row_selected(k, true);
+                    }
+                } else {
+                    // 无锚点或锚点已不可见：退化为单选。
+                    self.selected.clear();
+                    self.selection_version += 1;
+                    self.set_row_selected(&key, true);
+                    self.anchor = Some(key.clone());
+                }
+            }
+            FocusMove::FocusOnly => {}
+        }
+        self.focus = Some(key.clone());
+        // 预览跟随键盘：文件行同步预览目标（与鼠标单击一致），其余行不动。
+        if let RowKey::File(name) = &key {
+            self.preview_entry = Some(name.clone());
+        }
+        self.focus_scroll_pending = true;
+    }
+
+    /// 当前行键序列（行模型的身份键，焦点/选择计算共用）。
+    fn row_keys(&mut self) -> Vec<RowKey> {
+        self.rows().iter().map(|r| self.row_key(r)).collect()
+    }
+
+    /// ↑/↓/PgUp/PgDn 移动焦点：无焦点时选中首行/末行（按 delta 方向）；
+    /// 有焦点按行序步进，行为由 mode 决定（见 FocusMove）。
+    fn move_focus(&mut self, delta: isize, mode: FocusMove) {
+        let keys = self.row_keys();
         if keys.is_empty() {
             return;
         }
@@ -783,16 +947,26 @@ impl ArchiveView {
             None => keys.len() - 1,
             Some(i) => (i as isize + delta).clamp(0, keys.len() as isize - 1) as usize,
         };
-        let key = keys[next].clone();
-        self.selected.clear();
-        self.set_row_selected(&key, true);
-        self.anchor = Some(key.clone());
-        self.focus = Some(key.clone());
-        // 预览跟随键盘：文件行同步预览目标（与鼠标单击一致），目录行不动。
-        if let RowKey::File(name) = &key {
-            self.preview_entry = Some(name.clone());
+        self.apply_focus_move(&keys, next, mode);
+    }
+
+    /// Home/End：焦点跳首行/末行（语义同 ↑/↓ 单选）。
+    fn move_focus_edge(&mut self, last: bool, mode: FocusMove) {
+        let keys = self.row_keys();
+        if keys.is_empty() {
+            return;
         }
-        self.focus_scroll_pending = true;
+        let next = if last { keys.len() - 1 } else { 0 };
+        self.apply_focus_move(&keys, next, mode);
+    }
+
+    /// PgUp/PgDn 的整页步进：视口高 / 行高取整；视口高度未知（0）时按 10 行兜底。
+    fn page_step(&self) -> isize {
+        if self.last_viewport_height > 0.0 {
+            (self.last_viewport_height / ROW_HEIGHT).floor().max(1.0) as isize
+        } else {
+            10
+        }
     }
 
     /// 列头点击排序：同键切换升/降，换键回到升序。
@@ -1032,8 +1206,10 @@ impl ArchiveView {
         }
     }
 
-    /// 键盘导航（WinRAR/资源管理器式）：Backspace 上级、Enter 打开焦点行、
-    /// ↑/↓ 移动焦点并单选、Ctrl+A 全选可见、Esc 清过滤或清空选中。
+    /// 键盘导航（WinRAR/资源管理器式）：Backspace/← 上级、Enter 打开焦点行、
+    /// ↑/↓ 移动焦点并单选、Shift+↑/↓ 从 anchor 扩选、Ctrl+↑/↓ 只移焦点、
+    /// Home/End 跳首/末行、PgUp/PgDn 整页步进、→ 进入焦点目录、
+    /// Ctrl+A 全选可见、F5 重列、Esc 清过滤或清空选中。
     /// 过滤框等文本输入占用键盘时不处理。
     fn handle_keyboard(
         &mut self,
@@ -1046,17 +1222,49 @@ impl ArchiveView {
             return;
         }
         let mods = ui.input(|i| i.modifiers);
-        if ui.input(|i| i.key_pressed(egui::Key::Backspace)) {
+        // Shift 优先于 Ctrl（Explorer：Shift+方向 = 扩选，Ctrl+方向 = 只移焦点）。
+        let focus_mode = if mods.shift {
+            FocusMove::Extend
+        } else if mods.command {
+            FocusMove::FocusOnly
+        } else {
+            FocusMove::Select
+        };
+        if ui.input(|i| i.key_pressed(egui::Key::Backspace))
+            || ui.input(|i| i.key_pressed(egui::Key::ArrowLeft))
+        {
             self.go_up();
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+            if let Some(RowKey::Dir(dir)) = self.focus.clone() {
+                self.enter_dir(dir);
+            }
         }
         if mods.command && ui.input(|i| i.key_pressed(egui::Key::A)) {
             self.select_all_visible();
         }
+        if ui.input(|i| i.key_pressed(egui::Key::F5)) {
+            self.refresh();
+        }
         if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-            self.move_focus(1);
+            self.move_focus(1, focus_mode);
         }
         if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-            self.move_focus(-1);
+            self.move_focus(-1, focus_mode);
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Home)) {
+            self.move_focus_edge(false, focus_mode);
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::End)) {
+            self.move_focus_edge(true, focus_mode);
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::PageDown)) {
+            let step = self.page_step();
+            self.move_focus(step, focus_mode);
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::PageUp)) {
+            let step = self.page_step();
+            self.move_focus(-step, focus_mode);
         }
         if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             if let Some(key) = self.focus.clone() {
@@ -1077,7 +1285,7 @@ impl ArchiveView {
         }
     }
 
-    /// 打开一行的默认动作（双击/Enter/右键「打开」共用）：
+    /// 打开一行的默认动作（双击/Enter/右键「打开」共用）：「..」= 上级；
     /// 目录 = 进入；文件 = 漫画格式包的图片进漫画链路，其余外部打开。
     fn open_row(
         &mut self,
@@ -1087,6 +1295,7 @@ impl ArchiveView {
         on_open_entry_external: &mut dyn FnMut(String),
     ) {
         match key {
+            RowKey::Parent => self.go_up(),
             RowKey::Dir(dir) => self.enter_dir(dir),
             RowKey::File(name) => {
                 if openable_comic && openitgo_parser::traits::is_comic_image_name(&name) {
@@ -1281,7 +1490,7 @@ impl ArchiveView {
     /// 显示路径段会自相矛盾）；扁平模式显示「全部文件」；否则
     /// 「根目录 / dir1 / dir2」，每段可点击跳回。
     fn render_breadcrumb(&mut self, ui: &mut egui::Ui) {
-        let needle = self.filter.trim();
+        let needle = self.filter.trim().to_string();
         if !needle.is_empty() {
             let matches = self
                 .rows()
@@ -1599,6 +1808,21 @@ impl ArchiveView {
                 egui::StrokeKind::Inside,
             );
         }
+        // 目录行部分选中指示：后代文件选了但非全选时，行左缘画 3pt 强调色竖条
+        // （统计查 dir_stats 缓存，不逐行全扫）。
+        if let ListRow::Dir { full_path, .. } = row {
+            let dir = full_path.trim_end_matches(['/', '\\']);
+            let partial =
+                matches!(self.dir_stats().get(dir), Some(&(sel, total)) if sel > 0 && sel < total);
+            if partial {
+                let bar = egui::Rect::from_min_max(
+                    rect.left_top(),
+                    egui::pos2(rect.left() + 3.0, rect.bottom()),
+                );
+                ui.painter()
+                    .rect_filled(bar, 0.0, ui.visuals().selection.stroke.color);
+            }
+        }
         let layout = self.layout(rect.right());
         paint_column_separators(
             ui.painter(),
@@ -1608,16 +1832,20 @@ impl ArchiveView {
         );
 
         // 行内容：图标 + 名称（目录模式显示 basename，扁平/过滤显示全路径），
-        // 右侧固定宽的大小/压缩后/时间列（目录行留空）。
+        // 右侧固定宽的大小/压缩后/时间列（目录行与「..」行留空）。
         let file = match row {
             ListRow::File { idx } => Some(&self.entries[*idx]),
-            ListRow::Dir { .. } => None,
+            ListRow::Parent | ListRow::Dir { .. } => None,
         };
         let content = rect.shrink2(egui::vec2(6.0, 2.0));
         ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 match row {
+                    ListRow::Parent => {
+                        ui.label(egui::RichText::new(icons::ARROW_UP.as_str()).weak());
+                        ui.label(egui::RichText::new("..").weak());
+                    }
                     ListRow::Dir { name, .. } => {
                         ui.label(egui::RichText::new(icons::FOLDER.as_str()).weak());
                         ui.add(egui::Label::new(name).truncate());
@@ -1675,10 +1903,13 @@ impl ArchiveView {
         if response.double_clicked() {
             *open_key = Some(key.clone());
         }
-        if response.drag_started_by(egui::PointerButton::Primary) {
+        // 「..」行不参与拖出解压。
+        if !matches!(key, RowKey::Parent) && response.drag_started_by(egui::PointerButton::Primary)
+        {
             let names = match &key {
                 RowKey::File(name) => Self::drag_entry_set(&self.selected_names_in_order(), name),
                 RowKey::Dir(dir) => self.descendant_file_names(dir),
+                RowKey::Parent => unreachable!("guarded above"),
             };
             let origin = ui.input(|i| {
                 i.pointer
@@ -1688,61 +1919,67 @@ impl ArchiveView {
             });
             self.begin_drag_potential(names, origin);
         }
-        response.context_menu(|ui| {
-            // Explorer 惯例：右键未选中的行先把它单选。
-            if !self.row_selected(&key) {
-                self.click_row(key.clone(), false, false);
-            }
-            match &key {
-                RowKey::Dir(_) => {
-                    if ui.button((icons::FOLDER_OPEN, " 进入")).clicked() {
-                        *open_key = Some(key.clone());
-                        ui.close();
-                    }
+        // 「..」行无右键菜单。
+        if !matches!(key, RowKey::Parent) {
+            response.context_menu(|ui| {
+                // Explorer 惯例：右键未选中的行先把它单选。
+                if !self.row_selected(&key) {
+                    self.click_row(key.clone(), false, false);
                 }
-                RowKey::File(_) => {
-                    if ui.button((icons::ARROW_SQUARE_OUT, " 打开")).clicked() {
-                        *open_key = Some(key.clone());
-                        ui.close();
-                    }
-                    if ui.button((icons::EYE, " 预览")).clicked() {
-                        if let RowKey::File(name) = &key {
-                            *preview_name = Some(name.clone());
+                match &key {
+                    RowKey::Dir(_) => {
+                        if ui.button((icons::FOLDER_OPEN, " 进入")).clicked() {
+                            *open_key = Some(key.clone());
+                            ui.close();
                         }
-                        ui.close();
                     }
+                    RowKey::File(_) => {
+                        if ui.button((icons::ARROW_SQUARE_OUT, " 打开")).clicked() {
+                            *open_key = Some(key.clone());
+                            ui.close();
+                        }
+                        if ui.button((icons::EYE, " 预览")).clicked() {
+                            if let RowKey::File(name) = &key {
+                                *preview_name = Some(name.clone());
+                            }
+                            ui.close();
+                        }
+                    }
+                    RowKey::Parent => {}
                 }
-            }
-            ui.separator();
-            let (count, _) = self.selected_stats();
-            if ui
-                .add_enabled(
-                    count > 0,
-                    egui::Button::new((icons::EXPORT, format!(" 解压选中到… ({count})"))),
-                )
-                .clicked()
-            {
-                *extract_selected = true;
-                ui.close();
-            }
-            if matches!(&key, RowKey::Dir(_)) && ui.button((icons::EXPORT, " 解压全部…")).clicked()
-            {
-                *extract_all = true;
-                ui.close();
-            }
-            ui.separator();
-            if ui.button((icons::CHECK_SQUARE, " 全选")).clicked() {
-                self.select_all_visible();
-                ui.close();
-            }
-            if ui.button((icons::X, " 清空选中")).clicked() {
-                self.clear_selection();
-                ui.close();
-            }
-        });
+                ui.separator();
+                let (count, _) = self.selected_stats();
+                if ui
+                    .add_enabled(
+                        count > 0,
+                        egui::Button::new((icons::EXPORT, format!(" 解压选中到… ({count})"))),
+                    )
+                    .clicked()
+                {
+                    *extract_selected = true;
+                    ui.close();
+                }
+                if matches!(&key, RowKey::Dir(_))
+                    && ui.button((icons::EXPORT, " 解压全部…")).clicked()
+                {
+                    *extract_all = true;
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button((icons::CHECK_SQUARE, " 全选")).clicked() {
+                    self.select_all_visible();
+                    ui.close();
+                }
+                if ui.button((icons::X, " 清空选中")).clicked() {
+                    self.clear_selection();
+                    ui.close();
+                }
+            });
+        }
         // 悬停信息提示（被截断名称的完整信息）：目录 = 完整路径；
-        // 文件 = 全路径 + 大小 + 压缩后。
+        // 文件 = 全路径 + 大小 + 压缩后；「..」= 上级目录提示。
         let tip = match &key {
+            RowKey::Parent => "上级目录".to_string(),
             RowKey::Dir(dir) => dir.clone(),
             RowKey::File(name) => {
                 let mut tip = name.clone();
@@ -1758,7 +1995,8 @@ impl ArchiveView {
         response.on_hover_text(tip);
     }
 
-    /// 右侧预览面板内容：条目名/大小 + 图片纹理 / 只读文本 / 说明。
+    /// 右侧预览面板内容：条目名/大小 + 图片纹理（适应宽度/原始尺寸切换）/
+    /// 只读可选中文本 / 说明。
     fn render_preview(&mut self, ui: &mut egui::Ui) {
         // poll 收到的 ColorImage 在此（有 ctx）惰性上传为纹理。
         if let Some(img) = self.pending_preview_image.take() {
@@ -1768,20 +2006,48 @@ impl ArchiveView {
                 egui::TextureOptions::LINEAR,
             ));
         }
+        let Some(name) = self.preview_entry.clone() else {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("单击条目以预览").weak());
+            return;
+        };
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new(&name).strong());
+        if let Some(entry) = self.entries.iter().find(|e| e.name == name) {
+            ui.label(egui::RichText::new(human_size(entry.size)).weak());
+        }
+        // 图片预览的「适应宽度 / 原始尺寸」切换。
+        if self.preview_tex.is_some() {
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(!self.preview_full_size, "适应宽度")
+                    .clicked()
+                {
+                    self.preview_full_size = false;
+                }
+                if ui
+                    .selectable_label(self.preview_full_size, "原始尺寸")
+                    .clicked()
+                {
+                    self.preview_full_size = true;
+                }
+            });
+        }
+        ui.separator();
+        // 原始尺寸模式：按纹理原始大小显示，独立双向滚动区。
+        if self.preview_full_size {
+            if let Some(tex) = &self.preview_tex {
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.image(egui::load::SizedTexture::new(tex.id(), tex.size_vec2()));
+                    });
+                return;
+            }
+        }
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                let Some(name) = self.preview_entry.clone() else {
-                    ui.add_space(8.0);
-                    ui.label(egui::RichText::new("单击条目以预览").weak());
-                    return;
-                };
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(&name).strong());
-                if let Some(entry) = self.entries.iter().find(|e| e.name == name) {
-                    ui.label(egui::RichText::new(human_size(entry.size)).weak());
-                }
-                ui.separator();
                 if let Some(tex) = &self.preview_tex {
                     let width = ui.available_width();
                     let size = tex.size_vec2();
@@ -1795,7 +2061,13 @@ impl ArchiveView {
                         egui::vec2(width, height),
                     ));
                 } else if let Some(text) = &self.preview_text {
-                    ui.add(egui::Label::new(egui::RichText::new(text).monospace()).wrap());
+                    // 只读 &str 缓冲（TextBuffer for &str 拒绝修改）：可选中复制。
+                    let mut text = text.as_str();
+                    ui.add(
+                        egui::TextEdit::multiline(&mut text)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY),
+                    );
                 }
                 if let Some(note) = &self.preview_note {
                     ui.label(egui::RichText::new(note).weak());
@@ -1880,6 +2152,22 @@ fn min_scroll_to_reveal(offset: f32, viewport_h: f32, row_top: f32) -> f32 {
     } else {
         offset
     }
+}
+
+/// 目录在条目表中是否存在（F5 重列后决定是否恢复 current_dir）：显式目录
+/// 条目命中，或有条目以其为路径前缀（`/` 与 `\\` 均作分隔符）。
+fn dir_exists(entries: &[ArchiveEntry], dir: &str) -> bool {
+    let dir = dir.trim_end_matches(['/', '\\']);
+    if dir.is_empty() {
+        return false;
+    }
+    let prefix_slash = format!("{dir}/");
+    let prefix_backslash = format!("{dir}\\");
+    entries.iter().any(|e| {
+        (e.is_dir && e.name.trim_end_matches(['/', '\\']) == dir)
+            || e.name.starts_with(&prefix_slash)
+            || e.name.starts_with(&prefix_backslash)
+    })
 }
 
 /// 明细列表文件行的类型图标（按扩展名，大小写不敏感）；目录行恒用 FOLDER。
@@ -2017,10 +2305,10 @@ mod tests {
         // 过滤激活：忽略 current_dir 全包匹配（大小写不敏感）。
         view.filter = " PAGE ".to_string();
         assert_eq!(view.rows(), vec![ListRow::File { idx: 1 }]);
-        // 进入目录：仅直接子文件。
+        // 进入目录：行首「..」上级行 + 仅直接子文件。
         view.filter.clear();
         view.current_dir = Some("Dir".to_string());
-        assert_eq!(view.rows(), vec![ListRow::File { idx: 3 }]);
+        assert_eq!(view.rows(), vec![ListRow::Parent, ListRow::File { idx: 3 }]);
         // 全部文件扁平模式：全包文件（按显示名自然序：inner < notes < Page01），无目录行。
         view.flat_all = true;
         assert_eq!(
@@ -2165,25 +2453,187 @@ mod tests {
             ..Default::default()
         };
         // 无焦点时向下 = 首行（目录行，级联选中；预览目标不动）。
-        view.move_focus(1);
+        view.move_focus(1, FocusMove::Select);
         assert_eq!(view.focus, Some(RowKey::Dir("d".to_string())));
         assert!(view.selected.contains("d/f.png"));
         assert!(view.focus_scroll_pending);
         assert_eq!(view.preview_entry, None);
         view.focus_scroll_pending = false;
         // 文件行：预览跟随键盘焦点（与鼠标单击一致）。
-        view.move_focus(1);
+        view.move_focus(1, FocusMove::Select);
         assert_eq!(view.focus, Some(RowKey::File("a.png".to_string())));
         assert_eq!(view.selected.len(), 1);
         assert_eq!(view.preview_entry.as_deref(), Some("a.png"));
         // 末行钳位。
-        view.move_focus(5);
+        view.move_focus(5, FocusMove::Select);
         assert_eq!(view.focus, Some(RowKey::File("b.png".to_string())));
         assert_eq!(view.preview_entry.as_deref(), Some("b.png"));
         // 顶部再向上停在首行（目录行不改预览目标）。
-        view.move_focus(-10);
+        view.move_focus(-10, FocusMove::Select);
         assert_eq!(view.focus, Some(RowKey::Dir("d".to_string())));
         assert_eq!(view.preview_entry.as_deref(), Some("b.png"));
+    }
+
+    #[test]
+    fn move_focus_extend_replaces_range_from_anchor() {
+        let mut view = ArchiveView {
+            entries: vec![
+                entry("a.png", false, 1),
+                entry("b.png", false, 1),
+                entry("c.png", false, 1),
+                entry("d.png", false, 1),
+            ],
+            ..Default::default()
+        };
+        // 先单选 b.png（anchor = b.png），再 Shift+↓ 两步扩到 d.png。
+        view.move_focus(1, FocusMove::Select);
+        view.move_focus(1, FocusMove::Select);
+        assert_eq!(view.focus, Some(RowKey::File("b.png".to_string())));
+        view.move_focus(1, FocusMove::Extend);
+        view.move_focus(1, FocusMove::Extend);
+        assert_eq!(view.focus, Some(RowKey::File("d.png".to_string())));
+        // anchor 不动，选中 = anchor..focus 区间（b/c/d）。
+        assert_eq!(view.anchor, Some(RowKey::File("b.png".to_string())));
+        assert_eq!(view.selected.len(), 3);
+        assert!(view.selected.contains("b.png"));
+        assert!(view.selected.contains("c.png"));
+        assert!(view.selected.contains("d.png"));
+        // 反向扩选收缩区间（替换语义：区间外的不保留）。
+        view.move_focus(-2, FocusMove::Extend);
+        assert_eq!(view.focus, Some(RowKey::File("b.png".to_string())));
+        assert_eq!(view.selected.len(), 1);
+        assert!(view.selected.contains("b.png"));
+    }
+
+    #[test]
+    fn move_focus_focus_only_keeps_selection_and_anchor() {
+        let mut view = ArchiveView {
+            entries: vec![
+                entry("a.png", false, 1),
+                entry("b.png", false, 1),
+                entry("c.png", false, 1),
+            ],
+            ..Default::default()
+        };
+        view.move_focus(0, FocusMove::Select);
+        assert_eq!(view.focus, Some(RowKey::File("a.png".to_string())));
+        // Ctrl+↓：只移焦点，选中与 anchor 不变。
+        view.move_focus(1, FocusMove::FocusOnly);
+        view.move_focus(1, FocusMove::FocusOnly);
+        assert_eq!(view.focus, Some(RowKey::File("c.png".to_string())));
+        assert_eq!(view.selected.len(), 1);
+        assert!(view.selected.contains("a.png"));
+        assert_eq!(view.anchor, Some(RowKey::File("a.png".to_string())));
+        // 预览仍跟随焦点。
+        assert_eq!(view.preview_entry.as_deref(), Some("c.png"));
+    }
+
+    #[test]
+    fn move_focus_edge_and_page_step() {
+        let mut view = ArchiveView {
+            entries: (0..30)
+                .map(|i| entry(&format!("p{i:02}.png"), false, 1))
+                .collect(),
+            ..Default::default()
+        };
+        // Home 跳首行、End 跳末行。
+        view.move_focus_edge(true, FocusMove::Select);
+        assert_eq!(view.focus, Some(RowKey::File("p29.png".to_string())));
+        view.move_focus_edge(false, FocusMove::Select);
+        assert_eq!(view.focus, Some(RowKey::File("p00.png".to_string())));
+        // 视口高度未知时 PgDn 按 10 行兜底。
+        assert_eq!(view.page_step(), 10);
+        view.move_focus(view.page_step(), FocusMove::Select);
+        assert_eq!(view.focus, Some(RowKey::File("p10.png".to_string())));
+        // 视口高度已知（220pt = 10 行）时按视口取整。
+        view.last_viewport_height = ROW_HEIGHT * 5.0;
+        assert_eq!(view.page_step(), 5);
+        view.move_focus(view.page_step(), FocusMove::Select);
+        assert_eq!(view.focus, Some(RowKey::File("p15.png".to_string())));
+    }
+
+    #[test]
+    fn parent_row_focus_only_open_goes_up() {
+        let mut view = ArchiveView {
+            entries: vec![entry("a/b.png", false, 1)],
+            current_dir: Some("a".to_string()),
+            ..Default::default()
+        };
+        // 行模型：[.., b.png]；Parent 行不可选。
+        assert_eq!(view.row_keys().first(), Some(&RowKey::Parent));
+        assert!(!view.row_selected(&RowKey::Parent));
+        // 单击 Parent：只设焦点，不动选中/anchor。
+        view.selected.insert("a/b.png".to_string());
+        view.click_row(RowKey::Parent, false, false);
+        assert_eq!(view.focus, Some(RowKey::Parent));
+        assert_eq!(view.selected.len(), 1);
+        assert_eq!(view.anchor, None);
+        // 打开 Parent = 上级。
+        view.open_row(RowKey::Parent, false, &mut |_| {}, &mut |_| {});
+        assert_eq!(view.current_dir, None);
+    }
+
+    #[test]
+    fn refresh_restores_current_dir_when_still_present() {
+        let mut view = ArchiveView {
+            current_dir: Some("a".to_string()),
+            pending_restore_dir: Some("a".to_string()),
+            ..Default::default()
+        };
+        // 新条目里 a 仍存在 → 恢复。
+        view.apply_listing_result(Ok((
+            vec![entry("a/b.png", false, 1), entry("c.png", false, 1)],
+            None,
+        )));
+        assert_eq!(view.state, ArchiveViewState::Ready);
+        assert_eq!(view.current_dir.as_deref(), Some("a"));
+        assert!(view.tree_reveal_pending);
+        // 新条目里 a 已消失 → 回根目录（真实流程里 open() 已清掉 current_dir）。
+        view.pending_restore_dir = Some("a".to_string());
+        view.current_dir = None;
+        view.tree_reveal_pending = false;
+        view.apply_listing_result(Ok((vec![entry("c.png", false, 1)], None)));
+        assert_eq!(view.current_dir, None);
+        assert!(!view.tree_reveal_pending);
+        // 重列失败不残留恢复意图。
+        view.pending_restore_dir = Some("a".to_string());
+        view.apply_listing_result(Err("io".to_string()));
+        assert_eq!(view.pending_restore_dir, None);
+    }
+
+    #[test]
+    fn dir_exists_matches_explicit_and_prefix_entries() {
+        let entries = vec![
+            entry("a/", true, 0),
+            entry("a/b.png", false, 1),
+            entry("x\\y.png", false, 1),
+            entry("top.png", false, 1),
+        ];
+        assert!(dir_exists(&entries, "a"));
+        assert!(dir_exists(&entries, "a/"));
+        assert!(dir_exists(&entries, "x"));
+        assert!(!dir_exists(&entries, "b"));
+        assert!(!dir_exists(&entries, "top.png"));
+        assert!(!dir_exists(&entries, ""));
+        assert!(!dir_exists(&entries, "/"));
+    }
+
+    #[test]
+    fn rows_cache_hits_and_invalidates_on_state_change() {
+        let mut view = ArchiveView {
+            entries: vec![entry("a/b.png", false, 1), entry("c.png", false, 1)],
+            ..Default::default()
+        };
+        let first = view.rows();
+        assert!(view.rows_cache.is_some());
+        // 同状态再取：命中缓存（同内容）。
+        assert_eq!(view.rows(), first);
+        // 选中变化不影响行模型（rows_cache 不随 selection_version 失效）。
+        view.set_row_selected(&RowKey::File("c.png".to_string()), true);
+        assert_eq!(view.rows(), first);
+        // 进入目录：RowsKey 变化 → 重算（行首多了 Parent）。
+        view.enter_dir("a".to_string());
+        assert_eq!(view.rows(), vec![ListRow::Parent, ListRow::File { idx: 0 }]);
     }
 
     #[test]

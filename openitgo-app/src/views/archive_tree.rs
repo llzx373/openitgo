@@ -6,7 +6,7 @@
 use crate::app::natural_cmp;
 use openitgo_parser::archive::ArchiveEntry;
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// 目录树（左栏）中的一行。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +174,8 @@ pub fn all_file_indices(entries: &[ArchiveEntry]) -> Vec<usize> {
 /// 中栏明细列表的一行。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListRow {
+    /// 「..」上级目录行：非根目录且非扁平/过滤时恒居行首，不参与排序与选择。
+    Parent,
     /// 目录行：full_path 归一化（`/` 分隔、无尾部分隔符），name 为该级组件名。
     Dir { full_path: String, name: String },
     /// 文件行：entries 中的索引。
@@ -195,6 +197,8 @@ pub enum SortKey {
 /// 文件行按 sort/asc 排序（Name 自然序大小写不敏感按显示名；
 /// Size/Packed 按数值、同值按名称兜底；Modified 按 mtime 数值、
 /// None 恒垫底、同值/双 None 按名称兜底；desc 反转全部行序）。
+/// 非根目录且非扁平/过滤时行首恒为 `ListRow::Parent`（「..」上级行，
+/// 不参与排序，desc 也不移位）。
 pub fn list_rows(
     entries: &[ArchiveEntry],
     current_dir: Option<&str>,
@@ -247,16 +251,20 @@ pub fn list_rows(
     if !asc && !matches!(sort, SortKey::Modified) {
         files.reverse();
     }
-    let mut rows = Vec::with_capacity(subdirs.len() + files.len());
+    let mut rows = Vec::with_capacity(subdirs.len() + files.len() + 1);
     if !flat {
+        let parent = current_dir
+            .map(|d| d.trim_end_matches(['/', '\\']))
+            .filter(|d| !d.is_empty());
+        // 「..」上级行恒居行首（排序不影响它）。
+        if parent.is_some() {
+            rows.push(ListRow::Parent);
+        }
         let mut dirs = subdirs;
         dirs.sort_by(|a, b| natural_cmp(a, b));
         if !asc {
             dirs.reverse();
         }
-        let parent = current_dir
-            .map(|d| d.trim_end_matches(['/', '\\']))
-            .filter(|d| !d.is_empty());
         for name in dirs {
             let full_path = match parent {
                 Some(p) => format!("{p}/{name}"),
@@ -267,6 +275,41 @@ pub fn list_rows(
     }
     rows.extend(files.into_iter().map(|idx| ListRow::File { idx }));
     rows
+}
+
+/// 每目录的选中统计：dir full_path（`/` 分隔归一化）→（已选后代文件数,
+/// 后代文件总数）。单遍构建：遍历文件条目，沿其祖先目录前缀逐级累加，
+/// 供目录行选中态/部分选中指示查询（替代每行 O(entries) 的前缀全扫）。
+pub fn build_dir_stats(
+    entries: &[ArchiveEntry],
+    selected: &HashSet<String>,
+) -> HashMap<String, (usize, usize)> {
+    let mut stats: HashMap<String, (usize, usize)> = HashMap::new();
+    for entry in entries {
+        if entry.is_dir {
+            continue;
+        }
+        let is_selected = selected.contains(&entry.name);
+        let components: Vec<&str> = entry
+            .name
+            .split(['/', '\\'])
+            .filter(|c| !c.is_empty())
+            .collect();
+        // 最后一个组件是文件名，只累加其祖先目录前缀。
+        let mut path = String::new();
+        for comp in &components[..components.len().saturating_sub(1)] {
+            if !path.is_empty() {
+                path.push('/');
+            }
+            path.push_str(comp);
+            let stat = stats.entry(path.clone()).or_insert((0, 0));
+            stat.1 += 1;
+            if is_selected {
+                stat.0 += 1;
+            }
+        }
+    }
+    stats
 }
 
 /// 条目名的最后一段（`/` 与 `\\` 均作分隔符）。
@@ -440,6 +483,7 @@ mod tests {
     fn row_names(rows: &[ListRow], entries: &[ArchiveEntry]) -> Vec<String> {
         rows.iter()
             .map(|r| match r {
+                ListRow::Parent => "..".to_string(),
                 ListRow::Dir { name, .. } => format!("{name}/"),
                 ListRow::File { idx } => entries[*idx].name.clone(),
             })
@@ -575,13 +619,61 @@ mod tests {
                 name: "a".to_string()
             }]
         );
+        // 非根目录：行首恒为「..」上级行。
         let rows = list_rows(&entries, Some("a"), false, "", SortKey::Name, true);
         assert_eq!(
             rows,
-            vec![ListRow::Dir {
-                full_path: "a/b".to_string(),
-                name: "b".to_string()
-            }]
+            vec![
+                ListRow::Parent,
+                ListRow::Dir {
+                    full_path: "a/b".to_string(),
+                    name: "b".to_string()
+                }
+            ]
         );
+    }
+
+    #[test]
+    fn list_rows_parent_row_placement_rules() {
+        let entries = vec![
+            sized("a/b/c.png", false, 1, None),
+            sized("a/d.png", false, 1, None),
+        ];
+        // 根目录无上级行。
+        let rows = list_rows(&entries, None, false, "", SortKey::Name, true);
+        assert!(!rows.contains(&ListRow::Parent));
+        // 扁平模式与过滤激活时无上级行。
+        let rows = list_rows(&entries, Some("a"), true, "", SortKey::Name, true);
+        assert!(!rows.contains(&ListRow::Parent));
+        let rows = list_rows(&entries, Some("a"), false, "png", SortKey::Name, true);
+        assert!(!rows.contains(&ListRow::Parent));
+        // 尾部斜杠归一化后仍有上级行。
+        let rows = list_rows(&entries, Some("a/"), false, "", SortKey::Name, true);
+        assert_eq!(rows.first(), Some(&ListRow::Parent));
+        // 降序整体反转也不影响行首的上级行。
+        let rows = list_rows(&entries, Some("a"), false, "", SortKey::Size, false);
+        assert_eq!(rows.first(), Some(&ListRow::Parent));
+        assert_eq!(row_names(&rows, &entries), vec!["..", "b/", "a/d.png"]);
+    }
+
+    #[test]
+    fn build_dir_stats_accumulates_ancestors() {
+        let entries = vec![
+            sized("a/b/c.png", false, 1, None),
+            sized("a/b/d.png", false, 1, None),
+            sized("a\\e.png", false, 1, None),
+            sized("top.png", false, 1, None),
+        ];
+        let selected = HashSet::from(["a/b/c.png".to_string(), "a\\e.png".to_string()]);
+        let stats = build_dir_stats(&entries, &selected);
+        // 「a」的后代文件：b/c、b/d、e（反斜杠条目同样计入，key 归一化为「/」）。
+        assert_eq!(stats.get("a"), Some(&(2, 3)));
+        assert_eq!(stats.get("a/b"), Some(&(1, 2)));
+        // 顶层文件无祖先目录；无后代的目录不出现在表中。
+        assert_eq!(stats.get("top.png"), None);
+        assert_eq!(stats.len(), 2);
+        // 全不选时 selected 计数为 0。
+        let stats = build_dir_stats(&entries, &HashSet::new());
+        assert_eq!(stats.get("a"), Some(&(0, 3)));
     }
 }
