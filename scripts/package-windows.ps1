@@ -20,17 +20,13 @@ if (-not (Test-Path $dll)) {
     throw "未找到 vendor/mpv/libmpv-2.dll，请先运行 scripts/setup-windows.ps1"
 }
 
-# MSVC 环境（本机 VS2022 的库目录不完整，固定用 VS2019 BuildTools v142；
-# 若已处于 vcvars 环境（LIB 已设置）则跳过）
+# MSVC 环境（用 vswhere 找最新的带 C++ 工具集的 VS 实例，本机为 VS2022
+# Community；若已处于 vcvars 环境（LIB 已设置）则跳过）
 if (-not $env:LIB) {
-    $vcvars = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-    if (-not (Test-Path $vcvars)) {
-        # 回退：用 vswhere 找任意带 C++ 工具集的实例
-        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-        $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-        if (-not $vsPath) { throw "未找到带 C++ 工具集的 Visual Studio" }
-        $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
-    }
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if (-not $vsPath) { throw "未找到带 C++ 工具集的 Visual Studio" }
+    $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
     # 在 cmd 里跑 vcvars 再把环境导回当前进程
     $envLines = cmd /c "`"$vcvars`" >NUL 2>&1 && set"
     foreach ($line in $envLines) {
