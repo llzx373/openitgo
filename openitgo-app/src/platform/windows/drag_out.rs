@@ -19,7 +19,7 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::{
     DoDragDrop, IDropSource, IDropSource_Impl, OleInitialize, OleUninitialize, CF_HDROP,
-    DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_MOVE, DROPEFFECT_NONE,
+    DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
 };
 use windows::Win32::System::SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS};
 use windows::Win32::UI::Shell::DROPFILES;
@@ -49,14 +49,8 @@ unsafe fn drag_drop_inner(files: &[PathBuf]) -> Result<(), String> {
     .into();
     let source: IDropSource = SimpleDropSource.into();
     let mut effect = DROPEFFECT_NONE;
-    let hr = unsafe {
-        DoDragDrop(
-            &data,
-            &source,
-            DROPEFFECT_COPY | DROPEFFECT_MOVE,
-            &mut effect,
-        )
-    };
+    // 压缩包拖出惯例只允许 COPY（源是只读压缩包，MOVE 无意义）。
+    let hr = unsafe { DoDragDrop(&data, &source, DROPEFFECT_COPY, &mut effect) };
     // DRAGDROP_S_CANCEL（用户 Esc/右键取消）是 S 开头的成功码，不算错误。
     if hr == DRAGDROP_S_CANCEL {
         return Ok(());

@@ -76,6 +76,78 @@ enum RowKey {
     File(String),
 }
 
+/// 拖出解压的触发阈值（pt）：指针距起点超过该距离或已出窗才开始后台解压，
+/// 避免 egui 6pt 拖动阈值下手滑即触发整批解压 IO。
+const DRAG_OUT_THRESHOLD: f32 = 40.0;
+
+/// Potential → Extracting 的触发判定：指针出窗（pos None 或越出视口）
+/// 或距按下起点超过 DRAG_OUT_THRESHOLD。
+fn should_begin_extract(origin: egui::Pos2, pos: Option<egui::Pos2>, viewport: egui::Rect) -> bool {
+    match pos {
+        None => true,
+        Some(p) => !viewport.contains(p) || p.distance(origin) > DRAG_OUT_THRESHOLD,
+    }
+}
+
+/// 拖动幽灵的文案。
+fn ghost_text(supported: bool, preparing: bool, count: usize) -> String {
+    if !supported {
+        "当前平台不支持拖出".to_string()
+    } else if preparing {
+        format!("⇪ {count} 个文件 · 正在准备拖出…")
+    } else {
+        format!("⇪ {count} 个文件 · 拖到窗口外解压")
+    }
+}
+
+/// 拖动幽灵：指针旁的带底色小卡片（Order::Foreground，不拦截交互）。
+/// 指针出窗（latest_pos None）时不画。
+fn paint_drag_ghost(ctx: &egui::Context, text: &str) {
+    let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) else {
+        return;
+    };
+    egui::Area::new(egui::Id::new("archive-drag-ghost"))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .fixed_pos(pos + egui::vec2(12.0, 16.0))
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(text);
+            });
+        });
+}
+
+/// 拖出解压状态机：Potential（按下刚拖动，等阈值/出窗才解压）→
+/// Extracting（后台解压进本次专属暂存目录）→ Ready（出窗即 OLE DoDragDrop）。
+/// 任何时刻主键松开且还没进 DoDragDrop = 取消。
+enum DragOutState {
+    Potential {
+        names: Vec<String>,
+        origin: egui::Pos2,
+    },
+    Extracting {
+        staging: PathBuf,
+        names: Vec<String>,
+        task: AsyncOpener<()>,
+    },
+    Ready {
+        staging: PathBuf,
+        files: Vec<PathBuf>,
+    },
+}
+
+impl DragOutState {
+    /// 本次拖出的暂存目录（取消时 best-effort 清理用）。
+    fn staging(&self) -> Option<&Path> {
+        match self {
+            DragOutState::Extracting { staging, .. } | DragOutState::Ready { staging, .. } => {
+                Some(staging)
+            }
+            DragOutState::Potential { .. } => None,
+        }
+    }
+}
+
 /// 后台线程产出的预览内容。
 #[derive(Debug, Clone)]
 enum PreviewData {
@@ -132,10 +204,10 @@ pub struct ArchiveView {
     preview_note: Option<String>,
     /// 会话密码（app 每帧从会话密码表写入），预览读取加密条目用。
     pub preview_password: Option<String>,
-    /// 拖出：拖动起始时锁定的条目集 + 后台解压任务（一次一个）。
-    drag_out: Option<(Vec<String>, AsyncOpener<Vec<PathBuf>>)>,
-    /// 拖出解压就绪的临时文件，等指针拖出窗口后交给 OLE DoDragDrop。
-    drag_out_ready: Option<Vec<PathBuf>>,
+    /// 拖出状态机（Potential → Extracting → Ready，见 DragOutState）。
+    drag_out: Option<DragOutState>,
+    /// 拖出暂存目录递增计数（temp_root("drag")/<计数>/，同包多次拖出不互相覆盖）。
+    drag_out_counter: u64,
     /// 拖出错误（app render_archive 取走写入 error_message）。
     pub drag_error: Option<String>,
 }
@@ -172,7 +244,7 @@ impl Default for ArchiveView {
             preview_note: None,
             preview_password: None,
             drag_out: None,
-            drag_out_ready: None,
+            drag_out_counter: 0,
             drag_error: None,
         }
     }
@@ -216,8 +288,7 @@ impl ArchiveView {
         self.preview_tex = None;
         self.preview_text = None;
         self.preview_note = None;
-        self.drag_out = None;
-        self.drag_out_ready = None;
+        self.cancel_drag_out();
         self.drag_error = None;
     }
 
@@ -291,86 +362,162 @@ impl ArchiveView {
         }
     }
 
-    /// 拖动起始：后台把条目集解压到 openitgo-drag 临时目录。
-    fn start_drag_out(&mut self, names: Vec<String>) {
-        if names.is_empty() || self.drag_out.is_some() || self.drag_out_ready.is_some() {
+    /// 拖动起始（render_list_row 的 drag_started）：进入 Potential，
+    /// 只锁定条目集与按下起点，不做任何 IO（越过阈值/出窗才开始解压）。
+    fn begin_drag_potential(&mut self, names: Vec<String>, origin: egui::Pos2) {
+        if names.is_empty() || self.drag_out.is_some() {
             return;
         }
-        if !crate::platform::drag_out::is_supported() {
-            return;
-        }
-        let Some(path) = self.path.clone() else {
+        self.drag_out = Some(DragOutState::Potential { names, origin });
+    }
+
+    /// Potential 越过阈值/出窗：后台把条目集按包内相对路径解压进
+    /// 本次专属暂存目录 temp_root("drag")/<计数>/。
+    fn begin_drag_extract(&mut self, names: Vec<String>) {
+        let Some(archive) = self.path.clone() else {
+            self.drag_out = None;
             return;
         };
-        let archive = path.clone();
+        self.drag_out_counter += 1;
+        let staging =
+            crate::temp_open::temp_root("drag", &archive).join(self.drag_out_counter.to_string());
         let password = self.preview_password.clone();
+        let staging_in_task = staging.clone();
         let names_in_task = names.clone();
-        let task = AsyncOpener::open(path, move |_p| {
-            let mut out = Vec::with_capacity(names_in_task.len());
+        let task = AsyncOpener::open(archive.clone(), move |_p| {
             for n in &names_in_task {
-                match crate::temp_open::extract_entry_to_temp(
-                    "drag",
+                crate::temp_open::extract_entry_to_staging(
+                    &staging_in_task,
                     &archive,
                     n,
                     password.as_deref(),
-                ) {
-                    Ok(p) => out.push(p),
-                    Err(e) => return Err(format!("{n}: {e}")),
-                }
+                )
+                .map_err(|e| format!("{n}: {e}"))?;
             }
-            Ok(out)
+            Ok(())
         });
-        self.drag_out = Some((names, task));
+        self.drag_out = Some(DragOutState::Extracting {
+            staging,
+            names,
+            task,
+        });
     }
 
-    /// 排空拖出后台解压：成功 → drag_out_ready，失败 → drag_error。
+    /// 取消本次拖出：清空状态；暂存目录已建则 best-effort 删除（不再白留 24h）。
+    fn cancel_drag_out(&mut self) {
+        if let Some(state) = self.drag_out.take() {
+            if let Some(dir) = state.staging() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+
+    /// 排空拖出后台解压：成功 → 顶层负载进 Ready，失败 → drag_error + 清理暂存目录。
     fn poll_drag_out(&mut self) {
-        let Some((names, mut task)) = self.drag_out.take() else {
-            return;
+        let taken = match self.drag_out.take() {
+            Some(s @ DragOutState::Extracting { .. }) => s,
+            other => {
+                self.drag_out = other;
+                return;
+            }
+        };
+        let DragOutState::Extracting {
+            staging,
+            names,
+            mut task,
+        } = taken
+        else {
+            unreachable!()
         };
         match task.poll() {
-            OpenStatus::Loading => self.drag_out = Some((names, task)),
-            OpenStatus::Ready(Ok(files)) => self.drag_out_ready = Some(files),
-            OpenStatus::Ready(Err(e)) => self.drag_error = Some(format!("拖出解压失败: {e}")),
+            OpenStatus::Loading => {
+                self.drag_out = Some(DragOutState::Extracting {
+                    staging,
+                    names,
+                    task,
+                });
+            }
+            OpenStatus::Ready(Ok(())) => {
+                // HDROP 负载 = 暂存目录顶层项：拖单个目录时负载即该文件夹本身。
+                let files = crate::temp_open::staging_payload(&staging);
+                if files.is_empty() {
+                    self.drag_error = Some("拖出解压失败: 暂存目录为空".to_string());
+                    let _ = std::fs::remove_dir_all(&staging);
+                } else {
+                    self.drag_out = Some(DragOutState::Ready { staging, files });
+                }
+            }
+            OpenStatus::Ready(Err(e)) => {
+                self.drag_error = Some(format!("拖出解压失败: {e}"));
+                let _ = std::fs::remove_dir_all(&staging);
+            }
         }
     }
 
-    /// 拖出主流程：指针按住并离开窗口时，解压就绪则交给 OLE DoDragDrop
-    /// （模态阻塞，自带消息循环），未就绪则保持状态继续等；松开左键即收尾。
-    fn maybe_begin_os_drag(&mut self, ctx: &egui::Context) {
-        if self.drag_out.is_none() && self.drag_out_ready.is_none() {
+    /// 拖出主流程（每帧）：Potential 画幽灵并等阈值/出窗 → Extracting 等后台
+    /// 解压 → Ready 出窗即 OLE DoDragDrop（模态阻塞，自带消息循环）。
+    /// 主键松开且还没进 DoDragDrop = 取消并清理暂存目录。
+    fn update_drag_out(&mut self, ctx: &egui::Context) {
+        if self.drag_out.is_none() {
             return;
         }
-        let (primary_down, left_window) = ctx.input(|i| {
-            let rect = i.viewport_rect();
-            let pos = i.pointer.latest_pos();
+        let supported = crate::platform::drag_out::is_supported();
+        let (primary_down, pos, viewport) = ctx.input(|i| {
             (
                 i.pointer.primary_down(),
-                pos.is_none_or(|p| !rect.contains(p)),
+                i.pointer.latest_pos(),
+                i.viewport_rect(),
             )
         });
         if !primary_down {
-            // 键已松开：本次拖出结束（未出窗或已放弃）。
-            self.drag_out = None;
-            self.drag_out_ready = None;
+            self.cancel_drag_out();
             return;
         }
-        if !left_window {
-            // 指针还在窗口内：持续重绘以便排空后台解压。
-            ctx.request_repaint_after(Duration::from_millis(100));
-            return;
-        }
-        match self.drag_out_ready.take() {
-            Some(files) => {
-                self.drag_out = None;
-                if let Err(e) = crate::platform::drag_out::do_drag_drop(&files) {
-                    self.drag_error = Some(e);
+        let browsing_ready = self.state == ArchiveViewState::Ready;
+        match self.drag_out.take() {
+            Some(DragOutState::Potential { names, origin }) => {
+                if supported && should_begin_extract(origin, pos, viewport) {
+                    if browsing_ready {
+                        paint_drag_ghost(ctx, &ghost_text(true, true, names.len()));
+                    }
+                    self.begin_drag_extract(names);
+                } else {
+                    if browsing_ready {
+                        paint_drag_ghost(ctx, &ghost_text(supported, false, names.len()));
+                    }
+                    self.drag_out = Some(DragOutState::Potential { names, origin });
                 }
             }
-            None => {
-                // 解压未就绪：保持拖动状态等解压完成，持续重绘轮询。
+            Some(DragOutState::Extracting {
+                staging,
+                names,
+                task,
+            }) => {
+                if browsing_ready {
+                    paint_drag_ghost(ctx, &ghost_text(supported, true, names.len()));
+                }
+                self.drag_out = Some(DragOutState::Extracting {
+                    staging,
+                    names,
+                    task,
+                });
+                // 持续重绘以便空闲时 poll_drag_out 排空解压结果。
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
+            Some(DragOutState::Ready { staging, files }) => {
+                let left_window = pos.is_none_or(|p| !viewport.contains(p));
+                if left_window {
+                    // 模态阻塞；DROP/CANCEL 返回后本次拖出都结束。暂存目录不删
+                    // （落点可能还在读，交给 24h clean_stale 兜底）。
+                    if let Err(e) = crate::platform::drag_out::do_drag_drop(&files) {
+                        self.drag_error = Some(e);
+                    }
+                } else {
+                    self.drag_out = Some(DragOutState::Ready { staging, files });
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                }
+            }
+            None => {}
         }
     }
 
@@ -657,8 +804,8 @@ impl ArchiveView {
             on_need_password,
         } = callbacks;
 
-        // 拖出：指针按住离开窗口时发起 OLE DoDragDrop（Windows）。
-        self.maybe_begin_os_drag(ui.ctx());
+        // 拖出：每帧驱动状态机（幽灵/解压/出窗发起 OLE DoDragDrop）。
+        self.update_drag_out(ui.ctx());
 
         let openable_comic = self
             .path
@@ -743,7 +890,12 @@ impl ArchiveView {
                         human_size(selected_bytes)
                     ));
                     ui.separator();
-                    ui.label(egui::RichText::new("双击打开 · 右键菜单 · 按住拖出窗口解压").weak());
+                    let hint = if crate::platform::drag_out::is_supported() {
+                        "双击打开 · 右键菜单 · 按住拖出窗口解压"
+                    } else {
+                        "双击打开 · 右键菜单"
+                    };
+                    ui.label(egui::RichText::new(hint).weak());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let place = if self.flat_all {
                             "全部文件".to_string()
@@ -1366,7 +1518,13 @@ impl ArchiveView {
                 RowKey::File(name) => Self::drag_entry_set(&self.selected_names_in_order(), name),
                 RowKey::Dir(dir) => self.descendant_file_names(dir),
             };
-            self.start_drag_out(names);
+            let origin = ui.input(|i| {
+                i.pointer
+                    .press_origin()
+                    .or_else(|| i.pointer.latest_pos())
+                    .unwrap_or_default()
+            });
+            self.begin_drag_potential(names, origin);
         }
         response.context_menu(|ui| {
             // Explorer 惯例：右键未选中的行先把它单选。
@@ -2060,5 +2218,43 @@ mod tests {
             ArchiveView::drag_entry_set(&[], "a.txt"),
             vec!["a.txt".to_string()]
         );
+    }
+
+    #[test]
+    fn should_begin_extract_threshold_and_window_exit() {
+        let viewport = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let origin = egui::pos2(100.0, 100.0);
+        // 指针出窗（无位置或越出视口）→ 立即开始解压。
+        assert!(should_begin_extract(origin, None, viewport));
+        assert!(should_begin_extract(
+            origin,
+            Some(egui::pos2(-1.0, 100.0)),
+            viewport
+        ));
+        assert!(should_begin_extract(
+            origin,
+            Some(egui::pos2(100.0, 601.0)),
+            viewport
+        ));
+        // 窗内未超阈值 → 不开始（手滑不触发 IO）。
+        assert!(!should_begin_extract(
+            origin,
+            Some(egui::pos2(120.0, 110.0)),
+            viewport
+        ));
+        // 窗内超过 40pt → 开始。
+        assert!(should_begin_extract(
+            origin,
+            Some(egui::pos2(150.0, 100.0)),
+            viewport
+        ));
+    }
+
+    #[test]
+    fn ghost_text_by_state_and_platform() {
+        assert_eq!(ghost_text(false, false, 3), "当前平台不支持拖出");
+        assert_eq!(ghost_text(false, true, 3), "当前平台不支持拖出");
+        assert_eq!(ghost_text(true, false, 3), "⇪ 3 个文件 · 拖到窗口外解压");
+        assert_eq!(ghost_text(true, true, 1), "⇪ 1 个文件 · 正在准备拖出…");
     }
 }
