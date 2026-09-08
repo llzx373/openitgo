@@ -19,7 +19,7 @@ openitgo-core = { path = "../openitgo-core" }
 openitgo-media = { path = "../openitgo-media" }
 openitgo-parser = { path = "../openitgo-parser" }
 openitgo-storage = { path = "../openitgo-storage" }
-time = "0.3"
+time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
 wry = "0.55"
 serde = { workspace = true }
 serde_json = { workspace = true }

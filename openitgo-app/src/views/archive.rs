@@ -24,35 +24,43 @@ const TEXT_SNIFF_BYTES: usize = 256 * 1024;
 const TEXT_PREVIEW_MAX_CHARS: usize = 64_000;
 /// 明细列表行高（pt），虚拟化滚动要求固定行高。
 const ROW_HEIGHT: f32 = 22.0;
-/// 明细列表「大小」「压缩后」列宽（pt），右对齐。
+/// 明细列表「大小」「压缩后」「时间」列的默认宽度（pt），右对齐。
 const SIZE_COL_WIDTH: f32 = 90.0;
 const PACKED_COL_WIDTH: f32 = 90.0;
+const MTIME_COL_WIDTH: f32 = 110.0;
+/// 列宽拖拽的取值范围（pt）。
+const COL_MIN_WIDTH: f32 = 60.0;
+const COL_MAX_WIDTH: f32 = 400.0;
 /// 列内容右缘内边距（pt）：列锚点在右缘内 6pt 处，表头与行内容共用。
 const COL_RIGHT_PAD: f32 = 6.0;
 /// 表头「名称」文字的左缩进（pt）：与行内容对齐
 /// （行 = 6pt shrink + 约 16pt 图标 + 6pt 间距）。
 const NAME_HEADER_INDENT: f32 = 6.0 + 16.0 + 6.0;
 
-/// 名称/大小/压缩后三列的 x 坐标单一来源（表头 paint、行列分隔竖线、
-/// 后续列宽拖拽共用），消除各自手算的漂移。
+/// 名称/大小/压缩后/时间四列的 x 坐标单一来源（表头 paint、行列分隔竖线、
+/// 列宽拖拽共用），消除各自手算的漂移。名称列宽 = 剩余弹性。
 #[derive(Debug, Clone, Copy)]
 struct ColumnLayout {
     /// 名称列右缘（= 名称|大小分隔竖线 x、大小列左缘）。
     size_left: f32,
     /// 大小列右缘（= 大小|压缩后分隔竖线 x、压缩后列左缘），大小文字右锚点。
     packed_left: f32,
-    /// 压缩后文字右锚点（行右缘内 COL_RIGHT_PAD 处）。
+    /// 压缩后列右缘（= 压缩后|时间分隔竖线 x、时间列左缘），压缩后文字右锚点。
+    mtime_left: f32,
+    /// 时间文字右锚点（行右缘内 COL_RIGHT_PAD 处）。
     content_right: f32,
 }
 
-/// 由行/表头 rect 的右缘算出三列坐标。
-fn column_layout(right: f32) -> ColumnLayout {
+/// 由行/表头 rect 的右缘与三列宽度算出各列坐标。
+fn column_layout(right: f32, size_w: f32, packed_w: f32, mtime_w: f32) -> ColumnLayout {
     let content_right = right - COL_RIGHT_PAD;
-    let packed_left = content_right - PACKED_COL_WIDTH;
-    let size_left = packed_left - SIZE_COL_WIDTH;
+    let mtime_left = content_right - mtime_w;
+    let packed_left = mtime_left - packed_w;
+    let size_left = packed_left - size_w;
     ColumnLayout {
         size_left,
         packed_left,
+        mtime_left,
         content_right,
     }
 }
@@ -193,6 +201,11 @@ pub struct ArchiveView {
     /// 明细列表排序（默认名称升序）。
     sort_key: SortKey,
     sort_asc: bool,
+    /// 大小/压缩后/时间列宽（pt，分隔竖线拖拽可调，clamp 60..=400）；
+    /// 跨包保留（clear_entries_state 不重置），会话内有效，不落盘。
+    col_width_size: f32,
+    col_width_packed: f32,
+    col_width_mtime: f32,
     /// 右侧预览面板开关。
     pub preview_open: bool,
     /// 当前预览目标条目名（单击文件条目设置）。
@@ -238,6 +251,9 @@ impl Default for ArchiveView {
             last_viewport_height: 0.0,
             sort_key: SortKey::Name,
             sort_asc: true,
+            col_width_size: SIZE_COL_WIDTH,
+            col_width_packed: PACKED_COL_WIDTH,
+            col_width_mtime: MTIME_COL_WIDTH,
             preview_open: false,
             preview_entry: None,
             preview_requested: None,
@@ -789,6 +805,16 @@ impl ArchiveView {
         }
     }
 
+    /// 当前列宽下的列坐标（表头、数据行、竖线共用同一来源）。
+    fn layout(&self, right: f32) -> ColumnLayout {
+        column_layout(
+            right,
+            self.col_width_size,
+            self.col_width_packed,
+            self.col_width_mtime,
+        )
+    }
+
     /// 选中文件条目数与总大小（解压后字节）。
     fn selected_stats(&self) -> (usize, u64) {
         self.entries
@@ -1300,10 +1326,12 @@ impl ArchiveView {
         ui.separator();
     }
 
-    /// 列头：名称 / 大小 / 压缩后，整列格可点击切换排序键与升降序，
+    /// 列头：名称 / 大小 / 压缩后 / 时间，整列格可点击切换排序键与升降序，
     /// 当前键显示 ▲/▼。列坐标取自 column_layout（与行内容/竖线同一来源）；
-    /// 名称列左对齐并带图标占位缩进（与行内名称 x 对齐），右侧两列右对齐。
+    /// 名称列左对齐并带图标占位缩进（与行内名称 x 对齐），右侧三列右对齐。
     /// 整行铺淡底色 + hover 列高亮 + 列间竖线 + 底部描边（WinRAR 式表头）。
+    /// 三条分隔竖线各带 6pt 拖拽热区（后注册于列点击格，拖拽优先），
+    /// 拖动调整右侧列宽（clamp COL_MIN..=COL_MAX），hover 显示横向调整光标。
     fn render_column_header(&mut self, ui: &mut egui::Ui) {
         let (header_rect, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), ROW_HEIGHT),
@@ -1315,7 +1343,7 @@ impl ArchiveView {
             0.0,
             ui.visuals().widgets.noninteractive.bg_fill,
         );
-        let layout = column_layout(header_rect.right());
+        let layout = self.layout(header_rect.right());
         let cy = header_rect.center().y;
         let font_id = egui::TextStyle::Body.resolve(ui.style());
         let name_rect = egui::Rect::from_min_max(
@@ -1328,10 +1356,14 @@ impl ArchiveView {
         );
         let packed_rect = egui::Rect::from_min_max(
             egui::pos2(layout.packed_left, header_rect.min.y),
+            egui::pos2(layout.mtime_left, header_rect.max.y),
+        );
+        let mtime_rect = egui::Rect::from_min_max(
+            egui::pos2(layout.mtime_left, header_rect.min.y),
             header_rect.max,
         );
         // (列 rect, 排序键, 标题, 文字锚点 x, 对齐方式)
-        let cols: [(egui::Rect, SortKey, &str, f32, egui::Align2); 3] = [
+        let cols: [(egui::Rect, SortKey, &str, f32, egui::Align2); 4] = [
             (
                 name_rect,
                 SortKey::Name,
@@ -1350,12 +1382,19 @@ impl ArchiveView {
                 packed_rect,
                 SortKey::Packed,
                 "压缩后",
+                layout.mtime_left,
+                egui::Align2::RIGHT_CENTER,
+            ),
+            (
+                mtime_rect,
+                SortKey::Modified,
+                "时间",
                 layout.content_right,
                 egui::Align2::RIGHT_CENTER,
             ),
         ];
         let mut clicked: Option<SortKey> = None;
-        let mut texts: Vec<(egui::Pos2, egui::Align2, String)> = Vec::with_capacity(3);
+        let mut texts: Vec<(egui::Pos2, egui::Align2, String)> = Vec::with_capacity(4);
         for (rect, key, label, anchor_x, align) in cols {
             let response = ui.interact(
                 rect,
@@ -1379,8 +1418,46 @@ impl ArchiveView {
             };
             texts.push((egui::pos2(anchor_x, cy), align, format!("{label}{arrow}")));
         }
+        // 列宽拖拽热区：三条分隔竖线各 ±3pt，后注册于列点击格使拖拽优先。
+        // 拖动竖线调整其右侧列宽（右移 = 变窄），hover/拖拽时换光标并加深竖线。
+        let sep_xs = [layout.size_left, layout.packed_left, layout.mtime_left];
+        let mut hovered_sep: Option<usize> = None;
+        for (i, &x) in sep_xs.iter().enumerate() {
+            let drag_rect = egui::Rect::from_min_max(
+                egui::pos2(x - 3.0, header_rect.top()),
+                egui::pos2(x + 3.0, header_rect.bottom()),
+            );
+            let response = ui.interact(
+                drag_rect,
+                ui.id().with(("archive-col-sep", i)),
+                egui::Sense::drag(),
+            );
+            if response.hovered() || response.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                hovered_sep = Some(i);
+            }
+            if response.dragged() {
+                let dx = response.drag_motion().x;
+                if dx != 0.0 {
+                    let width = match i {
+                        0 => &mut self.col_width_size,
+                        1 => &mut self.col_width_packed,
+                        _ => &mut self.col_width_mtime,
+                    };
+                    *width = (*width - dx).clamp(COL_MIN_WIDTH, COL_MAX_WIDTH);
+                }
+            }
+        }
         let line_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
-        paint_column_separators(&painter, header_rect, line_color);
+        paint_column_separators(&painter, header_rect, line_color, &layout);
+        if let Some(i) = hovered_sep {
+            let strong = ui.visuals().widgets.active.bg_stroke.color;
+            painter.vline(
+                sep_xs[i],
+                header_rect.y_range(),
+                egui::Stroke::new(1.0, strong),
+            );
+        }
         painter.hline(
             header_rect.x_range(),
             header_rect.bottom(),
@@ -1522,14 +1599,16 @@ impl ArchiveView {
                 egui::StrokeKind::Inside,
             );
         }
+        let layout = self.layout(rect.right());
         paint_column_separators(
             ui.painter(),
             rect,
             ui.visuals().widgets.noninteractive.bg_stroke.color,
+            &layout,
         );
 
         // 行内容：图标 + 名称（目录模式显示 basename，扁平/过滤显示全路径），
-        // 右侧固定宽的大小/压缩后列（目录行留空）。
+        // 右侧固定宽的大小/压缩后/时间列（目录行留空）。
         let file = match row {
             ListRow::File { idx } => Some(&self.entries[*idx]),
             ListRow::Dir { .. } => None,
@@ -1556,7 +1635,16 @@ impl ArchiveView {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.allocate_ui_with_layout(
-                        egui::vec2(PACKED_COL_WIDTH, ROW_HEIGHT - 4.0),
+                        egui::vec2(self.col_width_mtime, ROW_HEIGHT - 4.0),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            if let Some(e) = file {
+                                ui.label(egui::RichText::new(format_mtime(e.mtime)).weak());
+                            }
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(self.col_width_packed, ROW_HEIGHT - 4.0),
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
                             if let Some(packed) = file.and_then(|e| e.compressed_size) {
@@ -1565,7 +1653,7 @@ impl ArchiveView {
                         },
                     );
                     ui.allocate_ui_with_layout(
-                        egui::vec2(SIZE_COL_WIDTH, ROW_HEIGHT - 4.0),
+                        egui::vec2(self.col_width_size, ROW_HEIGHT - 4.0),
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
                             if let Some(e) = file {
@@ -1767,12 +1855,16 @@ fn classify_preview_bytes(name: &str, bytes: &[u8]) -> PreviewData {
     }
 }
 
-/// 名称列与「大小」「压缩后」列之间的淡竖线（表头与数据行共用；
+/// 名称列与「大小」「压缩后」「时间」列之间的淡竖线（表头与数据行共用；
 /// 坐标取自 column_layout，与表头列区间一致）。
-fn paint_column_separators(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+fn paint_column_separators(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    color: egui::Color32,
+    layout: &ColumnLayout,
+) {
     let stroke = egui::Stroke::new(1.0, color);
-    let layout = column_layout(rect.right());
-    for x in [layout.size_left, layout.packed_left] {
+    for x in [layout.size_left, layout.packed_left, layout.mtime_left] {
         painter.vline(x, rect.y_range(), stroke);
     }
 }
@@ -1824,6 +1916,27 @@ pub(crate) fn human_size(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+/// 条目修改时间显示：`YYYY-MM-DD HH:MM`（本地时区），None/非法时间戳 → 空串。
+pub(crate) fn format_mtime(mtime: Option<i64>) -> String {
+    let Some(ts) = mtime else {
+        return String::new();
+    };
+    // 本地时区获取失败（极少见）回退 UTC。
+    let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    format_mtime_with_offset(ts, offset)
+}
+
+/// format_mtime 的纯函数核心（固定 offset，便于单测）。
+fn format_mtime_with_offset(ts: i64, offset: time::UtcOffset) -> String {
+    let Ok(dt) = time::OffsetDateTime::from_unix_timestamp(ts) else {
+        return String::new();
+    };
+    let format = time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]");
+    dt.to_offset(offset)
+        .format(&format)
+        .unwrap_or_else(|_| String::new())
 }
 
 #[cfg(test)]
@@ -2364,5 +2477,28 @@ mod tests {
         assert_eq!(ghost_text(false, true, 3), "当前平台不支持拖出");
         assert_eq!(ghost_text(true, false, 3), "⇪ 3 个文件 · 拖到窗口外解压");
         assert_eq!(ghost_text(true, true, 1), "⇪ 1 个文件 · 正在准备拖出…");
+    }
+
+    #[test]
+    fn format_mtime_with_offset_fixed_ts_and_offset() {
+        // 2023-11-14 22:13:20 UTC。
+        let ts = 1_700_000_000;
+        assert_eq!(
+            format_mtime_with_offset(ts, time::UtcOffset::UTC),
+            "2023-11-14 22:13"
+        );
+        // UTC+8：跨日进位到次日 06:13。
+        let plus8 = time::UtcOffset::from_hms(8, 0, 0).unwrap();
+        assert_eq!(format_mtime_with_offset(ts, plus8), "2023-11-15 06:13");
+        // 负偏移：UTC-5 → 当日 17:13。
+        let minus5 = time::UtcOffset::from_hms(-5, 0, 0).unwrap();
+        assert_eq!(format_mtime_with_offset(ts, minus5), "2023-11-14 17:13");
+    }
+
+    #[test]
+    fn format_mtime_none_and_invalid_ts_are_empty() {
+        assert_eq!(format_mtime(None), "");
+        // 超出 OffsetDateTime 可表示范围的时间戳 → 空串。
+        assert_eq!(format_mtime_with_offset(i64::MAX, time::UtcOffset::UTC), "");
     }
 }

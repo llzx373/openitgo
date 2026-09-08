@@ -5,6 +5,7 @@
 
 use crate::app::natural_cmp;
 use openitgo_parser::archive::ArchiveEntry;
+use std::cmp::Ordering;
 use std::collections::HashSet;
 
 /// 目录树（左栏）中的一行。
@@ -185,12 +186,15 @@ pub enum SortKey {
     Name,
     Size,
     Packed,
+    /// 修改时间：mtime 按数值排，None 恒垫底（不随升降序反转）。
+    Modified,
 }
 
 /// 中栏行模型：flat_all 或过滤激活 → 全包文件行（忽略 current_dir）；
-/// 否则当前目录的直接子项，目录行恒在前（自然序升序，不随降序反转），
+/// 否则当前目录的直接子项，目录行恒在前（自然序，desc 时与文件行一并反转），
 /// 文件行按 sort/asc 排序（Name 自然序大小写不敏感按显示名；
-/// Size/Packed 按数值、同值按名称兜底；desc 仅反转文件行）。
+/// Size/Packed 按数值、同值按名称兜底；Modified 按 mtime 数值、
+/// None 恒垫底、同值/双 None 按名称兜底；desc 反转全部行序）。
 pub fn list_rows(
     entries: &[ArchiveEntry],
     current_dir: Option<&str>,
@@ -225,16 +229,31 @@ pub fn list_rows(
                 .compressed_size
                 .unwrap_or(ea.size)
                 .cmp(&eb.compressed_size.unwrap_or(eb.size)),
+            SortKey::Modified => {
+                // None 恒垫底：排序键内吸收升降序，不能靠事后整体 reverse。
+                let core = match (ea.mtime, eb.mtime) {
+                    (Some(x), Some(y)) => x.cmp(&y),
+                    (None, Some(_)) => return Ordering::Greater,
+                    (Some(_), None) => return Ordering::Less,
+                    (None, None) => Ordering::Equal,
+                };
+                let core = if asc { core } else { core.reverse() };
+                return core.then_with(|| natural_cmp(&ea.name, &eb.name));
+            }
         };
         ord.then_with(|| natural_cmp(&ea.name, &eb.name))
     });
-    if !asc {
+    // Modified 的升降序已在排序键内处理（None 恒垫底），不再整体反转。
+    if !asc && !matches!(sort, SortKey::Modified) {
         files.reverse();
     }
     let mut rows = Vec::with_capacity(subdirs.len() + files.len());
     if !flat {
         let mut dirs = subdirs;
         dirs.sort_by(|a, b| natural_cmp(a, b));
+        if !asc {
+            dirs.reverse();
+        }
         let parent = current_dir
             .map(|d| d.trim_end_matches(['/', '\\']))
             .filter(|d| !d.is_empty());
@@ -444,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn list_rows_sort_by_size_and_desc_keeps_dirs_ascending() {
+    fn list_rows_sort_by_size_desc_reverses_dirs_too() {
         let entries = vec![
             sized("b/f.png", false, 1, None),
             sized("a/f.png", false, 1, None),
@@ -456,11 +475,59 @@ mod tests {
             row_names(&rows, &entries),
             vec!["a/", "b/", "small.png", "big.png"]
         );
-        // 降序只反转文件行，目录行保持自然序升序。
+        // 降序整体反转：目录行也反转为降序，文件行随之降序。
         let rows = list_rows(&entries, None, false, "", SortKey::Size, false);
         assert_eq!(
             row_names(&rows, &entries),
-            vec!["a/", "b/", "big.png", "small.png"]
+            vec!["b/", "a/", "big.png", "small.png"]
+        );
+    }
+
+    fn timed(name: &str, mtime: Option<i64>) -> ArchiveEntry {
+        ArchiveEntry {
+            name: name.to_string(),
+            is_dir: false,
+            size: 0,
+            compressed_size: None,
+            mtime,
+        }
+    }
+
+    #[test]
+    fn list_rows_sort_by_modified_none_last_and_name_fallback() {
+        let entries = vec![
+            timed("new.png", Some(200)),
+            timed("no-time-b.png", None),
+            timed("old.png", Some(100)),
+            timed("no-time-a.png", None),
+            timed("tie-b.png", Some(150)),
+            timed("tie-a.png", Some(150)),
+        ];
+        // 升序：mtime 数值升序，同值按名称兜底，无时间的恒垫底（双 None 按名称兜底）。
+        let rows = list_rows(&entries, None, true, "", SortKey::Modified, true);
+        assert_eq!(
+            row_names(&rows, &entries),
+            vec![
+                "old.png",
+                "tie-a.png",
+                "tie-b.png",
+                "new.png",
+                "no-time-a.png",
+                "no-time-b.png"
+            ]
+        );
+        // 降序：mtime 数值降序，同值仍按名称升序兜底，无时间的仍垫底。
+        let rows = list_rows(&entries, None, true, "", SortKey::Modified, false);
+        assert_eq!(
+            row_names(&rows, &entries),
+            vec![
+                "new.png",
+                "tie-a.png",
+                "tie-b.png",
+                "old.png",
+                "no-time-a.png",
+                "no-time-b.png"
+            ]
         );
     }
 
