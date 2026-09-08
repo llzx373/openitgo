@@ -279,6 +279,7 @@ mod tests {
             is_dir,
             size: 0,
             compressed_size: None,
+            mtime: None,
         }
     }
 
@@ -411,6 +412,7 @@ mod tests {
             is_dir,
             size,
             compressed_size: packed,
+            mtime: None,
         }
     }
 

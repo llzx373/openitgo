@@ -5419,18 +5419,21 @@ mod tests {
                 is_dir: true,
                 size: 0,
                 compressed_size: None,
+                mtime: None,
             },
             ArchiveEntry {
                 name: "a.png".into(),
                 is_dir: false,
                 size: 10,
                 compressed_size: None,
+                mtime: None,
             },
             ArchiveEntry {
                 name: "d/b.png".into(),
                 is_dir: false,
                 size: 20,
                 compressed_size: None,
+                mtime: None,
             },
         ];
         // 全部文件。
@@ -5470,6 +5473,7 @@ mod tests {
             is_dir: false,
             size: 1,
             compressed_size: None,
+            mtime: None,
         };
         // 多个顶层文件 → 建包名子目录。
         let scattered = vec![file_entry("a.png"), file_entry("b.png")];

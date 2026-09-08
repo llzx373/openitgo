@@ -27,6 +27,35 @@ const ROW_HEIGHT: f32 = 22.0;
 /// 明细列表「大小」「压缩后」列宽（pt），右对齐。
 const SIZE_COL_WIDTH: f32 = 90.0;
 const PACKED_COL_WIDTH: f32 = 90.0;
+/// 列内容右缘内边距（pt）：列锚点在右缘内 6pt 处，表头与行内容共用。
+const COL_RIGHT_PAD: f32 = 6.0;
+/// 表头「名称」文字的左缩进（pt）：与行内容对齐
+/// （行 = 6pt shrink + 约 16pt 图标 + 6pt 间距）。
+const NAME_HEADER_INDENT: f32 = 6.0 + 16.0 + 6.0;
+
+/// 名称/大小/压缩后三列的 x 坐标单一来源（表头 paint、行列分隔竖线、
+/// 后续列宽拖拽共用），消除各自手算的漂移。
+#[derive(Debug, Clone, Copy)]
+struct ColumnLayout {
+    /// 名称列右缘（= 名称|大小分隔竖线 x、大小列左缘）。
+    size_left: f32,
+    /// 大小列右缘（= 大小|压缩后分隔竖线 x、压缩后列左缘），大小文字右锚点。
+    packed_left: f32,
+    /// 压缩后文字右锚点（行右缘内 COL_RIGHT_PAD 处）。
+    content_right: f32,
+}
+
+/// 由行/表头 rect 的右缘算出三列坐标。
+fn column_layout(right: f32) -> ColumnLayout {
+    let content_right = right - COL_RIGHT_PAD;
+    let packed_left = content_right - PACKED_COL_WIDTH;
+    let size_left = packed_left - SIZE_COL_WIDTH;
+    ColumnLayout {
+        size_left,
+        packed_left,
+        content_right,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ArchiveViewState {
@@ -81,8 +110,11 @@ pub struct ArchiveView {
     anchor: Option<RowKey>,
     /// 键盘焦点行（方向键移动、Enter 打开）。
     focus: Option<RowKey>,
-    /// 键盘移动焦点后置位，下一帧渲染到该行时 scroll_to_me。
+    /// 键盘移动焦点后置位，下一帧按 Explorer 最小滚动语义揭示焦点行。
     focus_scroll_pending: bool,
+    /// 上一帧明细列表的滚动偏移与视口高度（最小滚动计算的基准；0 = 未知）。
+    last_scroll_offset: f32,
+    last_viewport_height: f32,
     /// 明细列表排序（默认名称升序）。
     sort_key: SortKey,
     sort_asc: bool,
@@ -126,6 +158,8 @@ impl Default for ArchiveView {
             anchor: None,
             focus: None,
             focus_scroll_pending: false,
+            last_scroll_offset: 0.0,
+            last_viewport_height: 0.0,
             sort_key: SortKey::Name,
             sort_asc: true,
             preview_open: false,
@@ -170,6 +204,8 @@ impl ArchiveView {
         self.anchor = None;
         self.focus = None;
         self.focus_scroll_pending = false;
+        self.last_scroll_offset = 0.0;
+        self.last_viewport_height = 0.0;
         self.sort_key = SortKey::Name;
         self.sort_asc = true;
         self.comment = None;
@@ -706,6 +742,8 @@ impl ArchiveView {
                         "已选 {selected_count} 项 · {}",
                         human_size(selected_bytes)
                     ));
+                    ui.separator();
+                    ui.label(egui::RichText::new("双击打开 · 右键菜单 · 按住拖出窗口解压").weak());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let place = if self.flat_all {
                             "全部文件".to_string()
@@ -856,56 +894,138 @@ impl ArchiveView {
         }
     }
 
-    /// 左栏目录树（纯导航）：特殊根节点「全部文件」+ 仅目录节点
-    /// （折叠三角 / 单击设为当前目录 / 当前位置高亮）。
+    /// 左栏目录树（纯导航）：特殊根节点「全部文件」+ 仅目录节点。
+    /// 整行可点（Explorer 式，行右侧空白同样有效），横向滚动容纳长目录名；
+    /// 行内手画 缩进 → 折叠三角（独立热区，只切折叠不进入）→ 图标 → 名称；
+    /// 当前目录高亮铺整行，行高与明细列表同为 ROW_HEIGHT。
     fn render_dir_pane(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, true])
+        egui::ScrollArea::both()
+            .auto_shrink([false, false])
             .show(ui, |ui| {
-                if ui
-                    .selectable_label(self.flat_all, (icons::FILES, " 全部文件"))
-                    .clicked()
-                {
-                    self.show_all_files();
-                }
                 let rows = build_dir_rows(&self.entries, &self.collapsed);
-                for row in rows {
-                    ui.horizontal(|ui| {
-                        ui.add_space(row.depth as f32 * 16.0);
-                        self.dir_pane_row(ui, &row);
-                    });
+                let font_id = egui::TextStyle::Body.resolve(ui.style());
+                let painter = ui.painter().clone();
+                let text_w = |s: &str| {
+                    painter
+                        .layout_no_wrap(s.to_string(), font_id.clone(), egui::Color32::WHITE)
+                        .size()
+                        .x
+                };
+                // 行宽 = 视口宽与最宽内容行（缩进+三角+图标+间距+名称）的较大者，
+                // 内容超出视口时由横向滚动揭示。
+                let content_w = |depth: usize, has_triangle: bool, name: &str| {
+                    let triangle = if has_triangle { 16.0 } else { 0.0 };
+                    4.0 + depth as f32 * 16.0 + triangle + 16.0 + 6.0 + text_w(name) + 8.0
+                };
+                let mut width = content_w(0, false, "全部文件");
+                for row in &rows {
+                    width = width.max(content_w(row.depth, true, &row.name));
+                }
+                let width = width.max(ui.clip_rect().width());
+                self.dir_all_files_row(ui, width);
+                for row in &rows {
+                    self.dir_pane_row(ui, row, width);
                 }
             });
     }
 
-    /// 目录树行：折叠三角 + 可单击的目录名（高亮当前目录）。
-    fn dir_pane_row(&mut self, ui: &mut egui::Ui, row: &TreeRow) {
+    /// 「全部文件」特殊根行：整行可点，高亮扁平模式。
+    fn dir_all_files_row(&mut self, ui: &mut egui::Ui, width: f32) {
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click());
+        let painter = ui.painter().clone();
+        if self.flat_all {
+            painter.rect_filled(rect, 2.0, ui.visuals().selection.bg_fill);
+        } else if response.hovered() {
+            painter.rect_filled(rect, 2.0, ui.visuals().widgets.hovered.bg_fill);
+        }
+        let cy = rect.center().y;
+        let font_id = egui::TextStyle::Body.resolve(ui.style());
+        painter.text(
+            egui::pos2(rect.left() + 4.0, cy),
+            egui::Align2::LEFT_CENTER,
+            icons::FILES.as_str(),
+            font_id.clone(),
+            ui.visuals().weak_text_color(),
+        );
+        painter.text(
+            egui::pos2(rect.left() + 4.0 + 16.0 + 6.0, cy),
+            egui::Align2::LEFT_CENTER,
+            "全部文件",
+            font_id,
+            ui.visuals().text_color(),
+        );
+        if response.clicked() {
+            self.show_all_files();
+        }
+    }
+
+    /// 目录树行：整行可点（单击设为当前目录，高亮铺整行）；行内手画
+    /// 缩进 → 折叠三角（独立小热区，只切折叠不进入）→ 文件夹图标 → 名称。
+    fn dir_pane_row(&mut self, ui: &mut egui::Ui, row: &TreeRow, width: f32) {
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click());
+        let is_current =
+            !self.flat_all && self.current_dir.as_deref() == Some(row.full_path.as_str());
+        let painter = ui.painter().clone();
+        if is_current {
+            painter.rect_filled(rect, 2.0, ui.visuals().selection.bg_fill);
+        } else if response.hovered() {
+            painter.rect_filled(rect, 2.0, ui.visuals().widgets.hovered.bg_fill);
+        }
+        let cy = rect.center().y;
+        let font_id = egui::TextStyle::Body.resolve(ui.style());
+        let mut x = rect.left() + 4.0 + row.depth as f32 * 16.0;
         if row.has_children {
+            // 折叠三角区域单独一个点击热区（后注册，覆盖在整行热区之上）。
+            let tri_rect =
+                egui::Rect::from_center_size(egui::pos2(x + 8.0, cy), egui::vec2(16.0, ROW_HEIGHT));
+            let tri_response = ui.interact(
+                tri_rect,
+                ui.id().with(("tree-collapse", &row.full_path)),
+                egui::Sense::click(),
+            );
             let is_collapsed = self.collapsed.contains(&row.full_path);
-            let triangle = if is_collapsed { "▸" } else { "▾" };
-            if ui
-                .add(egui::Button::new(triangle).frame(false))
-                .on_hover_text("展开/折叠")
-                .clicked()
-            {
+            let glyph = if is_collapsed { "▸" } else { "▾" };
+            let color = if tri_response.hovered() {
+                ui.visuals().text_color()
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            painter.text(
+                tri_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                glyph,
+                font_id.clone(),
+                color,
+            );
+            if tri_response.on_hover_text("展开/折叠").clicked() {
                 if is_collapsed {
                     self.collapsed.remove(&row.full_path);
                 } else {
                     self.collapsed.insert(row.full_path.clone());
                 }
             }
-        } else {
-            ui.add_space(16.0);
         }
-        let is_current =
-            !self.flat_all && self.current_dir.as_deref() == Some(row.full_path.as_str());
-        if ui
-            .selectable_label(
-                is_current,
-                format!("{} {}", icons::FOLDER.as_str(), row.name),
-            )
-            .clicked()
-        {
+        // 无子目录的行也占三角位，图标跨行对齐。
+        x += 16.0;
+        painter.text(
+            egui::pos2(x, cy),
+            egui::Align2::LEFT_CENTER,
+            icons::FOLDER.as_str(),
+            font_id.clone(),
+            ui.visuals().weak_text_color(),
+        );
+        painter.text(
+            egui::pos2(x + 16.0 + 6.0, cy),
+            egui::Align2::LEFT_CENTER,
+            &row.name,
+            font_id,
+            ui.visuals().text_color(),
+        );
+        let clicked = response.clicked();
+        response.on_hover_text(&row.full_path);
+        if clicked {
             self.enter_dir(row.full_path.clone());
         }
     }
@@ -961,12 +1081,75 @@ impl ArchiveView {
         ui.separator();
     }
 
-    /// 列头：名称 / 大小 / 压缩后，点击切换排序键与升降序，当前键显示 ▲/▼。
-    /// 右侧两列与行内容共用固定列宽、右对齐。整行铺淡底色 + 列间竖线 +
-    /// 底部描边（WinRAR 式表头）。
+    /// 列头：名称 / 大小 / 压缩后，整列格可点击切换排序键与升降序，
+    /// 当前键显示 ▲/▼。列坐标取自 column_layout（与行内容/竖线同一来源）；
+    /// 名称列左对齐并带图标占位缩进（与行内名称 x 对齐），右侧两列右对齐。
+    /// 整行铺淡底色 + hover 列高亮 + 列间竖线 + 底部描边（WinRAR 式表头）。
     fn render_column_header(&mut self, ui: &mut egui::Ui) {
-        let arrow = |key: SortKey| {
-            if self.sort_key == key {
+        let (header_rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), ROW_HEIGHT),
+            egui::Sense::hover(),
+        );
+        let painter = ui.painter().clone();
+        painter.rect_filled(
+            header_rect,
+            0.0,
+            ui.visuals().widgets.noninteractive.bg_fill,
+        );
+        let layout = column_layout(header_rect.right());
+        let cy = header_rect.center().y;
+        let font_id = egui::TextStyle::Body.resolve(ui.style());
+        let name_rect = egui::Rect::from_min_max(
+            header_rect.min,
+            egui::pos2(layout.size_left, header_rect.max.y),
+        );
+        let size_rect = egui::Rect::from_min_max(
+            egui::pos2(layout.size_left, header_rect.min.y),
+            egui::pos2(layout.packed_left, header_rect.max.y),
+        );
+        let packed_rect = egui::Rect::from_min_max(
+            egui::pos2(layout.packed_left, header_rect.min.y),
+            header_rect.max,
+        );
+        // (列 rect, 排序键, 标题, 文字锚点 x, 对齐方式)
+        let cols: [(egui::Rect, SortKey, &str, f32, egui::Align2); 3] = [
+            (
+                name_rect,
+                SortKey::Name,
+                "名称",
+                header_rect.left() + NAME_HEADER_INDENT,
+                egui::Align2::LEFT_CENTER,
+            ),
+            (
+                size_rect,
+                SortKey::Size,
+                "大小",
+                layout.packed_left,
+                egui::Align2::RIGHT_CENTER,
+            ),
+            (
+                packed_rect,
+                SortKey::Packed,
+                "压缩后",
+                layout.content_right,
+                egui::Align2::RIGHT_CENTER,
+            ),
+        ];
+        let mut clicked: Option<SortKey> = None;
+        let mut texts: Vec<(egui::Pos2, egui::Align2, String)> = Vec::with_capacity(3);
+        for (rect, key, label, anchor_x, align) in cols {
+            let response = ui.interact(
+                rect,
+                ui.id().with(("archive-header", label)),
+                egui::Sense::click(),
+            );
+            if response.clicked() {
+                clicked = Some(key);
+            }
+            if response.hovered() {
+                painter.rect_filled(rect, 0.0, ui.visuals().widgets.hovered.bg_fill);
+            }
+            let arrow = if self.sort_key == key {
                 if self.sort_asc {
                     " ▲"
                 } else {
@@ -974,69 +1157,22 @@ impl ArchiveView {
                 }
             } else {
                 ""
-            }
-        };
-        let name_arrow = arrow(SortKey::Name);
-        let size_arrow = arrow(SortKey::Size);
-        let packed_arrow = arrow(SortKey::Packed);
-        // 先按整行区域铺底色/描边，再在同一区域里画可点击的列标题。
-        let (header_rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), ROW_HEIGHT),
-            egui::Sense::hover(),
-        );
-        let painter = ui.painter();
-        painter.rect_filled(
-            header_rect,
-            0.0,
-            ui.visuals().widgets.noninteractive.bg_fill,
-        );
+            };
+            texts.push((egui::pos2(anchor_x, cy), align, format!("{label}{arrow}")));
+        }
         let line_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
-        paint_column_separators(painter, header_rect, line_color);
+        paint_column_separators(&painter, header_rect, line_color);
         painter.hline(
             header_rect.x_range(),
             header_rect.bottom(),
             egui::Stroke::new(1.0, line_color),
         );
-        // 右缘留 6pt 内边距，与行内容的列锚点对齐。
-        let content =
-            egui::Rect::from_min_max(header_rect.min, header_rect.max - egui::vec2(6.0, 0.0));
-        ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
-            ui.horizontal(|ui| {
-                ui.add_space(6.0);
-                if ui
-                    .selectable_label(false, format!("名称{name_arrow}"))
-                    .clicked()
-                {
-                    self.toggle_sort(SortKey::Name);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(PACKED_COL_WIDTH, ROW_HEIGHT),
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            if ui
-                                .selectable_label(false, format!("压缩后{packed_arrow}"))
-                                .clicked()
-                            {
-                                self.toggle_sort(SortKey::Packed);
-                            }
-                        },
-                    );
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(SIZE_COL_WIDTH, ROW_HEIGHT),
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            if ui
-                                .selectable_label(false, format!("大小{size_arrow}"))
-                                .clicked()
-                            {
-                                self.toggle_sort(SortKey::Size);
-                            }
-                        },
-                    );
-                });
-            });
-        });
+        for (pos, align, text) in texts {
+            painter.text(pos, align, text, font_id.clone(), ui.visuals().text_color());
+        }
+        if let Some(key) = clicked {
+            self.toggle_sort(key);
+        }
     }
 
     /// 中栏明细列表：行模型见 archive_tree::list_rows（目录优先 + 排序 +
@@ -1060,13 +1196,26 @@ impl ArchiveView {
             return;
         }
         let flat = self.flat_all || !self.filter.trim().is_empty();
-        // 键盘移动焦点：show_rows 只渲染可见行，改用绝对滚动定位。
-        let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        // 滚动条恒显：内容溢出与否行区宽度恒定，表头与行内容/竖线恒对齐。
+        // 键盘移动焦点：show_rows 只渲染可见行，按 Explorer 最小滚动语义
+        // 仅当焦点行越出视口时把偏移调到行上缘/下缘贴边。
+        let mut area = egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
         if self.focus_scroll_pending {
             self.focus_scroll_pending = false;
-            if let Some(focus) = &self.focus {
-                if let Some(i) = rows.iter().position(|r| self.row_key(r) == *focus) {
-                    area = area.vertical_scroll_offset(i as f32 * ROW_HEIGHT);
+            if self.last_viewport_height > 0.0 {
+                if let Some(focus) = &self.focus {
+                    if let Some(i) = rows.iter().position(|r| self.row_key(r) == *focus) {
+                        let new_offset = min_scroll_to_reveal(
+                            self.last_scroll_offset,
+                            self.last_viewport_height,
+                            i as f32 * ROW_HEIGHT,
+                        );
+                        if (new_offset - self.last_scroll_offset).abs() > 0.01 {
+                            area = area.vertical_scroll_offset(new_offset);
+                        }
+                    }
                 }
             }
         }
@@ -1074,7 +1223,7 @@ impl ArchiveView {
         let mut open_key: Option<RowKey> = None;
         let mut extract_selected = false;
         let mut preview_name: Option<String> = None;
-        area.show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
+        let output = area.show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
             let first = range.start;
             for (offset, row) in rows[range].iter().enumerate() {
                 self.render_list_row(
@@ -1088,6 +1237,8 @@ impl ArchiveView {
                 );
             }
         });
+        self.last_scroll_offset = output.state.offset.y;
+        self.last_viewport_height = output.inner_rect.height();
         if let Some(name) = preview_name {
             self.preview_open = true;
             self.preview_entry = Some(name);
@@ -1261,10 +1412,22 @@ impl ArchiveView {
                 ui.close();
             }
         });
-        response.on_hover_text(match &key {
-            RowKey::Dir(_) => "单击选中全部内容，双击进入，按住拖出窗口即解压",
-            RowKey::File(_) => "单击选中并预览，双击打开，按住拖出窗口即解压",
-        });
+        // 悬停信息提示（被截断名称的完整信息）：目录 = 完整路径；
+        // 文件 = 全路径 + 大小 + 压缩后。
+        let tip = match &key {
+            RowKey::Dir(dir) => dir.clone(),
+            RowKey::File(name) => {
+                let mut tip = name.clone();
+                if let Some(entry) = self.entries.iter().find(|e| !e.is_dir && e.name == *name) {
+                    tip.push_str(&format!("\n大小: {}", human_size(entry.size)));
+                    if let Some(packed) = entry.compressed_size {
+                        tip.push_str(&format!("\n压缩后: {}", human_size(packed)));
+                    }
+                }
+                tip
+            }
+        };
+        response.on_hover_text(tip);
     }
 
     /// 右侧预览面板内容：条目名/大小 + 图片纹理 / 只读文本 / 说明。
@@ -1365,14 +1528,25 @@ fn classify_preview_bytes(name: &str, bytes: &[u8]) -> PreviewData {
 }
 
 /// 名称列与「大小」「压缩后」列之间的淡竖线（表头与数据行共用；
-/// 列锚点在右缘内 6pt 处，与行内容的 shrink 对齐）。
+/// 坐标取自 column_layout，与表头列区间一致）。
 fn paint_column_separators(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
     let stroke = egui::Stroke::new(1.0, color);
-    let right = rect.right() - 6.0;
-    let x_packed = right - PACKED_COL_WIDTH;
-    let x_size = x_packed - SIZE_COL_WIDTH;
-    for x in [x_size, x_packed] {
+    let layout = column_layout(rect.right());
+    for x in [layout.size_left, layout.packed_left] {
         painter.vline(x, rect.y_range(), stroke);
+    }
+}
+
+/// 键盘焦点的最小滚动（Explorer 语义）：焦点行已在视口内则偏移不变；
+/// 上方越界贴顶（offset = 行顶），下方越界贴底（offset = 行底 - 视口高）。
+fn min_scroll_to_reveal(offset: f32, viewport_h: f32, row_top: f32) -> f32 {
+    let row_bottom = row_top + ROW_HEIGHT;
+    if row_top < offset {
+        row_top
+    } else if row_bottom > offset + viewport_h {
+        row_bottom - viewport_h
+    } else {
+        offset
     }
 }
 
@@ -1422,6 +1596,7 @@ mod tests {
             is_dir,
             size,
             compressed_size: None,
+            mtime: None,
         }
     }
 
@@ -1661,6 +1836,30 @@ mod tests {
         assert_eq!(view.selected_stats(), (2, 7));
         // 按包内顺序而非插入顺序。
         assert_eq!(view.selected_names_in_order(), vec!["z.png", "a.png"]);
+    }
+
+    #[test]
+    fn min_scroll_to_reveal_keeps_visible_row() {
+        // 行完全在视口内（110..132 ⊂ 100..300）：偏移不变。
+        assert!((min_scroll_to_reveal(100.0, 200.0, 110.0) - 100.0).abs() < 1e-6);
+        // 恰好贴顶/贴底的边界行也不动。
+        assert!((min_scroll_to_reveal(100.0, 200.0, 100.0) - 100.0).abs() < 1e-6);
+        assert!((min_scroll_to_reveal(100.0, 200.0, 300.0 - ROW_HEIGHT) - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn min_scroll_to_reveal_snaps_row_above_to_top() {
+        // 行顶 44 < offset 100：新 offset = 行顶。
+        assert!((min_scroll_to_reveal(100.0, 200.0, 44.0) - 44.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn min_scroll_to_reveal_snaps_row_below_to_bottom() {
+        // 行底 330+22=352 > 100+200：新 offset = 352-200，行底贴视口底。
+        let new = min_scroll_to_reveal(100.0, 200.0, 330.0);
+        assert!((new - (330.0 + ROW_HEIGHT - 200.0)).abs() < 1e-6);
+        // 行更高不越界：offset=0 时第 0 行恒在视口内。
+        assert!(min_scroll_to_reveal(0.0, 200.0, 0.0).abs() < 1e-6);
     }
 
     #[test]
