@@ -1,8 +1,9 @@
-//! 压缩包三栏视图的纯函数查询：目录树行构建（左栏）、当前目录直接子项
-//! （中栏）、面包屑路径段。不依赖 egui，便于单测。
+//! 压缩包三栏视图的纯函数查询：目录树行构建（左栏）、当前目录直接子项与
+//! 中栏行模型（目录优先 + 排序 + 过滤）、面包屑路径段。不依赖 egui，便于单测。
 //! 统一约定：条目名按 `/` 与 `\\` 切分；目录 full_path 归一化为 `/`
 //! 分隔、无尾部分隔符；选择/解压身份恒用原始 entry.name（不经此处）。
 
+use crate::app::natural_cmp;
 use openitgo_parser::archive::ArchiveEntry;
 use std::collections::HashSet;
 
@@ -105,31 +106,31 @@ fn emit_dir_rows(node: &Node, depth: usize, collapsed: &HashSet<String>, rows: &
 }
 
 /// 当前目录的直接子项：(文件条目索引（包内顺序）, 直接子目录名（字节序排序去重）)。
-/// `current_dir` 为 None 时返回全部文件条目索引（「全部文件」扁平模式），
-/// 子目录列表为空。目录前缀边界严格（`a` 不命中 `ab/` 与同名文件 `a.txt`），
+/// `current_dir` 为 None 时表示**根目录**（顶层文件 + 顶层子目录）。
+/// 目录前缀边界严格（`a` 不命中 `ab/` 与同名文件 `a.txt`），
 /// `/` 与 `\\` 均作分隔符；子目录同时来自显式目录条目与更深路径的隐式首组件。
 pub fn direct_children(
     entries: &[ArchiveEntry],
     current_dir: Option<&str>,
 ) -> (Vec<usize>, Vec<String>) {
-    let Some(dir) = current_dir else {
-        return (
-            entries
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| !e.is_dir)
-                .map(|(i, _)| i)
-                .collect(),
-            Vec::new(),
-        );
+    let (prefix_slash, prefix_backslash) = match current_dir {
+        // 根目录：空前缀匹配所有条目。
+        None => (String::new(), String::new()),
+        Some(dir) => {
+            let dir = dir.trim_end_matches(['/', '\\']);
+            if dir.is_empty() {
+                (String::new(), String::new())
+            } else {
+                (format!("{dir}/"), format!("{dir}\\"))
+            }
+        }
     };
-    let dir = dir.trim_end_matches(['/', '\\']);
-    let prefix_slash = format!("{dir}/");
-    let prefix_backslash = format!("{dir}\\");
     let mut files = Vec::new();
     let mut subdirs: Vec<String> = Vec::new();
     for (i, e) in entries.iter().enumerate() {
-        let remainder = if let Some(r) = e.name.strip_prefix(&prefix_slash) {
+        let remainder = if prefix_slash.is_empty() {
+            e.name.as_str()
+        } else if let Some(r) = e.name.strip_prefix(&prefix_slash) {
             r
         } else if let Some(r) = e.name.strip_prefix(&prefix_backslash) {
             r
@@ -157,6 +158,101 @@ pub fn direct_children(
     }
     subdirs.sort();
     (files, subdirs)
+}
+
+/// 全部文件条目索引（包内顺序）：「全部文件」扁平模式与过滤搜索用。
+pub fn all_file_indices(entries: &[ArchiveEntry]) -> Vec<usize> {
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| !e.is_dir)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// 中栏明细列表的一行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListRow {
+    /// 目录行：full_path 归一化（`/` 分隔、无尾部分隔符），name 为该级组件名。
+    Dir { full_path: String, name: String },
+    /// 文件行：entries 中的索引。
+    File { idx: usize },
+}
+
+/// 明细列表排序键。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKey {
+    Name,
+    Size,
+    Packed,
+}
+
+/// 中栏行模型：flat_all 或过滤激活 → 全包文件行（忽略 current_dir）；
+/// 否则当前目录的直接子项，目录行恒在前（自然序升序，不随降序反转），
+/// 文件行按 sort/asc 排序（Name 自然序大小写不敏感按显示名；
+/// Size/Packed 按数值、同值按名称兜底；desc 仅反转文件行）。
+pub fn list_rows(
+    entries: &[ArchiveEntry],
+    current_dir: Option<&str>,
+    flat_all: bool,
+    filter: &str,
+    sort: SortKey,
+    asc: bool,
+) -> Vec<ListRow> {
+    let needle = filter.trim().to_lowercase();
+    let flat = flat_all || !needle.is_empty();
+    let (mut files, subdirs) = if flat {
+        let indices = if needle.is_empty() {
+            all_file_indices(entries)
+        } else {
+            entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| !e.is_dir && e.name.to_lowercase().contains(&needle))
+                .map(|(i, _)| i)
+                .collect()
+        };
+        (indices, Vec::new())
+    } else {
+        direct_children(entries, current_dir)
+    };
+    files.sort_by(|&a, &b| {
+        let (ea, eb) = (&entries[a], &entries[b]);
+        let ord = match sort {
+            SortKey::Name => natural_cmp(file_basename(&ea.name), file_basename(&eb.name)),
+            SortKey::Size => ea.size.cmp(&eb.size),
+            SortKey::Packed => ea
+                .compressed_size
+                .unwrap_or(ea.size)
+                .cmp(&eb.compressed_size.unwrap_or(eb.size)),
+        };
+        ord.then_with(|| natural_cmp(&ea.name, &eb.name))
+    });
+    if !asc {
+        files.reverse();
+    }
+    let mut rows = Vec::with_capacity(subdirs.len() + files.len());
+    if !flat {
+        let mut dirs = subdirs;
+        dirs.sort_by(|a, b| natural_cmp(a, b));
+        let parent = current_dir
+            .map(|d| d.trim_end_matches(['/', '\\']))
+            .filter(|d| !d.is_empty());
+        for name in dirs {
+            let full_path = match parent {
+                Some(p) => format!("{p}/{name}"),
+                None => name.clone(),
+            };
+            rows.push(ListRow::Dir { full_path, name });
+        }
+    }
+    rows.extend(files.into_iter().map(|idx| ListRow::File { idx }));
+    rows
+}
+
+/// 条目名的最后一段（`/` 与 `\\` 均作分隔符）。
+fn file_basename(name: &str) -> &str {
+    name.rsplit(['/', '\\']).next().unwrap_or(name)
 }
 
 /// 面包屑累计路径段：`a/b/c` → `["a", "a/b", "a/b/c"]`（`\\` 同样切分）。
@@ -243,15 +339,27 @@ mod tests {
     }
 
     #[test]
-    fn direct_children_flat_mode_returns_all_files() {
+    fn direct_children_root_returns_top_level_items() {
+        let entries = vec![
+            entry("d/", true),
+            entry("d/a.png", false),
+            entry("b.txt", false),
+            entry("e/f/g.png", false),
+        ];
+        let (files, subdirs) = direct_children(&entries, None);
+        // 根目录：顶层文件 + 顶层子目录（含更深路径的隐式首组件）。
+        assert_eq!(files, vec![2]);
+        assert_eq!(subdirs, vec!["d", "e"]);
+    }
+
+    #[test]
+    fn all_file_indices_returns_all_files_in_archive_order() {
         let entries = vec![
             entry("d/", true),
             entry("d/a.png", false),
             entry("b.txt", false),
         ];
-        let (files, subdirs) = direct_children(&entries, None);
-        assert_eq!(files, vec![1, 2]);
-        assert!(subdirs.is_empty());
+        assert_eq!(all_file_indices(&entries), vec![1, 2]);
     }
 
     #[test]
@@ -295,5 +403,114 @@ mod tests {
         assert_eq!(breadcrumb_paths("a\\b"), vec!["a", "a/b"]);
         assert_eq!(breadcrumb_paths("a/b/"), vec!["a", "a/b"]);
         assert!(breadcrumb_paths("").is_empty());
+    }
+
+    fn sized(name: &str, is_dir: bool, size: u64, packed: Option<u64>) -> ArchiveEntry {
+        ArchiveEntry {
+            name: name.to_string(),
+            is_dir,
+            size,
+            compressed_size: packed,
+        }
+    }
+
+    fn row_names(rows: &[ListRow], entries: &[ArchiveEntry]) -> Vec<String> {
+        rows.iter()
+            .map(|r| match r {
+                ListRow::Dir { name, .. } => format!("{name}/"),
+                ListRow::File { idx } => entries[*idx].name.clone(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn list_rows_dirs_first_then_files_natural_name_order() {
+        let entries = vec![
+            sized("m/f.png", false, 1, None),
+            sized("page10.png", false, 1, None),
+            sized("a/f.png", false, 1, None),
+            sized("page2.png", false, 1, None),
+        ];
+        let rows = list_rows(&entries, None, false, "", SortKey::Name, true);
+        // 目录恒在前（自然序），文件按显示名自然序（page2 < page10）。
+        assert_eq!(
+            row_names(&rows, &entries),
+            vec!["a/", "m/", "page2.png", "page10.png"]
+        );
+    }
+
+    #[test]
+    fn list_rows_sort_by_size_and_desc_keeps_dirs_ascending() {
+        let entries = vec![
+            sized("b/f.png", false, 1, None),
+            sized("a/f.png", false, 1, None),
+            sized("big.png", false, 100, None),
+            sized("small.png", false, 1, None),
+        ];
+        let rows = list_rows(&entries, None, false, "", SortKey::Size, true);
+        assert_eq!(
+            row_names(&rows, &entries),
+            vec!["a/", "b/", "small.png", "big.png"]
+        );
+        // 降序只反转文件行，目录行保持自然序升序。
+        let rows = list_rows(&entries, None, false, "", SortKey::Size, false);
+        assert_eq!(
+            row_names(&rows, &entries),
+            vec!["a/", "b/", "big.png", "small.png"]
+        );
+    }
+
+    #[test]
+    fn list_rows_sort_by_packed_with_fallback() {
+        let entries = vec![
+            sized("x.png", false, 10, Some(8)),
+            sized("y.png", false, 10, None),
+            sized("z.png", false, 10, Some(2)),
+        ];
+        // 无压缩大小按解压大小计；同值按名称兜底。
+        let rows = list_rows(&entries, None, false, "", SortKey::Packed, true);
+        assert_eq!(row_names(&rows, &entries), vec!["z.png", "x.png", "y.png"]);
+    }
+
+    #[test]
+    fn list_rows_flat_and_filter_ignore_current_dir() {
+        let entries = vec![
+            sized("dir/in.png", false, 1, None),
+            sized("dir/sub/deep.png", false, 1, None),
+            sized("top.txt", false, 1, None),
+        ];
+        // flat_all：全包文件扁平，无目录行。
+        let rows = list_rows(&entries, Some("dir"), true, "", SortKey::Name, true);
+        assert_eq!(
+            row_names(&rows, &entries),
+            vec!["dir/sub/deep.png", "dir/in.png", "top.txt"]
+        );
+        // 过滤激活：忽略 current_dir 全包匹配（大小写不敏感）。
+        let rows = list_rows(&entries, None, false, "PNG", SortKey::Name, true);
+        assert_eq!(
+            row_names(&rows, &entries),
+            vec!["dir/sub/deep.png", "dir/in.png"]
+        );
+    }
+
+    #[test]
+    fn list_rows_dir_full_path_accumulates() {
+        let entries = vec![sized("a/b/c.png", false, 1, None)];
+        let rows = list_rows(&entries, None, false, "", SortKey::Name, true);
+        assert_eq!(
+            rows,
+            vec![ListRow::Dir {
+                full_path: "a".to_string(),
+                name: "a".to_string()
+            }]
+        );
+        let rows = list_rows(&entries, Some("a"), false, "", SortKey::Name, true);
+        assert_eq!(
+            rows,
+            vec![ListRow::Dir {
+                full_path: "a/b".to_string(),
+                name: "b".to_string()
+            }]
+        );
     }
 }

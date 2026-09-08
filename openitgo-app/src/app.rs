@@ -197,7 +197,8 @@ fn find_entry_page_index(comic: &Comic, entry_name: &str) -> Option<usize> {
 
 /// 数字感知、大小写不敏感的自然排序比较（"EP2" < "EP10"）。
 /// 连续数字段按数值比较，其余字符按小写后的字典序逐字符比较。
-fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+/// 压缩包浏览视图的列排序（`views/archive_tree.rs`）也复用本函数。
+pub(crate) fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
     fn take_digits(it: &mut std::iter::Peekable<std::str::Chars>) -> String {

@@ -101,14 +101,29 @@ calls advapi32 APIs without declaring the link; `openitgo-parser/src/lib.rs`
   为 Bandizip 式智能解压目录判定。`ExtractProgress::Started.total_bytes` 为
   `Option<u64>`（仅 ZIP 预知 Some，流式格式 None 由 app 按自带条目清单补充）。
   app 侧：
-  `View::Archive(PathBuf)` + `views/archive.rs`（资源管理器式三栏：
-  左栏目录树（仅目录节点 + 「全部文件」根，折叠/级联勾选/单击设
-  `current_dir`）/ 中栏面包屑 + 当前目录直接子项（`current_dir` None =
-  全部文件扁平；子目录行双击进入；过滤激活时忽略 `current_dir` 全包
-  搜索）/ 右栏预览面板（图片解码/UTF-8 文本嗅探前 256KB、>64MB 不预览，
-  密码经 `preview_password` 由 app 每帧写入）；`views/archive_tree.rs`
-  纯函数查询：`build_dir_rows`/`direct_children`/`breadcrumb_paths`，
-  `\\` 也作分隔符、隐式目录补全、目录勾选级联后代文件），
+  `View::Archive(PathBuf)` + `views/archive.rs`（资源管理器式三栏，操作手感
+  对齐 WinRAR/Explorer：左栏目录树（纯导航：仅目录节点 + 「全部文件」
+  特殊根，折叠/单击设 `current_dir`）/ 中栏面包屑（「根目录 / a / b」）
+  + 明细列表（列头 名称/大小/压缩后 点击排序 ▲▼、目录行恒在前、固定行高
+  `show_rows` 虚拟化）/ 右栏预览面板（图片解码/UTF-8 文本嗅探前 256KB、
+  >64MB 不预览，密码经 `preview_password` 由 app 每帧写入）。
+  **选择模型（Explorer 式，无勾选框）**：`selected: HashSet<String>` 只存
+  文件条目名，目录行选中态派生自 `dir_all_selected`（单击目录行级联
+  `cascade_set` 全部后代文件）；`click_row(key, ctrl, shift)`：无修饰单选、
+  Ctrl 切换、Shift 以 `anchor` 到目标行序区间替换式选中（Ctrl+Shift 追加）；
+  键盘（`egui_wants_keyboard_input` 为假时）：Backspace=`go_up` 上级、
+  Enter=打开焦点行（`open_row`：目录进入/文件按双击语义）、↑/↓=`move_focus`
+  步进单选（`focus_scroll_pending` + 绝对滚动定位，show_rows 下
+  scroll_to_me 不可靠）、Ctrl+A=全选可见、Esc=清过滤或清空选中；右键菜单
+  （打开/进入/预览/解压选中/全选/清空选中，右键未选中行先单选）。
+  导航语义：`current_dir: Option<String>` 的 None = **根目录**，
+  「全部文件」扁平模式由独立 `flat_all: bool` 表示；
+  `views/archive_tree.rs` 纯函数：`build_dir_rows`/`direct_children`
+  （None=根目录）/`all_file_indices`/`breadcrumb_paths`/`list_rows`
+  （ListRow::Dir/File 行模型：flat_all 或过滤激活 → 全包文件行并忽略
+  current_dir，否则目录优先；Name 排序按显示名自然序（复用 app.rs
+  `natural_cmp`，`pub(crate)`），Size/Packed 按数值、名称兜底，desc 仅
+  反转文件行），`\\` 也作分隔符、隐式目录补全、目录勾选级联后代文件），
   加密包经 `open_with_password` 重列）+ `extract_manager.rs`（每任务一
   线程 + 右下角进度面板，`poll_extracts` 每帧汇总写 `error_message`）；
   入口：Library 卡片右键「浏览压缩包」/「解压到…」；`open_path` 对
