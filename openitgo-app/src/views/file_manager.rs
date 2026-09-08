@@ -44,6 +44,24 @@ pub enum PanelLayout {
     Single { preview_open: bool },
 }
 
+/// 文件管理器持久化快照（app 侧 diff 后写回 settings.fm_*）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct FmStateSnapshot {
+    /// "dual" | "single"。
+    pub layout: String,
+    /// 双栏左栏宽占比（Single 期间取切单栏前保存的比例）。
+    pub ratio: f32,
+    /// 单栏预览面板开关（Dual 期间取切双栏前保存的开关）。
+    pub preview_open: bool,
+    /// 排序键 "name"|"size"|"mtime"：取活动栏（取舍：双栏各自排序可能不同，
+    /// settings 只有单值，持久化活动栏的排序）。
+    pub sort_key: String,
+    pub sort_asc: bool,
+    /// 两栏当前目录（字符串；空 = 用户主目录，跟随 resolve_fm_dir 语义）。
+    pub dir_left: String,
+    pub dir_right: String,
+}
+
 pub struct FileManagerView {
     pub layout: PanelLayout,
     pub panels: [FsPanel; 2],
@@ -51,6 +69,8 @@ pub struct FileManagerView {
     pub active: usize,
     /// 切回双栏时恢复的比例（Single 期间 Dual.ratio 不可见）。
     saved_ratio: f32,
+    /// 切回单栏时恢复的预览开关（Dual 期间 Single.preview_open 不可见）。
+    saved_preview_open: bool,
     /// 单栏模式预览面板宽度占比（拖动分隔条可调）。
     preview_ratio: f32,
     /// 当前预览目标文件（「选中即预览」：焦点行落到的文件）。
@@ -133,9 +153,15 @@ fn column_layout(right: f32, shift: f32, size_w: f32, mtime_w: f32) -> ColumnLay
 
 impl FileManagerView {
     /// 从 settings 恢复布局/排序（app 构造时调用）。
-    pub fn new(layout: &str, ratio: f32, sort_key: &str, sort_asc: bool) -> Self {
+    pub fn new(
+        layout: &str,
+        ratio: f32,
+        preview_open: bool,
+        sort_key: &str,
+        sort_asc: bool,
+    ) -> Self {
         let layout = if layout == "single" {
-            PanelLayout::Single { preview_open: true }
+            PanelLayout::Single { preview_open }
         } else {
             PanelLayout::Dual { ratio }
         };
@@ -149,6 +175,7 @@ impl FileManagerView {
             panels: [FsPanel::new(sort, sort_asc), FsPanel::new(sort, sort_asc)],
             active: 0,
             saved_ratio: ratio,
+            saved_preview_open: preview_open,
             preview_ratio: 0.35,
             preview_path: None,
             preview_entry: None,
@@ -164,6 +191,54 @@ impl FileManagerView {
             clipboard: Vec::new(),
             clipboard_cut: false,
             confirm_delete: true,
+        }
+    }
+
+    /// 采集当前状态快照（持久化写回用）。目录取面板当前 dir；
+    /// 排序取活动栏（settings 只有单值，见 FmStateSnapshot.sort_key 注释）。
+    pub fn snapshot(&self) -> FmStateSnapshot {
+        let (layout, ratio, preview_open) = match &self.layout {
+            PanelLayout::Dual { ratio } => ("dual", *ratio, self.saved_preview_open),
+            PanelLayout::Single { preview_open } => ("single", self.saved_ratio, *preview_open),
+        };
+        let panel = &self.panels[self.active];
+        let sort_key = match panel.sort_key {
+            SortKey::Name => "name",
+            SortKey::Size => "size",
+            SortKey::Mtime => "mtime",
+        };
+        FmStateSnapshot {
+            layout: layout.to_string(),
+            ratio,
+            preview_open,
+            sort_key: sort_key.to_string(),
+            sort_asc: panel.sort_asc,
+            dir_left: self.panels[0].dir.display().to_string(),
+            dir_right: self.panels[1].dir.display().to_string(),
+        }
+    }
+
+    /// 设置页改动默认布局/双栏比例时同步到本视图（此时视图休眠）。
+    /// 不同步的话，maybe_save_fm_state 会在下次进入视图时把旧布局写回
+    /// settings，覆盖用户在设置页的改动。
+    pub fn apply_layout_settings(&mut self, layout: &str, ratio: f32) {
+        let ratio = ratio.clamp(RATIO_MIN, RATIO_MAX);
+        if layout == "single" {
+            if let PanelLayout::Dual { ratio: r } = self.layout {
+                self.saved_ratio = r;
+            }
+            // 单栏只渲染 panels[0]：焦点栏内容保留到左栏（同顶栏切换逻辑）。
+            if self.active == 1 {
+                self.panels.swap(0, 1);
+                self.active = 0;
+            }
+            self.preview_window_open = false;
+            self.layout = PanelLayout::Single {
+                preview_open: self.saved_preview_open,
+            };
+        } else {
+            self.saved_ratio = ratio;
+            self.layout = PanelLayout::Dual { ratio };
         }
     }
 
@@ -352,7 +427,9 @@ impl FileManagerView {
                 }
                 self.active = 0;
                 self.preview_window_open = false;
-                self.layout = PanelLayout::Single { preview_open: true };
+                self.layout = PanelLayout::Single {
+                    preview_open: self.saved_preview_open,
+                };
             }
             if let PanelLayout::Single { preview_open } = &mut self.layout {
                 ui.separator();
@@ -362,6 +439,7 @@ impl FileManagerView {
                     .clicked()
                 {
                     *preview_open = !*preview_open;
+                    self.saved_preview_open = *preview_open;
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

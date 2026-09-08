@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 双栏文件管理器（Total Commander 形态，`View::FileManager`）：左右双栏独立浏览本地文件系统（Tab 切换焦点栏、单击/Ctrl/Shift 选择、双击分发打开、Alt+←/→ 导航历史、表头排序、过滤框、列宽拖动）；单栏模式带预览面板（选中即预览：图片/文本/元信息占位），双栏模式 F3 临时预览弹窗；双击压缩包进 Archive 浏览视图。入口：书架顶栏与文件菜单「文件管理器」。
+- 文件管理器文件操作：F5 复制 / F6 移动 / F8(Delete) 删除 / F2 重命名 / F7 新建文件夹、Ctrl+C/X/V 应用内剪贴板、右键菜单；复制/移动/删除后台线程执行，状态栏进度条 + 取消；删除移入回收站；冲突策略覆盖/跳过/自动改名（`name (1).ext`），目录冲突恒合并；取消清理半成品文件；Windows 长路径（>260 字符）经 `\\?\` 前缀支持。
+- Settings：文件管理器持久化字段 `fm_layout` / `fm_dual_ratio` / `fm_preview_open` / `fm_sort_key` / `fm_sort_asc` / `fm_dir_left` / `fm_dir_right` / `fm_confirm_delete`（状态变更帧尾 diff 写回，退出时统一落盘）；设置页新增「文件管理器」tab（删除前确认、默认布局、双栏比例）。
 - 压缩包浏览视图增强（对齐 WinRAR/Explorer）：新增「修改时间」列（本地时区显示，无时间的条目排序恒垫底）与列分隔竖线拖宽（会话内有效）；「..」上级行；键盘补全（Home/End 跳首末行、PgUp/PgDn 整页步进、← 上级 / → 进入目录、Shift+↑/↓ 区间扩选、Ctrl+↑/↓ 只移焦点、F5 重列并恢复当前目录）；目录行后代部分选中时左缘竖条指示；预览面板文本可选中复制、图片支持适应宽度/原始尺寸切换；明细列表行模型与目录选中统计按版本号缓存，消除每帧重复计算。
 - 文件菜单新增「打开文件…」（rfd 文件对话框，过滤器分漫画/电子书/图片/媒体/压缩包），选中后走 `open_path` 完整分发链。
 - Archive 视图顶栏「作为漫画打开」按钮（仅 zip/cbz/rar/cbr 显示）。

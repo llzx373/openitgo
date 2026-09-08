@@ -16,18 +16,20 @@ pub enum SettingsTab {
     Ebook,
     Media,
     Archive,
+    FileManager,
     FileAssoc,
     Performance,
     Shortcuts,
 }
 
 impl SettingsTab {
-    const ALL: [(SettingsTab, &'static str); 8] = [
+    const ALL: [(SettingsTab, &'static str); 9] = [
         (SettingsTab::Appearance, "外观"),
         (SettingsTab::Comic, "漫画"),
         (SettingsTab::Ebook, "电子书"),
         (SettingsTab::Media, "媒体"),
         (SettingsTab::Archive, "压缩包"),
+        (SettingsTab::FileManager, "文件管理器"),
         (SettingsTab::FileAssoc, "文件关联"),
         (SettingsTab::Performance, "性能"),
         (SettingsTab::Shortcuts, "快捷键"),
@@ -79,6 +81,7 @@ impl SettingsView {
                         SettingsTab::Archive => {
                             book_changed = self.archive_ui(ui, settings, password_book);
                         }
+                        SettingsTab::FileManager => Self::file_manager_ui(ui, settings),
                         SettingsTab::FileAssoc => self.file_assoc_ui(ui),
                         SettingsTab::Performance => self.performance_ui(ui, settings),
                         SettingsTab::Shortcuts => self.shortcut_editor(ui, &mut settings.shortcuts),
@@ -403,6 +406,36 @@ impl SettingsView {
             &mut settings.ebook.invert_scroll,
             "反转滚轮方向（适用于 macOS 自然滚动）",
         );
+    }
+
+    /// 文件管理器 tab：删除确认 / 默认布局 / 双栏比例。
+    fn file_manager_ui(ui: &mut egui::Ui, settings: &mut Settings) {
+        ui.checkbox(&mut settings.fm_confirm_delete, "删除前确认");
+        hint(ui, "关闭后删除（移入回收站）不再弹确认框");
+
+        ui.horizontal(|ui| {
+            ui.label("默认布局");
+            egui::ComboBox::from_id_salt("fm_layout")
+                .selected_text(if settings.fm_layout == "single" {
+                    "单栏"
+                } else {
+                    "双栏"
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut settings.fm_layout, "dual".to_string(), "双栏");
+                    ui.selectable_value(
+                        &mut settings.fm_layout,
+                        "single".to_string(),
+                        "单栏（含预览面板）",
+                    );
+                });
+        });
+        hint(ui, "改动立即同步到文件管理器视图，下次进入即生效");
+
+        ui.horizontal(|ui| {
+            ui.label("双栏比例（左栏宽度）:");
+            ui.add(egui::Slider::new(&mut settings.fm_dual_ratio, 0.2..=0.8).step_by(0.01));
+        });
     }
 
     /// 压缩包 tab：解压目录/线程/覆盖 + 密码本管理。返回密码本是否有变更。

@@ -4,7 +4,7 @@ use crate::loader::PageLoader;
 use crate::opener::{AsyncOpener, OpenStatus};
 use crate::shortcuts::is_shortcut_pressed;
 use crate::timing;
-use crate::views::file_manager::{FileManagerView, FmCallbacks};
+use crate::views::file_manager::{FileManagerView, FmCallbacks, FmStateSnapshot};
 use crate::views::file_manager_panel::PanelLoadState;
 use crate::views::file_manager_rows::natural_cmp;
 use crate::views::settings::{SettingsTab, SettingsView};
@@ -370,6 +370,10 @@ pub struct ReaderApp {
     /// 上次写盘的每书阅读设置快照（含 comic_id）。每帧与当前打开漫画的
     /// 三元组对比，变更时 upsert 并写盘；打开/关闭漫画时重置。
     pub last_saved_comic_settings: Option<(String, ComicReadingSettings)>,
+    /// 文件管理器状态快照（布局/比例/预览/排序/两栏目录）。每帧 diff，
+    /// 变更时写回 settings.fm_*（落盘随退出时统一 save_settings）；
+    /// 进入/离开 FileManager 视图时重置。
+    pub last_saved_fm_state: Option<FmStateSnapshot>,
     /// 帮助菜单"快捷键一览"面板的显示状态。
     pub show_shortcuts: bool,
     /// 会话级压缩包密码缓存（本表自身不落盘；验证成功的密码会另记入
@@ -453,6 +457,7 @@ impl Default for ReaderApp {
         let file_manager_view = FileManagerView::new(
             &settings.fm_layout,
             settings.fm_dual_ratio,
+            settings.fm_preview_open,
             &settings.fm_sort_key,
             settings.fm_sort_asc,
         );
@@ -489,6 +494,7 @@ impl Default for ReaderApp {
             current_theme: Theme::System,
             comic_settings,
             last_saved_comic_settings: None,
+            last_saved_fm_state: None,
             show_shortcuts: false,
             passwords: HashMap::new(),
             password_book,
@@ -624,6 +630,7 @@ impl eframe::App for ReaderApp {
         self.render_password_dialog(&ctx);
         self.render_extract_dialog(&ctx);
         self.maybe_save_comic_settings();
+        self.maybe_save_fm_state();
         self.tick_reading_stats();
         self.tick_persist_history_bookmarks();
         self.maybe_validate_window_geometry(&ctx);
@@ -2270,6 +2277,7 @@ impl ReaderApp {
 
     fn render_settings(&mut self, ui: &mut egui::Ui) {
         let from_ebook = self.ebook_view.open.is_some();
+        let fm_layout_before = (self.settings.fm_layout.clone(), self.settings.fm_dual_ratio);
         egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("← 返回").clicked() {
@@ -2291,6 +2299,13 @@ impl ReaderApp {
                 self.save_password_book();
             }
         });
+        // 「文件管理器」tab 的默认布局/比例改动同步到休眠中的视图，
+        // 否则下次进入时 maybe_save_fm_state 会把旧值写回覆盖。
+        let fm_layout_after = (self.settings.fm_layout.clone(), self.settings.fm_dual_ratio);
+        if fm_layout_after != fm_layout_before {
+            self.file_manager_view
+                .apply_layout_settings(&self.settings.fm_layout, self.settings.fm_dual_ratio);
+        }
         if from_ebook {
             self.ebook_view.apply_settings(&self.settings.ebook);
         }
@@ -3600,6 +3615,30 @@ impl ReaderApp {
             self.error_message = Some(format!("无法保存阅读设置: {}", e));
         }
         self.last_saved_comic_settings = Some(snapshot);
+    }
+
+    /// 每帧检测文件管理器状态（布局/比例/预览开关/排序/两栏目录）与上次
+    /// 快照是否不同：不同则写回 settings.fm_*。**不自行落盘**——settings 由
+    /// on_exit 统一 save_settings（与 fm_confirm_delete 等字段同一通道）；
+    /// 集中帧尾 diff 可捕获拖分隔条、切布局、导航、点表头排序等所有来源。
+    /// 快照在离开 FileManager 视图时重置（下次进入重新采集）。
+    fn maybe_save_fm_state(&mut self) {
+        if self.current_view != View::FileManager {
+            self.last_saved_fm_state = None;
+            return;
+        }
+        let snapshot = self.file_manager_view.snapshot();
+        if self.last_saved_fm_state.as_ref() == Some(&snapshot) {
+            return;
+        }
+        self.settings.fm_layout = snapshot.layout.clone();
+        self.settings.fm_dual_ratio = snapshot.ratio;
+        self.settings.fm_preview_open = snapshot.preview_open;
+        self.settings.fm_sort_key = snapshot.sort_key.clone();
+        self.settings.fm_sort_asc = snapshot.sort_asc;
+        self.settings.fm_dir_left = snapshot.dir_left.clone();
+        self.settings.fm_dir_right = snapshot.dir_right.clone();
+        self.last_saved_fm_state = Some(snapshot);
     }
 
     /// 当前打开中的读物 id（漫画/电子书/媒体都算），无则 None。
@@ -5352,6 +5391,7 @@ mod tests {
             let file_manager_view = FileManagerView::new(
                 &settings.fm_layout,
                 settings.fm_dual_ratio,
+                settings.fm_preview_open,
                 &settings.fm_sort_key,
                 settings.fm_sort_asc,
             );
@@ -5388,6 +5428,7 @@ mod tests {
                 current_theme: Theme::System,
                 comic_settings,
                 last_saved_comic_settings: None,
+                last_saved_fm_state: None,
                 show_shortcuts: false,
                 passwords: HashMap::new(),
                 password_book,
@@ -6257,6 +6298,38 @@ mod tests {
         app.maybe_save_comic_settings();
 
         assert_eq!(app.last_saved_comic_settings, None);
+    }
+
+    #[test]
+    fn test_maybe_save_fm_state_writes_on_change() {
+        let (mut app, tmp) = app_with_temp_store();
+        app.current_view = View::FileManager;
+        // 首帧建立快照（值与 settings 相同）。
+        app.maybe_save_fm_state();
+        assert!(app.last_saved_fm_state.is_some());
+
+        // 切单栏 → 写回 settings.fm_layout。
+        app.file_manager_view.apply_layout_settings("single", 0.5);
+        app.maybe_save_fm_state();
+        assert_eq!(app.settings.fm_layout, "single");
+
+        // 导航左栏 → 写回 settings.fm_dir_left。
+        app.file_manager_view.panels[0].navigate_to(tmp.path().to_path_buf());
+        app.maybe_save_fm_state();
+        assert_eq!(app.settings.fm_dir_left, tmp.path().display().to_string());
+    }
+
+    #[test]
+    fn test_maybe_save_fm_state_resets_snapshot_when_view_left() {
+        let (mut app, _tmp) = app_with_temp_store();
+        app.current_view = View::FileManager;
+        app.maybe_save_fm_state();
+        assert!(app.last_saved_fm_state.is_some());
+
+        app.current_view = View::Library;
+        app.maybe_save_fm_state();
+
+        assert_eq!(app.last_saved_fm_state, None);
     }
 
     #[test]

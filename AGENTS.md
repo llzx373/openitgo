@@ -119,6 +119,31 @@ cargo clippy --workspace --all-targets -- -D warnings
   （smart/always/never）、完成后删除压缩包（`trash` 移回收站）/打开目标文件夹；
   选项写回 settings，`poll_extracts` 按 `ExtractSummary.finished` 在成功时执行
   删除/打开（失败/取消不执行）。
+- **文件管理器（app 侧）**：`View::FileManager` 双栏文件管理器（Total Commander
+  形态；入口 = 书架顶栏「文件管理器」+ 文件菜单）。`views/file_manager.rs` 视图主体
+  （`FileManagerView`：单/双栏布局与分隔条、顶栏/状态栏、键盘与右键接线、
+  选中即预览）；`file_manager_panel.rs` 单栏面板 `FsPanel`（导航历史/选择/排序/
+  过滤/异步列举）；`file_manager_rows.rs` 纯函数行模型（`list_rows`/`natural_cmp`/
+  `SortKey`）；`file_ops.rs` 文件操作引擎；`file_manager_dialog.rs` 四种确认对话框
+  （复制/移动/删除/重命名/新建文件夹，对齐 `extract_dialog.rs` 模式）。
+  **选择模型与 Archive 的差异**：`selected: HashSet<PathBuf>` **含目录**
+  （Archive 只存文件条目名、目录选中态派生自后代统计）；焦点是 UI 行索引
+  usize（0 = 「..」上级行，盘符根禁用上级）。**file_ops 约定**：每任务一条后台
+  线程 + channel 进度 + `Arc<AtomicBool>` 取消；删除逐项 `trash::delete`（回收站）；
+  冲突策略由 UI 层操作前一次性确定（执行期不再询问，执行时遇新冲突且模式为
+  Ask/Skip 按 Skip 记 errors）；目录↔目录冲突恒合并（不整删目标目录），
+  AutoRename 用 `name (1).ext` 递增；移动 = `fs::rename` 快速路径，失败回退递归
+  复制 + trash 源；取消清理半成品目标文件（写入前取消不动已存在目标）；预扫描与
+  递归复制均不跟进符号链接目录（防环）；Windows 长路径统一经 `verbatim_path`
+  加 `\\?\` 前缀（>240 字符才加；manifest 未声明 longPathAware）。**fm_* settings**：
+  `fm_layout`/`fm_dual_ratio`/`fm_preview_open`/`fm_sort_key`/`fm_sort_asc`/
+  `fm_dir_left`/`fm_dir_right`/`fm_confirm_delete`；`FileManagerView::snapshot()`
+  采集，`maybe_save_fm_state`（`App::update` 末尾）diff 快照后写回 settings——
+  **不自行落盘**，退出时 `on_exit` 统一 `save_settings`（排序只持久化活动栏，
+  取舍见 `FmStateSnapshot` 注释）；快照在离开 FileManager 视图时重置。设置页
+  「文件管理器」tab 改默认布局/比例经 `apply_layout_settings` 同步到休眠视图
+  （否则下次进入时快照写回会覆盖设置页改动）。压缩包双击进 Archive 视图
+  （设计决策 3，不做面板内浏览）。
 - **PageLoader**: background IO + decode worker threads, results via channels；独立的
   `cover_loader` 负责库封面。**进度条悬停缩略图**：① 全尺寸解码且 compress=false 时
   顺产生成 256px 缩略图；② 悬停时 `request_page_thumbnail` 高优先级 + 按方向低优先
@@ -274,6 +299,7 @@ cargo clippy --workspace --all-targets -- -D warnings
   `openitgo-media/examples/{probe,probe_render,probe_cover}.rs`（无头播放器/渲染
   上下文/封面，`probe_cover` 跨平台，`vo=image` 无需窗口）。
 - 电子书：`probe_ebook_menu.rs`（菜单停放 #52 验证）。
+- 文件管理器：`fm_smoke.rs`（双栏列举就绪即退出）。
 - `OPENITGO_MPV_LOG=1` 开启 mpv debug 日志（stderr）。
 
 ## Commits

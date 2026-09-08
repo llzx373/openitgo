@@ -15,7 +15,10 @@
 //! 递归复制 + 成功后 `trash::delete` 源。
 //! 删除：逐项 `trash::delete`（回收站），单项失败记 errors 继续。
 //! 符号链接：复制 = 复制链接目标内容（`fs::copy` 语义），删除 = 只删链接；
-//! 预扫描不跟进符号链接目录（防环）。
+//! 预扫描不跟进符号链接目录（防环），递归复制同样不跟进（符号链接目录
+//! 按文件处理，`File::open` 失败则记 errors 继续）。
+//! Windows 长路径：manifest 未声明 longPathAware，文件系统调用统一经
+//! `verbatim_path` 加 `\\?\` 前缀（见该函数注释）。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -316,7 +319,9 @@ fn run_op(
                 if kind == OpKind::Move {
                     // 快速路径：同盘 rename 瞬间完成（目标存在时 rename 在
                     // Windows 上会失败，落入回退路径由冲突策略处理）。
-                    if !dst.exists() && std::fs::rename(src, &dst).is_ok() {
+                    if !verbatim_path(&dst).exists()
+                        && std::fs::rename(verbatim_path(src), verbatim_path(&dst)).is_ok()
+                    {
                         ctx.progress.done_files += items;
                         ctx.progress.done_bytes += bytes;
                         ctx.send_progress();
@@ -325,7 +330,7 @@ fn run_op(
                 }
                 // 两边都是目录：不应用文件冲突策略，合并进入（递归内部
                 // 按文件逐项应用）。否则按顶层策略消解冲突。
-                let dst = if src.is_dir() && dst.is_dir() {
+                let dst = if verbatim_path(src).is_dir() && verbatim_path(&dst).is_dir() {
                     Some(dst)
                 } else {
                     match resolve_conflict(&dst, conflict) {
@@ -389,7 +394,7 @@ impl OpCtx<'_> {
 /// 预扫描单个 source：返回 (项数[文件+目录], 文件字节数)；
 /// 符号链接按单项计（不跟进目录防环）；读取失败按 1 项 0 字节计。
 fn count_source(path: &Path) -> (u64, u64) {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
+    let Ok(meta) = std::fs::symlink_metadata(verbatim_path(path)) else {
         return (1, 0);
     };
     if meta.is_symlink() || !meta.is_dir() {
@@ -400,7 +405,7 @@ fn count_source(path: &Path) -> (u64, u64) {
     let mut bytes = 0;
     let mut stack = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
+        let Ok(rd) = std::fs::read_dir(verbatim_path(&dir)) else {
             continue;
         };
         for item in rd.flatten() {
@@ -429,7 +434,7 @@ fn count_source(path: &Path) -> (u64, u64) {
 /// Overwrite → 原样（复制时覆盖/合并）；AutoRename → `name (1).ext` 递增；
 /// Ask/Skip（含扫描后新出现的冲突）→ None（跳过并记汇总）。
 fn resolve_conflict(dst: &Path, mode: ConflictMode) -> Option<PathBuf> {
-    if !dst.exists() {
+    if !verbatim_path(dst).exists() {
         return Some(dst.to_path_buf());
     }
     match mode {
@@ -442,7 +447,7 @@ fn resolve_conflict(dst: &Path, mode: ConflictMode) -> Option<PathBuf> {
 /// 自动改名：`name (1).ext`、`name (2).ext`…（同 parser extract 的
 /// uniquify 语义）；目录与无扩展名文件同样适用。
 fn resolve_conflict_name(path: &Path) -> PathBuf {
-    if !path.exists() {
+    if !verbatim_path(path).exists() {
         return path.to_path_buf();
     }
     let stem = path
@@ -456,11 +461,38 @@ fn resolve_conflict_name(path: &Path) -> PathBuf {
     let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
     for i in 1..1000u32 {
         let candidate = parent.join(format!("{stem} ({i}){ext}"));
-        if !candidate.exists() {
+        if !verbatim_path(&candidate).exists() {
             return candidate;
         }
     }
     path.to_path_buf()
+}
+
+/// Windows 长路径（>MAX_PATH=260）支持：本程序 manifest 未声明
+/// longPathAware，Win32 文件 API 默认拒绝超长路径，需加 `\\?\`
+/// （verbatim）前缀。仅转换超过 240 字符（留余量）的绝对路径——普通路径
+/// 原样返回，避免 verbatim 前缀经 `read_dir` 传播进错误信息；已是
+/// verbatim 前缀的原样返回；UNC `\\server\share` 转 `\\?\UNC\server\share`。
+/// 非 Windows 恒等。
+#[cfg(windows)]
+fn verbatim_path(p: &Path) -> PathBuf {
+    let s = p.display().to_string();
+    if !p.is_absolute()
+        || s.starts_with(r"\\?\")
+        || s.starts_with(r"\\.\")
+        || s.chars().count() <= 240
+    {
+        return p.to_path_buf();
+    }
+    if let Some(rest) = s.strip_prefix(r"\\") {
+        return PathBuf::from(format!(r"\\?\UNC\{rest}"));
+    }
+    PathBuf::from(format!(r"\\?\{s}"))
+}
+
+#[cfg(not(windows))]
+fn verbatim_path(p: &Path) -> PathBuf {
+    p.to_path_buf()
 }
 
 /// 递归复制 src → dst（dst 已按顶层冲突策略消解）：目录建目录并合并进入，
@@ -470,17 +502,17 @@ fn copy_recursive(src: &Path, dst: &Path, mode: ConflictMode, ctx: &mut OpCtx) -
     if ctx.halt() {
         return Err(());
     }
-    let is_dir = std::fs::symlink_metadata(src)
+    let is_dir = std::fs::symlink_metadata(verbatim_path(src))
         .map(|m| m.is_dir() && !m.is_symlink())
         .unwrap_or(false);
     if is_dir {
-        if let Err(e) = std::fs::create_dir_all(dst) {
+        if let Err(e) = std::fs::create_dir_all(verbatim_path(dst)) {
             ctx.errors
                 .push((dst.to_path_buf(), format!("无法创建目录: {e}")));
         }
         ctx.progress.done_files += 1;
         ctx.send_progress();
-        let Ok(rd) = std::fs::read_dir(src) else {
+        let Ok(rd) = std::fs::read_dir(verbatim_path(src)) else {
             ctx.errors
                 .push((src.to_path_buf(), "无法读取目录内容".to_string()));
             return Ok(());
@@ -489,18 +521,19 @@ fn copy_recursive(src: &Path, dst: &Path, mode: ConflictMode, ctx: &mut OpCtx) -
             let child_src = item.path();
             let child_dst = dst.join(item.file_name());
             // 目录合并：两边都是目录时不应用文件冲突策略，直接递归。
-            let child_dst = if child_src.is_dir() && child_dst.is_dir() {
-                child_dst
-            } else {
-                match resolve_conflict(&child_dst, mode) {
-                    Some(d) => d,
-                    None => {
-                        ctx.errors
-                            .push((child_src.clone(), "目标已存在，已跳过".to_string()));
-                        continue;
+            let child_dst =
+                if verbatim_path(&child_src).is_dir() && verbatim_path(&child_dst).is_dir() {
+                    child_dst
+                } else {
+                    match resolve_conflict(&child_dst, mode) {
+                        Some(d) => d,
+                        None => {
+                            ctx.errors
+                                .push((child_src.clone(), "目标已存在，已跳过".to_string()));
+                            continue;
+                        }
                     }
-                }
-            };
+                };
             copy_recursive(&child_src, &child_dst, mode, ctx)?;
         }
         Ok(())
@@ -531,16 +564,16 @@ fn copy_file_chunks(src: &Path, dst: &Path, ctx: &mut OpCtx) -> Result<u64, Copy
     if ctx.halt() {
         return Err(CopyFail::Cancelled);
     }
-    let mut reader =
-        std::fs::File::open(src).map_err(|e| CopyFail::Io(format!("无法读取: {e}")))?;
-    let mut writer =
-        std::fs::File::create(dst).map_err(|e| CopyFail::Io(format!("无法创建目标: {e}")))?;
+    let mut reader = std::fs::File::open(verbatim_path(src))
+        .map_err(|e| CopyFail::Io(format!("无法读取: {e}")))?;
+    let mut writer = std::fs::File::create(verbatim_path(dst))
+        .map_err(|e| CopyFail::Io(format!("无法创建目标: {e}")))?;
     let mut buf = vec![0u8; COPY_CHUNK];
     let mut written = 0u64;
     loop {
         if ctx.halt() {
             drop(writer);
-            let _ = std::fs::remove_file(dst);
+            let _ = std::fs::remove_file(verbatim_path(dst));
             return Err(CopyFail::Cancelled);
         }
         match reader.read(&mut buf) {
@@ -548,14 +581,14 @@ fn copy_file_chunks(src: &Path, dst: &Path, ctx: &mut OpCtx) -> Result<u64, Copy
             Ok(n) => {
                 if let Err(e) = writer.write_all(&buf[..n]) {
                     drop(writer);
-                    let _ = std::fs::remove_file(dst);
+                    let _ = std::fs::remove_file(verbatim_path(dst));
                     return Err(CopyFail::Io(format!("写入失败: {e}")));
                 }
                 written += n as u64;
             }
             Err(e) => {
                 drop(writer);
-                let _ = std::fs::remove_file(dst);
+                let _ = std::fs::remove_file(verbatim_path(dst));
                 return Err(CopyFail::Io(format!("读取失败: {e}")));
             }
         }
@@ -587,10 +620,11 @@ pub fn rename_entry(path: &Path, new_name: &str) -> Result<PathBuf, String> {
     if new_path == path {
         return Ok(new_path);
     }
-    if new_path.exists() {
+    if verbatim_path(&new_path).exists() {
         return Err("已存在同名文件或文件夹".to_string());
     }
-    std::fs::rename(path, &new_path).map_err(|e| format!("重命名失败: {e}"))?;
+    std::fs::rename(verbatim_path(path), verbatim_path(&new_path))
+        .map_err(|e| format!("重命名失败: {e}"))?;
     Ok(new_path)
 }
 
@@ -598,22 +632,22 @@ pub fn rename_entry(path: &Path, new_name: &str) -> Result<PathBuf, String> {
 pub fn create_dir(parent: &Path, name: &str) -> Result<PathBuf, String> {
     validate_entry_name(name)?;
     let path = parent.join(name.trim());
-    if path.exists() {
+    if verbatim_path(&path).exists() {
         return Err("已存在同名文件或文件夹".to_string());
     }
-    std::fs::create_dir(&path).map_err(|e| format!("无法创建文件夹: {e}"))?;
+    std::fs::create_dir(verbatim_path(&path)).map_err(|e| format!("无法创建文件夹: {e}"))?;
     Ok(path)
 }
 
 /// 新建文件夹的默认名建议：「新建文件夹」，重名时「新建文件夹 (2)」递增。
 pub fn suggest_folder_name(parent: &Path) -> String {
     let base = "新建文件夹";
-    if !parent.join(base).exists() {
+    if !verbatim_path(&parent.join(base)).exists() {
         return base.to_string();
     }
     for i in 2..1000u32 {
         let candidate = format!("{base} ({i})");
-        if !parent.join(&candidate).exists() {
+        if !verbatim_path(&parent.join(&candidate)).exists() {
             return candidate;
         }
     }
@@ -892,5 +926,53 @@ mod tests {
         assert!(f.errors.is_empty());
         assert!(!mgr.poll().has_active);
         assert_eq!(std::fs::read(dest.join("x.txt")).unwrap(), b"data");
+    }
+
+    /// Windows 长路径：manifest 未声明 longPathAware，>260 字符的路径必须
+    /// 经 verbatim_path 加 `\\?\` 前缀才能读写。本测试用 verbatim 前缀
+    /// 搭好深层目录树，再用普通（未加前缀）路径驱动引擎验证读/写两侧。
+    #[cfg(windows)]
+    #[test]
+    fn copy_handles_paths_longer_than_260_chars() {
+        fn vp(p: &Path) -> PathBuf {
+            PathBuf::from(format!(r"\\?\{}", p.display()))
+        }
+        let t = TempTree::new("longpath");
+        // 24 × 12 字符/层 + temp 根 ≈ 330 字符，远超 MAX_PATH。
+        let mut deep = t.path().to_path_buf();
+        for _ in 0..24 {
+            deep = deep.join("deep-dir-x");
+        }
+        assert!(deep.display().to_string().chars().count() > 260);
+        std::fs::create_dir_all(vp(&deep)).unwrap();
+        std::fs::write(vp(&deep.join("f.txt")), b"long").unwrap();
+
+        // 读侧：深源 → 浅目标（count_source 递归 + File::open 都过长路径）。
+        let shallow_dest = t.path().join("out");
+        std::fs::create_dir_all(&shallow_dest).unwrap();
+        let r = run_copy_sync(
+            vec![deep.clone()],
+            shallow_dest.clone(),
+            ConflictMode::AutoRename,
+        );
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        let copied = shallow_dest.join("deep-dir-x/f.txt");
+        assert_eq!(std::fs::read(&copied).unwrap(), b"long");
+
+        // 写侧：浅源文件 → 深目标（File::create 过长路径）。
+        let shallow_src = t.path().join("s.txt");
+        write_file(&shallow_src, b"shallow");
+        let deep_dest = deep.join("dest");
+        std::fs::create_dir_all(vp(&deep_dest)).unwrap();
+        let r = run_copy_sync(
+            vec![shallow_src],
+            deep_dest.clone(),
+            ConflictMode::AutoRename,
+        );
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert_eq!(
+            std::fs::read(vp(&deep_dest.join("s.txt"))).unwrap(),
+            b"shallow"
+        );
     }
 }
