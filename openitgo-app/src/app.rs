@@ -3802,7 +3802,9 @@ impl ReaderApp {
         }
     }
 
-    /// 启动显示后的短暂淡入：从主题底色渐变到透明，替代最大化黑闪。
+    /// 启动显示后的短暂淡入：从黑色渐变到透明。显示瞬间的首帧必然是黑
+    /// 缓冲（隐藏期间 eframe 按 is_visible=false 跳过 tessellate/paint，
+    /// swapchain 从未绘制过），淡入从黑开始正好把这一帧接进动画里。
     fn paint_startup_fade(&mut self, ctx: &egui::Context) {
         const FADE_SECS: f32 = 0.2;
         let Some(started) = self.startup_fade_started else {
@@ -3813,9 +3815,8 @@ impl ReaderApp {
             self.startup_fade_started = None;
             return;
         }
-        let base = ctx.global_style().visuals.window_fill();
         let alpha = ((1.0 - t / FADE_SECS) * 255.0) as u8;
-        let color = egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha);
+        let color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, alpha);
         let rect = ctx.viewport_rect();
         ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
