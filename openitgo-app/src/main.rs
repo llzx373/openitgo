@@ -56,9 +56,13 @@ fn main() -> eframe::Result<()> {
         DEFAULT_WINDOW_SIZE
     };
 
+    // 创建期不请求最大化：egui-winit 创建窗口后会按 inner_size 调 winit
+    // request_inner_size，后者对最大化窗口异步 ShowWindow(SW_RESTORE)，
+    // 而紧随的 set_maximized 因 winit 内部标志尚未同步成为空操作——
+    // 创建期最大化会被稳定撤销。启动最大化由 ReaderApp 在首帧
+    // （monitor 信息就绪后）按 settings.window_maximized 补发。
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([w, h])
-        .with_maximized(restored.maximized)
         .with_clamp_size_to_monitor_size(true);
     // Transparent backbuffer (macOS only): egui-wgpu then picks
     // CompositeAlphaMode::PreMultiplied and the CAMetalLayer becomes

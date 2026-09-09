@@ -418,8 +418,8 @@ pub struct ReaderApp {
     pub last_window_geometry_flush: Option<Instant>,
     /// 是否已做过启动后几何合法性检查（相对当前显示器）。
     pub window_geometry_validated: bool,
-    /// 启动最大化补救的重试次数（上限内每帧补发 Maximized(true)）。
-    pub maximize_restore_retries: u8,
+    /// 启动最大化补救是否已发出（只发一次，失败不与用户对抗）。
+    pub maximize_restore_sent: bool,
     /// 上次设置的窗口标题，避免每帧重复发 ViewportCommand。
     last_window_title: String,
 }
@@ -522,7 +522,7 @@ impl Default for ReaderApp {
             last_history_flush: None,
             last_window_geometry_flush: None,
             window_geometry_validated: false,
-            maximize_restore_retries: 0,
+            maximize_restore_sent: false,
             last_window_title: String::new(),
         }
     }
@@ -3772,7 +3772,7 @@ impl ReaderApp {
         self.persist_history_bookmarks_if_due(Instant::now(), HISTORY_FLUSH_INTERVAL);
     }
 
-    /// 首帧（或 monitor 信息就绪后）：若当前窗口相对可见屏几乎无交集，重置为默认几何。
+    /// 首帧（或 monitor 信息就绪后）：先按保存意图补启动最大化，再校验是否屏外。
     fn maybe_validate_window_geometry(&mut self, ctx: &egui::Context) {
         if self.window_geometry_validated {
             return;
@@ -3787,17 +3787,16 @@ impl ReaderApp {
         if ms.x < 1.0 || ms.y < 1.0 {
             return;
         }
-        // 创建期最大化可能因多屏/混合 DPI 等干扰丢失（winit 创建时的
-        // ShowWindow(SW_MAXIMIZE) 并非总能生效）：按保存意图每帧补发
-        // Maximized(true)，确认生效（或重试耗尽）前不置 validated，
-        // 让 tick_persist 等待——否则同帧就会把未生效的 false 落盘，
-        // 覆盖保存的 true，之后每次启动都不再最大化。
+        // 启动最大化不在创建期请求（见 main.rs 注释），改在这里补发一次。
+        // 命令当帧末尾才被处理，live 状态要下帧才更新，故发出后先不置
+        // validated，让 tick_persist 等一帧，避免把未生效的 false 落盘
+        // 覆盖保存的 true；只发一次，失败则下帧按现实几何继续。
         if !fullscreen.unwrap_or(false)
             && self.settings.window_maximized
             && !maximized.unwrap_or(false)
-            && self.maximize_restore_retries < 30
+            && !self.maximize_restore_sent
         {
-            self.maximize_restore_retries += 1;
+            self.maximize_restore_sent = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
             return;
         }
@@ -5530,7 +5529,7 @@ mod tests {
                 last_history_flush: None,
                 last_window_geometry_flush: None,
                 window_geometry_validated: false,
-                maximize_restore_retries: 0,
+                maximize_restore_sent: false,
                 last_window_title: String::new(),
             }
         }
