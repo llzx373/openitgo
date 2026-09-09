@@ -152,7 +152,10 @@ cargo clippy --workspace --all-targets -- -D warnings
   `fm_layout`/`fm_dual_ratio`/`fm_preview_open`/`fm_sort_key`/`fm_sort_asc`/
   `fm_dir_left`/`fm_dir_right`/`fm_confirm_delete`/`fm_show_hidden`（隐藏 =
   `.` 开头或 Windows FILE_ATTRIBUTE_HIDDEN，行模型过滤不进快照，权威在
-  settings，与 confirm_delete 同走 ui() 每帧下发）/`fm_bookmark_groups`
+  settings，与 confirm_delete 同走 ui() 每帧下发）/`fm_view_mode`（"list"|
+  "thumbs"，取活动栏）/`fm_tabs_left`/`fm_tabs_right`/`fm_active_tab_left`/
+  `fm_active_tab_right`（标签页目录列表与活动索引，活动标签 = 实时目录，
+  越界 clamp）/`fm_bookmark_groups`
   （常用目录书签分组 `FmBookmarkGroup{name, items}`，两栏共享；旧扁平
   `fm_bookmarks` 仅读取兼容——clamp 时非空即并入「常用」组并清空，
   保存 skip 空 Vec 不再写出；分组空名修「未命名」、组内去重、空组保留。
@@ -231,6 +234,37 @@ cargo clippy --workspace --all-targets -- -D warnings
   否则导航/refresh 后 `pending_reveal` 在 poll Ready 应用）；「输送到焦点栏」
   = `FsPanel::inject_entries_branch`（命中集直接注入 + branch_view=true，
   同分支视图约定 name 存显示名，退出条件与分支视图一致 navigate/refresh）。
+  **阶段 A–I 增量（TC 对齐）**：选择增强——`*` 反选 / `+`「选择组」/ `-`
+  同框预置取消选择（`SelectGroupDialog`，`wildcard_match` 通配 `;` 多模式
+  不区分大小写、「仅选文件」变体，模式串会话记忆；egui 无小键盘键、主键盘
+  `*` = Shift+8，统一经 `Event::Text` 捕获）；其余可打印字符进 type-ahead
+  缓冲（`FsPanel::type_ahead_push`，命中即 Select 焦点 + 最小滚动揭示；
+  空格保留给目录大小不进 type-ahead）；`SortKey::Ext` 扩展名排序键；状态栏
+  「已选 N 项 · 合计 X」（文件直接求和，目录仅计 `dir_sizes` 已缓存值、
+  不触发计算，0 字节不显示合计）。Alt+↓ 开/关焦点栏目录历史下拉
+  （`history_menu_toggle` 一次性请求，菜单项新→旧、当前项 ✓，点击直跳
+  `navigate_history_to`）。栏间快捷键（仅双栏）：Ctrl+U `panels.swap(0,1)`
+  交换两栏（watcher/loader 随结构体走，active 不变）、Ctrl+→ 把本栏焦点目录
+  （非目录则当前目录）带给另一栏 / Ctrl+← 反向、Ctrl+\ 回本栏根目录。
+  进度增强：单文件进度 + `OpSpeedMeter` EMA 速度/ETA（500ms 采样节流）+
+  `FileOpManager::set_paused` 暂停（worker `wait_if_paused` 自旋，cancel
+  即时退出）。Ctrl+Q 快速预览（双栏：非活动栏整栏替换为预览面板、目标 =
+  活动栏焦点文件、焦点移动跟随，关闭即 `clear_preview`；单栏 = 预览面板
+  开关；Q 不抢 type-ahead——后者有 `!mods.command` 门控）。Ctrl+B 分支视图
+  （`toggle_branch_view`：当前目录 + 所有子目录文件扁平列出，列举有截断
+  上限并在状态栏提示，面包屑显示 [分支]，navigate/refresh 退出）。
+  Ctrl+M 批量重命名（`file_manager_rename.rs::plan_renames` 纯函数计划 +
+  `MultiRenameDialog` 实时预览，仅执行非 skip 且无 error 项，逐项失败汇总）。
+  栏内标签页：Ctrl+T 新建（复制当前目录）/ Ctrl+W 关闭（剩 1 个 no-op）/
+  Ctrl(+Shift)+Tab 循环；纯 Tab 切焦点栏与 Ctrl+Tab 互不干扰。缩略图视图：
+  `file_manager_thumbs.rs` `ThumbCache`（FileManagerView 级持有、两栏共享，
+  网格 cell 176×200，行索引/选择/过滤/type-ahead 与列表模式完全共用——
+  网格只是渲染层；可见范围变化 bump 请求代次，worker 丢弃过期请求）。
+  系统剪贴板互通：`platform::clipboard_files`（CF_HDROP + 剪切标志，与
+  Explorer 互贴；写失败回退应用内路径列表；剪切粘贴生效后按 Explorer 惯例
+  清空系统剪贴板防重复粘贴）。外部拖入：app 侧 `handle_dropped_files` 经
+  `FileManagerView::panel_rect_at` 命中落点栏；行拖出窗口复用
+  `platform::drag_out::do_drag_drop`（OLE HDROP，文件本就在盘上直接拖）。
   **新建文本文件（Shift+F4 / 右键 FILE_PLUS）**：`file_ops::suggest_text_file_name`
   （「新建文本文件.txt」重名 `(2)` 递增，扩展名固定末尾）+ `create_text_file`
   （`create_new(true)` 防竞态覆盖）；确认经 `FmDialogOutcome::ConfirmNewFile` →

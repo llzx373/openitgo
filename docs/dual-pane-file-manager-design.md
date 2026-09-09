@@ -1,6 +1,7 @@
 # 双栏文件管理器（Total Commander 形态）需求与设计文档
 
-> 状态：已实施（一期/二期/三期）。本文档保留需求与设计原貌；实现与设计的出入见文末「实施偏差记录」。
+> 状态：已实施（一期/二期/三期 + 后续 TC 对齐迭代阶段 A–N）。本文档保留需求与设计原貌；
+> 实现与设计的出入见文末「实施偏差记录」与「后续迭代（TC 对齐）实现记录」。
 > 调研基线：`openitgo-app/src/views/archive.rs`（3251 行）、`views/archive_tree.rs`（679 行纯函数）、
 > `app.rs` 视图分发（`View` 枚举 app.rs:670）。
 
@@ -272,11 +273,21 @@ FileOpManager
 pub fm_layout: String,          // "dual" | "single"，默认 "dual"
 pub fm_dual_ratio: f32,         // 0.2–0.8，默认 0.5
 pub fm_preview_open: bool,      // 单栏模式预览开关，默认 true
-pub fm_sort_key: String,        // "name"|"size"|"mtime"
+pub fm_sort_key: String,        // "name"|"size"|"mtime"|"ext"（单值，取活动栏）
 pub fm_sort_asc: bool,
+pub fm_view_mode: String,       // "list"|"thumbs"（单值，取活动栏）
 pub fm_confirm_delete: bool,    // 删除前确认，默认 true
+pub fm_show_hidden: bool,       // 显示隐藏文件，默认 true
 pub fm_dir_left: String,        // 左栏持久化目录（空 = 用户主目录）
 pub fm_dir_right: String,       // 右栏持久化目录
+pub fm_bookmark_groups: Vec<FmBookmarkGroup>, // 书签分组（旧扁平 fm_bookmarks 读取兼容迁移）
+pub fm_tabs_left: Vec<String>,  // 左/右栏标签页目录（活动标签 = 实时目录）
+pub fm_tabs_right: Vec<String>,
+pub fm_active_tab_left: usize,  // 活动标签索引（越界 clamp）
+pub fm_active_tab_right: usize,
+pub fm_col_size_width: f32,     // 大小/时间列宽与列块平移量（全局单值，取活动栏）
+pub fm_col_mtime_width: f32,
+pub fm_col_shift: f32,
 ```
 
 validate/clamp 同现有字段。面板目录在视图关闭/切换时写回；启动加载时目录不存在则
@@ -374,3 +385,31 @@ Archive 视图本身**不改行为**，仅可能因共享代码抽取而被小�
 17. **FS watch 语义**：`notify` 8 非递归监听每栏当前目录，事件去抖 300ms 后
     `refresh()`（保留选中，同 Ctrl+R）；watch 创建失败静默降级为不自动刷新
     （手动 Ctrl+R 仍可用），不报错打扰用户。
+
+## 11. 后续迭代（TC 对齐）实现记录（阶段 A–N）
+
+三期落地后，按 `docs/fm-vs-totalcommander-gaps.md` 差距清单的优先级又完成了 14 个
+迭代阶段（A–N），全部已实施。逐阶段概述（细节以 AGENTS.md「文件管理器」段与
+各阶段 commit 为准）：
+
+| 阶段 | 内容 | 对应差距清单条目 |
+|------|------|------------------|
+| A | 选择增强（`*` 反选 / `+`/`-` 选择组通配 `SelectGroupDialog`、含「仅选文件」变体）、`SortKey::Ext` 扩展名排序、状态栏选中集合计大小 | §五 P0：选择组/反选、扩展名排序、选中总大小 |
+| B | type-ahead 字母定位（`Event::Text` 捕获）、Alt+↓ 目录历史下拉、Ctrl+U 交换两栏、Ctrl+←/→ 目录带给另一栏、Ctrl+\ 根目录 | §五 P0：字母定位、栏间快捷键、历史下拉 |
+| C | 复制进度增强：单文件进度、`OpSpeedMeter` EMA 速度/ETA、暂停/继续 | §五 P1：进度粒度 |
+| D | Ctrl+Q 对面栏快速预览（双栏下非活动栏整栏替换为预览，焦点跟随） | §五 P1：Ctrl+Q |
+| E | Ctrl+B 分支视图（当前目录 + 所有子目录扁平列出，截断上限提示） | §五 P1：分支视图 |
+| F | Ctrl+M 批量重命名（`plan_renames` 纯函数计划 + 实时预览对话框） | §五 P1：批量重命名 |
+| G | 栏内标签页（Ctrl+T/W、Ctrl(+Shift)+Tab；`fm_tabs_*`/`fm_active_tab_*` 持久化） | §五 P1：标签页 |
+| H | 缩略图视图（`ThumbCache` 视图级共享、可见范围代次节流；`fm_view_mode` 持久化） | §五 P1：缩略图 |
+| I | 系统剪贴板互通（CF_HDROP + 剪切标志，写失败回退应用内）+ 外部拖入（`handle_dropped_files`）+ 行拖出窗口（OLE HDROP） | §五 P1：剪贴板/拖放互通 |
+| J | 文件搜索器（Alt+F7：名称通配/大小区间/日期/内容，结果输送到焦点栏分支视图） | §五 P2：搜索器 |
+| K | 执行期冲突逐个询问（`ConflictMode::Ask` 经 `OpEvent::AskConflict` 反向问 UI，含大小/时间快照与「全部应用」） | §五 P2：冲突逐个询问（无缩略图对比） |
+| L | 大小/时间列宽与 col_shift 持久化（`fm_col_*`）+ 名称语义着色（目录 accent / 链接斜体 / 隐藏弱档） | §三 外观：列布局持久化、类型着色 |
+| M | Shift+F4 新建文本文件、Alt+Enter 系统属性、右键「打开方式…」（Windows shell 动词）、面包屑铅笔可编辑路径 | §五 P2：属性/打开方式、新建文件、面包屑编辑 |
+| N | 书签分组（`FmBookmarkGroup`；★ 菜单分组子菜单 + 新建/重命名/删除分组；旧扁平 `fm_bookmarks` 读取兼容迁移） | §五 P2：目录热键表分组 |
+
+原设计文档正文（§1–§10）保留需求与设计原貌不再逐处修订；与现状的出入以本节、
+§10「实施偏差记录」及 AGENTS.md 为准。当前完整键位与设置项清单见 AGENTS.md
+「文件管理器（app 侧）」段；差距清单各条目的实现状态标注见
+`docs/fm-vs-totalcommander-gaps.md` §五。
