@@ -174,6 +174,16 @@ cargo clippy --workspace --all-targets -- -D warnings
   （防环且链接不计）、单项失败跳过、cancel 提前返回已累加值、`verbatim_path`
   包长路径。目录行大小列命中 `dir_sizes` 时以比文件大小弱一档的颜色显示，
   未命中留空。
+  **栏间拖放复制**：文件/目录行（除「..」）改 `click_and_drag` 并
+  `dnd_set_drag_payload(FmDragPayload{sources, src_panel})`，payload 经 egui
+  全局 dnd 状态跨栏传递；`drag_sources` 纯函数——拖选中行带整个选中集，
+  否则仅该行。落点判定**不用** `dnd_drop_zone`，由
+  `FileManagerView::poll_inter_panel_dnd` 手写：拖动中经 `DragAndDrop::payload`
+  取 payload 画「N 项」光标徽标（Area+Foreground），仅双栏接收，悬停另一栏
+  （目录不同）整栏淡底+选中色描边高亮；松开（payload 仍在、primary_released）
+  `DragAndDrop::clear_payload` 后调 `open_copy_move_dialog(Copy)` 走既有确认
+  复制链路（对齐 F19，非无确认直拷）；拖回源栏或两栏同目录忽略。Esc 取消由
+  egui dnd 插件内建处理（清全局 payload，poll 自然返回）。
   **FS watch 自动刷新**：列举就绪（Ready）后 `ensure_watch` 为当前目录
   建非递归 `notify::RecommendedWatcher`（同路径已监听则跳过；失败静默
   降级 None）；回调发 crossbeam 信号 + `wake_ctx.request_repaint()` 唤醒
