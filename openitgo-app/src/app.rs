@@ -424,6 +424,8 @@ pub struct ReaderApp {
     pub startup_reveal_pending: bool,
     /// 隐藏启动后经过的帧数（显示时机判断与超时兜底）。
     pub startup_reveal_frames: u32,
+    /// 显示瞬间的淡入动画已待命（等窗口可见后启动计时）。
+    pub startup_fade_armed: bool,
     /// 显示瞬间开始的淡入动画起点。
     pub startup_fade_started: Option<Instant>,
     /// 上次设置的窗口标题，避免每帧重复发 ViewportCommand。
@@ -532,6 +534,7 @@ impl Default for ReaderApp {
             maximize_restore_sent: false,
             startup_reveal_pending: startup_hidden,
             startup_reveal_frames: 0,
+            startup_fade_armed: false,
             startup_fade_started: None,
             last_window_title: String::new(),
         }
@@ -3785,7 +3788,7 @@ impl ReaderApp {
     }
 
     /// 隐藏启动（配合启动最大化）的窗口：最大化生效且最终尺寸已渲染一帧后
-    /// 再显示，并启动淡入动画；帧数兜底防极端情况下窗口永不显示。
+    /// 再显示，并待命淡入动画；帧数兜底防极端情况下窗口永不显示。
     fn tick_startup_reveal(&mut self, ctx: &egui::Context) {
         if !self.startup_reveal_pending {
             return;
@@ -3796,7 +3799,7 @@ impl ReaderApp {
         let settled = self.window_geometry_validated && self.startup_reveal_frames >= 2;
         if settled || self.startup_reveal_frames > 60 {
             self.startup_reveal_pending = false;
-            self.startup_fade_started = Some(Instant::now());
+            self.startup_fade_armed = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
@@ -3804,14 +3807,26 @@ impl ReaderApp {
 
     /// 启动显示后的短暂淡入：从黑色渐变到透明。显示瞬间的首帧必然是黑
     /// 缓冲（隐藏期间 eframe 按 is_visible=false 跳过 tessellate/paint，
-    /// swapchain 从未绘制过），淡入从黑开始正好把这一帧接进动画里。
+    /// swapchain 从未绘制过）；计时等窗口真正可见、eframe 恢复绘制的
+    /// 第一帧才开始，保证首个呈现的帧是纯黑，与黑缓冲无缝衔接。
     fn paint_startup_fade(&mut self, ctx: &egui::Context) {
         const FADE_SECS: f32 = 0.2;
+        if !self.startup_fade_armed {
+            return;
+        }
         let Some(started) = self.startup_fade_started else {
+            // 发出 Visible 的当帧绘制仍被跳过（is_visible 在帧首采样），
+            // 等 viewport 报告可见后再启动计时。
+            let visible = ctx.input(|i| i.viewport().visible().unwrap_or(true));
+            if visible {
+                self.startup_fade_started = Some(Instant::now());
+            }
+            ctx.request_repaint();
             return;
         };
         let t = started.elapsed().as_secs_f32();
         if t >= FADE_SECS {
+            self.startup_fade_armed = false;
             self.startup_fade_started = None;
             return;
         }
@@ -5587,6 +5602,7 @@ mod tests {
                 maximize_restore_sent: false,
                 startup_reveal_pending: startup_hidden,
                 startup_reveal_frames: 0,
+                startup_fade_armed: false,
                 startup_fade_started: None,
                 last_window_title: String::new(),
             }
