@@ -60,16 +60,11 @@ fn main() -> eframe::Result<()> {
     // request_inner_size，后者对最大化窗口异步 ShowWindow(SW_RESTORE)，
     // 而紧随的 set_maximized 因 winit 内部标志尚未同步成为空操作——
     // 创建期最大化会被稳定撤销。启动最大化由 ReaderApp 在首帧
-    // （monitor 信息就绪后）按 settings.window_maximized 补发。
+    // （monitor 信息就绪后）按 settings.window_maximized 补发，跳变与
+    // surface 重配置由 paint_startup_veil 的黑幕遮罩盖住。
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([w, h])
         .with_clamp_size_to_monitor_size(true);
-    // 启动最大化时先隐藏窗口：最大化过程中 wgpu surface 重配置会黑闪一帧，
-    // 隐藏创建 → 最大化生效并渲染好最终尺寸 → 再显示（ReaderApp 侧兜底），
-    // 显示出来即是最终状态，配淡入动画替代黑闪。
-    if settings.window_maximized {
-        viewport = viewport.with_visible(false);
-    }
     // Transparent backbuffer (macOS only): egui-wgpu then picks
     // CompositeAlphaMode::PreMultiplied and the CAMetalLayer becomes
     // non-opaque, so the video layer below the egui surface (Task 4)

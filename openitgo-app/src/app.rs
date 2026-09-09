@@ -420,13 +420,11 @@ pub struct ReaderApp {
     pub window_geometry_validated: bool,
     /// 启动最大化补救是否已发出（只发一次，失败不与用户对抗）。
     pub maximize_restore_sent: bool,
-    /// 窗口以隐藏方式启动（配合启动最大化），尚未到显示时机。
-    pub startup_reveal_pending: bool,
-    /// 隐藏启动后经过的帧数（显示时机判断与超时兜底）。
-    pub startup_reveal_frames: u32,
-    /// 显示瞬间的淡入动画已待命（等窗口可见后启动计时）。
-    pub startup_fade_armed: bool,
-    /// 显示瞬间开始的淡入动画起点。
+    /// 启动最大化黑幕遮罩是否生效中（paint_startup_veil）。
+    pub startup_veil: bool,
+    /// 黑幕生效后经过的帧数（淡出时机判断与超时兜底）。
+    pub startup_veil_frames: u32,
+    /// 黑幕淡出动画起点（None = 还在不透明遮罩阶段）。
     pub startup_fade_started: Option<Instant>,
     /// 上次设置的窗口标题，避免每帧重复发 ViewportCommand。
     last_window_title: String,
@@ -532,9 +530,8 @@ impl Default for ReaderApp {
             last_window_geometry_flush: None,
             window_geometry_validated: false,
             maximize_restore_sent: false,
-            startup_reveal_pending: startup_hidden,
-            startup_reveal_frames: 0,
-            startup_fade_armed: false,
+            startup_veil: startup_hidden,
+            startup_veil_frames: 0,
             startup_fade_started: None,
             last_window_title: String::new(),
         }
@@ -660,11 +657,10 @@ impl eframe::App for ReaderApp {
         self.maybe_save_fm_state();
         self.tick_reading_stats();
         self.tick_persist_history_bookmarks();
-        self.tick_startup_reveal(&ctx);
         self.maybe_validate_window_geometry(&ctx);
         self.tick_persist_window_geometry(&ctx);
         self.sync_window_title(&ctx);
-        self.paint_startup_fade(&ctx);
+        self.paint_startup_veil(&ctx);
     }
 }
 
@@ -3787,55 +3783,37 @@ impl ReaderApp {
         self.persist_history_bookmarks_if_due(Instant::now(), HISTORY_FLUSH_INTERVAL);
     }
 
-    /// 隐藏启动（配合启动最大化）的窗口：最大化生效且最终尺寸已渲染一帧后
-    /// 再显示，并待命淡入动画；帧数兜底防极端情况下窗口永不显示。
-    fn tick_startup_reveal(&mut self, ctx: &egui::Context) {
-        if !self.startup_reveal_pending {
-            return;
-        }
-        self.startup_reveal_frames += 1;
-        // tick 排在 maybe_validate 之前：validated 置位的下一帧才显示，
-        // 保证显示前最终尺寸的画面已经呈现过一次。
-        let settled = self.window_geometry_validated && self.startup_reveal_frames >= 2;
-        if settled || self.startup_reveal_frames > 60 {
-            self.startup_reveal_pending = false;
-            self.startup_fade_armed = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        }
-    }
-
-    /// 启动显示后的短暂淡入：从黑色渐变到透明。显示瞬间的首帧必然是黑
-    /// 缓冲（隐藏期间 eframe 按 is_visible=false 跳过 tessellate/paint，
-    /// swapchain 从未绘制过）；计时等窗口真正可见、eframe 恢复绘制的
-    /// 第一帧才开始，保证首个呈现的帧是纯黑，与黑缓冲无缝衔接。
-    fn paint_startup_fade(&mut self, ctx: &egui::Context) {
+    /// 启动最大化的遮罩/淡入：从首帧起用不透明黑色盖住整个窗口，遮盖
+    /// 小窗口到最大化的跳变与 wgpu surface 重配置（隐藏创建不可行——
+    /// SW_MAXIMIZE 会强制显示窗口，且隐藏期间 eframe 跳过绘制，
+    /// 显示瞬间必然露出黑缓冲）；几何稳定后 0.2s 淡出。
+    fn paint_startup_veil(&mut self, ctx: &egui::Context) {
         const FADE_SECS: f32 = 0.2;
-        if !self.startup_fade_armed {
+        if !self.startup_veil {
             return;
         }
-        let Some(started) = self.startup_fade_started else {
-            // 发出 Visible 的当帧绘制仍被跳过（is_visible 在帧首采样），
-            // 等 viewport 报告可见后再启动计时。
-            let visible = ctx.input(|i| i.viewport().visible().unwrap_or(true));
-            if visible {
+        self.startup_veil_frames += 1;
+        let alpha = if let Some(started) = self.startup_fade_started {
+            let t = started.elapsed().as_secs_f32();
+            if t >= FADE_SECS {
+                self.startup_veil = false;
+                return;
+            }
+            ((1.0 - t / FADE_SECS) * 255.0) as u8
+        } else {
+            // 窗口全程可见、每帧都在绘制：validated 置位当帧的画面已是
+            // 最终尺寸，即可开始淡出；帧数兜底防黑幕永不揭开。
+            let settled = self.window_geometry_validated && self.startup_veil_frames >= 2;
+            if settled || self.startup_veil_frames > 60 {
                 self.startup_fade_started = Some(Instant::now());
             }
-            ctx.request_repaint();
-            return;
+            255
         };
-        let t = started.elapsed().as_secs_f32();
-        if t >= FADE_SECS {
-            self.startup_fade_armed = false;
-            self.startup_fade_started = None;
-            return;
-        }
-        let alpha = ((1.0 - t / FADE_SECS) * 255.0) as u8;
         let color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, alpha);
         let rect = ctx.viewport_rect();
         ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
-            egui::Id::new("startup_fade"),
+            egui::Id::new("startup_veil"),
         ))
         .rect_filled(rect, 0.0, color);
         ctx.request_repaint();
@@ -5600,9 +5578,8 @@ mod tests {
                 last_window_geometry_flush: None,
                 window_geometry_validated: false,
                 maximize_restore_sent: false,
-                startup_reveal_pending: startup_hidden,
-                startup_reveal_frames: 0,
-                startup_fade_armed: false,
+                startup_veil: startup_hidden,
+                startup_veil_frames: 0,
                 startup_fade_started: None,
                 last_window_title: String::new(),
             }
