@@ -5,6 +5,7 @@ pub mod ebook_toc;
 pub mod file_manager;
 pub mod file_manager_dialog;
 pub mod file_manager_panel;
+pub mod file_manager_rename;
 pub mod file_manager_rows;
 pub mod file_ops;
 pub mod library;

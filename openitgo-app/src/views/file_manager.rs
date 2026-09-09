@@ -12,8 +12,8 @@
 use crate::opener::{AsyncOpener, OpenStatus};
 use crate::views::archive::{format_mtime, human_size};
 use crate::views::file_manager_dialog::{
-    CompressDialog, CopyMoveDialog, DeleteDialog, FmDialog, FmDialogOutcome, NewDirDialog,
-    RenameDialog, SelectGroupDialog,
+    CompressDialog, CopyMoveDialog, DeleteDialog, FmDialog, FmDialogOutcome, MultiRenameDialog,
+    NewDirDialog, RenameDialog, SelectGroupDialog,
 };
 use crate::views::file_manager_panel::{
     fallback_existing_dir, list_drives, FocusMove, FsPanel, PanelLoadState, COL_RIGHT_PAD,
@@ -1544,6 +1544,13 @@ impl FileManagerView {
                     self.dialog = Some(FmDialog::Rename(RenameDialog::new(e.path.clone())));
                     ui.close();
                 }
+                if ui
+                    .button((icons::PENCIL_SIMPLE_LINE, " 批量重命名…"))
+                    .clicked()
+                {
+                    self.open_multi_rename_dialog(idx);
+                    ui.close();
+                }
                 let dual = matches!(self.layout, PanelLayout::Dual { .. });
                 let dest_label = if dual { "另一栏" } else { "当前目录" };
                 if ui
@@ -1680,6 +1687,28 @@ impl FileManagerView {
         self.dialog = Some(FmDialog::Compress(CompressDialog::new(sources, &dest)));
     }
 
+    /// 批量重命名（Ctrl+M）：作用于 op_targets（选中集或焦点项），
+    /// is_dir 从栏内 entries 查（查不到回退磁盘探测）。
+    fn open_multi_rename_dialog(&mut self, idx: usize) {
+        let targets = self.op_targets(idx);
+        if targets.is_empty() {
+            return;
+        }
+        let items: Vec<(PathBuf, bool)> = targets
+            .into_iter()
+            .map(|p| {
+                let is_dir = self.panels[idx]
+                    .entries
+                    .iter()
+                    .find(|e| e.path == p)
+                    .map(|e| e.is_dir)
+                    .unwrap_or_else(|| p.is_dir());
+                (p, is_dir)
+            })
+            .collect();
+        self.dialog = Some(FmDialog::MultiRename(MultiRenameDialog::new(items)));
+    }
+
     /// 栏间拖放复制（仅双栏接收）：行 payload 经 egui 全局 dnd 状态传递，
     /// 拖动中画「N 项」光标徽标；指针悬停另一栏（目录不同）时整栏高亮，
     /// 松开弹出既有「复制到…」确认框（dest = 目标栏当前目录，经
@@ -1810,6 +1839,22 @@ impl FileManagerView {
                 // 记住上次输入（会话内），作用于焦点栏当前可见行。
                 self.select_group_pattern = pattern.clone();
                 self.panels[self.active].apply_pattern_selection(&pattern, select, files_only);
+            }
+            FmDialogOutcome::ConfirmMultiRename { plans } => {
+                let mut failures = Vec::new();
+                for plan in &plans {
+                    match rename_entry(&plan.src, &plan.dst_name) {
+                        Ok(new_path) => self.refresh_panel_of(&new_path),
+                        Err(e) => failures.push(format!("{}: {e}", plan.src.display())),
+                    }
+                }
+                if !failures.is_empty() {
+                    intents.op_error = Some(format!(
+                        "批量重命名完成，{} 项失败:\n{}",
+                        failures.len(),
+                        failures.join("\n")
+                    ));
+                }
             }
         }
     }
@@ -2073,6 +2118,10 @@ impl FileManagerView {
         // Ctrl+B：分支视图开关（当前目录 + 所有子目录文件扁平列出）。
         if mods.command && ui.input(|i| i.key_pressed(egui::Key::B)) {
             self.panels[active].toggle_branch_view();
+        }
+        // Ctrl+M：批量重命名（作用于选中集或焦点项）。
+        if mods.command && ui.input(|i| i.key_pressed(egui::Key::M)) {
+            self.open_multi_rename_dialog(active);
         }
         // Ctrl+Q：双栏 = 开关对面栏快速预览（快览面板恒渲染非活动栏位置，
         // 目标 = 活动栏焦点文件）；单栏 = 切换预览面板（同顶栏「预览」）。

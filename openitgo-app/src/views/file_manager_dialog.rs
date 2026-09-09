@@ -5,7 +5,10 @@
 //! 统一消费。全部 UI 文本中文。
 
 use crate::views::archive::human_size;
-use crate::views::file_ops::{resolve_conflict_name, validate_entry_name, ConflictMode, OpKind};
+use crate::views::file_manager_rename::{plan_renames, CounterRule, RenamePlan, RenameRule};
+use crate::views::file_ops::{
+    resolve_conflict_name, validate_entry_name, verbatim_path, ConflictMode, OpKind,
+};
 use std::path::{Path, PathBuf};
 
 /// 对话框统一入口。
@@ -16,6 +19,7 @@ pub enum FmDialog {
     NewDir(NewDirDialog),
     Compress(CompressDialog),
     SelectGroup(SelectGroupDialog),
+    MultiRename(MultiRenameDialog),
 }
 
 /// 对话框关闭结果（确认携带全部执行参数；取消为 Cancelled）。
@@ -50,6 +54,10 @@ pub enum FmDialogOutcome {
         select: bool,
         files_only: bool,
     },
+    /// 批量重命名确认：仅含可执行（非 skip 且无 error）的计划。
+    ConfirmMultiRename {
+        plans: Vec<RenamePlan>,
+    },
 }
 
 impl FmDialog {
@@ -62,6 +70,7 @@ impl FmDialog {
             FmDialog::NewDir(d) => d.ui(ctx),
             FmDialog::Compress(d) => d.ui(ctx),
             FmDialog::SelectGroup(d) => d.ui(ctx),
+            FmDialog::MultiRename(d) => d.ui(ctx),
         }
     }
 }
@@ -538,6 +547,162 @@ impl SelectGroupDialog {
                         outcome = Some(self.confirm(false));
                     }
                     if ui.button("关闭").clicked() {
+                        outcome = Some(FmDialogOutcome::Cancelled);
+                    }
+                });
+            });
+        if !open {
+            outcome = Some(FmDialogOutcome::Cancelled);
+        }
+        outcome
+    }
+}
+
+/// 批量重命名（Ctrl+M，TC Multi-Rename 简化版）：查找替换 + 计数器 + 模板，
+/// 实时预览全部结果；仅当无任何错误且至少一项可执行时可确认。
+pub struct MultiRenameDialog {
+    /// 待重命名项（路径, 是否目录）。
+    items: Vec<(PathBuf, bool)>,
+    search: String,
+    replace: String,
+    counter_enabled: bool,
+    counter_start: i32,
+    counter_step: i32,
+    counter_pad: usize,
+    template: String,
+}
+
+impl MultiRenameDialog {
+    pub fn new(items: Vec<(PathBuf, bool)>) -> Self {
+        Self {
+            items,
+            search: String::new(),
+            replace: String::new(),
+            counter_enabled: false,
+            counter_start: 1,
+            counter_step: 1,
+            counter_pad: 1,
+            template: "[O][E]".to_string(),
+        }
+    }
+
+    fn rule(&self) -> RenameRule {
+        RenameRule {
+            search: self.search.clone(),
+            replace: self.replace.clone(),
+            counter: self.counter_enabled.then_some(CounterRule {
+                start: self.counter_start,
+                step: self.counter_step,
+                pad: self.counter_pad,
+            }),
+            template: self.template.clone(),
+        }
+    }
+
+    fn ui(&mut self, ctx: &egui::Context) -> Option<FmDialogOutcome> {
+        let mut outcome = None;
+        let mut open = true;
+        egui::Window::new(format!("批量重命名（{} 项）", self.items.len()))
+            .collapsible(false)
+            .resizable(true)
+            .default_size(egui::vec2(520.0, 420.0))
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("查找：");
+                    ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(140.0));
+                    ui.label("替换为：");
+                    ui.add(egui::TextEdit::singleline(&mut self.replace).desired_width(140.0));
+                });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.counter_enabled, "计数器：");
+                    ui.add_enabled(
+                        self.counter_enabled,
+                        egui::DragValue::new(&mut self.counter_start).prefix("起始 "),
+                    );
+                    ui.add_enabled(
+                        self.counter_enabled,
+                        egui::DragValue::new(&mut self.counter_step).prefix("步长 "),
+                    );
+                    ui.add_enabled(
+                        self.counter_enabled,
+                        egui::DragValue::new(&mut self.counter_pad)
+                            .range(0..=8)
+                            .prefix("补零 "),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("模板：");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.template)
+                            .hint_text("[O][E]")
+                            .desired_width(280.0),
+                    );
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "[O] 原名（查找替换后）　[E] 扩展名　[C] 计数器　其余字符原样输出",
+                    )
+                    .weak(),
+                );
+                ui.add_space(4.0);
+
+                let plans = plan_renames(&self.items, &self.rule(), |p| verbatim_path(p).exists());
+                let runnable = plans
+                    .iter()
+                    .filter(|p| !p.skip && p.error.is_none())
+                    .count();
+                let errors = plans.iter().filter(|p| p.error.is_some()).count();
+
+                egui::ScrollArea::vertical()
+                    .id_salt("fm_multi_rename_preview")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Grid::new("fm_multi_rename_grid")
+                            .num_columns(3)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for plan in &plans {
+                                    let old = plan
+                                        .src
+                                        .file_name()
+                                        .map(|s| s.to_string_lossy().to_string())
+                                        .unwrap_or_default();
+                                    ui.label(&old).on_hover_text(plan.src.display().to_string());
+                                    ui.label("→");
+                                    if let Some(err) = &plan.error {
+                                        ui.colored_label(ui.visuals().error_fg_color, err);
+                                    } else if plan.skip {
+                                        ui.label(egui::RichText::new(&plan.dst_name).weak());
+                                    } else {
+                                        ui.label(&plan.dst_name);
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let ok = runnable > 0 && errors == 0;
+                    if errors > 0 {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            format!("{errors} 项存在冲突或非法名称"),
+                        );
+                    }
+                    if ui
+                        .add_enabled(ok, egui::Button::new(format!("重命名 {runnable} 项")))
+                        .clicked()
+                    {
+                        let plans = plans
+                            .into_iter()
+                            .filter(|p| !p.skip && p.error.is_none())
+                            .collect();
+                        outcome = Some(FmDialogOutcome::ConfirmMultiRename { plans });
+                    }
+                    if ui.button("取消").clicked() {
                         outcome = Some(FmDialogOutcome::Cancelled);
                     }
                 });

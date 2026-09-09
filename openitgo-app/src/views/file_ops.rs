@@ -624,7 +624,7 @@ pub(crate) fn dir_size(path: &Path, cancel: &AtomicBool) -> u64 {
 /// verbatim 前缀的原样返回；UNC `\\server\share` 转 `\\?\UNC\server\share`。
 /// 非 Windows 恒等。
 #[cfg(windows)]
-fn verbatim_path(p: &Path) -> PathBuf {
+pub(crate) fn verbatim_path(p: &Path) -> PathBuf {
     let s = p.display().to_string();
     if !p.is_absolute()
         || s.starts_with(r"\\?\")
@@ -640,7 +640,7 @@ fn verbatim_path(p: &Path) -> PathBuf {
 }
 
 #[cfg(not(windows))]
-fn verbatim_path(p: &Path) -> PathBuf {
+pub(crate) fn verbatim_path(p: &Path) -> PathBuf {
     p.to_path_buf()
 }
 
