@@ -420,12 +420,6 @@ pub struct ReaderApp {
     pub window_geometry_validated: bool,
     /// 启动最大化补救是否已发出（只发一次，失败不与用户对抗）。
     pub maximize_restore_sent: bool,
-    /// 启动最大化黑幕遮罩是否生效中（paint_startup_veil）。
-    pub startup_veil: bool,
-    /// 黑幕生效后经过的帧数（淡出时机判断与超时兜底）。
-    pub startup_veil_frames: u32,
-    /// 黑幕淡出动画起点（None = 还在不透明遮罩阶段）。
-    pub startup_fade_started: Option<Instant>,
     /// 上次设置的窗口标题，避免每帧重复发 ViewportCommand。
     last_window_title: String,
 }
@@ -475,7 +469,6 @@ impl Default for ReaderApp {
             settings.fm_sort_asc,
             &settings.fm_bookmarks,
         );
-        let startup_hidden = settings.window_maximized;
         Self {
             current_view: View::Library,
             last_view: View::Library,
@@ -530,9 +523,6 @@ impl Default for ReaderApp {
             last_window_geometry_flush: None,
             window_geometry_validated: false,
             maximize_restore_sent: false,
-            startup_veil: startup_hidden,
-            startup_veil_frames: 0,
-            startup_fade_started: None,
             last_window_title: String::new(),
         }
     }
@@ -660,7 +650,6 @@ impl eframe::App for ReaderApp {
         self.maybe_validate_window_geometry(&ctx);
         self.tick_persist_window_geometry(&ctx);
         self.sync_window_title(&ctx);
-        self.paint_startup_veil(&ctx);
     }
 }
 
@@ -3783,43 +3772,7 @@ impl ReaderApp {
         self.persist_history_bookmarks_if_due(Instant::now(), HISTORY_FLUSH_INTERVAL);
     }
 
-    /// 启动最大化的遮罩/淡入：从首帧起用不透明黑色盖住整个窗口，遮盖
-    /// 小窗口到最大化的跳变与 wgpu surface 重配置（隐藏创建不可行——
-    /// SW_MAXIMIZE 会强制显示窗口，且隐藏期间 eframe 跳过绘制，
-    /// 显示瞬间必然露出黑缓冲）；几何稳定后 0.2s 淡出。
-    fn paint_startup_veil(&mut self, ctx: &egui::Context) {
-        const FADE_SECS: f32 = 0.2;
-        if !self.startup_veil {
-            return;
-        }
-        self.startup_veil_frames += 1;
-        let alpha = if let Some(started) = self.startup_fade_started {
-            let t = started.elapsed().as_secs_f32();
-            if t >= FADE_SECS {
-                self.startup_veil = false;
-                return;
-            }
-            ((1.0 - t / FADE_SECS) * 255.0) as u8
-        } else {
-            // 窗口全程可见、每帧都在绘制：validated 置位当帧的画面已是
-            // 最终尺寸，即可开始淡出；帧数兜底防黑幕永不揭开。
-            let settled = self.window_geometry_validated && self.startup_veil_frames >= 2;
-            if settled || self.startup_veil_frames > 60 {
-                self.startup_fade_started = Some(Instant::now());
-            }
-            255
-        };
-        let color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, alpha);
-        let rect = ctx.viewport_rect();
-        ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::new("startup_veil"),
-        ))
-        .rect_filled(rect, 0.0, color);
-        ctx.request_repaint();
-    }
-
-    /// 首帧（或 monitor 信息就绪后）：先按保存意图补启动最大化，再校验是否屏外。
+    /// 首帧（或 monitor 信息就绪后）：最大化确认与还原矩形修复，再校验是否屏外。
     fn maybe_validate_window_geometry(&mut self, ctx: &egui::Context) {
         if self.window_geometry_validated {
             return;
@@ -3834,10 +3787,11 @@ impl ReaderApp {
         if ms.x < 1.0 || ms.y < 1.0 {
             return;
         }
-        // 启动最大化不在创建期请求（见 main.rs 注释），改在这里补发一次。
-        // 命令当帧末尾才被处理，live 状态要下帧才更新，故发出后先不置
-        // validated，让 tick_persist 等一帧，避免把未生效的 false 落盘
-        // 覆盖保存的 true；只发一次，失败则下帧按现实几何继续。
+        // 兜底：创建期最大化（main.rs，不传 inner_size 使其存活）若因罕见
+        // 竞态丢失，补发一次 Maximized(true)。命令当帧末尾才被处理，live
+        // 状态要下帧才更新，故发出后先不置 validated，让 tick_persist 等
+        // 一帧，避免把未生效的 false 落盘覆盖保存的 true；只发一次，
+        // 失败则下帧按现实几何继续。
         if !fullscreen.unwrap_or(false)
             && self.settings.window_maximized
             && !maximized.unwrap_or(false)
@@ -3849,7 +3803,18 @@ impl ReaderApp {
         }
         self.window_geometry_validated = true;
 
-        if maximized.unwrap_or(false) || fullscreen.unwrap_or(false) {
+        if maximized.unwrap_or(false) {
+            // 方案 A 下窗口的还原矩形是 Windows 默认值；写成保存的几何，
+            // 让首次取消最大化回到记忆中的尺寸/位置（platform::restore_rect）。
+            if self.settings.window_maximized {
+                crate::platform::restore_rect::set_saved_restore_rect(
+                    self.settings.window_size,
+                    self.settings.window_pos,
+                );
+            }
+            return;
+        }
+        if fullscreen.unwrap_or(false) {
             return;
         }
         let Some(outer) = outer else {
@@ -5523,7 +5488,6 @@ mod tests {
                 settings.fm_sort_asc,
                 &settings.fm_bookmarks,
             );
-            let startup_hidden = settings.window_maximized;
             Self {
                 current_view: View::Library,
                 last_view: View::Library,
@@ -5578,9 +5542,6 @@ mod tests {
                 last_window_geometry_flush: None,
                 window_geometry_validated: false,
                 maximize_restore_sent: false,
-                startup_veil: startup_hidden,
-                startup_veil_frames: 0,
-                startup_fade_started: None,
                 last_window_title: String::new(),
             }
         }

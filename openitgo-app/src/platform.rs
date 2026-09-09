@@ -799,7 +799,19 @@ pub mod windows {
     pub mod drag_out;
     pub mod file_assoc;
     pub mod mpv_view;
+    pub mod restore_rect;
 }
+
+/// 还原矩形 stub（非 Windows）：无操作。
+#[cfg(not(target_os = "windows"))]
+pub mod restore_rect {
+    /// 非 Windows 无需设置还原矩形。
+    pub fn set_saved_restore_rect(_size: (f32, f32), _pos: Option<(f32, f32)>) {}
+}
+
+/// Unified restore-rect API (`crate::platform::restore_rect`)。
+#[cfg(target_os = "windows")]
+pub use windows::restore_rect;
 
 /// 文件关联 stub（非 Windows）：类型/静态表与 `windows::file_assoc` 同签名，
 /// 操作一律返回 Err，保证 `crate::platform::file_assoc` 跨平台可用。
