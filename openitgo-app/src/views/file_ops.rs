@@ -1,8 +1,11 @@
-//! 文件操作引擎：复制/移动/删除/压缩的后台执行 + 进度/取消/冲突处理；
+//! 文件操作引擎：复制/移动/删除/压缩的后台执行 + 进度/取消/暂停/冲突处理；
 //! 重命名/新建文件夹为瞬时操作，提供同步 helper。对齐 extract 约定：
-//! 每任务一条后台线程、channel 上报进度、`Arc<AtomicBool>` 取消、
+//! 每任务一条后台线程、channel 上报进度、`Arc<AtomicBool>` 取消与暂停、
 //! 取消清理半成品目标文件（已完整复制/移动的保留并计入进度）、
 //! 单项失败记 `errors` 继续整批、结束汇总上报。
+//! 进度含当前文件内进度（cur_done/cur_total_bytes，分块复制维护，
+//! 节流 100ms）；暂停在块/项边界生效（200ms 轮询，期间可即时取消），
+//! Compress 不支持暂停。
 //!
 //! 冲突语义（一期）：策略由 UI 层操作前一次性确定（见
 //! `file_manager_dialog.rs`），执行期不再询问；执行时遇「扫描后新出现的
@@ -24,9 +27,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-/// 复制块大小（B）：手动分块复制以便块间响应取消并清理半成品。
-const COPY_CHUNK: usize = 128 * 1024;
+/// 复制块大小（B）：手动分块复制以便块间响应取消/暂停并上报文件内进度。
+const COPY_CHUNK: usize = 256 * 1024;
+/// 文件内进度上报节流：距上次发送满此间隔才发（避免 channel 洪泛；
+/// 文件结束经 copy_recursive 的逐项上报兜底）。
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+/// 暂停等待的轮询间隔（期间 cancel 即时生效）。
+const PAUSE_POLL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpKind {
@@ -63,6 +72,11 @@ pub struct OpProgress {
     pub done_bytes: u64,
     pub total_bytes: u64,
     pub current: PathBuf,
+    /// 当前文件内进度（分块复制维护；进入新文件时 done 归零、total 设为
+    /// 该文件大小）。cur_total_bytes=0 = 无文件内进度（目录/删除/rename
+    /// 快速路径），UI 不显示当前文件条。
+    pub cur_done_bytes: u64,
+    pub cur_total_bytes: u64,
 }
 
 impl OpProgress {
@@ -97,6 +111,9 @@ pub struct FileOpTask {
     /// 目标目录（仅复制/移动），完成后刷新用。
     dest_dir: Option<PathBuf>,
     cancel: Arc<AtomicBool>,
+    /// 暂停标志（与 cancel 同模式暴露给 UI；Copy/Move/Delete 在块/项边界
+    /// 生效，Compress 不支持暂停）。
+    paused: Arc<AtomicBool>,
     rx: Receiver<OpEvent>,
 }
 
@@ -115,6 +132,8 @@ pub struct ActiveOp {
     pub id: u64,
     pub kind: OpKind,
     pub progress: OpProgress,
+    /// 暂停态快照（UI 直接读，无需进进度消息）。
+    pub paused: bool,
 }
 
 #[derive(Default)]
@@ -160,7 +179,7 @@ impl FileOpManager {
     /// OpProgress；dest_dir 记 dest_zip 的父目录使完成后栏刷新自动生效）。
     pub fn start_compress(&mut self, sources: Vec<PathBuf>, dest_zip: PathBuf) -> u64 {
         let dest_dir = dest_zip.parent().map(Path::to_path_buf);
-        let (id, cancel, tx) = self.push_task(OpKind::Compress, &sources, dest_dir);
+        let (id, cancel, _paused, tx) = self.push_task(OpKind::Compress, &sources, dest_dir);
         std::thread::spawn(move || {
             run_compress(sources, dest_zip, cancel, tx);
         });
@@ -184,23 +203,24 @@ impl FileOpManager {
         dest_dir: Option<PathBuf>,
         conflict: ConflictMode,
     ) -> u64 {
-        let (id, cancel, tx) = self.push_task(kind, &sources, dest_dir.clone());
+        let (id, cancel, paused, tx) = self.push_task(kind, &sources, dest_dir.clone());
         std::thread::spawn(move || {
-            run_op(kind, sources, dest_dir, conflict, cancel, tx);
+            run_op(kind, sources, dest_dir, conflict, cancel, paused, tx);
         });
         id
     }
 
-    /// 登记任务并返回 (id, cancel, 事件发送端)，由调用方自起工作线程。
+    /// 登记任务并返回 (id, cancel, paused, 事件发送端)，由调用方自起工作线程。
     fn push_task(
         &mut self,
         kind: OpKind,
         sources: &[PathBuf],
         dest_dir: Option<PathBuf>,
-    ) -> (u64, Arc<AtomicBool>, Sender<OpEvent>) {
+    ) -> (u64, Arc<AtomicBool>, Arc<AtomicBool>, Sender<OpEvent>) {
         self.next_id += 1;
         let id = self.next_id;
         let cancel = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
         let mut src_dirs: Vec<PathBuf> = sources
             .iter()
@@ -215,16 +235,24 @@ impl FileOpManager {
             src_dirs,
             dest_dir,
             cancel: cancel.clone(),
+            paused: paused.clone(),
             rx,
         };
         self.tasks.push(task);
-        (id, cancel, tx)
+        (id, cancel, paused, tx)
     }
 
     /// 取消任务：工作线程在下一块/下一项停止并上报 Finished(cancelled)。
     pub fn cancel(&mut self, id: u64) {
         if let Some(task) = self.tasks.iter().find(|t| t.id == id) {
             task.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// 暂停/继续任务（Copy/Move/Delete 在块/项边界生效；Compress 不响应）。
+    pub fn set_paused(&mut self, id: u64, paused: bool) {
+        if let Some(task) = self.tasks.iter().find(|t| t.id == id) {
+            task.paused.store(paused, Ordering::Relaxed);
         }
     }
 
@@ -276,6 +304,7 @@ impl FileOpManager {
             id: t.id,
             kind: t.kind,
             progress: t.progress.clone(),
+            paused: t.paused.load(Ordering::Relaxed),
         });
         summary
     }
@@ -288,10 +317,12 @@ fn run_op(
     dest_dir: Option<PathBuf>,
     conflict: ConflictMode,
     cancel: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     tx: Sender<OpEvent>,
 ) {
     let mut ctx = OpCtx {
         cancel: &cancel,
+        paused: &paused,
         tx: &tx,
         progress: OpProgress::default(),
         errors: Vec::new(),
@@ -310,7 +341,7 @@ fn run_op(
         OpKind::Compress => unreachable!("Compress 走 run_compress"),
         OpKind::Delete => {
             for (i, src) in sources.iter().enumerate() {
-                if ctx.halt() {
+                if ctx.wait_if_paused() {
                     break;
                 }
                 ctx.progress.current = src.clone();
@@ -326,7 +357,7 @@ fn run_op(
         OpKind::Copy | OpKind::Move => {
             let dest_dir = dest_dir.unwrap_or_default();
             for (i, src) in sources.iter().enumerate() {
-                if ctx.halt() {
+                if ctx.wait_if_paused() {
                     break;
                 }
                 let Some(name) = src.file_name() else {
@@ -443,6 +474,7 @@ fn run_compress(
 
 struct OpCtx<'a> {
     cancel: &'a AtomicBool,
+    paused: &'a AtomicBool,
     tx: &'a Sender<OpEvent>,
     progress: OpProgress,
     errors: Vec<(PathBuf, String)>,
@@ -458,6 +490,19 @@ impl OpCtx<'_> {
         } else {
             false
         }
+    }
+
+    /// 块/项边界的暂停等待：暂停期间按 PAUSE_POLL 轮询（不发新进度，
+    /// UI 经 paused 快照显示「已暂停」），cancel 即时生效；返回 true =
+    /// 已取消（语义同 halt，调用方收拢退出）。
+    fn wait_if_paused(&mut self) -> bool {
+        while self.paused.load(Ordering::Relaxed) {
+            if self.halt() {
+                return true;
+            }
+            std::thread::sleep(PAUSE_POLL);
+        }
+        self.halt()
     }
 
     fn send_progress(&mut self) {
@@ -600,16 +645,19 @@ fn verbatim_path(p: &Path) -> PathBuf {
 }
 
 /// 递归复制 src → dst（dst 已按顶层冲突策略消解）：目录建目录并合并进入，
-/// 文件分块复制（块间响应取消，取消时删除半成品目标文件）。
+/// 文件分块复制（块间响应取消/暂停，取消时删除半成品目标文件）。
 /// 返回 Err 仅表示已取消（errors 里已记单项失败）。
 fn copy_recursive(src: &Path, dst: &Path, mode: ConflictMode, ctx: &mut OpCtx) -> Result<(), ()> {
-    if ctx.halt() {
+    if ctx.wait_if_paused() {
         return Err(());
     }
     let is_dir = std::fs::symlink_metadata(verbatim_path(src))
         .map(|m| m.is_dir() && !m.is_symlink())
         .unwrap_or(false);
     if is_dir {
+        // 进入目录：无文件内进度，清零隐藏状态栏当前文件条。
+        ctx.progress.cur_done_bytes = 0;
+        ctx.progress.cur_total_bytes = 0;
         if let Err(e) = std::fs::create_dir_all(verbatim_path(dst)) {
             ctx.errors
                 .push((dst.to_path_buf(), format!("无法创建目录: {e}")));
@@ -662,20 +710,26 @@ enum CopyFail {
     Io(String),
 }
 
-/// 分块复制文件：每块后检查取消；取消时删除半成品目标文件。
+/// 分块复制文件：维护当前文件内进度（cur_done/cur_total_bytes），每块后
+/// 检查暂停/取消并按 PROGRESS_INTERVAL 节流上报（文件结束的上报由
+/// copy_recursive 的逐项进度兜底）；取消时删除半成品目标文件。
 fn copy_file_chunks(src: &Path, dst: &Path, ctx: &mut OpCtx) -> Result<u64, CopyFail> {
     use std::io::{Read, Write};
-    if ctx.halt() {
+    if ctx.wait_if_paused() {
         return Err(CopyFail::Cancelled);
     }
     let mut reader = std::fs::File::open(verbatim_path(src))
         .map_err(|e| CopyFail::Io(format!("无法读取: {e}")))?;
     let mut writer = std::fs::File::create(verbatim_path(dst))
         .map_err(|e| CopyFail::Io(format!("无法创建目标: {e}")))?;
+    // 进入新文件：文件内进度归零并设总量（元数据失败按 0 = 不显示）。
+    ctx.progress.cur_done_bytes = 0;
+    ctx.progress.cur_total_bytes = reader.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut last_send = Instant::now();
     let mut buf = vec![0u8; COPY_CHUNK];
     let mut written = 0u64;
     loop {
-        if ctx.halt() {
+        if ctx.wait_if_paused() {
             drop(writer);
             let _ = std::fs::remove_file(verbatim_path(dst));
             return Err(CopyFail::Cancelled);
@@ -689,6 +743,11 @@ fn copy_file_chunks(src: &Path, dst: &Path, ctx: &mut OpCtx) -> Result<u64, Copy
                     return Err(CopyFail::Io(format!("写入失败: {e}")));
                 }
                 written += n as u64;
+                ctx.progress.cur_done_bytes = written;
+                if last_send.elapsed() >= PROGRESS_INTERVAL {
+                    ctx.send_progress();
+                    last_send = Instant::now();
+                }
             }
             Err(e) => {
                 drop(writer);
@@ -756,6 +815,86 @@ pub fn suggest_folder_name(parent: &Path) -> String {
         }
     }
     base.to_string()
+}
+
+/// 状态栏速度/ETA 估算：对 done_bytes 的增量做指数滑动平均（EMA）。
+/// 纯函数式采样（now 由调用方传入），与 egui 无关，可单测。
+pub struct OpSpeedMeter {
+    /// 上次采样（时间, done_bytes）。
+    last: Option<(Instant, u64)>,
+    /// 平滑速度（B/s）。
+    ema_bps: Option<f64>,
+}
+
+impl OpSpeedMeter {
+    /// 采样最小间隔：过密的样本直接忽略（UI 每帧调用，内部节流）。
+    pub const SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
+    /// EMA 平滑系数。
+    const ALPHA: f64 = 0.3;
+
+    pub fn new() -> Self {
+        Self {
+            last: None,
+            ema_bps: None,
+        }
+    }
+
+    /// 记录一次采样，返回当前平滑速度（B/s）。首样本只记基准返回 None；
+    /// 距上次 < SAMPLE_INTERVAL 忽略（返回既有平滑值）。done 倒退
+    /// （新任务复用等）按 0 速度计。
+    pub fn sample(&mut self, now: Instant, done_bytes: u64) -> Option<f64> {
+        match self.last {
+            None => {
+                self.last = Some((now, done_bytes));
+                None
+            }
+            Some((t, b)) => {
+                let dt = now.duration_since(t);
+                if dt < Self::SAMPLE_INTERVAL {
+                    return self.ema_bps;
+                }
+                let inst = done_bytes.saturating_sub(b) as f64 / dt.as_secs_f64();
+                self.ema_bps = Some(match self.ema_bps {
+                    Some(ema) => Self::ALPHA * inst + (1.0 - Self::ALPHA) * ema,
+                    None => inst,
+                });
+                self.last = Some((now, done_bytes));
+                self.ema_bps
+            }
+        }
+    }
+
+    /// 当前平滑速度（B/s）；尚无有效样本为 None。
+    pub fn speed_bps(&self) -> Option<f64> {
+        self.ema_bps
+    }
+
+    /// ETA（秒）：速度未知/为 0 或已完成时 None。
+    pub fn eta_secs(&self, total_bytes: u64, done_bytes: u64) -> Option<f64> {
+        let speed = self.ema_bps?;
+        if speed <= 0.0 || done_bytes >= total_bytes {
+            return None;
+        }
+        Some((total_bytes - done_bytes) as f64 / speed)
+    }
+}
+
+impl Default for OpSpeedMeter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// ETA 显示格式：「~45s」「~3m05s」「~2h07m」。
+pub fn format_eta(secs: f64) -> String {
+    let s = secs.round().max(0.0) as u64;
+    if s < 60 {
+        format!("~{s}s")
+    } else if s < 3600 {
+        format!("~{}m{:02}s", s / 60, s % 60)
+    } else {
+        format!("~{}h{:02}m", s / 3600, (s % 3600) / 60)
+    }
 }
 
 #[cfg(test)]
@@ -876,7 +1015,15 @@ mod tests {
         cancel: Arc<AtomicBool>,
     ) -> FinishedLike {
         let (tx, rx) = channel();
-        run_op(kind, sources, dest, mode, cancel, tx);
+        run_op(
+            kind,
+            sources,
+            dest,
+            mode,
+            cancel,
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        );
         let mut finished = None;
         while let Ok(ev) = rx.try_recv() {
             if let OpEvent::Finished {
@@ -984,9 +1131,11 @@ mod tests {
         let dst = t.path().join("out.bin");
         // 取消在写入前生效：目标从未创建（不得残留半成品）。
         let cancel = AtomicBool::new(true);
+        let paused = AtomicBool::new(false);
         let (tx, _rx) = channel();
         let mut ctx = OpCtx {
             cancel: &cancel,
+            paused: &paused,
             tx: &tx,
             progress: OpProgress::default(),
             errors: Vec::new(),
@@ -1141,5 +1290,111 @@ mod tests {
             std::fs::read(vp(&deep_dest.join("s.txt"))).unwrap(),
             b"shallow"
         );
+    }
+
+    #[test]
+    fn copy_reports_cur_file_progress() {
+        let t = TempTree::new("curprog");
+        let src = t.path().join("f.bin");
+        write_file(&src, &vec![5u8; COPY_CHUNK + 100]);
+        let dest = t.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let (tx, rx) = channel();
+        run_op(
+            OpKind::Copy,
+            vec![src.clone()],
+            Some(dest.clone()),
+            ConflictMode::Overwrite,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        );
+        let progresses: Vec<OpProgress> = rx
+            .try_iter()
+            .filter_map(|ev| match ev {
+                OpEvent::Progress(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        let size = (COPY_CHUNK + 100) as u64;
+        let last = progresses.last().expect("progress events");
+        // 文件结束时文件内进度满格，总进度同步。
+        assert_eq!(last.cur_total_bytes, size);
+        assert_eq!(last.cur_done_bytes, size);
+        assert_eq!(last.done_bytes, size);
+    }
+
+    #[test]
+    fn paused_worker_waits_then_cancel_exits_immediately() {
+        let t = TempTree::new("pause");
+        let src = t.path().join("big.bin");
+        write_file(&src, &vec![3u8; COPY_CHUNK * 4]);
+        let dest = t.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = channel();
+        let (c2, p2, src2, dest2) = (cancel.clone(), paused.clone(), src.clone(), dest.clone());
+        let handle = std::thread::spawn(move || {
+            run_op(
+                OpKind::Copy,
+                vec![src2],
+                Some(dest2),
+                ConflictMode::Overwrite,
+                c2,
+                p2,
+                tx,
+            );
+        });
+        // 暂停期间：不写目标、不发 Finished（暂停中不发新进度）。
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!dest.join("big.bin").exists());
+        assert!(rx.try_iter().all(|ev| matches!(ev, OpEvent::Progress(_))));
+        // 暂停中取消即时生效：半成品不残留，cancelled 上报。
+        cancel.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+        let cancelled = rx.try_iter().any(|ev| {
+            matches!(
+                ev,
+                OpEvent::Finished {
+                    cancelled: true,
+                    ..
+                }
+            )
+        });
+        assert!(cancelled);
+        assert!(!dest.join("big.bin").exists());
+        assert!(src.exists());
+    }
+
+    #[test]
+    fn speed_meter_ema_and_eta() {
+        let t0 = Instant::now();
+        let mut m = OpSpeedMeter::new();
+        // 首样本只记基准，不产生速度。
+        assert_eq!(m.sample(t0, 0), None);
+        assert_eq!(m.speed_bps(), None);
+        // 过密样本忽略（返回既有平滑值 None）。
+        assert_eq!(m.sample(t0 + Duration::from_millis(100), 500), None);
+        // 满间隔：1MB / 1s = 1MB/s。
+        let s = m.sample(t0 + Duration::from_secs(1), 1_000_000).unwrap();
+        assert!((s - 1_000_000.0).abs() < 1.0);
+        // EMA：第二样本 3MB/s → 0.3*3 + 0.7*1 = 1.6MB/s。
+        let s = m.sample(t0 + Duration::from_secs(2), 4_000_000).unwrap();
+        assert!((s - 1_600_000.0).abs() < 1.0);
+        // ETA：剩余 3.2MB / 1.6MB/s = 2s。
+        let eta = m.eta_secs(7_200_000, 4_000_000).unwrap();
+        assert!((eta - 2.0).abs() < 0.01);
+        // 已完成 → None。
+        assert_eq!(m.eta_secs(4_000_000, 4_000_000), None);
+    }
+
+    #[test]
+    fn format_eta_ranges() {
+        assert_eq!(format_eta(45.0), "~45s");
+        assert_eq!(format_eta(1.9), "~2s");
+        assert_eq!(format_eta(185.0), "~3m05s");
+        assert_eq!(format_eta(7620.0), "~2h07m");
+        assert_eq!(format_eta(-1.0), "~0s");
     }
 }

@@ -21,14 +21,15 @@ use crate::views::file_manager_panel::{
 };
 use crate::views::file_manager_rows::{FsEntry, SortKey};
 use crate::views::file_ops::{
-    create_dir, rename_entry, suggest_folder_name, FileOpManager, FinishedOp, OpKind,
+    create_dir, format_eta, rename_entry, suggest_folder_name, FileOpManager, FinishedOp, OpKind,
+    OpSpeedMeter,
 };
 use crate::views::preview_bytes::{is_previewable_name, load_file_preview, PreviewData};
 use egui_phosphor_icons::{icons, Icon};
 use openitgo_parser::archive::archive_kind;
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 /// 双栏/预览分隔条宽度（pt）。
 const SPLITTER_WIDTH: f32 = 6.0;
@@ -112,6 +113,8 @@ pub struct FileManagerView {
     /// Alt+↓ 的一次性请求：下一帧焦点栏的历史下拉菜单开/关切换
     /// （弹层开关状态在 egui memory，键盘段无法直接触达）。
     history_menu_toggle: bool,
+    /// 状态栏速度/ETA 估算器（任务 id + EMA 采样器；任务切换重置）。
+    op_speed: Option<(u64, OpSpeedMeter)>,
 }
 
 /// 帧内意图：行内交互写入，帧尾统一触发回调（避免回调嵌套借用）。
@@ -237,6 +240,7 @@ impl FileManagerView {
             bookmarks: bookmarks.iter().map(PathBuf::from).collect(),
             select_group_pattern: String::new(),
             history_menu_toggle: false,
+            op_speed: None,
         }
     }
 
@@ -374,12 +378,26 @@ impl FileManagerView {
             self.on_op_finished(finished, &mut intents);
         }
         let active_op = op_summary.active;
+        // 速度/ETA 采样（任务切换重置采样器；暂停期间 done 不变，
+        // EMA 自然衰减归零、速率显示消失）。采样间隔由 meter 内部节流。
+        match (&active_op, &mut self.op_speed) {
+            (Some(op), Some((id, meter))) if *id == op.id => {
+                meter.sample(Instant::now(), op.progress.done_bytes);
+            }
+            (Some(op), _) => {
+                let mut meter = OpSpeedMeter::new();
+                meter.sample(Instant::now(), op.progress.done_bytes);
+                self.op_speed = Some((op.id, meter));
+            }
+            (None, _) => self.op_speed = None,
+        }
 
         self.render_top_bar(ui, &mut intents);
         ui.separator();
 
         // 底栏：当前栏选中/条目统计 + 操作进度。
         let mut cancel_op: Option<u64> = None;
+        let mut toggle_pause: Option<(u64, bool)> = None;
         egui::Panel::bottom("fm_status_bar").show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -417,18 +435,51 @@ impl FileManagerView {
                     ui.label(egui::RichText::new(format!("定位: {buf}")).weak());
                     ui.ctx().request_repaint_after(Duration::from_millis(200));
                 }
-                ui.separator();
-                ui.label(egui::RichText::new("Tab 切换栏 · 双击打开 · 右键菜单").weak());
-                // 活动文件操作：进度条 + 百分比 + 取消按钮。
+                // 操作进行中提示文本让位（状态栏宽度有限）。
+                if active_op.is_none() {
+                    ui.separator();
+                    ui.label(egui::RichText::new("Tab 切换栏 · 双击打开 · 右键菜单").weak());
+                }
+                // 活动文件操作：总进度条 + 当前文件进度 + 速度/ETA +
+                // 暂停/继续 + 取消（进度区加宽，提示文本相应让位）。
                 if let Some(op) = &active_op {
                     ui.separator();
                     let fraction = op.progress.fraction();
                     let pct = (fraction * 100.0).round() as u32;
+                    let bar_text = if op.paused {
+                        format!("{} {pct}%（已暂停）", op.kind.verb())
+                    } else {
+                        format!("{} {pct}%", op.kind.verb())
+                    };
                     ui.add(
                         egui::ProgressBar::new(fraction)
-                            .desired_width(160.0)
-                            .text(format!("{} {pct}%", op.kind.verb())),
+                            .desired_width(200.0)
+                            .text(bar_text),
                     );
+                    // 当前文件内进度（分块复制维护；cur_total=0 不显示）。
+                    if op.progress.cur_total_bytes > 0 {
+                        let cur_pct = (op.progress.cur_done_bytes as f64
+                            / op.progress.cur_total_bytes as f64
+                            * 100.0)
+                            .round() as u32;
+                        ui.label(egui::RichText::new(format!("当前文件 {cur_pct}%")).weak());
+                    }
+                    // 速度 / ETA（EMA 平滑；速度 0 或 ETA<2s 不显示剩余时间）。
+                    if let Some((_, meter)) = &self.op_speed {
+                        if let Some(bps) = meter.speed_bps() {
+                            if bps > 0.0 {
+                                let mut text = format!("{}/s", human_size(bps as u64));
+                                if let Some(eta) =
+                                    meter.eta_secs(op.progress.total_bytes, op.progress.done_bytes)
+                                {
+                                    if eta >= 2.0 {
+                                        text.push_str(&format!(" · 剩余 {}", format_eta(eta)));
+                                    }
+                                }
+                                ui.label(egui::RichText::new(text).weak());
+                            }
+                        }
+                    }
                     let current = op
                         .progress
                         .current
@@ -438,6 +489,22 @@ impl FileManagerView {
                     if !current.is_empty() {
                         ui.label(egui::RichText::new(current).weak())
                             .on_hover_text(op.progress.current.display().to_string());
+                    }
+                    // 暂停/继续（压缩不支持暂停，禁用并说明）。
+                    let pause_label = if op.paused { "继续" } else { "暂停" };
+                    if ui
+                        .add_enabled(
+                            op.kind != OpKind::Compress,
+                            egui::Button::new(pause_label).small(),
+                        )
+                        .on_hover_text(if op.kind == OpKind::Compress {
+                            "压缩不支持暂停"
+                        } else {
+                            ""
+                        })
+                        .clicked()
+                    {
+                        toggle_pause = Some((op.id, !op.paused));
                     }
                     if ui.small_button("取消").clicked() {
                         cancel_op = Some(op.id);
@@ -451,6 +518,9 @@ impl FileManagerView {
         });
         if let Some(id) = cancel_op {
             self.ops.cancel(id);
+        }
+        if let Some((id, paused)) = toggle_pause {
+            self.ops.set_paused(id, paused);
         }
 
         // 中央：双栏 + 可拖分隔条 / 单栏 + 预览占位。
