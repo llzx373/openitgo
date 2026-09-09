@@ -81,6 +81,12 @@ pub struct FmStateSnapshot {
     pub tabs_right: Vec<String>,
     pub active_tab_left: usize,
     pub active_tab_right: usize,
+    /// 大小/时间列宽与列块平移量（≤0，0 = 列块贴右缘）：全局单值取活动栏
+    /// （取舍同 sort_key——双栏各自拖过会不同，持久化活动栏的，恢复时
+    /// 两栏同用）。
+    pub col_size_width: f32,
+    pub col_mtime_width: f32,
+    pub col_shift: f32,
 }
 
 pub struct FileManagerView {
@@ -361,6 +367,9 @@ impl FileManagerView {
             tabs_right: self.panel_tab_dirs(1),
             active_tab_left: self.panels[0].active_tab(),
             active_tab_right: self.panels[1].active_tab(),
+            col_size_width: panel.col_width_size,
+            col_mtime_width: panel.col_width_mtime,
+            col_shift: panel.col_shift,
         }
     }
 
@@ -1621,7 +1630,10 @@ impl FileManagerView {
                             egui::Label::new(egui::RichText::new(entry_icon(e).as_str()).weak())
                                 .selectable(false),
                         );
-                        ui.add(egui::Label::new(&e.name).truncate().selectable(false));
+                        // 语义着色（目录 accent / 链接斜体弱档 / 隐藏弱色 /
+                        // 选中行回退强对比色，见 entry_name_rich_text）。
+                        let name = entry_name_rich_text(&e.name, e, ui.visuals(), selected);
+                        ui.add(egui::Label::new(name).truncate().selectable(false));
                     }
                 }
                 // 右对齐列：与表头/竖线共用 column_layout 锚点直接绘制，天然跟随
@@ -2040,25 +2052,31 @@ impl FileManagerView {
             }
         }
         // 名称：底部两行区，字符量按两行截断（truncate_cell_name），
-        // 像素折行交给 layout wrap；水平居中、超出区域裁剪。
+        // 像素折行交给 layout wrap；水平居中、超出区域裁剪。语义着色与
+        // 明细行共用 entry_name_rich_text（「..」cell 维持现状配色）。
         let name_rect = egui::Rect::from_min_max(
             egui::pos2(rect.left() + 4.0, thumb_rect.bottom() + 4.0),
             egui::pos2(rect.right() - 4.0, rect.bottom() - 2.0),
         );
-        let name = match &entry {
-            None => "..".to_string(),
-            Some(e) => truncate_cell_name(&e.name, 24),
+        let name_text = match &entry {
+            None => {
+                let color = if parent_enabled {
+                    ui.visuals().text_color()
+                } else {
+                    ui.visuals().widgets.noninteractive.fg_stroke.color
+                };
+                egui::RichText::new("..").color(color)
+            }
+            Some(e) => {
+                let truncated = truncate_cell_name(&e.name, 24);
+                entry_name_rich_text(&truncated, e, ui.visuals(), selected)
+            }
         };
-        let text_color = if is_parent && !parent_enabled {
-            ui.visuals().widgets.noninteractive.fg_stroke.color
-        } else {
-            ui.visuals().text_color()
-        };
-        let galley = painter.layout(
-            name,
-            egui::TextStyle::Body.resolve(ui.style()),
-            text_color,
+        let galley = egui::WidgetText::RichText(std::sync::Arc::new(name_text)).into_galley(
+            ui,
+            Some(egui::TextWrapMode::Wrap),
             name_rect.width(),
+            egui::FontSelection::Default,
         );
         painter.with_clip_rect(name_rect).galley(
             egui::pos2(
@@ -2066,7 +2084,7 @@ impl FileManagerView {
                 name_rect.top(),
             ),
             galley,
-            text_color,
+            ui.visuals().text_color(),
         );
 
         // 交互与明细行一致：cell = 栏间拖放的 drag source（「..」不可拖）。
@@ -3132,6 +3150,40 @@ fn breadcrumb_segments(path: &Path) -> Vec<(PathBuf, String)> {
 }
 
 /// 明细列表行的类型图标（按扩展名，大小写不敏感）；目录行恒用 FOLDER。
+/// 名称语义着色（明细行与网格共用；固定规则，不做用户配色）：
+/// 目录 = accent 色（hyperlink_color，主题派生深浅均可读；egui/epaint 无
+/// 字重支持——strong() 仅为更强颜色、未注册 bold 字族，故以 accent 色
+/// 承担目录强调）；符号链接 = 斜体 + 弱一档；隐藏条目 = 弱档 0.6（同
+/// dir_sizes 先例）；普通文件 = 默认文字色。选中行颜色统一回退
+/// text_color()（选中底色上保持对比度——现状选中行即此色；斜体字形
+/// 保留）。颜色全部经 visuals 派生，不硬编码色值。
+fn entry_name_rich_text(
+    name: &str,
+    e: &FsEntry,
+    visuals: &egui::Visuals,
+    selected: bool,
+) -> egui::RichText {
+    let mut text = egui::RichText::new(name);
+    if e.is_symlink {
+        text = text.italics();
+    }
+    let base = if e.is_dir {
+        visuals.hyperlink_color
+    } else if e.is_symlink {
+        visuals.weak_text_color()
+    } else {
+        visuals.text_color()
+    };
+    let color = if selected {
+        visuals.text_color()
+    } else if e.is_hidden {
+        base.gamma_multiply(0.6)
+    } else {
+        base
+    };
+    text.color(color)
+}
+
 fn entry_icon(entry: &FsEntry) -> Icon {
     if entry.is_dir {
         return icons::FOLDER;

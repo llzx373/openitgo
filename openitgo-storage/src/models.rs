@@ -107,6 +107,16 @@ pub struct Settings {
     pub fm_active_tab_left: usize,
     #[serde(default)]
     pub fm_active_tab_right: usize,
+    /// 文件管理器大小/时间列宽与列块平移量（全局单值，恢复时两栏同用；
+    /// 取舍同 fm_sort_key——持久化活动栏的值）。默认值同 panel.rs 的
+    /// SIZE_COL_WIDTH/MTIME_COL_WIDTH/0（storage 不依赖 app，数值硬编码同步）。
+    #[serde(default = "default_fm_col_size_width")]
+    pub fm_col_size_width: f32,
+    #[serde(default = "default_fm_col_mtime_width")]
+    pub fm_col_mtime_width: f32,
+    /// 列块平移量（≤0；0 = 列块贴右缘）。
+    #[serde(default)]
+    pub fm_col_shift: f32,
 }
 
 fn default_chrome_opacity() -> f32 {
@@ -135,6 +145,16 @@ fn default_fm_sort_key() -> String {
 
 fn default_fm_view_mode() -> String {
     "list".to_string()
+}
+
+/// 同 openitgo-app views/file_manager_panel.rs 的 SIZE_COL_WIDTH。
+fn default_fm_col_size_width() -> f32 {
+    90.0
+}
+
+/// 同 openitgo-app views/file_manager_panel.rs 的 MTIME_COL_WIDTH。
+fn default_fm_col_mtime_width() -> f32 {
+    110.0
 }
 
 impl Default for Settings {
@@ -189,6 +209,9 @@ impl Default for Settings {
             fm_tabs_right: Vec::new(),
             fm_active_tab_left: 0,
             fm_active_tab_right: 0,
+            fm_col_size_width: default_fm_col_size_width(),
+            fm_col_mtime_width: default_fm_col_mtime_width(),
+            fm_col_shift: 0.0,
         }
     }
 }
@@ -372,6 +395,13 @@ impl Settings {
             clamp_active_tab(self.fm_tabs_left.len(), self.fm_active_tab_left);
         self.fm_active_tab_right =
             clamp_active_tab(self.fm_tabs_right.len(), self.fm_active_tab_right);
+        // 列宽 clamp 同 panel.rs 的 COL_MIN_WIDTH/COL_MAX_WIDTH；col_shift
+        // ≤0，下限取 -(两列宽之和)（panel.rs drag_column_sep 的 min_shift
+        // 近似——运行时还会按栏宽再 clamp，此处只防脏值）。
+        self.fm_col_size_width = self.fm_col_size_width.clamp(60.0, 400.0);
+        self.fm_col_mtime_width = self.fm_col_mtime_width.clamp(60.0, 400.0);
+        let min_shift = -(self.fm_col_size_width + self.fm_col_mtime_width);
+        self.fm_col_shift = self.fm_col_shift.clamp(min_shift, 0.0);
     }
 }
 
@@ -1006,6 +1036,34 @@ mod tests {
         };
         s.clamp();
         assert_eq!(s.fm_bookmarks, ["C:\\a", "D:\\b"]);
+    }
+
+    #[test]
+    fn test_fm_col_widths_default_and_clamp() {
+        // 旧 settings 无字段：serde default = 现状默认列宽/零平移。
+        let loaded: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(loaded.fm_col_size_width, 90.0);
+        assert_eq!(loaded.fm_col_mtime_width, 110.0);
+        assert_eq!(loaded.fm_col_shift, 0.0);
+
+        let mut s = Settings {
+            fm_col_size_width: 10.0,
+            fm_col_mtime_width: 9999.0,
+            fm_col_shift: -9999.0,
+            ..Default::default()
+        };
+        s.clamp();
+        assert_eq!(s.fm_col_size_width, 60.0);
+        assert_eq!(s.fm_col_mtime_width, 400.0);
+        // 下限 = -(两列宽之和)（clamp 后的 60+400）。
+        assert_eq!(s.fm_col_shift, -460.0);
+
+        let mut s = Settings {
+            fm_col_shift: 50.0,
+            ..Default::default()
+        };
+        s.clamp();
+        assert_eq!(s.fm_col_shift, 0.0, "col_shift ≤ 0");
     }
 
     #[test]

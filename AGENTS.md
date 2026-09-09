@@ -153,7 +153,11 @@ cargo clippy --workspace --all-targets -- -D warnings
   `.` 开头或 Windows FILE_ATTRIBUTE_HIDDEN，行模型过滤不进快照，权威在
   settings，与 confirm_delete 同走 ui() 每帧下发）/`fm_bookmarks`（常用目录
   书签，两栏共享；面包屑星标菜单管理，点击跳转经 `fallback_existing_dir`
-  逐级回退最近存在祖先，与启动恢复 fm_dir_* 共用）；`FileManagerView::snapshot()`
+  逐级回退最近存在祖先，与启动恢复 fm_dir_* 共用）/`fm_col_size_width`/
+  `fm_col_mtime_width`/`fm_col_shift`（大小/时间列宽与列块平移，全局单值
+  取活动栏——同 fm_sort_key 先例；sanitize clamp 列宽 60..=400、shift
+  ≤0 且 ≥ -(两列宽之和)，默认值同 panel.rs SIZE_COL_WIDTH/MTIME_COL_WIDTH/0
+  在 storage 侧硬编码同步）；`FileManagerView::snapshot()`
   采集，`maybe_save_fm_state`（`App::update` 末尾）diff 快照后写回 settings——
   **不自行落盘**，退出时 `on_exit` 统一 `save_settings`（排序只持久化活动栏，
   取舍见 `FmStateSnapshot` 注释）；快照在离开 FileManager 视图时重置。设置页
@@ -180,6 +184,13 @@ cargo clippy --workspace --all-targets -- -D warnings
   （防环且链接不计）、单项失败跳过、cancel 提前返回已累加值、`verbatim_path`
   包长路径。目录行大小列命中 `dir_sizes` 时以比文件大小弱一档的颜色显示，
   未命中留空。
+  **名称语义着色**（明细行与网格共用 `entry_name_rich_text`，固定规则不做
+  用户配色）：目录 = accent 色（`hyperlink_color`；egui 无字重支持，strong()
+  仅为更强颜色，故以 accent 色承担目录强调）、符号链接 = 斜体 + 弱一档、
+  隐藏条目 = 弱档 0.6（同 dir_sizes 先例）、普通文件不变；选中行颜色统一
+  回退 `text_color()`（选中底色上保对比，斜体保留）；「..」行维持现状。
+  颜色全经 visuals 派生不硬编码。网格名称渲染从 `painter.layout` 改为
+  `WidgetText::into_galley`（RichText 携带颜色/斜体进 galley）。
   **栏间拖放复制**：文件/目录行（除「..」）改 `click_and_drag` 并
   `dnd_set_drag_payload(FmDragPayload{sources, src_panel})`，payload 经 egui
   全局 dnd 状态跨栏传递；`drag_sources` 纯函数——拖选中行带整个选中集，

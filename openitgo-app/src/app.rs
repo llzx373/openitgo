@@ -474,6 +474,14 @@ impl Default for ReaderApp {
         for panel in &mut file_manager_view.panels {
             panel.view_mode = fm_view_mode;
         }
+        // 列宽/列块平移全局单值（同 fm_sort_key 先例），恢复时两栏同用；
+        // 值已经 settings clamp 消毒（sanitize 的 min_shift 近似），运行时
+        // 拖分隔线还会按栏宽再 clamp。
+        for panel in &mut file_manager_view.panels {
+            panel.col_width_size = settings.fm_col_size_width;
+            panel.col_width_mtime = settings.fm_col_mtime_width;
+            panel.col_shift = settings.fm_col_shift;
+        }
         Self {
             current_view: View::Library,
             last_view: View::Library,
@@ -3727,6 +3735,9 @@ impl ReaderApp {
         self.settings.fm_tabs_right = snapshot.tabs_right.clone();
         self.settings.fm_active_tab_left = snapshot.active_tab_left;
         self.settings.fm_active_tab_right = snapshot.active_tab_right;
+        self.settings.fm_col_size_width = snapshot.col_size_width;
+        self.settings.fm_col_mtime_width = snapshot.col_mtime_width;
+        self.settings.fm_col_shift = snapshot.col_shift;
         self.last_saved_fm_state = Some(snapshot);
     }
 
@@ -6506,6 +6517,16 @@ mod tests {
         app.file_manager_view.panels[0].navigate_to(tmp.path().to_path_buf());
         app.maybe_save_fm_state();
         assert_eq!(app.settings.fm_dir_left, tmp.path().display().to_string());
+
+        // 拖列宽/列块 → 写回 settings.fm_col_*（取活动栏当前值）。
+        let active = app.file_manager_view.active;
+        app.file_manager_view.panels[active].col_width_size = 120.0;
+        app.file_manager_view.panels[active].col_width_mtime = 150.0;
+        app.file_manager_view.panels[active].col_shift = -30.0;
+        app.maybe_save_fm_state();
+        assert_eq!(app.settings.fm_col_size_width, 120.0);
+        assert_eq!(app.settings.fm_col_mtime_width, 150.0);
+        assert_eq!(app.settings.fm_col_shift, -30.0);
     }
 
     #[test]
