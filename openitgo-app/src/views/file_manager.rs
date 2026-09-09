@@ -25,6 +25,7 @@ use crate::views::file_ops::{
 use crate::views::preview_bytes::{is_previewable_name, load_file_preview, PreviewData};
 use egui_phosphor_icons::{icons, Icon};
 use openitgo_parser::archive::archive_kind;
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -160,6 +161,26 @@ fn column_layout(right: f32, shift: f32, size_w: f32, mtime_w: f32) -> ColumnLay
         size_left,
         mtime_left,
         content_right,
+    }
+}
+
+/// 栏间拖放复制的 payload：行 drag source 设置，经 egui 全局 dnd 状态
+/// 跨栏传递（payload 与 widget Id 无关，栏间 push_id 隔离不影响）。
+#[derive(Debug, Clone)]
+struct FmDragPayload {
+    sources: Vec<PathBuf>,
+    src_panel: usize,
+}
+
+/// 行拖拽的源集合（Explorer 惯例）：被拖行已在选中集内 → 整个选中集
+/// （排序保证确定性），否则仅被拖行自身。「..」上级行不可拖（调用处保证）。
+fn drag_sources(selected: &HashSet<PathBuf>, row_path: &Path) -> Vec<PathBuf> {
+    if selected.contains(row_path) {
+        let mut sources: Vec<PathBuf> = selected.iter().cloned().collect();
+        sources.sort();
+        sources
+    } else {
+        vec![row_path.to_path_buf()]
     }
 }
 
@@ -404,13 +425,16 @@ impl FileManagerView {
         });
         if pressed {
             if let Some(pos) = pos {
-                for (idx, rect) in panel_rects {
+                for (idx, rect) in &panel_rects {
                     if rect.contains(pos) {
-                        self.active = idx;
+                        self.active = *idx;
                     }
                 }
             }
         }
+
+        // 栏间拖放复制：悬停高亮落点栏 + 松开弹「复制到…」确认框 + 拖动徽标。
+        self.poll_inter_panel_dnd(ui, &panel_rects);
 
         self.handle_keyboard(ui, &mut intents, confirm_delete);
         // 「选中即预览」跟随焦点行（键盘/鼠标改动焦点之后统一同步）。
@@ -1047,7 +1071,7 @@ impl FileManagerView {
         let parent_enabled = !at_root;
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), ROW_HEIGHT),
-            egui::Sense::click(),
+            egui::Sense::click_and_drag(),
         );
         // 斑马纹（全局行号，滚动时条纹不闪动）先铺底，再叠加选中/悬停高亮。
         if row.is_multiple_of(2) {
@@ -1156,6 +1180,17 @@ impl FileManagerView {
         // （内容区比行高矮 4pt，会回退光标、行距偏离 show_rows 的假定），
         // 钉回「行底 + item_spacing」。
         ui.advance_cursor_after_rect(rect);
+
+        // 行 = 栏间拖放的 drag source（「..」上级行不可拖）：拖动开始即设置
+        // payload，落点栏判定与 drop 生效在 poll_inter_panel_dnd。
+        // 拖拽与单击互斥由 egui 保证（拖动超过阈值后不产生 clicked）。
+        if let Some(e) = &entry {
+            let sources = drag_sources(&self.panels[idx].selected, &e.path);
+            response.dnd_set_drag_payload(FmDragPayload {
+                sources,
+                src_panel: idx,
+            });
+        }
 
         let mods = ui.input(|i| i.modifiers);
         if response.clicked() {
@@ -1350,6 +1385,65 @@ impl FileManagerView {
         self.dialog = Some(FmDialog::CopyMove(CopyMoveDialog::new(
             kind, sources, &dest,
         )));
+    }
+
+    /// 栏间拖放复制（仅双栏接收）：行 payload 经 egui 全局 dnd 状态传递，
+    /// 拖动中画「N 项」光标徽标；指针悬停另一栏（目录不同）时整栏高亮，
+    /// 松开弹出既有「复制到…」确认框（dest = 目标栏当前目录，经
+    /// open_copy_move_dialog 的既有 dest 计算）。拖到源栏自身或两栏
+    /// 同目录时忽略（不高亮、不响应 drop）。
+    fn poll_inter_panel_dnd(&mut self, ui: &egui::Ui, panel_rects: &[(usize, egui::Rect)]) {
+        let ctx = ui.ctx();
+        let Some(payload) = egui::DragAndDrop::payload::<FmDragPayload>(ctx) else {
+            return;
+        };
+        let pointer_down = ctx.input(|i| i.pointer.primary_down());
+        // 光标跟随徽标（「N 项」）；松开帧 payload 仍在但按键已抬，徽标消失。
+        if pointer_down {
+            if let Some(pos) = ctx.pointer_interact_pos() {
+                egui::Area::new(egui::Id::new("fm-dnd-badge"))
+                    .order(egui::Order::Foreground)
+                    .interactable(false)
+                    .fixed_pos(pos + egui::vec2(14.0, 14.0))
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.label(format!("{} 项", payload.sources.len()));
+                        });
+                    });
+            }
+        }
+        if !matches!(self.layout, PanelLayout::Dual { .. }) {
+            return;
+        }
+        let released = ctx.input(|i| i.pointer.primary_released());
+        let layer = ui.layer_id();
+        let mut drop_sources: Option<Vec<PathBuf>> = None;
+        for &(idx, rect) in panel_rects {
+            if idx == payload.src_panel || !ctx.rect_contains_pointer(layer, rect) {
+                continue;
+            }
+            if self.panels[idx].dir == self.panels[payload.src_panel].dir {
+                continue;
+            }
+            if pointer_down {
+                // 高亮落点栏：active 栏面包屑同款淡底 + 选中色描边。
+                let painter = ui.painter();
+                painter.rect_filled(rect, 0.0, ui.visuals().faint_bg_color);
+                painter.rect_stroke(
+                    rect,
+                    0.0,
+                    egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                    egui::StrokeKind::Inside,
+                );
+            } else if released {
+                drop_sources = Some(payload.sources.clone());
+            }
+        }
+        if let Some(sources) = drop_sources {
+            egui::DragAndDrop::clear_payload(ctx);
+            // 落点恒为 1-src_panel，dest 计算与 F5/菜单「复制到另一栏…」一致。
+            self.open_copy_move_dialog(OpKind::Copy, sources, payload.src_panel);
+        }
     }
 
     /// 删除（确认框已把关或 fm_confirm_delete=false）：预览目标在被删项中
@@ -2000,6 +2094,18 @@ mod tests {
     }
 
     #[test]
+    fn drag_sources_selected_set_or_single_row() {
+        let a = PathBuf::from("/x/a");
+        let b = PathBuf::from("/x/b");
+        let c = PathBuf::from("/x/c");
+        let selected = HashSet::from([b.clone(), a.clone()]);
+        // 拖选中行 → 整个选中集（排序后确定）。
+        assert_eq!(drag_sources(&selected, &a), vec![a.clone(), b.clone()]);
+        // 拖未选中行 → 仅该行自身。
+        assert_eq!(drag_sources(&selected, &c), vec![c.clone()]);
+    }
+
+    #[test]
     fn bookmark_add_dedup_remove_and_snapshot() {
         let mut view = FileManagerView::new("dual", 0.5, false, "name", true, &[]);
         let a = PathBuf::from("/a");
@@ -2198,6 +2304,68 @@ mod tests {
             view.panels[0].last_scroll_offset, left_after,
             "左栏不应跟随右栏滚动"
         );
+    }
+
+    /// 栏间拖放：从左栏拖行到右栏松开 → payload 设置/传递 → 弹既有
+    /// 「复制到…」确认框（不直拷）；拖到源栏自身松开则无事发生。
+    #[test]
+    fn drag_row_to_other_panel_opens_copy_dialog() {
+        let tmp_left = tempfile::tempdir().unwrap();
+        let tmp_right = tempfile::tempdir().unwrap();
+        std::fs::write(tmp_left.path().join("a.txt"), b"x").unwrap();
+        let mut view = FileManagerView::new("dual", 0.5, false, "name", true, &[]);
+        navigate_ready(&mut view.panels[0], tmp_left.path());
+        navigate_ready(&mut view.panels[1], tmp_right.path());
+        let ctx = egui::Context::default();
+        setup_test_fonts(&ctx);
+        let mut t = 0.0;
+        headless_frame(&ctx, &mut view, t, vec![]); // 布局帧
+        let pos = locate_file_row(&ctx, &mut view, &mut t, "a.txt");
+        assert_eq!(view.active, 0, "行定位应落在左栏");
+
+        let button = egui::PointerButton::Primary;
+        let mods = egui::Modifiers::NONE;
+        let press = |pos: egui::Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: mods,
+        };
+        // 按下后移动超过拖拽阈值（6pt）→ drag_started → payload 设置。
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, vec![press(pos, true)]);
+        t += 0.1;
+        let mid = egui::pos2(pos.x + 30.0, pos.y + 10.0);
+        headless_frame(&ctx, &mut view, t, vec![egui::Event::PointerMoved(mid)]);
+        assert!(
+            egui::DragAndDrop::has_payload_of_type::<FmDragPayload>(&ctx),
+            "拖动行应设置 dnd payload"
+        );
+
+        // 拖到右栏松开 → 弹复制确认框，payload 被取走。
+        t += 0.1;
+        let drop_pos = egui::pos2(1000.0, 400.0);
+        headless_frame(
+            &ctx,
+            &mut view,
+            t,
+            vec![egui::Event::PointerMoved(drop_pos), press(drop_pos, false)],
+        );
+        assert!(
+            matches!(view.dialog, Some(FmDialog::CopyMove(_))),
+            "drop 到另一栏应弹「复制到…」确认框"
+        );
+        assert!(!egui::DragAndDrop::has_any_payload(&ctx));
+
+        // 关对话框；再拖到源栏自身松开 → 不弹框。
+        view.dialog = None;
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, vec![press(pos, true)]);
+        t += 0.1;
+        headless_frame(&ctx, &mut view, t, vec![egui::Event::PointerMoved(mid)]);
+        t += 0.1;
+        headless_frame(&ctx, &mut view, t, vec![press(mid, false)]);
+        assert!(view.dialog.is_none(), "拖回源栏不应弹框");
     }
 
     // ---- 预览链路回归（查看预览崩溃）----
