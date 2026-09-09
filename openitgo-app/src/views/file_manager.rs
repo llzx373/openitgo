@@ -32,6 +32,7 @@ use crate::views::file_ops::{
 use crate::views::preview_bytes::{is_previewable_name, load_file_preview, PreviewData};
 use egui_phosphor_icons::{icons, Icon};
 use openitgo_parser::archive::archive_kind;
+use openitgo_storage::models::FmBookmarkGroup;
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -72,8 +73,8 @@ pub struct FmStateSnapshot {
     /// 两栏当前目录（字符串；空 = 用户主目录，跟随 resolve_fm_dir 语义）。
     pub dir_left: String,
     pub dir_right: String,
-    /// 常用目录书签（两栏共享）。
-    pub bookmarks: Vec<String>,
+    /// 常用目录书签分组（两栏共享；空分组保留）。
+    pub bookmark_groups: Vec<FmBookmarkGroup>,
     /// 两栏标签页目录（活动标签 = 实时目录；只存目录路径，选中/焦点/过滤/
     /// 滚动不持久化）与活动标签索引。旧 settings 无此数据时恢复端回退
     /// dir_left/dir_right 的单标签行为。
@@ -130,8 +131,8 @@ pub struct FileManagerView {
     drives_rx: Option<std::sync::mpsc::Receiver<Vec<PathBuf>>>,
     /// 删除前是否弹确认框（settings.fm_confirm_delete 快照，供右键菜单使用）。
     confirm_delete: bool,
-    /// 常用目录书签（两栏共享，权威走快照写回 settings.fm_bookmarks）。
-    bookmarks: Vec<PathBuf>,
+    /// 常用目录书签分组（两栏共享，权威走快照写回 settings.fm_bookmark_groups）。
+    bookmark_groups: Vec<FmBookmarkGroup>,
     /// 「选择组」对话框上次使用的模式（会话内记忆，不落盘）。
     select_group_pattern: String,
     /// Alt+↓ 的一次性请求：下一帧焦点栏的历史下拉菜单开/关切换
@@ -152,6 +153,9 @@ pub struct FileManagerView {
     panel_drop_rects: [Option<egui::Rect>; 2],
     /// 文件搜索对话框（Alt+F7；非模态 egui::Window，worker 关闭即取消）。
     search: SearchDialog,
+    /// 书签分组小对话框（新建/重命名；非模态 egui::Window，同 SelectGroupDialog
+    /// 模式——菜单内联输入与 CloseOnClickOutside 焦点冲突，故走独立窗口）。
+    group_dialog: Option<BookmarkGroupDialog>,
     /// 执行期冲突问答（ConflictMode::Ask「逐个询问」）：待答的 worker 询问
     /// + 弹窗状态；Some 时屏蔽面板键盘（同 self.dialog 机制）。
     pending_conflict: Option<(u64, ConflictDialog)>,
@@ -163,6 +167,34 @@ pub struct FileManagerView {
     breadcrumb_edit_focused: bool,
     /// Enter 后路径不存在：红字提示并保持编辑态（文本变化即清）。
     breadcrumb_edit_error: bool,
+}
+
+/// 书签分组小对话框状态（新建/重命名共用；非模态 egui::Window——菜单内联
+/// 输入与 CloseOnClickOutside 焦点冲突，故走独立窗口）。
+struct BookmarkGroupDialog {
+    /// None = 新建分组；Some(i) = 重命名第 i 组。
+    rename: Option<usize>,
+    name: String,
+    /// 首帧 request_focus 一次性标志（同 SelectGroupDialog 模式）。
+    focused: bool,
+}
+
+impl BookmarkGroupDialog {
+    fn new_create() -> Self {
+        Self {
+            rename: None,
+            name: String::new(),
+            focused: false,
+        }
+    }
+
+    fn new_rename(group: usize, current: &str) -> Self {
+        Self {
+            rename: Some(group),
+            name: current.to_string(),
+            focused: false,
+        }
+    }
 }
 
 /// 帧内意图：行内交互写入，帧尾统一触发回调（避免回调嵌套借用）。
@@ -293,7 +325,7 @@ impl FileManagerView {
         preview_open: bool,
         sort_key: &str,
         sort_asc: bool,
-        bookmarks: &[String],
+        bookmark_groups: &[FmBookmarkGroup],
     ) -> Self {
         let layout = if layout == "single" {
             PanelLayout::Single { preview_open }
@@ -330,7 +362,7 @@ impl FileManagerView {
             drives: None,
             drives_rx: None,
             confirm_delete: true,
-            bookmarks: bookmarks.iter().map(PathBuf::from).collect(),
+            bookmark_groups: bookmark_groups.to_vec(),
             select_group_pattern: String::new(),
             history_menu_toggle: false,
             op_speed: None,
@@ -339,6 +371,7 @@ impl FileManagerView {
             thumb_visible: [None, None],
             panel_drop_rects: [None, None],
             search: SearchDialog::default(),
+            group_dialog: None,
             pending_conflict: None,
             breadcrumb_edit: None,
             breadcrumb_edit_text: String::new(),
@@ -370,11 +403,7 @@ impl FileManagerView {
             view_mode: panel.view_mode.as_setting().to_string(),
             dir_left: self.panels[0].dir.display().to_string(),
             dir_right: self.panels[1].dir.display().to_string(),
-            bookmarks: self
-                .bookmarks
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect(),
+            bookmark_groups: self.bookmark_groups.clone(),
             tabs_left: self.panel_tab_dirs(0),
             tabs_right: self.panel_tab_dirs(1),
             active_tab_left: self.panels[0].active_tab(),
@@ -392,20 +421,66 @@ impl FileManagerView {
             .collect()
     }
 
-    /// 添加书签（两栏共享）；已在列表中时 no-op 返回 false。
-    pub fn add_bookmark(&mut self, dir: &Path) -> bool {
-        if self.bookmarks.iter().any(|b| b == dir) {
+    /// 添加书签到指定分组（两栏共享）；组内已有时 no-op 返回 false。
+    pub fn add_bookmark_to_group(&mut self, group: usize, dir: &Path) -> bool {
+        let Some(g) = self.bookmark_groups.get_mut(group) else {
+            return false;
+        };
+        let item = dir.display().to_string();
+        if g.items.iter().any(|b| Path::new(b) == dir) {
             return false;
         }
-        self.bookmarks.push(dir.to_path_buf());
+        g.items.push(item);
         true
     }
 
-    /// 移除书签；不在列表中返回 false。
-    pub fn remove_bookmark(&mut self, dir: &Path) -> bool {
-        let before = self.bookmarks.len();
-        self.bookmarks.retain(|b| b != dir);
-        self.bookmarks.len() != before
+    /// 移除指定分组内的书签；不在组内返回 false。
+    pub fn remove_bookmark(&mut self, group: usize, dir: &Path) -> bool {
+        let Some(g) = self.bookmark_groups.get_mut(group) else {
+            return false;
+        };
+        let before = g.items.len();
+        g.items.retain(|b| Path::new(b) != dir);
+        g.items.len() != before
+    }
+
+    /// 新建分组；空名/重名 no-op 返回 false。
+    pub fn add_group(&mut self, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() || self.bookmark_groups.iter().any(|g| g.name == name) {
+            return false;
+        }
+        self.bookmark_groups.push(FmBookmarkGroup {
+            name: name.to_string(),
+            items: Vec::new(),
+        });
+        true
+    }
+
+    /// 重命名分组；空名/与他组重名 no-op 返回 false。
+    pub fn rename_group(&mut self, group: usize, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty()
+            || self
+                .bookmark_groups
+                .iter()
+                .enumerate()
+                .any(|(i, g)| i != group && g.name == name)
+        {
+            return false;
+        }
+        let Some(g) = self.bookmark_groups.get_mut(group) else {
+            return false;
+        };
+        g.name = name.to_string();
+        true
+    }
+
+    /// 删除分组（组内书签一并删除；从简无确认，调用点注释说明）。
+    pub fn remove_group(&mut self, group: usize) {
+        if group < self.bookmark_groups.len() {
+            self.bookmark_groups.remove(group);
+        }
     }
 
     /// 设置页改动默认布局/双栏比例时同步到本视图（此时视图休眠）。
@@ -725,6 +800,8 @@ impl FileManagerView {
         self.render_conflict_dialog(ui.ctx());
         // 文件搜索对话框（非模态 egui::Window）。
         self.render_search_dialog(ui.ctx());
+        // 书签分组小对话框（新建/重命名；非模态 egui::Window）。
+        self.render_group_dialog(ui.ctx());
 
         // 帧尾统一外抛回调。
         if intents.back {
@@ -1295,8 +1372,10 @@ impl FileManagerView {
         });
     }
 
-    /// 面包屑上的书签菜单（两栏共享一份）：「添加当前目录」+ 书签列表
-    /// （点击跳转，目录不存在逐级回退最近存在祖先；✕ 移除，菜单不收起）。
+    /// 面包屑上的书签菜单（两栏共享一份）：顶部「添加当前目录 ▸」（分组子菜单，
+    /// 已在组内打勾禁用）+「新建分组…」，下方各分组子菜单（书签点击跳转经
+    /// fallback_existing_dir、✕ 移除不收起菜单；组尾重命名/删除分组）。
+    /// 动作先收集、闭包内统一应用（迭代分组时 self 只能只读借用）。
     fn render_bookmarks_button(&mut self, ui: &mut egui::Ui, idx: usize) {
         let button = egui::Button::new(icons::STAR.as_str()).frame(false);
         let config = egui::containers::menu::MenuConfig::new()
@@ -1306,55 +1385,186 @@ impl FileManagerView {
             .ui(ui, |ui| {
                 ui.set_min_width(280.0);
                 let dir = self.panels[idx].dir.clone();
-                let already = self.bookmarks.iter().any(|b| b == &dir);
-                if ui
-                    .add_enabled(!already, egui::Button::new("添加当前目录"))
-                    .clicked()
-                {
-                    self.add_bookmark(&dir);
-                    ui.close();
+                let mut add_to: Option<usize> = None;
+                let mut open_create = false;
+                let mut open_rename: Option<usize> = None;
+                let mut delete_group: Option<usize> = None;
+                let mut remove_bm: Option<(usize, PathBuf)> = None;
+                let mut jump: Option<PathBuf> = None;
+                egui::containers::menu::SubMenuButton::new("添加当前目录").ui(ui, |ui| {
+                    if self.bookmark_groups.is_empty() {
+                        ui.label(egui::RichText::new("（无分组，请先新建分组）").weak());
+                        return;
+                    }
+                    for (gi, g) in self.bookmark_groups.iter().enumerate() {
+                        let already = g.items.iter().any(|b| Path::new(b) == dir);
+                        let label = if already {
+                            format!("✓ {}", g.name)
+                        } else {
+                            g.name.clone()
+                        };
+                        if ui.add_enabled(!already, egui::Button::new(label)).clicked() {
+                            add_to = Some(gi);
+                        }
+                    }
+                });
+                if ui.button("新建分组…").clicked() {
+                    open_create = true;
                 }
                 ui.separator();
-                if self.bookmarks.is_empty() {
+                if self.bookmark_groups.is_empty() {
                     ui.label(egui::RichText::new("（无书签）").weak());
-                    return;
                 }
-                let mut jump: Option<PathBuf> = None;
-                let mut remove: Option<PathBuf> = None;
-                for bm in &self.bookmarks {
-                    let tip = bm.display().to_string();
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(egui::Button::new(icons::X.as_str()).frame(false).small())
-                            .on_hover_text("移除书签")
-                            .clicked()
-                        {
-                            remove = Some(bm.clone());
+                for (gi, g) in self.bookmark_groups.iter().enumerate() {
+                    egui::containers::menu::SubMenuButton::new(g.name.as_str()).ui(ui, |ui| {
+                        ui.set_min_width(240.0);
+                        if g.items.is_empty() {
+                            ui.label(egui::RichText::new("（空分组）").weak());
                         }
-                        if ui
-                            .add(
-                                egui::Label::new(tip.as_str())
-                                    .truncate()
-                                    .sense(egui::Sense::click()),
-                            )
-                            .on_hover_text(&tip)
-                            .clicked()
-                        {
-                            jump = Some(bm.clone());
+                        for bm in &g.items {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(icons::X.as_str())
+                                                .frame(false)
+                                                .small(),
+                                        )
+                                        .on_hover_text("移除书签")
+                                        .clicked()
+                                    {
+                                        remove_bm = Some((gi, PathBuf::from(bm)));
+                                    }
+                                    if ui
+                                        .add(
+                                            egui::Label::new(bm.as_str())
+                                                .truncate()
+                                                .sense(egui::Sense::click()),
+                                        )
+                                        .on_hover_text(bm)
+                                        .clicked()
+                                    {
+                                        jump = Some(PathBuf::from(bm));
+                                    }
+                                },
+                            );
+                        }
+                        ui.separator();
+                        if ui.button("重命名分组…").clicked() {
+                            open_rename = Some(gi);
+                        }
+                        // 从简无确认：组内书签一并删除。
+                        if ui.button("删除分组").clicked() {
+                            delete_group = Some(gi);
                         }
                     });
                 }
-                if let Some(bm) = remove {
-                    self.remove_bookmark(&bm);
+                // 统一应用收集到的动作。
+                if let Some(gi) = add_to {
+                    self.add_bookmark_to_group(gi, &dir);
+                }
+                if let Some((gi, bm)) = remove_bm {
+                    self.remove_bookmark(gi, &bm);
                 }
                 if let Some(bm) = jump {
                     let target = fallback_existing_dir(bm);
                     self.panels[idx].navigate_to(target);
                     ui.close();
                 }
+                if open_create {
+                    self.group_dialog = Some(BookmarkGroupDialog::new_create());
+                    ui.close();
+                }
+                if let Some(gi) = open_rename {
+                    let current = self.bookmark_groups[gi].name.clone();
+                    self.group_dialog = Some(BookmarkGroupDialog::new_rename(gi, &current));
+                    ui.close();
+                }
+                if let Some(gi) = delete_group {
+                    self.remove_group(gi);
+                    ui.close();
+                }
             })
             .0
             .on_hover_text("常用目录书签");
+    }
+
+    /// 渲染书签分组对话框（新建/重命名共用；非模态 egui::Window，
+    /// 参照 SelectGroupDialog 的 focused/Enter 模式）。
+    fn render_group_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.group_dialog.take() else {
+            return;
+        };
+        let title = if dialog.rename.is_some() {
+            "重命名分组"
+        } else {
+            "新建分组"
+        };
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancelled = false;
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("分组名：");
+                    let response =
+                        ui.add(egui::TextEdit::singleline(&mut dialog.name).desired_width(220.0));
+                    if !dialog.focused {
+                        response.request_focus();
+                        dialog.focused = true;
+                    }
+                    // 单行输入框 Enter 自动失焦。
+                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        confirm = true;
+                    }
+                });
+                let name = dialog.name.trim().to_string();
+                let dup = !name.is_empty()
+                    && self
+                        .bookmark_groups
+                        .iter()
+                        .enumerate()
+                        .any(|(i, g)| Some(i) != dialog.rename && g.name == name);
+                let error = if name.is_empty() {
+                    Some("名称不能为空")
+                } else if dup {
+                    Some("已存在同名分组")
+                } else {
+                    None
+                };
+                if let Some(err) = error {
+                    ui.colored_label(ui.visuals().error_fg_color, err);
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(error.is_none(), egui::Button::new("确定"))
+                        .clicked()
+                    {
+                        confirm = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        cancelled = true;
+                    }
+                });
+            });
+        if confirm {
+            match dialog.rename {
+                Some(i) => {
+                    self.rename_group(i, &dialog.name);
+                }
+                None => {
+                    self.add_group(&dialog.name);
+                }
+            }
+        } else if !cancelled && open {
+            self.group_dialog = Some(dialog);
+        }
     }
 
     /// 列头：名称 / 大小 / 修改时间，整列格可点击切换排序键与升降序，
@@ -2628,8 +2838,8 @@ impl FileManagerView {
     /// Shift+F4 新建文本文件 / F8(Delete) 删除（confirm_delete 时先弹确认框）；
     /// Alt+Enter 焦点项系统属性；Ctrl+C/X/V 剪贴板。
     fn handle_keyboard(&mut self, ui: &egui::Ui, intents: &mut FmIntents, confirm_delete: bool) {
-        // 对话框打开时屏蔽面板键盘（输入归对话框；冲突问答窗同此机制）。
-        if self.dialog.is_some() || self.pending_conflict.is_some() {
+        // 对话框打开时屏蔽面板键盘（输入归对话框；冲突问答窗/分组小窗同此机制）。
+        if self.dialog.is_some() || self.pending_conflict.is_some() || self.group_dialog.is_some() {
             return;
         }
         if ui.ctx().egui_wants_keyboard_input() {
@@ -3401,30 +3611,54 @@ mod tests {
     }
 
     #[test]
-    fn bookmark_add_dedup_remove_and_snapshot() {
+    fn bookmark_groups_add_dedup_remove_and_snapshot() {
         let mut view = FileManagerView::new("dual", 0.5, false, "name", true, &[]);
         let a = PathBuf::from("/a");
         let b = PathBuf::from("/b");
 
-        assert!(view.add_bookmark(&a));
-        assert!(view.add_bookmark(&b));
-        // 去重：重复添加 no-op。
-        assert!(!view.add_bookmark(&a));
-        assert_eq!(
-            view.snapshot().bookmarks,
-            ["/a".to_string(), "/b".to_string()]
-        );
+        // 分组管理：空名/重名 no-op。
+        assert!(!view.add_group("  "));
+        assert!(view.add_group("常用"));
+        assert!(!view.add_group("常用"));
+        assert!(view.add_group("下载"));
 
-        assert!(view.remove_bookmark(&a));
-        assert!(!view.remove_bookmark(&a));
-        assert_eq!(view.snapshot().bookmarks, ["/b".to_string()]);
+        assert!(view.add_bookmark_to_group(0, &a));
+        assert!(view.add_bookmark_to_group(0, &b));
+        // 组内去重：重复添加 no-op；越界组 no-op。
+        assert!(!view.add_bookmark_to_group(0, &a));
+        assert!(!view.add_bookmark_to_group(9, &a));
+        let groups = &view.snapshot().bookmark_groups;
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "常用");
+        assert_eq!(groups[0].items, ["/a".to_string(), "/b".to_string()]);
+        assert!(groups[1].items.is_empty());
+
+        assert!(view.remove_bookmark(0, &a));
+        assert!(!view.remove_bookmark(0, &a));
+        assert_eq!(view.snapshot().bookmark_groups[0].items, ["/b".to_string()]);
+
+        // 重命名（与他组重名拒绝）+ 删除分组。
+        assert!(!view.rename_group(0, "下载"));
+        assert!(view.rename_group(0, "收藏"));
+        assert_eq!(view.snapshot().bookmark_groups[0].name, "收藏");
+        view.remove_group(1);
+        assert_eq!(view.snapshot().bookmark_groups.len(), 1);
     }
 
     #[test]
-    fn snapshot_restores_bookmarks_from_constructor() {
-        let saved = vec!["/a".to_string(), "/b".to_string()];
+    fn snapshot_restores_bookmark_groups_from_constructor() {
+        let saved = vec![
+            FmBookmarkGroup {
+                name: "常用".to_string(),
+                items: vec!["/a".to_string(), "/b".to_string()],
+            },
+            FmBookmarkGroup {
+                name: "空组".to_string(),
+                items: Vec::new(),
+            },
+        ];
         let view = FileManagerView::new("dual", 0.5, false, "name", true, &saved);
-        assert_eq!(view.snapshot().bookmarks, saved);
+        assert_eq!(view.snapshot().bookmark_groups, saved);
     }
 
     // ---- 无头 egui 测试基座：注入输入事件驱动 FileManagerView 真实渲染帧 ----

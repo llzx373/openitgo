@@ -152,9 +152,15 @@ cargo clippy --workspace --all-targets -- -D warnings
   `fm_layout`/`fm_dual_ratio`/`fm_preview_open`/`fm_sort_key`/`fm_sort_asc`/
   `fm_dir_left`/`fm_dir_right`/`fm_confirm_delete`/`fm_show_hidden`（隐藏 =
   `.` 开头或 Windows FILE_ATTRIBUTE_HIDDEN，行模型过滤不进快照，权威在
-  settings，与 confirm_delete 同走 ui() 每帧下发）/`fm_bookmarks`（常用目录
-  书签，两栏共享；面包屑星标菜单管理，点击跳转经 `fallback_existing_dir`
-  逐级回退最近存在祖先，与启动恢复 fm_dir_* 共用）/`fm_col_size_width`/
+  settings，与 confirm_delete 同走 ui() 每帧下发）/`fm_bookmark_groups`
+  （常用目录书签分组 `FmBookmarkGroup{name, items}`，两栏共享；旧扁平
+  `fm_bookmarks` 仅读取兼容——clamp 时非空即并入「常用」组并清空，
+  保存 skip 空 Vec 不再写出；分组空名修「未命名」、组内去重、空组保留。
+  面包屑星标菜单：「添加当前目录 ▸」分组子菜单（已在组内打勾禁用）+
+  「新建分组…」（非模态 egui::Window，菜单内联输入与 CloseOnClickOutside
+  冲突故走独立窗口）+ 各分组 SubMenuButton 子菜单（书签点击跳转经
+  `fallback_existing_dir` 逐级回退最近存在祖先、与启动恢复 fm_dir_* 共用；
+  ✕ 移除、组尾重命名/删除分组——删除从简无确认））/`fm_col_size_width`/
   `fm_col_mtime_width`/`fm_col_shift`（大小/时间列宽与列块平移，全局单值
   取活动栏——同 fm_sort_key 先例；sanitize clamp 列宽 60..=400、shift
   ≤0 且 ≥ -(两列宽之和)，默认值同 panel.rs SIZE_COL_WIDTH/MTIME_COL_WIDTH/0

@@ -467,7 +467,7 @@ impl Default for ReaderApp {
             settings.fm_preview_open,
             &settings.fm_sort_key,
             settings.fm_sort_asc,
-            &settings.fm_bookmarks,
+            &settings.fm_bookmark_groups,
         );
         // 视图模式全局单值（同 fm_sort_key 先例），恢复时两栏同用。
         let fm_view_mode = PanelViewMode::from_setting(&settings.fm_view_mode);
@@ -3730,7 +3730,7 @@ impl ReaderApp {
         self.settings.fm_view_mode = snapshot.view_mode.clone();
         self.settings.fm_dir_left = snapshot.dir_left.clone();
         self.settings.fm_dir_right = snapshot.dir_right.clone();
-        self.settings.fm_bookmarks = snapshot.bookmarks.clone();
+        self.settings.fm_bookmark_groups = snapshot.bookmark_groups.clone();
         self.settings.fm_tabs_left = snapshot.tabs_left.clone();
         self.settings.fm_tabs_right = snapshot.tabs_right.clone();
         self.settings.fm_active_tab_left = snapshot.active_tab_left;
@@ -5537,7 +5537,7 @@ mod tests {
                 settings.fm_preview_open,
                 &settings.fm_sort_key,
                 settings.fm_sort_asc,
-                &settings.fm_bookmarks,
+                &settings.fm_bookmark_groups,
             );
             Self {
                 current_view: View::Library,
@@ -6534,17 +6534,22 @@ mod tests {
         let (mut app, _tmp) = app_with_temp_store();
         app.current_view = View::FileManager;
         app.maybe_save_fm_state();
-        assert!(app.settings.fm_bookmarks.is_empty());
+        assert!(app.settings.fm_bookmark_groups.is_empty());
 
-        // 加书签 → diff 后写回 settings.fm_bookmarks（不自行落盘）。
-        app.file_manager_view.add_bookmark(Path::new("/a"));
+        // 新建分组 + 加书签 → diff 后写回 settings.fm_bookmark_groups（不自行落盘）。
+        assert!(app.file_manager_view.add_group("常用"));
+        assert!(app
+            .file_manager_view
+            .add_bookmark_to_group(0, Path::new("/a")));
         app.maybe_save_fm_state();
-        assert_eq!(app.settings.fm_bookmarks, ["/a".to_string()]);
+        assert_eq!(app.settings.fm_bookmark_groups.len(), 1);
+        assert_eq!(app.settings.fm_bookmark_groups[0].name, "常用");
+        assert_eq!(app.settings.fm_bookmark_groups[0].items, ["/a".to_string()]);
 
         // 移除书签同样经快照 diff 写回。
-        app.file_manager_view.remove_bookmark(Path::new("/a"));
+        assert!(app.file_manager_view.remove_bookmark(0, Path::new("/a")));
         app.maybe_save_fm_state();
-        assert!(app.settings.fm_bookmarks.is_empty());
+        assert!(app.settings.fm_bookmark_groups[0].items.is_empty());
     }
 
     #[test]

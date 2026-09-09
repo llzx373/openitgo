@@ -3,6 +3,16 @@ use openitgo_core::models::{FitMode, ReadingMode};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// 文件管理器常用目录书签分组（两栏共享；空分组保留，用户可能建空组备用）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FmBookmarkGroup {
+    /// 分组名（clamp 时空名修「未命名」）。
+    pub name: String,
+    /// 组内书签目录（clamp 时组内去重、去空串）。
+    pub items: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Settings {
@@ -93,9 +103,13 @@ pub struct Settings {
     pub fm_dir_left: String,
     #[serde(default)]
     pub fm_dir_right: String,
-    /// 文件管理器常用目录书签（两栏共享）。
-    #[serde(default)]
+    /// 旧版扁平常用目录书签：仅作读取兼容（阶段 N 起迁移进
+    /// `fm_bookmark_groups`），clamp 迁移后清空，保存时不再写出。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fm_bookmarks: Vec<String>,
+    /// 常用目录书签分组（两栏共享）。
+    #[serde(default)]
+    pub fm_bookmark_groups: Vec<FmBookmarkGroup>,
     /// 左/右栏标签页目录列表（活动标签 = 当前目录；只存目录路径）。
     /// 空列表（旧 settings 无此字段）= 单标签，恢复回退 fm_dir_left/right。
     #[serde(default)]
@@ -205,6 +219,7 @@ impl Default for Settings {
             fm_dir_left: String::new(),
             fm_dir_right: String::new(),
             fm_bookmarks: Vec::new(),
+            fm_bookmark_groups: Vec::new(),
             fm_tabs_left: Vec::new(),
             fm_tabs_right: Vec::new(),
             fm_active_tab_left: 0,
@@ -388,9 +403,37 @@ impl Settings {
         if !matches!(self.fm_view_mode.as_str(), "list" | "thumbs") {
             self.fm_view_mode = default_fm_view_mode();
         }
-        let mut seen = std::collections::HashSet::new();
-        self.fm_bookmarks
-            .retain(|b| !b.trim().is_empty() && seen.insert(b.clone()));
+        // 旧版扁平书签 → 分组迁移：非空即并入「常用」组（无此组则新建——
+        // 组为空时即「迁移为单个分组」），迁移后清空旧字段（保存时
+        // skip_serializing_if 空 Vec，不再写出）。
+        if !self.fm_bookmarks.is_empty() {
+            let legacy = std::mem::take(&mut self.fm_bookmarks);
+            if let Some(g) = self
+                .fm_bookmark_groups
+                .iter_mut()
+                .find(|g| g.name == "常用")
+            {
+                g.items.extend(legacy);
+            } else {
+                self.fm_bookmark_groups.push(FmBookmarkGroup {
+                    name: "常用".to_string(),
+                    items: legacy,
+                });
+            }
+        }
+        // 分组校验：空名修「未命名」；组内去空串 + 去重；空分组保留（备用）。
+        for group in &mut self.fm_bookmark_groups {
+            let name = group.name.trim();
+            if name.is_empty() {
+                group.name = "未命名".to_string();
+            } else if name.len() != group.name.len() {
+                group.name = name.to_string();
+            }
+            let mut seen = std::collections::HashSet::new();
+            group
+                .items
+                .retain(|b| !b.trim().is_empty() && seen.insert(b.clone()));
+        }
         self.fm_active_tab_left =
             clamp_active_tab(self.fm_tabs_left.len(), self.fm_active_tab_left);
         self.fm_active_tab_right =
@@ -1011,31 +1054,51 @@ mod tests {
     }
 
     #[test]
-    fn test_fm_bookmarks_roundtrip_default_and_sanitize() {
-        let s = Settings {
-            fm_bookmarks: vec!["C:\\a".to_string(), "D:\\b".to_string()],
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&s).unwrap();
-        let loaded: Settings = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.fm_bookmarks, ["C:\\a", "D:\\b"]);
-        assert_eq!(s, loaded);
-
-        let loaded: Settings = serde_json::from_str("{}").unwrap();
+    fn test_fm_bookmark_groups_migration_and_sanitize() {
+        // 旧版扁平书签 → 单个分组「常用」；旧字段清空且保存不再写出。
+        let json = r#"{"fm_bookmarks": ["C:\\a", "D:\\b"]}"#;
+        let mut loaded: Settings = serde_json::from_str(json).unwrap();
+        loaded.clamp();
         assert!(loaded.fm_bookmarks.is_empty());
+        assert_eq!(loaded.fm_bookmark_groups.len(), 1);
+        assert_eq!(loaded.fm_bookmark_groups[0].name, "常用");
+        assert_eq!(loaded.fm_bookmark_groups[0].items, ["C:\\a", "D:\\b"]);
+        let out = serde_json::to_string(&loaded).unwrap();
+        assert!(!out.contains("fm_bookmarks"));
 
+        // 全新 settings：无分组。
+        let loaded: Settings = serde_json::from_str("{}").unwrap();
+        assert!(loaded.fm_bookmark_groups.is_empty());
+
+        // 校验：空名修「未命名」、组内去重去空、空分组保留。
         let mut s = Settings {
-            fm_bookmarks: vec![
-                "C:\\a".to_string(),
-                "  ".to_string(),
-                "C:\\a".to_string(),
-                "D:\\b".to_string(),
-                "D:\\b".to_string(),
+            fm_bookmark_groups: vec![
+                FmBookmarkGroup {
+                    name: "  ".to_string(),
+                    items: vec![
+                        "C:\\a".to_string(),
+                        "  ".to_string(),
+                        "C:\\a".to_string(),
+                        "D:\\b".to_string(),
+                    ],
+                },
+                FmBookmarkGroup {
+                    name: "空组".to_string(),
+                    items: Vec::new(),
+                },
             ],
             ..Default::default()
         };
         s.clamp();
-        assert_eq!(s.fm_bookmarks, ["C:\\a", "D:\\b"]);
+        assert_eq!(s.fm_bookmark_groups[0].name, "未命名");
+        assert_eq!(s.fm_bookmark_groups[0].items, ["C:\\a", "D:\\b"]);
+        assert_eq!(s.fm_bookmark_groups[1].name, "空组");
+        assert!(s.fm_bookmark_groups[1].items.is_empty());
+
+        // 新字段 roundtrip。
+        let json = serde_json::to_string(&s).unwrap();
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, loaded);
     }
 
     #[test]
