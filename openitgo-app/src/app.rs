@@ -418,6 +418,8 @@ pub struct ReaderApp {
     pub last_window_geometry_flush: Option<Instant>,
     /// 是否已做过启动后几何合法性检查（相对当前显示器）。
     pub window_geometry_validated: bool,
+    /// 启动最大化补救的重试次数（上限内每帧补发 Maximized(true)）。
+    pub maximize_restore_retries: u8,
     /// 上次设置的窗口标题，避免每帧重复发 ViewportCommand。
     last_window_title: String,
 }
@@ -520,6 +522,7 @@ impl Default for ReaderApp {
             last_history_flush: None,
             last_window_geometry_flush: None,
             window_geometry_validated: false,
+            maximize_restore_retries: 0,
             last_window_title: String::new(),
         }
     }
@@ -3784,6 +3787,20 @@ impl ReaderApp {
         if ms.x < 1.0 || ms.y < 1.0 {
             return;
         }
+        // 创建期最大化可能因多屏/混合 DPI 等干扰丢失（winit 创建时的
+        // ShowWindow(SW_MAXIMIZE) 并非总能生效）：按保存意图每帧补发
+        // Maximized(true)，确认生效（或重试耗尽）前不置 validated，
+        // 让 tick_persist 等待——否则同帧就会把未生效的 false 落盘，
+        // 覆盖保存的 true，之后每次启动都不再最大化。
+        if !fullscreen.unwrap_or(false)
+            && self.settings.window_maximized
+            && !maximized.unwrap_or(false)
+            && self.maximize_restore_retries < 30
+        {
+            self.maximize_restore_retries += 1;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            return;
+        }
         self.window_geometry_validated = true;
 
         if maximized.unwrap_or(false) || fullscreen.unwrap_or(false) {
@@ -3823,6 +3840,11 @@ impl ReaderApp {
 
     /// 节流把当前非全屏窗口几何合并进 settings 并落盘。
     fn tick_persist_window_geometry(&mut self, ctx: &egui::Context) {
+        // 启动几何未确认前不持久化：补救中的最大化在 live 状态里仍是
+        // false，此刻落盘会把保存的 window_maximized=true 覆盖成 false。
+        if !self.window_geometry_validated {
+            return;
+        }
         let now = Instant::now();
         if self
             .last_window_geometry_flush
@@ -5508,6 +5530,7 @@ mod tests {
                 last_history_flush: None,
                 last_window_geometry_flush: None,
                 window_geometry_validated: false,
+                maximize_restore_retries: 0,
                 last_window_title: String::new(),
             }
         }
