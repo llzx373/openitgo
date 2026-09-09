@@ -7,7 +7,9 @@
 //! （0 = 「..」上级行，1..= 对应 `rows()[i-1]`）。
 
 use crate::opener::{AsyncOpener, OpenStatus};
-use crate::views::file_manager_rows::{is_hidden_name, list_rows, FsEntry, SortKey};
+use crate::views::file_manager_rows::{
+    is_hidden_name, list_rows, select_by_pattern, FsEntry, SortKey,
+};
 use crate::views::file_ops::dir_size;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -579,6 +581,36 @@ impl FsPanel {
         }
     }
 
+    /// 反选当前可见行（不含「..」行；可见性受过滤/隐藏开关影响）。
+    pub fn invert_selection(&mut self) {
+        let row_count = self.rows().len() + 1;
+        for r in 1..row_count {
+            if let Some(path) = self.row_path(r) {
+                if !self.selected.remove(&path) {
+                    self.selected.insert(path);
+                }
+            }
+        }
+    }
+
+    /// 「选择组」通配模式应用（`;` 分隔多模式，`*`/`?`，不区分大小写）：
+    /// select=true 把匹配的可见行加入选中集，false 从选中集移除；
+    /// files_only 只作用于文件。只增删选中，不动焦点/锚点。
+    pub fn apply_pattern_selection(&mut self, pattern: &str, select: bool, files_only: bool) {
+        let rows = self.rows();
+        for row in select_by_pattern(&self.entries, &rows, pattern, files_only) {
+            // rows 是本帧刚取的行模型，entries 未变，索引安全（get 防御）。
+            if let Some(&i) = rows.get(row - 1) {
+                let path = self.entries[i].path.clone();
+                if select {
+                    self.selected.insert(path);
+                } else {
+                    self.selected.remove(&path);
+                }
+            }
+        }
+    }
+
     /// 清空选中与锚点/焦点（Esc 时用）。
     pub fn clear_selection(&mut self) {
         self.selected.clear();
@@ -1053,5 +1085,51 @@ mod tests {
         }
         assert!(matches!(panel.state, PanelLoadState::Ready));
         assert_eq!(panel.watch.as_ref().map(|w| w.path.clone()), Some(sub));
+    }
+
+    /// 反选与「选择组」模式选择：作用于当前可见行（不含「..」行），
+    /// 只改选中集、不动焦点；files_only 排除目录。
+    #[test]
+    fn invert_and_pattern_selection() {
+        let mk = |name: &str, is_dir: bool| FsEntry {
+            name: name.to_string(),
+            path: PathBuf::from(name),
+            is_dir,
+            size: if is_dir { None } else { Some(1) },
+            mtime: None,
+            is_symlink: false,
+            is_hidden: false,
+        };
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        // 名称升序：docs, EP1（目录）, EP2.zip, notes.txt
+        panel.entries = vec![
+            mk("EP2.zip", false),
+            mk("docs", true),
+            mk("notes.txt", false),
+            mk("EP1", true),
+        ];
+        panel.entries_version = 1;
+        panel.state = PanelLoadState::Ready;
+
+        // 全选后反选 = 空；再反选 = 全选。
+        panel.select_all_visible();
+        assert_eq!(panel.selected.len(), 4);
+        panel.invert_selection();
+        assert!(panel.selected.is_empty());
+        panel.invert_selection();
+        assert_eq!(panel.selected.len(), 4);
+
+        // 模式选择（含目录）：EP1 与 EP2.zip。
+        panel.apply_pattern_selection("EP*", true, false);
+        assert!(panel.selected.contains(&PathBuf::from("EP1")));
+        assert!(panel.selected.contains(&PathBuf::from("EP2.zip")));
+        // 模式取消选择（仅文件）：移除 EP2.zip，EP1 目录保留。
+        panel.apply_pattern_selection("EP*", false, true);
+        assert!(panel.selected.contains(&PathBuf::from("EP1")));
+        assert!(!panel.selected.contains(&PathBuf::from("EP2.zip")));
+        // 空 pattern 不动选中集。
+        panel.apply_pattern_selection("", true, false);
+        assert_eq!(panel.selected.len(), 3);
+        assert!(panel.focus.is_none());
     }
 }

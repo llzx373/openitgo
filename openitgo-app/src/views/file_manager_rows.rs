@@ -31,6 +31,81 @@ pub enum SortKey {
     Name,
     Size,
     Mtime,
+    /// 按小写扩展名（无扩展名恒垫底，同 Mtime 的 None 约定），回退 natural_cmp。
+    Ext,
+}
+
+/// 小写扩展名：无 `.`、仅起始 `.`（如 `.env`）或 `.` 结尾 → None。
+fn lower_ext(name: &str) -> Option<String> {
+    let pos = name.rfind('.')?;
+    if pos == 0 {
+        return None;
+    }
+    let ext = &name[pos + 1..];
+    if ext.is_empty() {
+        return None;
+    }
+    Some(ext.to_lowercase())
+}
+
+/// `;` 分隔的多模式通配匹配（TC「选择组」语义）：支持 `*`（任意串）与
+/// `?`（单字符），不区分大小写；空白段忽略，全空 pattern 恒不匹配。
+pub fn wildcard_match(pattern: &str, name: &str) -> bool {
+    let name: Vec<char> = name.to_lowercase().chars().collect();
+    pattern
+        .split(';')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .any(|p| {
+            let pat: Vec<char> = p.to_lowercase().chars().collect();
+            wildcard_segment_match(&pat, &name)
+        })
+}
+
+/// 单段通配匹配（调用方已小写化）：经典星号回溯法。
+fn wildcard_segment_match(pat: &[char], name: &[char]) -> bool {
+    let (mut pi, mut ni) = (0, 0);
+    // 最近一次 `*` 的位置与其时已消费的 name 长度（无 `*` 时 star_p = MAX）。
+    let (mut star_p, mut star_n) = (usize::MAX, 0);
+    while ni < name.len() {
+        if pi < pat.len() && (pat[pi] == '?' || pat[pi] == name[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < pat.len() && pat[pi] == '*' {
+            star_p = pi;
+            star_n = ni;
+            pi += 1;
+        } else if star_p != usize::MAX {
+            // 失配：回溯到最近的 `*`，让它多消费一个字符。
+            pi = star_p + 1;
+            star_n += 1;
+            ni = star_n;
+        } else {
+            return false;
+        }
+    }
+    while pi < pat.len() && pat[pi] == '*' {
+        pi += 1;
+    }
+    pi == pat.len()
+}
+
+/// 「选择组」模式匹配：返回匹配条目的 UI 行索引（1 起，0 = 「..」行）。
+/// rows 为 list_rows 的输出（UI 行索引 = 下标 + 1）；files_only = 只匹配文件。
+pub fn select_by_pattern(
+    entries: &[FsEntry],
+    rows: &[usize],
+    pattern: &str,
+    files_only: bool,
+) -> Vec<usize> {
+    rows.iter()
+        .enumerate()
+        .filter(|(_, &i)| {
+            let e = &entries[i];
+            (!files_only || !e.is_dir) && wildcard_match(pattern, &e.name)
+        })
+        .map(|(r, _)| r + 1)
+        .collect()
 }
 
 /// 数字感知、大小写不敏感的自然排序比较（"EP2" < "EP10"）。
@@ -120,13 +195,24 @@ pub fn list_rows(
                 let core = if asc { core } else { core.reverse() };
                 return core.then_with(|| natural_cmp(&ea.name, &eb.name));
             }
+            SortKey::Ext => {
+                // 无扩展名恒垫底（同 Mtime 的 None 约定）：升降序在键内吸收。
+                let core = match (lower_ext(&ea.name), lower_ext(&eb.name)) {
+                    (Some(x), Some(y)) => x.cmp(&y),
+                    (None, Some(_)) => return Ordering::Greater,
+                    (Some(_), None) => return Ordering::Less,
+                    (None, None) => Ordering::Equal,
+                };
+                let core = if asc { core } else { core.reverse() };
+                return core.then_with(|| natural_cmp(&ea.name, &eb.name));
+            }
         };
         ord.then_with(|| natural_cmp(&ea.name, &eb.name))
     };
     dirs.sort_by(|&a, &b| cmp(a, b));
     files.sort_by(|&a, &b| cmp(a, b));
-    // Mtime 的升降序已在排序键内处理（None 恒垫底），不再整体反转。
-    if !asc && !matches!(sort, SortKey::Mtime) {
+    // Mtime/Ext 的升降序已在排序键内处理（None/无扩展名恒垫底），不再整体反转。
+    if !asc && !matches!(sort, SortKey::Mtime | SortKey::Ext) {
         dirs.reverse();
         files.reverse();
     }
@@ -294,5 +380,97 @@ mod tests {
         ];
         let rows = list_rows(&entries, "photo", SortKey::Name, true, false);
         assert_eq!(names(&entries, &rows), ["photo1.jpg"]);
+    }
+
+    #[test]
+    fn wildcard_match_star_and_question() {
+        assert!(wildcard_match("*.zip", "a.zip"));
+        assert!(wildcard_match("*.zip", "a.ZIP"));
+        assert!(!wildcard_match("*.zip", "a.zip.bak"));
+        assert!(wildcard_match("EP*", "EP2.txt"));
+        assert!(wildcard_match("*", "anything"));
+        assert!(wildcard_match("*", ""));
+        assert!(wildcard_match("vol?.cbz", "vol1.cbz"));
+        assert!(!wildcard_match("vol?.cbz", "vol10.cbz"));
+        assert!(wildcard_match("a*c", "abc"));
+        assert!(wildcard_match("a*c", "ac"));
+        assert!(!wildcard_match("a*c", "abcd"));
+        // 连续星号与首尾星号
+        assert!(wildcard_match("**a**", "banana"));
+        assert!(!wildcard_match("**a**", "xyz"));
+    }
+
+    #[test]
+    fn wildcard_match_multi_pattern_and_case() {
+        assert!(wildcard_match("*.zip;*.rar", "b.rar"));
+        assert!(wildcard_match("*.zip; *.rar", "a.zip"));
+        assert!(wildcard_match("EP*;vol?", "VOL3"));
+        assert!(wildcard_match("*.JPG", "photo.jpg"));
+        // 空白段忽略；全空 pattern 恒不匹配
+        assert!(!wildcard_match(";;", "a.zip"));
+        assert!(!wildcard_match("", "a.zip"));
+        assert!(wildcard_match(";*.zip;", "a.zip"));
+    }
+
+    #[test]
+    fn sort_by_ext_no_ext_always_last() {
+        let entries = vec![
+            entry("noext", false, Some(1), None),
+            entry("b.TXT", false, Some(1), None),
+            entry("a.zip", false, Some(1), None),
+            entry("c.rar", false, Some(1), None),
+        ];
+        // 升序：按扩展名字典序，无扩展名垫底；同扩展名回退 natural_cmp。
+        let rows = list_rows(&entries, "", SortKey::Ext, true, true);
+        assert_eq!(names(&entries, &rows), ["c.rar", "b.TXT", "a.zip", "noext"]);
+        // 降序：扩展名倒序，无扩展名仍垫底。
+        let rows = list_rows(&entries, "", SortKey::Ext, false, true);
+        assert_eq!(names(&entries, &rows), ["a.zip", "b.TXT", "c.rar", "noext"]);
+    }
+
+    #[test]
+    fn sort_by_ext_fallback_and_dotfile() {
+        let entries = vec![
+            entry("b10.zip", false, Some(1), None),
+            entry("b2.zip", false, Some(1), None),
+            entry(".env", false, Some(1), None),
+            entry("trailing.", false, Some(1), None),
+        ];
+        let rows = list_rows(&entries, "", SortKey::Ext, true, true);
+        // 同扩展名按 natural_cmp；`.env`（仅起始点）与 `trailing.`（点结尾）算无扩展名垫底，
+        // 两者并列回退 natural_cmp。
+        assert_eq!(
+            names(&entries, &rows),
+            ["b2.zip", "b10.zip", ".env", "trailing."]
+        );
+    }
+
+    #[test]
+    fn select_by_pattern_returns_ui_row_indices() {
+        let entries = vec![
+            entry("EP1", true, None, None),
+            entry("docs", true, None, None),
+            entry("EP2.zip", false, Some(1), None),
+            entry("notes.txt", false, Some(1), None),
+            entry("ep10.rar", false, Some(1), None),
+        ];
+        // 名称升序：docs, EP1, EP2.zip, ep10.rar, notes.txt
+        let rows = list_rows(&entries, "", SortKey::Name, true, true);
+        assert_eq!(
+            names(&entries, &rows),
+            ["docs", "EP1", "EP2.zip", "ep10.rar", "notes.txt"]
+        );
+        // 含目录：EP1（行 2）、EP2.zip（行 3）、ep10.rar（行 4）
+        let hit = select_by_pattern(&entries, &rows, "EP*", false);
+        assert_eq!(hit, [2, 3, 4]);
+        // 仅文件：去掉 EP1 目录
+        let hit = select_by_pattern(&entries, &rows, "EP*", true);
+        assert_eq!(hit, [3, 4]);
+        // 多模式 + 大小写不敏感
+        let hit = select_by_pattern(&entries, &rows, "*.ZIP;*.txt", false);
+        assert_eq!(hit, [3, 5]);
+        // 无匹配 / 空 pattern
+        assert!(select_by_pattern(&entries, &rows, "*.7z", false).is_empty());
+        assert!(select_by_pattern(&entries, &rows, "  ", false).is_empty());
     }
 }

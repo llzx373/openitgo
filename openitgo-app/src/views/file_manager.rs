@@ -13,7 +13,7 @@ use crate::opener::{AsyncOpener, OpenStatus};
 use crate::views::archive::{format_mtime, human_size};
 use crate::views::file_manager_dialog::{
     CompressDialog, CopyMoveDialog, DeleteDialog, FmDialog, FmDialogOutcome, NewDirDialog,
-    RenameDialog,
+    RenameDialog, SelectGroupDialog,
 };
 use crate::views::file_manager_panel::{
     fallback_existing_dir, list_drives, FocusMove, FsPanel, PanelLoadState, COL_RIGHT_PAD,
@@ -56,7 +56,7 @@ pub struct FmStateSnapshot {
     pub ratio: f32,
     /// 单栏预览面板开关（Dual 期间取切双栏前保存的开关）。
     pub preview_open: bool,
-    /// 排序键 "name"|"size"|"mtime"：取活动栏（取舍：双栏各自排序可能不同，
+    /// 排序键 "name"|"size"|"mtime"|"ext"：取活动栏（取舍：双栏各自排序可能不同，
     /// settings 只有单值，持久化活动栏的排序）。
     pub sort_key: String,
     pub sort_asc: bool,
@@ -107,6 +107,8 @@ pub struct FileManagerView {
     confirm_delete: bool,
     /// 常用目录书签（两栏共享，权威走快照写回 settings.fm_bookmarks）。
     bookmarks: Vec<PathBuf>,
+    /// 「选择组」对话框上次使用的模式（会话内记忆，不落盘）。
+    select_group_pattern: String,
 }
 
 /// 帧内意图：行内交互写入，帧尾统一触发回调（避免回调嵌套借用）。
@@ -203,6 +205,7 @@ impl FileManagerView {
         let sort = match sort_key {
             "size" => SortKey::Size,
             "mtime" => SortKey::Mtime,
+            "ext" => SortKey::Ext,
             _ => SortKey::Name,
         };
         Self {
@@ -229,6 +232,7 @@ impl FileManagerView {
             drives_rx: None,
             confirm_delete: true,
             bookmarks: bookmarks.iter().map(PathBuf::from).collect(),
+            select_group_pattern: String::new(),
         }
     }
 
@@ -244,6 +248,7 @@ impl FileManagerView {
             SortKey::Name => "name",
             SortKey::Size => "size",
             SortKey::Mtime => "mtime",
+            SortKey::Ext => "ext",
         };
         FmStateSnapshot {
             layout: layout.to_string(),
@@ -379,8 +384,27 @@ impl FileManagerView {
                 let selected = panel.selected.len();
                 ui.label(format!("共 {total} 项"));
                 if selected > 0 {
+                    // 选中集总大小：文件直接求和；目录仅计入「计算大小」已缓存
+                    // 的值，未命中不触发计算（0 字节选中集不显示，避免误导）。
+                    let total_size: u64 = panel
+                        .entries
+                        .iter()
+                        .filter(|e| panel.selected.contains(&e.path))
+                        .map(|e| {
+                            if e.is_dir {
+                                panel.dir_sizes.get(&e.path).copied().unwrap_or(0)
+                            } else {
+                                e.size.unwrap_or(0)
+                            }
+                        })
+                        .sum();
                     ui.separator();
-                    ui.label(format!("已选 {selected} 项"));
+                    let label = if total_size > 0 {
+                        format!("已选 {selected} 项 · 合计 {}", human_size(total_size))
+                    } else {
+                        format!("已选 {selected} 项")
+                    };
+                    ui.label(label);
                 }
                 ui.separator();
                 ui.label(egui::RichText::new("Tab 切换栏 · 双击打开 · 右键菜单").weak());
@@ -897,11 +921,17 @@ impl FileManagerView {
             header_rect.max,
         );
         // (列 rect, 排序键, 标题, 文字锚点 x, 对齐方式)
+        // 扩展名排序时名称列头显示「扩展名」（扩展名没有独立列，TC 同款约定）。
+        let name_label = if panel.sort_key == SortKey::Ext {
+            "扩展名"
+        } else {
+            "名称"
+        };
         let cols: [(egui::Rect, SortKey, &str, f32, egui::Align2); 3] = [
             (
                 name_rect,
                 SortKey::Name,
-                "名称",
+                name_label,
                 header_rect.left() + NAME_HEADER_INDENT,
                 egui::Align2::LEFT_CENTER,
             ),
@@ -931,10 +961,41 @@ impl FileManagerView {
             if response.clicked() {
                 clicked = Some(key);
             }
+            // 名称列头右键：排序键/升降序菜单（整格左击逻辑不变）。
+            if key == SortKey::Name {
+                response.context_menu(|ui| {
+                    for (k, menu_label) in [
+                        (SortKey::Name, "名称"),
+                        (SortKey::Ext, "扩展名"),
+                        (SortKey::Size, "大小"),
+                        (SortKey::Mtime, "修改时间"),
+                    ] {
+                        if ui
+                            .selectable_label(panel.sort_key == k, menu_label)
+                            .clicked()
+                        {
+                            panel.toggle_sort(k);
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    if ui.selectable_label(panel.sort_asc, "升序").clicked() {
+                        panel.sort_asc = true;
+                        ui.close();
+                    }
+                    if ui.selectable_label(!panel.sort_asc, "降序").clicked() {
+                        panel.sort_asc = false;
+                        ui.close();
+                    }
+                });
+            }
             if response.hovered() {
                 painter.rect_filled(rect, 0.0, ui.visuals().widgets.hovered.bg_fill);
             }
-            let arrow = if panel.sort_key == key {
+            // 扩展名排序的箭头画在名称列（扩展名借用名称列头，见 name_label）。
+            let arrow = if panel.sort_key == key
+                || (key == SortKey::Name && panel.sort_key == SortKey::Ext)
+            {
                 if panel.sort_asc {
                     " ▲"
                 } else {
@@ -1537,6 +1598,15 @@ impl FileManagerView {
                 Ok(new_path) => self.refresh_panel_of(&new_path),
                 Err(e) => intents.op_error = Some(e),
             },
+            FmDialogOutcome::SelectGroup {
+                pattern,
+                select,
+                files_only,
+            } => {
+                // 记住上次输入（会话内），作用于焦点栏当前可见行。
+                self.select_group_pattern = pattern.clone();
+                self.panels[self.active].apply_pattern_selection(&pattern, select, files_only);
+            }
         }
     }
 
@@ -1600,7 +1670,7 @@ impl FileManagerView {
     /// Shift+↑/↓ 从 anchor 扩选、Ctrl+↑/↓ 只移焦点、Home/End 跳首/末行、
     /// PgUp/PgDn 整页步进、Enter 打开焦点行、空格计算焦点目录大小、
     /// Backspace 上级、Ctrl+A 全选可见、Ctrl+R 刷新、Alt+←/→ 导航历史、
-    /// Esc 清过滤或清空选中。
+    /// `*` 反选、`+`/`-` 弹「选择组」对话框、Esc 清过滤或清空选中。
     /// 过滤框等文本输入占用键盘时不处理。
     /// 文件操作键：F2 重命名 / F5 复制 / F6 移动 / F7 新建文件夹 /
     /// F8(Delete) 删除（confirm_delete 时先弹确认框）；Ctrl+C/X/V 剪贴板。
@@ -1705,6 +1775,38 @@ impl FileManagerView {
         }
         if mods.command && ui.input(|i| i.key_pressed(egui::Key::A)) {
             self.panels[active].select_all_visible();
+        }
+        // `*` 反选 / `+`「选择组」对话框 / `-` 同框预置取消选择（TC 语义）。
+        // egui 0.35 的 Key 枚举没有小键盘乘/加/减键，主键盘 `*` 又是 Shift+8，
+        // 统一用 Event::Text 捕获——文本事件只在无控件占用键盘时产生
+        // （上面 egui_wants_keyboard_input 已挡掉过滤框/对话框输入）。
+        let (star, plus, minus) = ui.input(|i| {
+            i.events
+                .iter()
+                .fold((false, false, false), |(s, p, m), e| match e {
+                    egui::Event::Text(t) => match t.as_str() {
+                        "*" => (true, p, m),
+                        "+" => (s, true, m),
+                        "-" => (s, p, true),
+                        _ => (s, p, m),
+                    },
+                    _ => (s, p, m),
+                })
+        });
+        if star {
+            self.panels[active].invert_selection();
+        }
+        if plus {
+            self.dialog = Some(FmDialog::SelectGroup(SelectGroupDialog::new(
+                self.select_group_pattern.clone(),
+                false,
+            )));
+        }
+        if minus {
+            self.dialog = Some(FmDialog::SelectGroup(SelectGroupDialog::new(
+                self.select_group_pattern.clone(),
+                true,
+            )));
         }
         if mods.command && ui.input(|i| i.key_pressed(egui::Key::R)) {
             self.panels[active].refresh();

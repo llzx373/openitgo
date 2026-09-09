@@ -184,3 +184,15 @@ fn test_settings_fm_fields_roundtrip() {
     let loaded = store.load_settings().unwrap();
     assert_eq!(settings, loaded);
 }
+
+#[test]
+fn test_settings_fm_sort_key_ext() {
+    // ext 排序键（扩展名）：validate/clamp 均视为合法值，不回退 name。
+    let mut s = Settings {
+        fm_sort_key: "ext".to_string(),
+        ..Default::default()
+    };
+    assert!(s.validate().is_ok());
+    s.clamp();
+    assert_eq!(s.fm_sort_key, "ext");
+}

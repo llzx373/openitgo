@@ -1,7 +1,8 @@
 //! 文件管理器操作对话框：复制/移动确认、删除确认（防误删 + 「不再询问」）、
-//! 重命名、新建文件夹。对齐 `extract_dialog.rs` 模式：状态 struct + 每帧
-//! `ui(ctx)`，`None` = 仍开着，`Some(FmDialogOutcome)` = 本帧关闭
-//! （确认或取消），由 FileManagerView 统一消费。全部 UI 文本中文。
+//! 重命名、新建文件夹、选择组（通配模式选择/取消选择）。对齐
+//! `extract_dialog.rs` 模式：状态 struct + 每帧 `ui(ctx)`，`None` = 仍开着，
+//! `Some(FmDialogOutcome)` = 本帧关闭（确认或取消），由 FileManagerView
+//! 统一消费。全部 UI 文本中文。
 
 use crate::views::archive::human_size;
 use crate::views::file_ops::{resolve_conflict_name, validate_entry_name, ConflictMode, OpKind};
@@ -14,6 +15,7 @@ pub enum FmDialog {
     Rename(RenameDialog),
     NewDir(NewDirDialog),
     Compress(CompressDialog),
+    SelectGroup(SelectGroupDialog),
 }
 
 /// 对话框关闭结果（确认携带全部执行参数；取消为 Cancelled）。
@@ -42,6 +44,12 @@ pub enum FmDialogOutcome {
         sources: Vec<PathBuf>,
         dest_zip: PathBuf,
     },
+    /// 「选择组」确认：通配模式 + 方向（select=true 选择 / false 取消选择）。
+    SelectGroup {
+        pattern: String,
+        select: bool,
+        files_only: bool,
+    },
 }
 
 impl FmDialog {
@@ -53,6 +61,7 @@ impl FmDialog {
             FmDialog::Rename(d) => d.ui(ctx),
             FmDialog::NewDir(d) => d.ui(ctx),
             FmDialog::Compress(d) => d.ui(ctx),
+            FmDialog::SelectGroup(d) => d.ui(ctx),
         }
     }
 }
@@ -462,4 +471,80 @@ fn name_error(parent: Option<&Path>, name: &str, exclude: Option<&Path>) -> Opti
         }
     }
     None
+}
+
+/// 「选择组」对话框（TC 语义）：通配模式（`;` 分隔多模式，`*`/`?`，
+/// 不区分大小写）选择/取消选择当前可见行。deselect 预置回车的默认动作
+/// （`+` 打开 = 选择，`-` 打开 = 取消选择）。
+pub struct SelectGroupDialog {
+    pattern: String,
+    files_only: bool,
+    deselect: bool,
+    /// 首帧自动聚焦模式输入框（request_focus 只需一次）。
+    focused: bool,
+}
+
+impl SelectGroupDialog {
+    pub fn new(pattern: String, deselect: bool) -> Self {
+        Self {
+            pattern,
+            files_only: false,
+            deselect,
+            focused: false,
+        }
+    }
+
+    fn confirm(&self, select: bool) -> FmDialogOutcome {
+        FmDialogOutcome::SelectGroup {
+            pattern: self.pattern.trim().to_string(),
+            select,
+            files_only: self.files_only,
+        }
+    }
+
+    fn ui(&mut self, ctx: &egui::Context) -> Option<FmDialogOutcome> {
+        let mut outcome = None;
+        let mut open = true;
+        egui::Window::new("选择组")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("模式：");
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.pattern)
+                            .hint_text("如 *.zip;EP*")
+                            .desired_width(280.0),
+                    );
+                    if !self.focused {
+                        response.request_focus();
+                        self.focused = true;
+                    }
+                    // 回车 = 执行预置动作（单行输入框 Enter 自动失焦）。
+                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        outcome = Some(self.confirm(!self.deselect));
+                    }
+                });
+                ui.checkbox(&mut self.files_only, "仅文件");
+                ui.label(egui::RichText::new("支持 * ? 通配，; 分隔多模式，不区分大小写").weak());
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("选择").clicked() {
+                        outcome = Some(self.confirm(true));
+                    }
+                    if ui.button("取消选择").clicked() {
+                        outcome = Some(self.confirm(false));
+                    }
+                    if ui.button("关闭").clicked() {
+                        outcome = Some(FmDialogOutcome::Cancelled);
+                    }
+                });
+            });
+        if !open {
+            outcome = Some(FmDialogOutcome::Cancelled);
+        }
+        outcome
+    }
 }

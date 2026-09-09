@@ -278,9 +278,9 @@ impl Settings {
                 self.fm_layout
             ));
         }
-        if !matches!(self.fm_sort_key.as_str(), "name" | "size" | "mtime") {
+        if !matches!(self.fm_sort_key.as_str(), "name" | "size" | "mtime" | "ext") {
             return Err(format!(
-                "fm_sort_key must be name/size/mtime, got {}",
+                "fm_sort_key must be name/size/mtime/ext, got {}",
                 self.fm_sort_key
             ));
         }
@@ -315,7 +315,7 @@ impl Settings {
         if self.fm_layout != "single" {
             self.fm_layout = default_fm_layout();
         }
-        if !matches!(self.fm_sort_key.as_str(), "size" | "mtime") {
+        if !matches!(self.fm_sort_key.as_str(), "size" | "mtime" | "ext") {
             self.fm_sort_key = default_fm_sort_key();
         }
         let mut seen = std::collections::HashSet::new();
