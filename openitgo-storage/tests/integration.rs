@@ -130,6 +130,7 @@ fn test_settings_deserialize_missing_fm_fields() {
     assert_eq!(s.fm_sort_key, "name");
     assert!(s.fm_sort_asc);
     assert!(s.fm_confirm_delete);
+    assert!(s.fm_show_hidden);
     assert_eq!(s.fm_dir_left, "");
     assert_eq!(s.fm_dir_right, "");
 }
@@ -174,6 +175,7 @@ fn test_settings_fm_fields_roundtrip() {
         fm_sort_key: "size".to_string(),
         fm_sort_asc: false,
         fm_confirm_delete: false,
+        fm_show_hidden: false,
         fm_dir_left: "F:\\comics".to_string(),
         fm_dir_right: "D:\\downloads".to_string(),
         ..Default::default()

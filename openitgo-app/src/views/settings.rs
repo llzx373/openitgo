@@ -408,10 +408,13 @@ impl SettingsView {
         );
     }
 
-    /// 文件管理器 tab：删除确认 / 默认布局 / 双栏比例。
+    /// 文件管理器 tab：删除确认 / 显示隐藏文件 / 默认布局 / 双栏比例。
     fn file_manager_ui(ui: &mut egui::Ui, settings: &mut Settings) {
         ui.checkbox(&mut settings.fm_confirm_delete, "删除前确认");
         hint(ui, "关闭后删除（移入回收站）不再弹确认框");
+
+        ui.checkbox(&mut settings.fm_show_hidden, "显示隐藏文件");
+        hint(ui, "隐藏文件指以 . 开头的文件及带系统隐藏属性的文件");
 
         ui.horizontal(|ui| {
             ui.label("默认布局");

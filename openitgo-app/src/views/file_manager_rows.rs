@@ -16,6 +16,13 @@ pub struct FsEntry {
     pub size: Option<u64>,
     pub mtime: Option<SystemTime>,
     pub is_symlink: bool,
+    /// 隐藏文件（`.` 开头或 Windows FILE_ATTRIBUTE_HIDDEN）。
+    pub is_hidden: bool,
+}
+
+/// 跨平台一致的隐藏判定：文件名以 `.` 开头。
+pub fn is_hidden_name(name: &str) -> bool {
+    name.starts_with('.')
 }
 
 /// 排序键。
@@ -72,12 +79,22 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
 }
 
 /// 返回排序+过滤后的条目索引。目录恒排在文件前；
-/// 过滤为不区分大小写的 name 子串匹配（trim 后为空则不过滤）。
-pub fn list_rows(entries: &[FsEntry], filter: &str, sort: SortKey, asc: bool) -> Vec<usize> {
+/// 过滤为不区分大小写的 name 子串匹配（trim 后为空则不过滤）；
+/// show_hidden=false 时隐藏条目直接排除。
+pub fn list_rows(
+    entries: &[FsEntry],
+    filter: &str,
+    sort: SortKey,
+    asc: bool,
+    show_hidden: bool,
+) -> Vec<usize> {
     let needle = filter.trim().to_lowercase();
     let mut dirs: Vec<usize> = Vec::new();
     let mut files: Vec<usize> = Vec::new();
     for (idx, e) in entries.iter().enumerate() {
+        if !show_hidden && e.is_hidden {
+            continue;
+        }
         if !needle.is_empty() && !e.name.to_lowercase().contains(&needle) {
             continue;
         }
@@ -130,6 +147,7 @@ mod tests {
             size,
             mtime,
             is_symlink: false,
+            is_hidden: is_hidden_name(name),
         }
     }
 
@@ -139,6 +157,15 @@ mod tests {
 
     fn t(secs: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn is_hidden_name_dot_prefix() {
+        assert!(is_hidden_name(".gitignore"));
+        assert!(is_hidden_name("."));
+        assert!(!is_hidden_name("notes.txt"));
+        assert!(!is_hidden_name("a.b"));
+        assert!(!is_hidden_name(""));
     }
 
     #[test]
@@ -179,10 +206,10 @@ mod tests {
             entry("aaa", true, None, None),
             entry("mmm.txt", false, Some(1), None),
         ];
-        let rows = list_rows(&entries, "", SortKey::Name, true);
+        let rows = list_rows(&entries, "", SortKey::Name, true, true);
         assert_eq!(names(&entries, &rows), ["aaa", "mmm.txt", "zzz.txt"]);
         // 降序目录仍在前
-        let rows = list_rows(&entries, "", SortKey::Name, false);
+        let rows = list_rows(&entries, "", SortKey::Name, false, true);
         assert_eq!(names(&entries, &rows), ["aaa", "zzz.txt", "mmm.txt"]);
     }
 
@@ -193,9 +220,9 @@ mod tests {
             entry("vol2", false, Some(1), None),
             entry("vol1", false, Some(1), None),
         ];
-        let rows = list_rows(&entries, "", SortKey::Name, true);
+        let rows = list_rows(&entries, "", SortKey::Name, true, true);
         assert_eq!(names(&entries, &rows), ["vol1", "vol2", "vol10"]);
-        let rows = list_rows(&entries, "", SortKey::Name, false);
+        let rows = list_rows(&entries, "", SortKey::Name, false, true);
         assert_eq!(names(&entries, &rows), ["vol10", "vol2", "vol1"]);
     }
 
@@ -207,9 +234,9 @@ mod tests {
             entry("small", false, Some(10), None),
             entry("mid", false, Some(100), None),
         ];
-        let rows = list_rows(&entries, "", SortKey::Size, true);
+        let rows = list_rows(&entries, "", SortKey::Size, true, true);
         assert_eq!(names(&entries, &rows), ["dir", "small", "mid", "big"]);
-        let rows = list_rows(&entries, "", SortKey::Size, false);
+        let rows = list_rows(&entries, "", SortKey::Size, false, true);
         assert_eq!(names(&entries, &rows), ["dir", "big", "mid", "small"]);
     }
 
@@ -220,10 +247,10 @@ mod tests {
             entry("new", false, Some(1), Some(t(200))),
             entry("old", false, Some(1), Some(t(100))),
         ];
-        let rows = list_rows(&entries, "", SortKey::Mtime, true);
+        let rows = list_rows(&entries, "", SortKey::Mtime, true, true);
         assert_eq!(names(&entries, &rows), ["old", "new", "no_mtime"]);
         // 降序 None 仍垫底
-        let rows = list_rows(&entries, "", SortKey::Mtime, false);
+        let rows = list_rows(&entries, "", SortKey::Mtime, false, true);
         assert_eq!(names(&entries, &rows), ["new", "old", "no_mtime"]);
     }
 
@@ -234,10 +261,38 @@ mod tests {
             entry("photo1.jpg", false, Some(1), None),
             entry("notes.txt", false, Some(1), None),
         ];
-        let rows = list_rows(&entries, "PHOTO", SortKey::Name, true);
+        let rows = list_rows(&entries, "PHOTO", SortKey::Name, true, true);
         assert_eq!(names(&entries, &rows), ["Photos", "photo1.jpg"]);
         // 空白过滤串不过滤
-        let rows = list_rows(&entries, "  ", SortKey::Name, true);
+        let rows = list_rows(&entries, "  ", SortKey::Name, true, true);
         assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn show_hidden_false_filters_hidden_entries() {
+        let entries = vec![
+            entry(".config", true, None, None),
+            entry("docs", true, None, None),
+            entry(".env", false, Some(1), None),
+            entry("notes.txt", false, Some(1), None),
+        ];
+        let rows = list_rows(&entries, "", SortKey::Name, true, false);
+        assert_eq!(names(&entries, &rows), ["docs", "notes.txt"]);
+        // 默认（true）全量显示
+        let rows = list_rows(&entries, "", SortKey::Name, true, true);
+        assert_eq!(
+            names(&entries, &rows),
+            [".config", "docs", ".env", "notes.txt"]
+        );
+    }
+
+    #[test]
+    fn hidden_filter_composes_with_name_filter() {
+        let entries = vec![
+            entry(".photo", false, Some(1), None),
+            entry("photo1.jpg", false, Some(1), None),
+        ];
+        let rows = list_rows(&entries, "photo", SortKey::Name, true, false);
+        assert_eq!(names(&entries, &rows), ["photo1.jpg"]);
     }
 }

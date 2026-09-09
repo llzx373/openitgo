@@ -81,6 +81,9 @@ pub struct Settings {
     /// 删除前确认（防误删）。
     #[serde(default = "default_true")]
     pub fm_confirm_delete: bool,
+    /// 显示隐藏文件（`.` 开头 / Windows 隐藏属性）。
+    #[serde(default = "default_true")]
+    pub fm_show_hidden: bool,
     /// 左/右栏持久化目录；空 = 用户主目录。
     #[serde(default)]
     pub fm_dir_left: String,
@@ -155,6 +158,7 @@ impl Default for Settings {
             fm_sort_key: default_fm_sort_key(),
             fm_sort_asc: true,
             fm_confirm_delete: true,
+            fm_show_hidden: true,
             fm_dir_left: String::new(),
             fm_dir_right: String::new(),
         }
@@ -892,6 +896,21 @@ mod tests {
         let loaded: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.toolbar_display_mode, ToolbarDisplayMode::IconOnly);
         assert_eq!(s, loaded);
+    }
+
+    #[test]
+    fn test_fm_show_hidden_roundtrip_and_default() {
+        let s = Settings {
+            fm_show_hidden: false,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert!(!loaded.fm_show_hidden);
+        assert_eq!(s, loaded);
+
+        let loaded: Settings = serde_json::from_str("{}").unwrap();
+        assert!(loaded.fm_show_hidden);
     }
 
     #[test]

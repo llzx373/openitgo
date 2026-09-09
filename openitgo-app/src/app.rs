@@ -2506,6 +2506,7 @@ impl ReaderApp {
                     on_confirm_delete_change: &mut |confirm| confirm_change = Some(confirm),
                 },
                 self.settings.fm_confirm_delete,
+                self.settings.fm_show_hidden,
             );
             if back {
                 self.current_view = View::Library;

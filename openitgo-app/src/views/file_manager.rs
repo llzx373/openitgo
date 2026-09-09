@@ -247,8 +247,20 @@ impl FileManagerView {
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, callbacks: FmCallbacks<'_>, confirm_delete: bool) {
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        callbacks: FmCallbacks<'_>,
+        confirm_delete: bool,
+        show_hidden: bool,
+    ) {
         self.confirm_delete = confirm_delete;
+        // show_hidden 权威在 settings（同 confirm_delete），每帧下发；
+        // 休眠期间设置页改动在下次进入时经此同步，rows_cache 按
+        // RowsKey 自动失效，无需重新 read_dir。
+        for panel in &mut self.panels {
+            panel.show_hidden = show_hidden;
+        }
         let FmCallbacks {
             on_back,
             on_open_path,
@@ -1839,6 +1851,7 @@ mod tests {
                     on_confirm_delete_change: &mut |_| {},
                 },
                 false,
+                true,
             );
         });
     }

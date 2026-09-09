@@ -7,7 +7,7 @@
 //! （0 = 「..」上级行，1..= 对应 `rows()[i-1]`）。
 
 use crate::opener::{AsyncOpener, OpenStatus};
-use crate::views::file_manager_rows::{list_rows, FsEntry, SortKey};
+use crate::views::file_manager_rows::{is_hidden_name, list_rows, FsEntry, SortKey};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -53,6 +53,7 @@ struct RowsKey {
     filter: String,
     sort_key: SortKey,
     sort_asc: bool,
+    show_hidden: bool,
 }
 
 pub struct FsPanel {
@@ -70,6 +71,9 @@ pub struct FsPanel {
     pub sort_key: SortKey,
     pub sort_asc: bool,
     pub filter: String,
+    /// 是否显示隐藏文件（settings.fm_show_hidden 经 ui() 每帧下发；
+    /// 纳入 RowsKey，切换时 rows_cache 自动失效）。
+    pub show_hidden: bool,
     /// 导航历史（访问顺序）；history_pos = 当前位置（当前目录 =
     /// history[history_pos-1]），前进分支在 navigate_to 时截断。
     history: Vec<PathBuf>,
@@ -105,6 +109,7 @@ impl FsPanel {
             sort_key,
             sort_asc,
             filter: String::new(),
+            show_hidden: true,
             history: Vec::new(),
             history_pos: 0,
             rows_cache: None,
@@ -268,13 +273,20 @@ impl FsPanel {
             filter: self.filter.clone(),
             sort_key: self.sort_key,
             sort_asc: self.sort_asc,
+            show_hidden: self.show_hidden,
         };
         if let Some((k, rows)) = &self.rows_cache {
             if *k == key {
                 return rows.clone();
             }
         }
-        let rows = list_rows(&self.entries, &self.filter, self.sort_key, self.sort_asc);
+        let rows = list_rows(
+            &self.entries,
+            &self.filter,
+            self.sort_key,
+            self.sort_asc,
+            self.show_hidden,
+        );
         self.rows_cache = Some((key, rows.clone()));
         rows
     }
@@ -490,6 +502,7 @@ fn read_dir_entries(path: &Path) -> Result<Vec<FsEntry>, String> {
             .map(|m| m.is_dir())
             .unwrap_or_else(|| item.file_type().map(|t| t.is_dir()).unwrap_or(false));
         let size = meta.as_ref().filter(|m| m.is_file()).map(|m| m.len());
+        let is_hidden = is_hidden_name(&name) || windows_attr_hidden(meta.as_ref());
         let mtime = meta.and_then(|m| m.modified().ok());
         entries.push(FsEntry {
             name,
@@ -498,9 +511,23 @@ fn read_dir_entries(path: &Path) -> Result<Vec<FsEntry>, String> {
             size,
             mtime,
             is_symlink,
+            is_hidden,
         });
     }
     Ok(entries)
+}
+
+#[cfg(windows)]
+fn windows_attr_hidden(meta: Option<&std::fs::Metadata>) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    meta.map(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn windows_attr_hidden(_: Option<&std::fs::Metadata>) -> bool {
+    false
 }
 
 /// 枚举可用盘符/卷（盘符下拉用；断开的映射盘/光驱可能阻塞数秒，
@@ -571,6 +598,47 @@ mod tests {
         for d in &drives {
             assert!(std::fs::read_dir(d).is_ok(), "{d:?} 应可列出");
         }
+    }
+
+    /// show_hidden=false 时 rows() 排除隐藏条目（RowsKey 含 show_hidden，
+    /// 切换后缓存自动失效）；「..」上级行是 UI 行索引 0，不在行模型内，
+    /// 恒不受影响（row_path(0) 恒为 None）。
+    #[test]
+    fn rows_respect_show_hidden_and_parent_row_untouched() {
+        let mk = |name: &str, is_dir: bool, is_hidden: bool| FsEntry {
+            name: name.to_string(),
+            path: PathBuf::from(name),
+            is_dir,
+            size: if is_dir { None } else { Some(1) },
+            mtime: None,
+            is_symlink: false,
+            is_hidden,
+        };
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        panel.entries = vec![
+            mk(".config", true, true),
+            mk("docs", true, false),
+            mk(".env", false, true),
+            mk("notes.txt", false, false),
+        ];
+        panel.entries_version = 1;
+        panel.state = PanelLoadState::Ready;
+
+        let rows = panel.rows();
+        assert_eq!(rows.len(), 4);
+
+        panel.show_hidden = false;
+        let rows = panel.rows();
+        let names: Vec<&str> = rows
+            .iter()
+            .map(|&i| panel.entries[i].name.as_str())
+            .collect();
+        assert_eq!(names, ["docs", "notes.txt"]);
+        assert_eq!(panel.row_path(0), None);
+        assert_eq!(panel.row_path(1), Some(PathBuf::from("docs")));
+
+        panel.show_hidden = true;
+        assert_eq!(panel.rows().len(), 4);
     }
 
     /// 导航历史查询：初始不可后退/前进；navigate 两次后可后退；
