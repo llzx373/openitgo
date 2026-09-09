@@ -52,6 +52,8 @@ pub struct OpenEbook {
     pub search: SearchState,
     /// 菜单停放状态：true 时 webview 已 set_visible(false) 隐藏。
     pub webview_hidden: bool,
+    /// 目录树中折叠的章节索引（仅本次打开内有效，不落盘）。
+    pub toc_collapsed: std::collections::HashSet<usize>,
 }
 
 impl EbookView {
@@ -72,6 +74,7 @@ impl EbookView {
             current_spread: 0,
             search: SearchState::default(),
             webview_hidden: false,
+            toc_collapsed: std::collections::HashSet::new(),
         });
         Ok(())
     }
@@ -222,10 +225,13 @@ impl EbookView {
         ui.allocate_space(ui.available_size());
     }
 
-    /// Renders the table-of-contents side panel. Call this *before* the
-    /// central panel so the webview bounds can avoid the panel area.
-    pub fn render_toc(&self, ui: &mut egui::Ui) -> Option<(usize, Option<String>)> {
-        let open = self.open.as_ref()?;
+    /// Renders the table-of-contents side panel as a tree (indent + collapse
+    /// by `EbookChapter.level`). Call this *before* the central panel so the
+    /// webview bounds can avoid the panel area.
+    pub fn render_toc(&mut self, ui: &mut egui::Ui) -> Option<(usize, Option<String>)> {
+        use egui_phosphor_icons::icons;
+
+        let open = self.open.as_mut()?;
         let mut jump_to: Option<(usize, Option<String>)> = None;
         egui::Panel::left("ebook_toc")
             .default_size(240.0)
@@ -233,14 +239,43 @@ impl EbookView {
             .show(ui, |ui| {
                 ui.heading("目录");
                 ui.separator();
+                let rows =
+                    crate::views::ebook_toc::toc_rows(&open.ebook.chapters, &open.toc_collapsed);
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for chapter in &open.ebook.chapters {
-                        let is_current = chapter.index == open.current_chapter;
-                        let label = chapter.title.as_deref().unwrap_or("无标题");
-                        let response = ui.selectable_label(is_current, label);
-                        if response.clicked() {
-                            let fragment = Self::toc_fragment(&chapter.href);
-                            jump_to = Some((chapter.index, fragment));
+                    let mut toggles: Vec<usize> = Vec::new();
+                    for row in &rows {
+                        let Some(chapter) = open.ebook.chapters.get(row.chapter_index) else {
+                            continue;
+                        };
+                        ui.horizontal(|ui| {
+                            ui.add_space(row.depth as f32 * 14.0);
+                            if row.has_children {
+                                let icon = if row.collapsed {
+                                    icons::CARET_RIGHT
+                                } else {
+                                    icons::CARET_DOWN
+                                };
+                                if ui
+                                    .add(egui::Button::new(icon.as_str()).frame(false))
+                                    .clicked()
+                                {
+                                    toggles.push(row.chapter_index);
+                                }
+                            } else {
+                                // 无子节点的行也占三角位，标题跨级对齐。
+                                ui.add_space(18.0);
+                            }
+                            let is_current = chapter.index == open.current_chapter;
+                            let label = chapter.title.as_deref().unwrap_or("无标题");
+                            if ui.selectable_label(is_current, label).clicked() {
+                                let fragment = Self::toc_fragment(&chapter.href);
+                                jump_to = Some((chapter.index, fragment));
+                            }
+                        });
+                    }
+                    for index in toggles {
+                        if !open.toc_collapsed.remove(&index) {
+                            open.toc_collapsed.insert(index);
                         }
                     }
                 });
@@ -280,12 +315,14 @@ mod tests {
                     id: "ch1".to_string(),
                     href: "ch1.xhtml".to_string(),
                     title: Some("第一章".to_string()),
+                    level: 0,
                 },
                 EbookChapter {
                     index: 1,
                     id: "ch2".to_string(),
                     href: "ch2.xhtml".to_string(),
                     title: Some("第二章".to_string()),
+                    level: 1,
                 },
             ],
         }
@@ -321,6 +358,7 @@ mod tests {
                 current_spread: 0,
                 search: SearchState::default(),
                 webview_hidden: false,
+                toc_collapsed: std::collections::HashSet::new(),
             };
             open.current_spread = 7;
             open.current_spread

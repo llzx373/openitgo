@@ -70,6 +70,36 @@ img {{ max-width: 100%; max-height: calc(100vh - var(--margin-v) * 2); height: a
 }}
 #column-content td, #column-content th {{ overflow-wrap: anywhere; }}
 #column-content pre {{ overflow-x: auto; }}
+/* Markdown 表格/代码块样式；颜色经 color-mix 跟随阅读主题。 */
+#column-content table {{ border-collapse: collapse; margin: 0 0 1em 0; }}
+#column-content th, #column-content td {{
+  border: 1px solid color-mix(in srgb, var(--fg) 25%, transparent);
+  padding: 0.3em 0.6em;
+}}
+#column-content th {{
+  font-weight: bold;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}}
+#column-content code {{
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+  padding: 0.15em 0.35em;
+  border-radius: 4px;
+  font-size: 0.9em;
+}}
+#column-content pre {{
+  /* syntect 高亮产出自带深色内联背景；未高亮的 pre（EPUB 等）跟随阅读主题。 */
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  padding: 0.8em;
+  border-radius: 6px;
+  margin: 0 0 1em 0;
+}}
+#column-content pre code {{ background: none; padding: 0; border-radius: 0; }}
+#column-content blockquote {{
+  margin: 0 0 1em 0;
+  padding-left: 1em;
+  border-left: 3px solid color-mix(in srgb, var(--fg) 25%, transparent);
+  opacity: 0.9;
+}}
 body.scroll #column-view {{
   overflow-x: hidden;
   overflow-y: scroll;
@@ -913,6 +943,27 @@ mod tests {
         assert!(!html.contains("id=\"measure\""));
         assert!(!html.contains("id=\"spread\""));
         assert!(!html.contains("id=\"flipper\""));
+    }
+
+    #[test]
+    fn test_reader_html_styles_markdown_tables_and_code() {
+        let html = reader_html(&EbookSettings::default(), 1);
+        assert!(
+            html.contains("border-collapse: collapse"),
+            "tables should have collapsed borders"
+        );
+        assert!(
+            html.contains("#column-content code {"),
+            "inline code should be styled"
+        );
+        assert!(
+            html.contains("#column-content pre code {"),
+            "pre code should not stack the inline-code background"
+        );
+        assert!(
+            html.contains("#column-content blockquote {"),
+            "blockquotes should be styled"
+        );
     }
 
     #[test]

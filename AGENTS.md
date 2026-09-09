@@ -233,7 +233,14 @@ cargo clippy --workspace --all-targets -- -D warnings
   wry 用 `http://ebook.*` workaround 拦截自定义协议，页面内绝对 `ebook://...`
   请求（fetch/img/字体）不会被拦截、直接失败（fetch 报 TypeError: Failed to
   fetch）——JS 与章节 HTML 内一律用相对 URL（`?chapter=N`、`/res/...`），由
-  当前 origin 解析后在各平台都能命中协议回调。**菜单停放（#52）**：egui 弹层
+  当前 origin 解析后在各平台都能命中协议回调。**目录树**：`EbookChapter.level`
+  为嵌套深度（markdown 经 `chapters::split_markdown` 按 pulldown-cmark 标题事件
+  分章并归一化层级——parse 与 render 共用此入口；EPUB 为 navpoint 深度；txt/mobi
+  恒 0），目录面板经 `views/ebook_toc.rs::toc_rows` 纯函数展开为缩进+可折叠树，
+  折叠态存 `OpenEbook.toc_collapsed`（会话内，不落盘）。**markdown 渲染**：
+  fenced code block 经 syntect（`default-fancy`，base16-ocean.dark）Rust 侧高亮；
+  相对路径图片改写为 `/file/` 根相对 URL，handler 经 `read_text_resource` 从 md
+  同目录提供（canonicalize 后必须在书目录子树内，防穿越）。**菜单停放（#52）**：egui 弹层
   无法穿透原生 webview，菜单打开时 `render_ebook` 用 `menu_overlay_open(ctx)` 驱动
   `EbookView::set_webview_hidden`（wry `set_visible(false)`，状态去重避免每帧
   IPC）。**位置保持**：字号/边距/主题变化按字符偏移保持，窗口 resize 防抖后按滚动

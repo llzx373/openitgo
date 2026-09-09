@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Markdown 目录树：按 h1–h6 每级标题分章（pulldown-cmark 标题事件驱动，fenced code 内 `#` 不误判，支持 setext 标题，跳级归一化嵌套深度）；目录面板树形展示（按层级缩进 + 折叠三角）。EPUB 目录同样记录 navpoint 嵌套深度并树形展示；`EbookChapter` 新增 `level` 字段。
+- Markdown 渲染增强：相对路径图片经 `/file/` 协议通道从 md 文件同目录提供（限制在书目录子树内）；fenced code block 经 syntect 语法高亮（Rust 侧预处理，深色代码块）；表格边框、行内代码、引用块阅读样式（颜色跟随阅读主题）。
+
+### Fixed
+
+- 电子书：修复 Windows（WebView2）下打开任意电子书报「章节加载失败： TypeError: Failed to fetch」的问题——wry 自定义协议在 Windows 走 `http://ebook.*` 变通域名，页面内绝对 `ebook://` 请求不被拦截；章节 fetch 与 EPUB 图片/字体资源 URL 改为相对形式（`?chapter=N`、`/res/...`）。
+
+### Added（文件管理器与压缩包）
+
 - 双栏文件管理器（Total Commander 形态，`View::FileManager`）：左右双栏独立浏览本地文件系统（Tab 切换焦点栏、单击/Ctrl/Shift 选择、双击分发打开、Alt+←/→ 导航历史、表头排序、过滤框、列宽拖动）；单栏模式带预览面板（选中即预览：图片/文本/元信息占位），双栏模式 F3 临时预览弹窗；双击压缩包进 Archive 浏览视图。入口：书架顶栏与文件菜单「文件管理器」。
 - 文件管理器文件操作：F5 复制 / F6 移动 / F8(Delete) 删除 / F2 重命名 / F7 新建文件夹、Ctrl+C/X/V 应用内剪贴板、右键菜单；复制/移动/删除后台线程执行，状态栏进度条 + 取消；删除移入回收站；冲突策略覆盖/跳过/自动改名（`name (1).ext`），目录冲突恒合并；取消清理半成品文件；Windows 长路径（>260 字符）经 `\\?\` 前缀支持。
 - Settings：文件管理器持久化字段 `fm_layout` / `fm_dual_ratio` / `fm_preview_open` / `fm_sort_key` / `fm_sort_asc` / `fm_dir_left` / `fm_dir_right` / `fm_confirm_delete`（状态变更帧尾 diff 写回，退出时统一落盘）；设置页新增「文件管理器」tab（删除前确认、默认布局、双栏比例）。

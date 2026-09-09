@@ -108,6 +108,7 @@ impl EpubParser {
         fn collect_navpoints(
             points: &[epub::doc::NavPoint],
             base_idx: &mut usize,
+            depth: usize,
         ) -> Vec<EbookChapter> {
             let mut chapters = Vec::new();
             for point in points {
@@ -116,14 +117,15 @@ impl EpubParser {
                     id: point.content.to_string_lossy().to_string(),
                     href: point.content.to_string_lossy().to_string(),
                     title: Some(point.label.trim().to_string()),
+                    level: depth,
                 });
                 *base_idx += 1;
-                chapters.extend(collect_navpoints(&point.children, base_idx));
+                chapters.extend(collect_navpoints(&point.children, base_idx, depth + 1));
             }
             chapters
         }
 
-        let mut chapters: Vec<EbookChapter> = collect_navpoints(&doc.toc, &mut 0);
+        let mut chapters: Vec<EbookChapter> = collect_navpoints(&doc.toc, &mut 0, 0);
 
         if chapters.is_empty() {
             let spine_items: Vec<(usize, String, String)> = doc
@@ -149,6 +151,7 @@ impl EpubParser {
                     id: idref,
                     href,
                     title,
+                    level: 0,
                 });
             }
         }

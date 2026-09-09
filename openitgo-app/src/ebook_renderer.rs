@@ -358,6 +358,22 @@ fn handle_ebook_protocol(
         }
     }
 
+    if let Some(rel) = decode_file_path(path) {
+        match openitgo_parser::html::read_text_resource(&state.ebook, &rel) {
+            Some((mime, bytes)) => {
+                eprintln!("EbookRenderer: serving file resource {rel}");
+                return wry::http::Response::builder()
+                    .header("Content-Type", mime)
+                    .header("Cache-Control", "no-cache, no-store, must-revalidate")
+                    .body(bytes.into())
+                    .unwrap();
+            }
+            None => {
+                eprintln!("EbookRenderer: file resource not found: {rel}");
+            }
+        }
+    }
+
     // Return an empty 200 response for unknown resource requests instead of a
     // 404, which can be treated as a navigation error by WebKit and trigger a
     // reload of the shell page.
@@ -375,6 +391,22 @@ fn handle_ebook_protocol(
 /// non-resource paths.
 fn decode_res_path(path: &str) -> Option<String> {
     let raw = path.strip_prefix("/res/")?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(
+        percent_encoding::percent_decode_str(raw)
+            .decode_utf8()
+            .map(|c| c.into_owned())
+            .unwrap_or_else(|_| raw.to_string()),
+    )
+}
+
+/// Extract and percent-decode the relative path from a `/file/<path>` request
+/// URI (markdown images served from the ebook's own directory). Returns `None`
+/// for non-`/file/` paths.
+fn decode_file_path(path: &str) -> Option<String> {
+    let raw = path.strip_prefix("/file/")?;
     if raw.is_empty() {
         return None;
     }
@@ -459,6 +491,60 @@ mod tests {
         let resp = handle_ebook_protocol(&state, req);
         assert_eq!(resp.status(), 200);
         assert!(resp.body().is_empty());
+    }
+
+    fn state_for_ebook(ebook: Ebook) -> Arc<Mutex<RendererState>> {
+        Arc::new(Mutex::new(RendererState {
+            ebook,
+            current_chapter: 0,
+            char_offset: 0,
+            current_spread: 0,
+            total_spreads: 1,
+            settings: EbookSettings::default(),
+            search_count: 0,
+            search_active: -1,
+        }))
+    }
+
+    #[test]
+    fn test_handle_ebook_protocol_serves_markdown_sibling_file() {
+        // /file/ 通道：markdown 相对路径图片从 md 文件同目录提供。
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("book");
+        std::fs::create_dir_all(dir.join("images")).unwrap();
+        std::fs::write(dir.join("images/pic.png"), b"png-bytes").unwrap();
+        let md = dir.join("book.md");
+        std::fs::write(&md, "# A\n\n![x](images/pic.png)\n").unwrap();
+        let ebook = openitgo_parser::parse_ebook(&md).expect("md parses");
+        let state = state_for_ebook(ebook);
+
+        let req = wry::http::Request::builder()
+            .uri("ebook://reader/file/images/pic.png")
+            .body(Vec::new())
+            .unwrap();
+        let resp = handle_ebook_protocol(&state, req);
+        assert_eq!(resp.status(), 200);
+        assert_eq!(&resp.body()[..], &b"png-bytes"[..]);
+        assert_eq!(
+            resp.headers()
+                .get("Content-Type")
+                .and_then(|v| v.to_str().ok()),
+            Some("image/png")
+        );
+
+        // 目录穿越与缺失文件落到空 200 兜底。
+        for uri in [
+            "ebook://reader/file/../secret.png",
+            "ebook://reader/file/missing.png",
+        ] {
+            let req = wry::http::Request::builder()
+                .uri(uri)
+                .body(Vec::new())
+                .unwrap();
+            let resp = handle_ebook_protocol(&state, req);
+            assert_eq!(resp.status(), 200, "{uri}");
+            assert!(resp.body().is_empty(), "{uri}");
+        }
     }
 
     #[test]
@@ -745,6 +831,7 @@ mod tests {
                 id: "c".to_string(),
                 href: "c.xhtml".to_string(),
                 title: None,
+                level: 0,
             }],
         };
         Arc::new(Mutex::new(RendererState {

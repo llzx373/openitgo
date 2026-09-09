@@ -1,6 +1,7 @@
 pub mod archive;
 pub mod archive_tree;
 pub mod ebook;
+pub mod ebook_toc;
 pub mod file_manager;
 pub mod file_manager_dialog;
 pub mod file_manager_panel;

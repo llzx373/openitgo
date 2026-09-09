@@ -35,6 +35,10 @@ pub struct EbookChapter {
     pub id: String,
     pub href: String,
     pub title: Option<String>,
+    /// 目录树嵌套深度（0 = 顶层）：markdown 为归一化标题层级，EPUB 为 navpoint 深度，
+    /// txt/mobi/字数切分恒为 0。
+    #[serde(default)]
+    pub level: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -62,6 +66,14 @@ impl Ebook {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_ebook_chapter_level_defaults_to_zero_in_old_json() {
+        // 旧格式 JSON（无 level 字段）反序列化为顶层节点。
+        let json = r##"{"index":0,"id":"c1","href":"#c1","title":"A"}"##;
+        let ch: EbookChapter = serde_json::from_str(json).unwrap();
+        assert_eq!(ch.level, 0);
+    }
 
     #[test]
     fn test_ebook_reading_mode_from_str() {

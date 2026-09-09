@@ -11,22 +11,32 @@ pub fn render_chapter_html(ebook: &Ebook, chapter_index: usize) -> Result<String
 
     if is_text_like_path(path) {
         let text = crate::text_encoding::read_text_lossy(path)?;
-        let parts = if is_markdown_path(path) {
-            let mut ch = split_markdown(&text);
-            if ch.is_empty() {
-                ch = split_by_word_count(&text, CHAPTER_WORDS);
+        let is_md = is_markdown_path(path);
+        let body = if is_md {
+            let parts = crate::chapters::split_markdown(&text);
+            if parts.is_empty() {
+                let parts = split_by_word_count(&text, CHAPTER_WORDS);
+                parts
+                    .get(chapter_index)
+                    .ok_or(ParseError::NoPages)?
+                    .1
+                    .clone()
+            } else {
+                parts
+                    .get(chapter_index)
+                    .ok_or(ParseError::NoPages)?
+                    .2
+                    .clone()
             }
-            ch
         } else {
             let mut ch = split_txt(&text);
             if ch.is_empty() {
                 ch = split_by_word_count(&text, CHAPTER_WORDS);
             }
-            ch
+            ch.get(chapter_index).ok_or(ParseError::NoPages)?.1.clone()
         };
-        let (_, body) = parts.get(chapter_index).ok_or(ParseError::NoPages)?.clone();
-        let html = if is_markdown_path(path) {
-            markdown_to_html(&body)
+        let html = if is_md {
+            rewrite_markdown_image_urls(&markdown_to_html(&body))
         } else {
             plain_text_to_html(&body)
         };
@@ -382,19 +392,6 @@ fn txt_extract_title(line: &str) -> Option<String> {
     Some(trimmed.trim_start_matches('#').trim().to_string())
 }
 
-fn split_markdown(text: &str) -> Vec<(Option<String>, String)> {
-    split_by_heading(text, markdown_extract_title, markdown_is_heading)
-}
-
-fn markdown_is_heading(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.starts_with("# ") || trimmed.starts_with("## ")
-}
-
-fn markdown_extract_title(line: &str) -> Option<String> {
-    Some(line.trim().trim_start_matches('#').trim().to_string())
-}
-
 fn plain_text_to_html(body: &str) -> String {
     let escaped = escape_html(body);
     escaped
@@ -404,10 +401,54 @@ fn plain_text_to_html(body: &str) -> String {
 }
 
 fn markdown_to_html(md: &str) -> String {
-    use pulldown_cmark::{html, Options, Parser};
+    use pulldown_cmark::{html, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+    use std::sync::LazyLock;
+    use syntect::highlighting::ThemeSet;
+    use syntect::parsing::SyntaxSet;
+
+    static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+    static THEMES: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
+
+    // Intercept code blocks for syntect highlighting; everything else passes
+    // through to pulldown-cmark's HTML renderer unchanged.
     let parser = Parser::new_ext(md, Options::all());
+    let mut events: Vec<Event> = Vec::new();
+    let mut code_lang: Option<String> = None;
+    let mut code_text = String::new();
+    for event in parser {
+        match event {
+            Event::Start(Tag::CodeBlock(kind)) => {
+                code_lang = Some(match kind {
+                    CodeBlockKind::Fenced(lang) => {
+                        lang.split_whitespace().next().unwrap_or("").to_string()
+                    }
+                    CodeBlockKind::Indented => String::new(),
+                });
+                code_text.clear();
+            }
+            Event::Text(t) if code_lang.is_some() => {
+                code_text.push_str(&t);
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                let lang = code_lang.take().unwrap_or_default();
+                let syntax = SYNTAXES
+                    .find_syntax_by_token(&lang)
+                    .unwrap_or_else(|| SYNTAXES.find_syntax_plain_text());
+                let highlighted = syntect::html::highlighted_html_for_string(
+                    &code_text,
+                    &SYNTAXES,
+                    syntax,
+                    &THEMES.themes["base16-ocean.dark"],
+                )
+                .unwrap_or_else(|_| format!("<pre><code>{}</code></pre>", escape_html(&code_text)));
+                events.push(Event::Html(highlighted.into()));
+                code_text.clear();
+            }
+            other => events.push(other),
+        }
+    }
     let mut output = String::new();
-    html::push_html(&mut output, parser);
+    html::push_html(&mut output, events.into_iter());
     output
 }
 
@@ -522,8 +563,72 @@ fn to_res_url(dir: &str, value: &str) -> Option<String> {
 /// resolved against the chapter's directory inside the archive. Run after
 /// [`sanitize_epub_html`], which guarantees tags and quotes are balanced.
 pub fn rewrite_epub_urls(html: &str, chapter_href: &str) -> String {
-    const ATTRS: [&str; 2] = ["src=", "xlink:href="];
     let dir = chapter_dir(chapter_href);
+    rewrite_attr_urls(html, &["src=", "xlink:href="], |v| to_res_url(&dir, v))
+}
+
+/// Rewrite relative `src=` references in rendered markdown chapter HTML to
+/// root-relative `/file/` URLs, served by the protocol handler from the
+/// markdown file's own directory (see [`read_text_resource`]).
+pub fn rewrite_markdown_image_urls(html: &str) -> String {
+    rewrite_attr_urls(html, &["src="], to_file_url)
+}
+
+/// Build a root-relative `/file/` URL for a relative resource reference next
+/// to a text-like ebook (markdown images). Returns `None` for references that
+/// must stay untouched (absolute URLs, `data:` URIs, fragments, empty values,
+/// root-relative paths).
+fn to_file_url(value: &str) -> Option<String> {
+    let v = value.trim();
+    if v.is_empty() || v.starts_with('#') || v.starts_with('/') {
+        return None;
+    }
+    let lower = v.to_ascii_lowercase();
+    if lower.contains("://") || lower.starts_with("data:") {
+        return None;
+    }
+    let encoded = percent_encoding::utf8_percent_encode(v, RES_ENCODE_SET);
+    Some(format!("/file/{}", encoded))
+}
+
+/// Read a resource sitting next to a text-like ebook (e.g. an image referenced
+/// by a markdown file). `rel` is the percent-decoded relative path from the
+/// `/file/` URL. Returns `(mime, bytes)`, or `None` for non-text ebooks,
+/// unreadable files, and any path escaping the ebook's own directory.
+pub fn read_text_resource(ebook: &Ebook, rel: &str) -> Option<(String, Vec<u8>)> {
+    if !is_text_like_path(&ebook.path) {
+        return None;
+    }
+    let base = ebook.path.parent()?.canonicalize().ok()?;
+    let path = base.join(rel).canonicalize().ok()?;
+    // Traversal guard: the canonical path must stay inside the book's
+    // directory subtree (canonicalize resolves `..` and symlinks).
+    if !path.starts_with(&base) || !path.is_file() {
+        return None;
+    }
+    let bytes = std::fs::read(&path).ok()?;
+    let mime = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("bmp") => "image/bmp",
+        Some("avif") => "image/avif",
+        Some("ico") => "image/x-icon",
+        _ => "application/octet-stream",
+    };
+    Some((mime.to_string(), bytes))
+}
+
+/// Rewrite the quoted values of the given attribute names (`src=` style, seen
+/// inside a tag) with `map`; unmapped values are copied verbatim.
+fn rewrite_attr_urls(html: &str, attrs: &[&str], map: impl Fn(&str) -> Option<String>) -> String {
     let lower = html.to_ascii_lowercase();
     let bytes = lower.as_bytes();
     let mut out = String::with_capacity(html.len());
@@ -565,7 +670,7 @@ pub fn rewrite_epub_urls(html: &str, chapter_href: &str) -> String {
                 i += 1;
             }
             _ if in_tag => {
-                let attr = ATTRS.iter().find(|a| lower[i..].starts_with(**a));
+                let attr = attrs.iter().find(|a| lower[i..].starts_with(**a));
                 // Attribute names must start at a boundary (whitespace or `/`)
                 // so `data-src=` is not mistaken for `src=`.
                 let boundary =
@@ -591,7 +696,7 @@ pub fn rewrite_epub_urls(html: &str, chapter_href: &str) -> String {
                             i += 1;
                         }
                         let value = &html[value_start..i];
-                        match to_res_url(&dir, value) {
+                        match map(value) {
                             Some(url) => out.push_str(&url),
                             None => out.push_str(value),
                         }
@@ -805,6 +910,7 @@ mod tests {
                 id: "ch1".to_string(),
                 href: "#ch1".to_string(),
                 title: Some("Chapter 1".to_string()),
+                level: 0,
             }],
         }
     }
@@ -830,6 +936,96 @@ mod tests {
         let html = markdown_to_html("# Hello\n\nworld");
         assert!(html.contains("Hello"));
         assert!(html.contains("world"));
+    }
+
+    #[test]
+    fn test_markdown_to_html_highlights_known_language() {
+        let html = markdown_to_html("```rust\nfn main() {}\n```");
+        // syntect 产出自带背景的内联样式 pre，且关键字被 span 着色。
+        assert!(html.contains("background-color"), "got: {html}");
+        assert!(html.contains("<span"), "got: {html}");
+        assert!(html.contains("fn"), "got: {html}");
+    }
+
+    #[test]
+    fn test_markdown_to_html_unknown_language_falls_back_to_plain() {
+        let html = markdown_to_html("```nonexistent-lang-xyz\nhello <world>\n```");
+        assert!(html.contains("hello"), "got: {html}");
+        assert!(!html.contains("<world>"), "code must be escaped: {html}");
+    }
+
+    #[test]
+    fn test_rewrite_markdown_image_urls() {
+        let html = r#"<p><img src="images/pic.png" alt="" /><img src="https://x.com/a.png" alt="" /><img src="data:image/png;base64,AA" alt="" /></p>"#;
+        let out = rewrite_markdown_image_urls(html);
+        assert!(out.contains(r#"src="/file/images/pic.png""#), "got: {out}");
+        assert!(out.contains(r#"src="https://x.com/a.png""#), "got: {out}");
+        assert!(
+            out.contains(r#"src="data:image/png;base64,AA""#),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_markdown_image_urls_encodes_non_ascii() {
+        let out = rewrite_markdown_image_urls(r#"<img src="图 片.png">"#);
+        assert!(
+            out.contains("/file/%E5%9B%BE%20%E7%89%87.png"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn test_read_text_resource_serves_sibling_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("book");
+        std::fs::create_dir_all(dir.join("images")).unwrap();
+        std::fs::write(dir.join("images/pic.png"), b"png-bytes").unwrap();
+        let ebook = ebook_with_path(dir.join("book.md"));
+        let (mime, bytes) = read_text_resource(&ebook, "images/pic.png").unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(bytes, b"png-bytes");
+    }
+
+    #[test]
+    fn test_read_text_resource_rejects_traversal_and_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("book");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(tmp.path().join("outside.png"), b"x").unwrap();
+        let ebook = ebook_with_path(dir.join("book.md"));
+        assert!(read_text_resource(&ebook, "../outside.png").is_none());
+        assert!(read_text_resource(&ebook, "missing.png").is_none());
+        // 非文本书不走 /file/ 通道。
+        let epub = ebook_with_path(dir.join("book.epub"));
+        assert!(read_text_resource(&epub, "images/pic.png").is_none());
+    }
+
+    #[test]
+    fn test_render_markdown_chapter_rewrites_relative_image() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("book.md");
+        std::fs::write(&path, "# A\n\n![alt](images/pic.png)\n").unwrap();
+        let ebook = ebook_with_path(path);
+        let html = render_chapter_html(&ebook, 0).unwrap();
+        assert!(
+            html.contains(r#"src="/file/images/pic.png""#),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn test_render_markdown_chapters_match_parse_split() {
+        // 渲染分章必须与 MarkdownParser 的目录分章一致（同源 split_markdown）。
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("book.md");
+        std::fs::write(&path, "# A\na1\n## B\nb1\n### C\nc1\n").unwrap();
+        let ebook = crate::markdown::MarkdownParser::parse(&path).unwrap();
+        assert_eq!(ebook.total_chapters(), 3);
+        assert!(render_chapter_html(&ebook, 0).unwrap().contains("a1"));
+        assert!(render_chapter_html(&ebook, 1).unwrap().contains("b1"));
+        assert!(render_chapter_html(&ebook, 2).unwrap().contains("c1"));
+        assert!(render_chapter_html(&ebook, 3).is_err());
     }
 
     #[test]

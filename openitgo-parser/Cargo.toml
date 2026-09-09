@@ -14,6 +14,7 @@ pdf-syntax = "0.5"
 epub = "2.1"
 mobi = "0.8"
 pulldown-cmark = "0.13"
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 thiserror = { workspace = true }
 chardetng = "0.1"
 encoding_rs = "0.8"

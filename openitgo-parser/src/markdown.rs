@@ -1,18 +1,11 @@
-use crate::chapters::{build_chapters, split_by_heading, split_by_word_count, text_ebook};
+use crate::chapters::{
+    build_chapters, build_chapters_leveled, split_by_word_count, split_markdown, text_ebook,
+};
 use crate::traits::ParseError;
 use openitgo_core::ebook::Ebook;
 use std::path::Path;
 
 pub struct MarkdownParser;
-
-fn is_heading(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.starts_with("# ") || trimmed.starts_with("## ")
-}
-
-fn extract_title(line: &str) -> Option<String> {
-    Some(line.trim().trim_start_matches('#').trim().to_string())
-}
 
 impl MarkdownParser {
     pub fn supports(path: &Path) -> bool {
@@ -29,11 +22,11 @@ impl MarkdownParser {
             return Err(ParseError::NoPages);
         }
 
-        let parts = split_by_heading(&text, extract_title, is_heading);
+        let parts = split_markdown(&text);
         let chapters = if parts.is_empty() {
             build_chapters(split_by_word_count(&text, 3000))
         } else {
-            build_chapters(parts)
+            build_chapters_leveled(parts)
         };
 
         if chapters.is_empty() {
