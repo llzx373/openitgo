@@ -204,6 +204,12 @@ impl FsPanel {
     /// 每帧排空列举结果；返回 true = 仍在 Loading（调用方据此
     /// `request_repaint_after(100ms)`，遵循 egui 空闲不重绘约定）。
     pub fn poll(&mut self) -> bool {
+        // mem::take 会把 state 先换成 Default(Idle)，必须先确认 Loading 再
+        // take——否则 Ready/Failed 会被静默打回 Idle，触发 app 侧「Idle =
+        // 首次进入」恢复逻辑每帧重列目录（列表闪烁 + 选中/焦点被清）。
+        if !matches!(self.state, PanelLoadState::Loading(_)) {
+            return false;
+        }
         let PanelLoadState::Loading(mut opener) = std::mem::take(&mut self.state) else {
             return false;
         };
@@ -473,4 +479,45 @@ fn read_dir_entries(path: &Path) -> Result<Vec<FsEntry>, String> {
         });
     }
     Ok(entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归：poll() 在非 Loading 状态必须原样返回——mem::take 会先把 state
+    /// 换成 Default(Idle)，若不先判 Loading 就 take，Ready/Failed 会被静默
+    /// 打回 Idle，触发 app 侧「Idle = 首次进入」恢复逻辑每帧重列目录
+    /// （列表周期性塌缩闪烁、选中/焦点被清）。
+    #[test]
+    fn poll_preserves_non_loading_state() {
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        panel.state = PanelLoadState::Ready;
+        assert!(!panel.poll());
+        assert!(matches!(panel.state, PanelLoadState::Ready));
+
+        panel.state = PanelLoadState::Failed("boom".to_string());
+        assert!(!panel.poll());
+        assert!(matches!(panel.state, PanelLoadState::Failed(_)));
+
+        assert!(!panel.poll());
+        assert!(matches!(panel.state, PanelLoadState::Failed(_)));
+    }
+
+    /// navigate 到真实目录 → poll 至 Ready 后状态稳定，再 poll 不再变化。
+    #[test]
+    fn poll_settles_ready_after_listing() {
+        let dir = std::env::temp_dir();
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        panel.navigate_to(dir);
+        for _ in 0..100 {
+            if !panel.poll() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(matches!(panel.state, PanelLoadState::Ready));
+        assert!(!panel.poll());
+        assert!(matches!(panel.state, PanelLoadState::Ready));
+    }
 }
