@@ -4,10 +4,11 @@
 //! `Some(FmDialogOutcome)` = 本帧关闭（确认或取消），由 FileManagerView
 //! 统一消费。全部 UI 文本中文。
 
-use crate::views::archive::human_size;
+use crate::views::archive::{format_mtime, human_size};
 use crate::views::file_manager_rename::{plan_renames, CounterRule, RenamePlan, RenameRule};
 use crate::views::file_ops::{
-    resolve_conflict_name, validate_entry_name, verbatim_path, ConflictMode, OpKind,
+    resolve_conflict_name, validate_entry_name, verbatim_path, ConflictAction, ConflictAnswer,
+    ConflictMode, ConflictQuery, OpKind,
 };
 use std::path::{Path, PathBuf};
 
@@ -201,8 +202,106 @@ fn conflict_label(mode: ConflictMode) -> &'static str {
         ConflictMode::AutoRename => "自动改名（保留两者）",
         ConflictMode::Overwrite => "覆盖",
         ConflictMode::Skip => "跳过",
-        ConflictMode::Ask => "询问（执行期按跳过处理）",
+        ConflictMode::Ask => "逐个询问",
     }
+}
+
+/// 执行期同名冲突问答（ConflictMode::Ask「逐个询问」的弹窗）：worker 阻塞
+/// 等答，窗口无关闭按钮——必须显式选择（整体取消走状态栏「取消」，经
+/// cancel 旗标让 worker 按 Cancel 收拢）。目录冲突只给「合并/跳过」。
+pub struct ConflictDialog {
+    query: ConflictQuery,
+    apply_all: bool,
+}
+
+impl ConflictDialog {
+    pub fn new(query: ConflictQuery) -> Self {
+        Self {
+            query,
+            apply_all: false,
+        }
+    }
+
+    /// 每帧渲染；Some(answer) = 用户已选择（回发 worker）。
+    pub fn ui(&mut self, ctx: &egui::Context) -> Option<ConflictAnswer> {
+        let mut out = None;
+        egui::Window::new("同名冲突")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                let q = &self.query;
+                if q.is_dir {
+                    ui.label("目标已存在同名文件夹：");
+                } else {
+                    ui.label("目标已存在同名文件：");
+                }
+                ui.add_space(4.0);
+                let name = q
+                    .src
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                egui::Grid::new("fm_conflict_cmp")
+                    .num_columns(3)
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("源：").weak());
+                        ui.label(&name).on_hover_text(q.src.display().to_string());
+                        ui.label(entry_detail(q.src_size, q.src_mtime));
+                        ui.end_row();
+                        ui.label(egui::RichText::new("目标：").weak());
+                        ui.label(&name).on_hover_text(q.dst.display().to_string());
+                        ui.label(entry_detail(q.dst_size, q.dst_mtime));
+                        ui.end_row();
+                    });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let mut pick = |action: ConflictAction, apply_all: bool| {
+                        out = Some(ConflictAnswer { action, apply_all });
+                    };
+                    if q.is_dir {
+                        if ui.button("合并").clicked() {
+                            pick(ConflictAction::Overwrite, self.apply_all);
+                        }
+                        if ui.button("跳过").clicked() {
+                            pick(ConflictAction::Skip, self.apply_all);
+                        }
+                    } else {
+                        if ui.button("覆盖").clicked() {
+                            pick(ConflictAction::Overwrite, self.apply_all);
+                        }
+                        if ui.button("跳过").clicked() {
+                            pick(ConflictAction::Skip, self.apply_all);
+                        }
+                        if ui.button("自动改名").clicked() {
+                            pick(ConflictAction::AutoRename, self.apply_all);
+                        }
+                    }
+                    ui.checkbox(&mut self.apply_all, "本次操作全部应用");
+                    if ui.button("取消操作").clicked() {
+                        // Cancel 无 apply_all（取消恒作用整批）。
+                        pick(ConflictAction::Cancel, false);
+                    }
+                });
+            });
+        out
+    }
+}
+
+/// 冲突对比行的「大小 · 时间」详情（目录/元数据缺失相应留空）。
+fn entry_detail(size: Option<u64>, mtime: Option<std::time::SystemTime>) -> String {
+    let mut parts = Vec::new();
+    if let Some(size) = size {
+        parts.push(human_size(size));
+    }
+    let ts = mtime
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64);
+    let mtime = format_mtime(ts);
+    if !mtime.is_empty() {
+        parts.push(mtime);
+    }
+    parts.join(" · ")
 }
 
 /// 压缩为 zip：目标目录（默认非焦点栏目录）+ 文件名（默认首个 source

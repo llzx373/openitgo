@@ -7,12 +7,16 @@
 //! 节流 100ms）；暂停在块/项边界生效（200ms 轮询，期间可即时取消），
 //! Compress 不支持暂停。
 //!
-//! 冲突语义（一期）：策略由 UI 层操作前一次性确定（见
-//! `file_manager_dialog.rs`），执行期不再询问；执行时遇「扫描后新出现的
-//! 冲突」且模式为 Ask/Skip 时按 Skip 记入 errors 汇总。AutoRename 用
-//! `name (1).ext` 递增（`resolve_conflict_name`，同 parser extract 的
-//! uniquify 语义）。目录冲突：两边都是目录 → 合并进入（递归内部按文件
-//! 逐项应用策略），不整删目标目录。
+//! 冲突语义：策略由 UI 层操作前一次性确定（见
+//! `file_manager_dialog.rs`）。`ConflictMode::Ask`（「逐个询问」）执行期
+//! 遇冲突经 `OpEvent::AskConflict` 向 UI 发问并阻塞等答（100ms 轮询，
+//! 期间可被取消打断按 Cancel 收拢；回答通道断开同按 Cancel）；
+//! `ConflictAnswer.apply_all` 把该选择记忆为后续同级冲突（文件级/目录级
+//! 各自独立）的生效策略。Overwrite 覆盖/合并；Skip 跳过记 errors 汇总；
+//! AutoRename 用 `name (1).ext` 递增（`resolve_conflict_name`，同 parser
+//! extract 的 uniquify 语义）。目录↔目录冲突：非 Ask 模式恒合并不问，
+//! Ask 模式问一次「合并/跳过」（合并 = 递归进入逐项处理），不整删目标
+//! 目录；目录级 apply_all 不预决文件级策略（各问各的，各自记忆）。
 //!
 //! 移动：`fs::rename` 快速路径（同盘瞬间完成），失败（跨盘/占用）回退
 //! 递归复制 + 成功后 `trash::delete` 源。
@@ -56,13 +60,45 @@ impl OpKind {
     }
 }
 
-/// 冲突处理策略：操作前由对话框一次性确定；执行期 Ask 按 Skip 处理。
+/// 冲突处理策略：操作前由对话框一次性确定；Ask = 执行期逐个询问
+/// （worker 发 `OpEvent::AskConflict` 阻塞等 `ConflictAnswer`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictMode {
     Ask,
     Overwrite,
     Skip,
     AutoRename,
+}
+
+/// 执行期冲突询问（Ask 模式，worker → UI）。is_dir = 目录↔目录冲突
+/// （UI 文案「合并/跳过」；其余形态都按文件冲突问）。元数据查询失败给 None。
+#[derive(Debug, Clone)]
+pub struct ConflictQuery {
+    pub src: PathBuf,
+    pub dst: PathBuf,
+    pub is_dir: bool,
+    pub src_size: Option<u64>,
+    pub src_mtime: Option<std::time::SystemTime>,
+    pub dst_size: Option<u64>,
+    pub dst_mtime: Option<std::time::SystemTime>,
+}
+
+/// 冲突问答的选择。目录冲突 UI 只给「合并(=Overwrite)/跳过」；
+/// Cancel = 取消整个操作（无 apply_all）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictAction {
+    Overwrite,
+    Skip,
+    AutoRename,
+    Cancel,
+}
+
+/// UI → worker 的回答：apply_all = 记忆为后续同级冲突的生效策略
+/// （文件级/目录级各自记忆；Cancel 忽略 apply_all）。
+#[derive(Debug, Clone, Copy)]
+pub struct ConflictAnswer {
+    pub action: ConflictAction,
+    pub apply_all: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -92,9 +128,14 @@ impl OpProgress {
     }
 }
 
+/// 冲突问答等待的轮询间隔（期间 cancel 即时生效，按 Cancel 收拢）。
+const CONFLICT_POLL: Duration = Duration::from_millis(100);
+
 /// 线程 → UI 的事件。
 enum OpEvent {
     Progress(OpProgress),
+    /// Ask 模式冲突询问：worker 阻塞等 `answer_tx` 回发 `ConflictAnswer`。
+    AskConflict(ConflictQuery),
     Finished {
         cancelled: bool,
         fatal: Option<String>,
@@ -115,6 +156,11 @@ pub struct FileOpTask {
     /// 生效，Compress 不支持暂停）。
     paused: Arc<AtomicBool>,
     rx: Receiver<OpEvent>,
+    /// Ask 模式的回答回发端（worker 持 rx 阻塞等答；task 被移除时 drop，
+    /// worker recv 出错按 Cancel 收拢，防悬挂）。
+    answer_tx: Sender<ConflictAnswer>,
+    /// 已到达、待 UI 取走的冲突询问（worker 逐一发问，恒最多一条）。
+    pending_query: Option<ConflictQuery>,
 }
 
 /// 本帧完成的任务快照（poll 返回值携带，已从 manager 移除）。
@@ -179,7 +225,8 @@ impl FileOpManager {
     /// OpProgress；dest_dir 记 dest_zip 的父目录使完成后栏刷新自动生效）。
     pub fn start_compress(&mut self, sources: Vec<PathBuf>, dest_zip: PathBuf) -> u64 {
         let dest_dir = dest_zip.parent().map(Path::to_path_buf);
-        let (id, cancel, _paused, tx) = self.push_task(OpKind::Compress, &sources, dest_dir);
+        let (id, cancel, _paused, tx, _answer_rx) =
+            self.push_task(OpKind::Compress, &sources, dest_dir);
         std::thread::spawn(move || {
             run_compress(sources, dest_zip, cancel, tx);
         });
@@ -203,25 +250,37 @@ impl FileOpManager {
         dest_dir: Option<PathBuf>,
         conflict: ConflictMode,
     ) -> u64 {
-        let (id, cancel, paused, tx) = self.push_task(kind, &sources, dest_dir.clone());
+        let (id, cancel, paused, tx, answer_rx) = self.push_task(kind, &sources, dest_dir.clone());
+        // Ask 模式才需要问答通道（worker 阻塞等答）；其余模式不需要。
+        let answer_rx = (conflict == ConflictMode::Ask).then_some(answer_rx);
         std::thread::spawn(move || {
-            run_op(kind, sources, dest_dir, conflict, cancel, paused, tx);
+            run_op(
+                kind, sources, dest_dir, conflict, cancel, paused, tx, answer_rx,
+            );
         });
         id
     }
 
-    /// 登记任务并返回 (id, cancel, paused, 事件发送端)，由调用方自起工作线程。
+    /// 登记任务并返回 (id, cancel, paused, 事件发送端, 冲突回答接收端)，
+    /// 由调用方自起工作线程。
     fn push_task(
         &mut self,
         kind: OpKind,
         sources: &[PathBuf],
         dest_dir: Option<PathBuf>,
-    ) -> (u64, Arc<AtomicBool>, Arc<AtomicBool>, Sender<OpEvent>) {
+    ) -> (
+        u64,
+        Arc<AtomicBool>,
+        Arc<AtomicBool>,
+        Sender<OpEvent>,
+        Receiver<ConflictAnswer>,
+    ) {
         self.next_id += 1;
         let id = self.next_id;
         let cancel = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
+        let (answer_tx, answer_rx) = channel();
         let mut src_dirs: Vec<PathBuf> = sources
             .iter()
             .filter_map(|s| s.parent().map(Path::to_path_buf))
@@ -237,9 +296,11 @@ impl FileOpManager {
             cancel: cancel.clone(),
             paused: paused.clone(),
             rx,
+            answer_tx,
+            pending_query: None,
         };
         self.tasks.push(task);
-        (id, cancel, paused, tx)
+        (id, cancel, paused, tx, answer_rx)
     }
 
     /// 取消任务：工作线程在下一块/下一项停止并上报 Finished(cancelled)。
@@ -247,6 +308,30 @@ impl FileOpManager {
         if let Some(task) = self.tasks.iter().find(|t| t.id == id) {
             task.cancel.store(true, Ordering::Relaxed);
         }
+    }
+
+    /// 取出一个待答冲突询问（Ask 模式；worker 逐一发问且阻塞等答，全局
+    /// 恒最多一条在途）。取走后由 `answer_conflict` 回发；任务已结束未答
+    /// 时 worker 侧经 cancel/answer_tx 断开兜底按 Cancel 收拢，不会悬挂。
+    pub fn take_pending_conflict(&mut self) -> Option<(u64, ConflictQuery)> {
+        for task in &mut self.tasks {
+            if let Some(q) = task.pending_query.take() {
+                return Some((task.id, q));
+            }
+        }
+        None
+    }
+
+    /// 回发冲突回答（发送失败 = worker 已退出，忽略）。
+    pub fn answer_conflict(&mut self, id: u64, answer: ConflictAnswer) {
+        if let Some(task) = self.tasks.iter().find(|t| t.id == id) {
+            let _ = task.answer_tx.send(answer);
+        }
+    }
+
+    /// 任务是否仍在活动列表（冲突弹窗的任务结束检测用）。
+    pub fn is_active(&self, id: u64) -> bool {
+        self.tasks.iter().any(|t| t.id == id)
     }
 
     /// 暂停/继续任务（Copy/Move/Delete 在块/项边界生效；Compress 不响应）。
@@ -264,6 +349,7 @@ impl FileOpManager {
             loop {
                 match task.rx.try_recv() {
                     Ok(OpEvent::Progress(p)) => task.progress = p,
+                    Ok(OpEvent::AskConflict(q)) => task.pending_query = Some(q),
                     Ok(OpEvent::Finished {
                         cancelled,
                         fatal,
@@ -311,6 +397,8 @@ impl FileOpManager {
 }
 
 /// 工作线程入口：预扫描计数 → 逐项执行 → Finished 事件收尾。
+/// answer_rx 仅 Ask 模式 Some（冲突问答的回答接收端）。
+#[allow(clippy::too_many_arguments)]
 fn run_op(
     kind: OpKind,
     sources: Vec<PathBuf>,
@@ -319,11 +407,15 @@ fn run_op(
     cancel: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
     tx: Sender<OpEvent>,
+    answer_rx: Option<Receiver<ConflictAnswer>>,
 ) {
     let mut ctx = OpCtx {
         cancel: &cancel,
         paused: &paused,
         tx: &tx,
+        answer_rx: answer_rx.as_ref(),
+        remembered_file: None,
+        remembered_dir: None,
         progress: OpProgress::default(),
         errors: Vec::new(),
         cancelled: false,
@@ -384,22 +476,19 @@ fn run_op(
                         continue;
                     }
                 }
-                // 两边都是目录：不应用文件冲突策略，合并进入（递归内部
-                // 按文件逐项应用）。否则按顶层策略消解冲突。
-                let dst = if verbatim_path(src).is_dir() && verbatim_path(&dst).is_dir() {
-                    Some(dst)
-                } else {
-                    match resolve_conflict(&dst, conflict) {
-                        Some(d) => Some(d),
-                        None => {
-                            ctx.errors
-                                .push((src.clone(), "目标已存在，已跳过".to_string()));
-                            ctx.progress.done_files += items;
-                            ctx.progress.done_bytes += bytes;
-                            ctx.send_progress();
-                            None
-                        }
+                // 冲突消解：目录↔目录非 Ask 恒合并；Ask 逐个询问（含目录
+                // 「合并/跳过」）；Skip 记 errors 汇总；Cancel 收拢整批。
+                let dst = match ctx.resolve_dst(src, &dst, conflict) {
+                    Resolve::Proceed(d) => Some(d),
+                    Resolve::Skip => {
+                        ctx.errors
+                            .push((src.clone(), "目标已存在，已跳过".to_string()));
+                        ctx.progress.done_files += items;
+                        ctx.progress.done_bytes += bytes;
+                        ctx.send_progress();
+                        None
                     }
+                    Resolve::Cancelled => break,
                 };
                 if let Some(dst) = dst {
                     if copy_recursive(src, &dst, conflict, &mut ctx).is_ok()
@@ -476,9 +565,25 @@ struct OpCtx<'a> {
     cancel: &'a AtomicBool,
     paused: &'a AtomicBool,
     tx: &'a Sender<OpEvent>,
+    /// Ask 模式的回答接收端（非 Ask 为 None）。
+    answer_rx: Option<&'a Receiver<ConflictAnswer>>,
+    /// Ask 模式 apply_all 记忆：后续同级冲突的生效策略（文件级/目录级
+    /// 各自独立——目录级「全部应用」不预决文件级策略）。
+    remembered_file: Option<ConflictAction>,
+    remembered_dir: Option<ConflictAction>,
     progress: OpProgress,
     errors: Vec<(PathBuf, String)>,
     cancelled: bool,
+}
+
+/// 冲突消解结果（resolve_dst 返回值）。
+enum Resolve {
+    /// 继续：Overwrite 原路径 / AutoRename 新路径 / 无冲突原路径 / 目录合并。
+    Proceed(PathBuf),
+    /// 跳过（调用方记 errors 汇总）。
+    Skip,
+    /// 取消整批（用户选 Cancel / 等待期间被 cancel / 回答通道断开）。
+    Cancelled,
 }
 
 impl OpCtx<'_> {
@@ -507,6 +612,107 @@ impl OpCtx<'_> {
 
     fn send_progress(&mut self) {
         let _ = self.tx.send(OpEvent::Progress(self.progress.clone()));
+    }
+
+    /// 冲突消解（Ask 模式含执行期问答）：目标不存在 → 原样；目录↔目录
+    /// 非 Ask 恒合并（递归内部逐项处理，不整删目标目录）；Ask 模式逐个
+    /// 询问（目录问「合并/跳过」，文件问「覆盖/跳过/自动改名/取消」，
+    /// apply_all 记忆同级策略）；其余按模式静态消解。
+    fn resolve_dst(&mut self, src: &Path, dst: &Path, mode: ConflictMode) -> Resolve {
+        if !verbatim_path(dst).exists() {
+            return Resolve::Proceed(dst.to_path_buf());
+        }
+        let dir_dir = verbatim_path(src).is_dir() && verbatim_path(dst).is_dir();
+        match mode {
+            ConflictMode::Overwrite => Resolve::Proceed(dst.to_path_buf()),
+            ConflictMode::AutoRename | ConflictMode::Skip if dir_dir => {
+                Resolve::Proceed(dst.to_path_buf())
+            }
+            ConflictMode::AutoRename => Resolve::Proceed(resolve_conflict_name(dst)),
+            ConflictMode::Skip => Resolve::Skip,
+            ConflictMode::Ask => self.resolve_ask(src, dst, dir_dir),
+        }
+    }
+
+    /// Ask 模式问答：先看 apply_all 记忆，否则发 ConflictQuery 阻塞等答。
+    fn resolve_ask(&mut self, src: &Path, dst: &Path, dir_dir: bool) -> Resolve {
+        let remembered = if dir_dir {
+            self.remembered_dir
+        } else {
+            self.remembered_file
+        };
+        let action = match remembered {
+            Some(action) => action,
+            None => {
+                let Some(answer) = self.ask_conflict(src, dst, dir_dir) else {
+                    self.cancelled = true;
+                    return Resolve::Cancelled;
+                };
+                if answer.apply_all && answer.action != ConflictAction::Cancel {
+                    if dir_dir {
+                        self.remembered_dir = Some(answer.action);
+                    } else {
+                        self.remembered_file = Some(answer.action);
+                    }
+                }
+                answer.action
+            }
+        };
+        match action {
+            ConflictAction::Overwrite => Resolve::Proceed(dst.to_path_buf()),
+            ConflictAction::AutoRename => Resolve::Proceed(resolve_conflict_name(dst)),
+            ConflictAction::Skip => Resolve::Skip,
+            ConflictAction::Cancel => {
+                self.cancelled = true;
+                Resolve::Cancelled
+            }
+        }
+    }
+
+    /// 发问并阻塞等答：100ms 轮询 try_recv + cancel 检查（cancel 或通道
+    /// 断开都按 None=Cancel 收拢）；无问答通道时按 Skip 兜底（不应发生：
+    /// Ask 模式必配通道）。问答期间进度消息暂停（worker 阻塞），UI 侧
+    /// 另有「等待确认…」展示。
+    fn ask_conflict(&mut self, src: &Path, dst: &Path, is_dir: bool) -> Option<ConflictAnswer> {
+        let Some(rx) = self.answer_rx else {
+            return Some(ConflictAnswer {
+                action: ConflictAction::Skip,
+                apply_all: false,
+            });
+        };
+        let stat = |p: &Path| {
+            let m = std::fs::metadata(verbatim_path(p)).ok();
+            let size = m.as_ref().filter(|m| m.is_file()).map(|m| m.len());
+            let mtime = m.and_then(|m| m.modified().ok());
+            (size, mtime)
+        };
+        let (src_size, src_mtime) = stat(src);
+        let (dst_size, dst_mtime) = stat(dst);
+        let query = ConflictQuery {
+            src: src.to_path_buf(),
+            dst: dst.to_path_buf(),
+            is_dir,
+            src_size,
+            src_mtime,
+            dst_size,
+            dst_mtime,
+        };
+        if self.tx.send(OpEvent::AskConflict(query)).is_err() {
+            return None;
+        }
+        loop {
+            if self.cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            match rx.try_recv() {
+                Ok(answer) => return Some(answer),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    std::thread::sleep(CONFLICT_POLL);
+                }
+                // UI 侧 answer_tx 全部 drop（任务被移除等）：按 Cancel 收拢。
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return None,
+            }
+        }
     }
 }
 
@@ -547,20 +753,6 @@ fn count_source(path: &Path) -> (u64, u64) {
         }
     }
     (items, bytes)
-}
-
-/// 执行期冲突消解：目标不存在 → 原样；否则按策略：
-/// Overwrite → 原样（复制时覆盖/合并）；AutoRename → `name (1).ext` 递增；
-/// Ask/Skip（含扫描后新出现的冲突）→ None（跳过并记汇总）。
-fn resolve_conflict(dst: &Path, mode: ConflictMode) -> Option<PathBuf> {
-    if !verbatim_path(dst).exists() {
-        return Some(dst.to_path_buf());
-    }
-    match mode {
-        ConflictMode::Overwrite => Some(dst.to_path_buf()),
-        ConflictMode::AutoRename => Some(resolve_conflict_name(dst)),
-        ConflictMode::Ask | ConflictMode::Skip => None,
-    }
 }
 
 /// 自动改名：`name (1).ext`、`name (2).ext`…（同 parser extract 的
@@ -672,20 +864,16 @@ fn copy_recursive(src: &Path, dst: &Path, mode: ConflictMode, ctx: &mut OpCtx) -
         for item in rd.flatten() {
             let child_src = item.path();
             let child_dst = dst.join(item.file_name());
-            // 目录合并：两边都是目录时不应用文件冲突策略，直接递归。
-            let child_dst =
-                if verbatim_path(&child_src).is_dir() && verbatim_path(&child_dst).is_dir() {
-                    child_dst
-                } else {
-                    match resolve_conflict(&child_dst, mode) {
-                        Some(d) => d,
-                        None => {
-                            ctx.errors
-                                .push((child_src.clone(), "目标已存在，已跳过".to_string()));
-                            continue;
-                        }
-                    }
-                };
+            // 递归内部逐项冲突消解（目录↔目录合并在 resolve_dst 内判定）。
+            let child_dst = match ctx.resolve_dst(&child_src, &child_dst, mode) {
+                Resolve::Proceed(d) => d,
+                Resolve::Skip => {
+                    ctx.errors
+                        .push((child_src.clone(), "目标已存在，已跳过".to_string()));
+                    continue;
+                }
+                Resolve::Cancelled => return Err(()),
+            };
             copy_recursive(&child_src, &child_dst, mode, ctx)?;
         }
         Ok(())
@@ -1023,6 +1211,7 @@ mod tests {
             cancel,
             Arc::new(AtomicBool::new(false)),
             tx,
+            None,
         );
         let mut finished = None;
         while let Ok(ev) = rx.try_recv() {
@@ -1084,6 +1273,252 @@ mod tests {
         assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"old");
     }
 
+    fn answer(action: ConflictAction, apply_all: bool) -> ConflictAnswer {
+        ConflictAnswer { action, apply_all }
+    }
+
+    /// Ask 模式问答测试驱动：worker 线程跑 run_op，主线程收 AskConflict
+    /// 按脚本回发（脚本外再来询问 = panic），收 Finished 收尾；
+    /// 返回 (结果, 实际收到的全部询问)。
+    fn run_ask_sync(
+        sources: Vec<PathBuf>,
+        dest: PathBuf,
+        answers: Vec<ConflictAnswer>,
+    ) -> (FinishedLike, Vec<ConflictQuery>) {
+        let (tx, rx) = channel();
+        let (atx, arx) = channel();
+        let handle = std::thread::spawn(move || {
+            run_op(
+                OpKind::Copy,
+                sources,
+                Some(dest),
+                ConflictMode::Ask,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+                tx,
+                Some(arx),
+            );
+        });
+        let mut queries = Vec::new();
+        let mut answers = answers.into_iter();
+        let mut finished = None;
+        // worker 退出后 tx 断开，recv 出错收尾。
+        while let Ok(ev) = rx.recv() {
+            match ev {
+                OpEvent::AskConflict(q) => {
+                    let ans = answers.next().expect("询问数超脚本");
+                    atx.send(ans).unwrap();
+                    queries.push(q);
+                }
+                OpEvent::Finished {
+                    cancelled, errors, ..
+                } => {
+                    finished = Some(FinishedLike { cancelled, errors });
+                }
+                OpEvent::Progress(_) => {}
+            }
+        }
+        handle.join().unwrap();
+        (finished.expect("worker must finish"), queries)
+    }
+
+    #[test]
+    fn ask_conflict_overwrite_skip_rename_cancel() {
+        // 覆盖
+        let t = TempTree::new("ask-ow");
+        let src = t.path().join("a.txt");
+        write_file(&src, b"new");
+        let dest = t.path().join("dest");
+        write_file(&dest.join("a.txt"), b"old");
+        let (r, qs) = run_ask_sync(
+            vec![src],
+            dest.clone(),
+            vec![answer(ConflictAction::Overwrite, false)],
+        );
+        assert!(!r.cancelled && r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(qs.len(), 1);
+        assert!(!qs[0].is_dir);
+        assert_eq!(qs[0].src_size, Some(3));
+        assert_eq!(qs[0].dst_size, Some(3));
+        assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"new");
+
+        // 跳过
+        let t = TempTree::new("ask-skip");
+        let src = t.path().join("a.txt");
+        write_file(&src, b"new");
+        let dest = t.path().join("dest");
+        write_file(&dest.join("a.txt"), b"old");
+        let (r, _) = run_ask_sync(
+            vec![src],
+            dest.clone(),
+            vec![answer(ConflictAction::Skip, false)],
+        );
+        assert!(!r.cancelled);
+        assert_eq!(r.errors.len(), 1);
+        assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"old");
+
+        // 自动改名
+        let t = TempTree::new("ask-rn");
+        let src = t.path().join("a.txt");
+        write_file(&src, b"new");
+        let dest = t.path().join("dest");
+        write_file(&dest.join("a.txt"), b"old");
+        let (r, _) = run_ask_sync(
+            vec![src],
+            dest.clone(),
+            vec![answer(ConflictAction::AutoRename, false)],
+        );
+        assert!(!r.cancelled && r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"old");
+        assert_eq!(std::fs::read(dest.join("a (1).txt")).unwrap(), b"new");
+
+        // 取消操作：整批收拢，目标不动。
+        let t = TempTree::new("ask-cancel");
+        let src = t.path().join("a.txt");
+        write_file(&src, b"new");
+        let dest = t.path().join("dest");
+        write_file(&dest.join("a.txt"), b"old");
+        let (r, _) = run_ask_sync(
+            vec![src],
+            dest.clone(),
+            vec![answer(ConflictAction::Cancel, false)],
+        );
+        assert!(r.cancelled);
+        assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"old");
+    }
+
+    #[test]
+    fn ask_apply_all_remembers_per_level() {
+        // 文件级 apply_all：两个冲突文件只问一次，第二个自动覆盖。
+        let t = TempTree::new("ask-all");
+        let src = t.path().join("s");
+        write_file(&src.join("a.txt"), b"new-a");
+        write_file(&src.join("b.txt"), b"new-b");
+        let dest = t.path().join("dest");
+        write_file(&dest.join("s/a.txt"), b"old-a");
+        write_file(&dest.join("s/b.txt"), b"old-b");
+        let (r, qs) = run_ask_sync(
+            vec![src],
+            dest.clone(),
+            vec![
+                answer(ConflictAction::Overwrite, true), // 目录冲突（合并，全部应用）
+                answer(ConflictAction::Overwrite, true), // 首个文件冲突（覆盖，全部应用）
+            ],
+        );
+        assert!(!r.cancelled && r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(qs.len(), 2, "目录问一次 + 文件只问首个: {qs:?}");
+        assert!(qs[0].is_dir);
+        assert!(!qs[1].is_dir);
+        assert_eq!(std::fs::read(dest.join("s/a.txt")).unwrap(), b"new-a");
+        assert_eq!(std::fs::read(dest.join("s/b.txt")).unwrap(), b"new-b");
+
+        // 目录级 apply_all 不预决文件级：目录「合并+全部」后文件仍逐个问
+        // （此处文件首问答「跳过+全部」→ 第二个文件免问自动跳过）。
+        let t = TempTree::new("ask-levels");
+        let src = t.path().join("s");
+        write_file(&src.join("a.txt"), b"new-a");
+        write_file(&src.join("b.txt"), b"new-b");
+        let dest = t.path().join("dest");
+        write_file(&dest.join("s/a.txt"), b"old-a");
+        write_file(&dest.join("s/b.txt"), b"old-b");
+        let (r, qs) = run_ask_sync(
+            vec![src],
+            dest.clone(),
+            vec![
+                answer(ConflictAction::Overwrite, true), // 目录：合并，全部应用
+                answer(ConflictAction::Skip, true),      // 首个文件：跳过，全部应用
+            ],
+        );
+        assert!(!r.cancelled);
+        assert_eq!(
+            qs.len(),
+            2,
+            "目录记忆不预决文件，文件记忆免问第二个: {qs:?}"
+        );
+        assert_eq!(r.errors.len(), 2, "两个文件都跳过记汇总: {:?}", r.errors);
+        assert_eq!(std::fs::read(dest.join("s/a.txt")).unwrap(), b"old-a");
+        assert_eq!(std::fs::read(dest.join("s/b.txt")).unwrap(), b"old-b");
+    }
+
+    #[test]
+    fn ask_dir_conflict_merge_or_skip() {
+        // 合并：递归进入逐项处理，目标已有内容保留。
+        let t = TempTree::new("ask-merge");
+        let src = t.path().join("s");
+        write_file(&src.join("f.txt"), b"new");
+        let dest = t.path().join("dest");
+        write_file(&dest.join("s/other.txt"), b"keep");
+        let (r, qs) = run_ask_sync(
+            vec![src],
+            dest.clone(),
+            vec![answer(ConflictAction::Overwrite, false)],
+        );
+        assert!(!r.cancelled && r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(qs.len(), 1);
+        assert!(qs[0].is_dir);
+        assert_eq!(qs[0].src_size, None, "目录不给大小");
+        assert_eq!(std::fs::read(dest.join("s/f.txt")).unwrap(), b"new");
+        assert_eq!(std::fs::read(dest.join("s/other.txt")).unwrap(), b"keep");
+
+        // 跳过：整目录不进，记汇总。
+        let t = TempTree::new("ask-dirskip");
+        let src = t.path().join("s");
+        write_file(&src.join("f.txt"), b"new");
+        let dest = t.path().join("dest");
+        write_file(&dest.join("s/other.txt"), b"keep");
+        let (r, _) = run_ask_sync(
+            vec![src],
+            dest.clone(),
+            vec![answer(ConflictAction::Skip, false)],
+        );
+        assert!(!r.cancelled);
+        assert_eq!(r.errors.len(), 1);
+        assert!(!dest.join("s/f.txt").exists());
+        assert_eq!(std::fs::read(dest.join("s/other.txt")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn ask_wait_interrupted_by_cancel_flag() {
+        // 等待回答期间置 cancel：按 Cancel 收拢（worker 不悬挂）。
+        let t = TempTree::new("ask-waitcancel");
+        let src = t.path().join("a.txt");
+        write_file(&src, b"new");
+        let dest = t.path().join("dest");
+        write_file(&dest.join("a.txt"), b"old");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c2 = cancel.clone();
+        let dest2 = dest.clone();
+        let (tx, rx) = channel();
+        let (_atx, arx) = channel::<ConflictAnswer>();
+        let handle = std::thread::spawn(move || {
+            run_op(
+                OpKind::Copy,
+                vec![src],
+                Some(dest2),
+                ConflictMode::Ask,
+                c2,
+                Arc::new(AtomicBool::new(false)),
+                tx,
+                Some(arx),
+            );
+        });
+        // 收到询问后不答，直接置 cancel。
+        loop {
+            match rx.recv() {
+                Ok(OpEvent::AskConflict(_)) => break,
+                Ok(_) => {}
+                Err(_) => panic!("worker 退出前未发问"),
+            }
+        }
+        cancel.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+        let cancelled = rx
+            .try_iter()
+            .any(|ev| matches!(ev, OpEvent::Finished { cancelled, .. } if cancelled));
+        assert!(cancelled);
+        assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"old");
+    }
+
     #[test]
     fn move_same_disk_uses_rename_fast_path() {
         let t = TempTree::new("move");
@@ -1137,6 +1572,9 @@ mod tests {
             cancel: &cancel,
             paused: &paused,
             tx: &tx,
+            answer_rx: None,
+            remembered_file: None,
+            remembered_dir: None,
             progress: OpProgress::default(),
             errors: Vec::new(),
             cancelled: false,
@@ -1308,6 +1746,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             tx,
+            None,
         );
         let progresses: Vec<OpProgress> = rx
             .try_iter()
@@ -1344,6 +1783,7 @@ mod tests {
                 c2,
                 p2,
                 tx,
+                None,
             );
         });
         // 暂停期间：不写目标、不发 Finished（暂停中不发新进度）。

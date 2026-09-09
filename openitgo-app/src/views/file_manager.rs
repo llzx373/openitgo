@@ -12,8 +12,8 @@
 use crate::opener::{AsyncOpener, OpenStatus};
 use crate::views::archive::{format_mtime, human_size};
 use crate::views::file_manager_dialog::{
-    CompressDialog, CopyMoveDialog, DeleteDialog, FmDialog, FmDialogOutcome, MultiRenameDialog,
-    NewDirDialog, RenameDialog, SelectGroupDialog,
+    CompressDialog, ConflictDialog, CopyMoveDialog, DeleteDialog, FmDialog, FmDialogOutcome,
+    MultiRenameDialog, NewDirDialog, RenameDialog, SelectGroupDialog,
 };
 use crate::views::file_manager_panel::{
     fallback_existing_dir, list_drives, FocusMove, FsPanel, PanelLoadState, PanelViewMode,
@@ -146,6 +146,9 @@ pub struct FileManagerView {
     panel_drop_rects: [Option<egui::Rect>; 2],
     /// 文件搜索对话框（Alt+F7；非模态 egui::Window，worker 关闭即取消）。
     search: SearchDialog,
+    /// 执行期冲突问答（ConflictMode::Ask「逐个询问」）：待答的 worker 询问
+    /// + 弹窗状态；Some 时屏蔽面板键盘（同 self.dialog 机制）。
+    pending_conflict: Option<(u64, ConflictDialog)>,
 }
 
 /// 帧内意图：行内交互写入，帧尾统一触发回调（避免回调嵌套借用）。
@@ -322,6 +325,7 @@ impl FileManagerView {
             thumb_visible: [None, None],
             panel_drop_rects: [None, None],
             search: SearchDialog::default(),
+            pending_conflict: None,
         }
     }
 
@@ -477,6 +481,19 @@ impl FileManagerView {
         for finished in op_summary.finished {
             self.on_op_finished(finished, &mut intents);
         }
+        // 执行期冲突问答（Ask 模式）：取新询问（一次一窗）；待答询问所属
+        // 任务已结束（取消打断等待/异常）时关窗——worker 侧经 cancel 旗标
+        // 或 answer_tx 断开兜底按 Cancel 收拢，不会悬挂。
+        if self.pending_conflict.is_none() {
+            if let Some((id, query)) = self.ops.take_pending_conflict() {
+                self.pending_conflict = Some((id, ConflictDialog::new(query)));
+            }
+        }
+        if let Some((id, _)) = &self.pending_conflict {
+            if !self.ops.is_active(*id) {
+                self.pending_conflict = None;
+            }
+        }
         let active_op = op_summary.active;
         // 速度/ETA 采样（任务切换重置采样器；暂停期间 done 不变，
         // EMA 自然衰减归零、速率显示消失）。采样间隔由 meter 内部节流。
@@ -551,6 +568,12 @@ impl FileManagerView {
                 // 暂停/继续 + 取消（进度区加宽，提示文本相应让位）。
                 if let Some(op) = &active_op {
                     ui.separator();
+                    // Ask 模式冲突问答在途：worker 阻塞等答，进度暂停推进。
+                    if self.pending_conflict.is_some() {
+                        ui.label(
+                            egui::RichText::new("等待确认…").color(ui.visuals().warn_fg_color),
+                        );
+                    }
                     let fraction = op.progress.fraction();
                     let pct = (fraction * 100.0).round() as u32;
                     let bar_text = if op.paused {
@@ -677,6 +700,8 @@ impl FileManagerView {
         self.render_preview_window(ui.ctx());
         // 文件操作确认对话框（复制/移动/删除/重命名/新建文件夹）。
         self.render_dialog(ui.ctx(), &mut intents);
+        // 执行期冲突问答弹窗（Ask 模式；worker 阻塞等答）。
+        self.render_conflict_dialog(ui.ctx());
         // 文件搜索对话框（非模态 egui::Window）。
         self.render_search_dialog(ui.ctx());
 
@@ -2325,6 +2350,18 @@ impl FileManagerView {
         }
     }
 
+    /// 渲染执行期冲突问答弹窗；用户选择后回发 worker（同 render_dialog
+    /// 的 take/reinsert 模式，防嵌套借用）。
+    fn render_conflict_dialog(&mut self, ctx: &egui::Context) {
+        let Some((id, mut dialog)) = self.pending_conflict.take() else {
+            return;
+        };
+        match dialog.ui(ctx) {
+            Some(answer) => self.ops.answer_conflict(id, answer),
+            None => self.pending_conflict = Some((id, dialog)),
+        }
+    }
+
     fn apply_dialog_outcome(&mut self, outcome: FmDialogOutcome, intents: &mut FmIntents) {
         let sys_cut_paste = std::mem::take(&mut self.sys_clipboard_cut_pending);
         match outcome {
@@ -2472,8 +2509,8 @@ impl FileManagerView {
     /// 文件操作键：F2 重命名 / F5 复制 / F6 移动 / F7 新建文件夹 /
     /// F8(Delete) 删除（confirm_delete 时先弹确认框）；Ctrl+C/X/V 剪贴板。
     fn handle_keyboard(&mut self, ui: &egui::Ui, intents: &mut FmIntents, confirm_delete: bool) {
-        // 对话框打开时屏蔽面板键盘（输入归对话框）。
-        if self.dialog.is_some() {
+        // 对话框打开时屏蔽面板键盘（输入归对话框；冲突问答窗同此机制）。
+        if self.dialog.is_some() || self.pending_conflict.is_some() {
             return;
         }
         if ui.ctx().egui_wants_keyboard_input() {

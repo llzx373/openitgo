@@ -136,8 +136,14 @@ cargo clippy --workspace --all-targets -- -D warnings
   （Archive 只存文件条目名、目录选中态派生自后代统计）；焦点是 UI 行索引
   usize（0 = 「..」上级行，盘符根禁用上级）。**file_ops 约定**：每任务一条后台
   线程 + channel 进度 + `Arc<AtomicBool>` 取消；删除逐项 `trash::delete`（回收站）；
-  冲突策略由 UI 层操作前一次性确定（执行期不再询问，执行时遇新冲突且模式为
-  Ask/Skip 按 Skip 记 errors）；目录↔目录冲突恒合并（不整删目标目录），
+  冲突策略由 UI 层操作前一次性确定；`ConflictMode::Ask`（确认框「逐个询问」档）
+  执行期真正逐个问——worker 经 `OpEvent::AskConflict` 发 `ConflictQuery`（含
+  双方大小/时间快照）并阻塞等 `ConflictAnswer`（100ms 轮询，期间 cancel 旗标
+  或回答通道断开都按 Cancel 收拢）；manager 侧 `take_pending_conflict()`/
+  `answer_conflict()`，`FileManagerView.pending_conflict` 弹「同名冲突」窗
+  （目录冲突只给「合并/跳过」；「本次操作全部应用」把选择记忆为后续同级冲突
+  策略——文件级/目录级各自独立，目录级不预决文件级；Cancel 无 apply_all）；
+  Skip 记 errors 汇总；目录↔目录冲突非 Ask 恒合并（不整删目标目录），
   AutoRename 用 `name (1).ext` 递增；移动 = `fs::rename` 快速路径，失败回退递归
   复制 + trash 源；取消清理半成品目标文件（写入前取消不动已存在目标）；预扫描与
   递归复制均不跟进符号链接目录（防环）；Windows 长路径统一经 `verbatim_path`
