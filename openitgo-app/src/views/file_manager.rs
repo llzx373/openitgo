@@ -1135,12 +1135,23 @@ impl FileManagerView {
                         } else {
                             ui.visuals().widgets.noninteractive.fg_stroke.color
                         };
-                        ui.colored_label(text_color, icons::ARROW_UP.as_str());
-                        ui.colored_label(text_color, "..");
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(icons::ARROW_UP.as_str()).color(text_color),
+                            )
+                            .selectable(false),
+                        );
+                        ui.add(
+                            egui::Label::new(egui::RichText::new("..").color(text_color))
+                                .selectable(false),
+                        );
                     }
                     Some(e) => {
-                        ui.label(egui::RichText::new(entry_icon(e).as_str()).weak());
-                        ui.add(egui::Label::new(&e.name).truncate());
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(entry_icon(e).as_str()).weak())
+                                .selectable(false),
+                        );
+                        ui.add(egui::Label::new(&e.name).truncate().selectable(false));
                     }
                 }
                 // 右对齐列：与表头/竖线共用 column_layout 锚点直接绘制，天然跟随
