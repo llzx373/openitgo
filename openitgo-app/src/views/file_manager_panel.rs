@@ -481,6 +481,38 @@ fn read_dir_entries(path: &Path) -> Result<Vec<FsEntry>, String> {
     Ok(entries)
 }
 
+/// 枚举可用盘符/卷（盘符下拉用；断开的映射盘/光驱可能阻塞数秒，
+/// 调用方应放后台线程）：Windows 列 A–Z 中 `read_dir` 成功的 `X:\`
+/// （光驱无盘/断开映射盘 `exists` 可能为真但读取失败，以可列出为准；
+/// 空盘 `read_dir` 成功，不误伤）；macOS/Linux 返回 `/` 加 `/Volumes/*`
+/// 下的可用卷。
+pub fn list_drives() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        let mut drives = Vec::new();
+        for letter in b'A'..=b'Z' {
+            let root = PathBuf::from(format!("{}:\\", letter as char));
+            if std::fs::read_dir(&root).is_ok() {
+                drives.push(root);
+            }
+        }
+        drives
+    }
+    #[cfg(not(windows))]
+    {
+        let mut drives = vec![PathBuf::from("/")];
+        if let Ok(rd) = std::fs::read_dir("/Volumes") {
+            for item in rd.flatten() {
+                let p = item.path();
+                if p.is_dir() {
+                    drives.push(p);
+                }
+            }
+        }
+        drives
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,6 +534,21 @@ mod tests {
 
         assert!(!panel.poll());
         assert!(matches!(panel.state, PanelLoadState::Failed(_)));
+    }
+
+    /// 盘符枚举：Windows 下至少能列出系统盘 C:\（CI/开发机均成立）。
+    #[cfg(windows)]
+    #[test]
+    fn list_drives_includes_system_drive() {
+        let drives = list_drives();
+        assert!(
+            drives.iter().any(|d| d == &PathBuf::from("C:\\")),
+            "应列出 C:\\，实际: {drives:?}"
+        );
+        // 每个列出的盘符都必须真的可读（不以 exists 为准）。
+        for d in &drives {
+            assert!(std::fs::read_dir(d).is_ok(), "{d:?} 应可列出");
+        }
     }
 
     /// navigate 到真实目录 → poll 至 Ready 后状态稳定，再 poll 不再变化。

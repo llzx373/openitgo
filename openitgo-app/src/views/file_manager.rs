@@ -15,7 +15,7 @@ use crate::views::file_manager_dialog::{
     CopyMoveDialog, DeleteDialog, FmDialog, FmDialogOutcome, NewDirDialog, RenameDialog,
 };
 use crate::views::file_manager_panel::{
-    FocusMove, FsPanel, PanelLoadState, COL_RIGHT_PAD, ROW_HEIGHT,
+    list_drives, FocusMove, FsPanel, PanelLoadState, COL_RIGHT_PAD, ROW_HEIGHT,
 };
 use crate::views::file_manager_rows::{FsEntry, SortKey};
 use crate::views::file_ops::{
@@ -95,6 +95,9 @@ pub struct FileManagerView {
     /// 应用内剪贴板（Ctrl+C/X 复制/剪切，Ctrl+V 粘贴到焦点栏）。
     clipboard: Vec<PathBuf>,
     clipboard_cut: bool,
+    /// 盘符列表缓存与在途后台枚举（盘符下拉共用；慢速设备不卡 UI）。
+    drives: Option<Vec<PathBuf>>,
+    drives_rx: Option<std::sync::mpsc::Receiver<Vec<PathBuf>>>,
     /// 删除前是否弹确认框（settings.fm_confirm_delete 快照，供右键菜单使用）。
     confirm_delete: bool,
 }
@@ -190,6 +193,8 @@ impl FileManagerView {
             dialog: None,
             clipboard: Vec::new(),
             clipboard_cut: false,
+            drives: None,
+            drives_rx: None,
             confirm_delete: true,
         }
     }
@@ -591,7 +596,7 @@ impl FileManagerView {
         }
     }
 
-    /// 面包屑：路径分段可点击跳回；焦点栏铺淡底色高亮。
+    /// 面包屑：盘符下拉（最左）+ 路径分段可点击跳回；焦点栏铺淡底色高亮。
     fn render_breadcrumb(&mut self, ui: &mut egui::Ui, idx: usize) {
         let active = self.active == idx;
         let fill = if active {
@@ -604,6 +609,8 @@ impl FileManagerView {
             .inner_margin(egui::Margin::symmetric(4, 2))
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
+                    self.render_drive_switcher(ui, idx);
+                    ui.separator();
                     let dir = self.panels[idx].dir.clone();
                     let segments = breadcrumb_segments(&dir);
                     if segments.is_empty() {
@@ -635,6 +642,53 @@ impl FileManagerView {
                     }
                 });
             });
+    }
+
+    /// 面包屑最左的盘符下拉：显示该栏当前盘符（如 `C:\`），点开列出可用
+    /// 盘符/卷，点击后该栏 navigate_to 盘符根（两栏各自独立）。盘符枚举
+    /// 首次打开时后台线程执行（慢速/断开设备不卡 UI），结果缓存于视图。
+    fn render_drive_switcher(&mut self, ui: &mut egui::Ui, idx: usize) {
+        // 每帧尝试接收后台枚举结果；在途时主动重绘直到就绪。
+        if let Some(rx) = &self.drives_rx {
+            if let Ok(list) = rx.try_recv() {
+                self.drives = Some(list);
+                self.drives_rx = None;
+            } else {
+                ui.ctx().request_repaint_after(Duration::from_millis(100));
+            }
+        }
+        let label = format!(
+            "{} {}",
+            icons::HARD_DRIVES.as_str(),
+            drive_label(&self.panels[idx].dir)
+        );
+        ui.menu_button(label, |ui| {
+            if self.drives.is_none() {
+                // 首次打开：起后台线程枚举（仅一次，结果缓存）。
+                if self.drives_rx.is_none() {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(list_drives());
+                    });
+                    self.drives_rx = Some(rx);
+                    ui.ctx().request_repaint_after(Duration::from_millis(100));
+                }
+                ui.label(egui::RichText::new("正在扫描盘符…").weak());
+                return;
+            }
+            let drives = self.drives.clone().unwrap_or_default();
+            let current = self.panels[idx].dir.clone();
+            for d in drives {
+                let is_current = current.starts_with(&d) && d.as_os_str() != "/";
+                if ui
+                    .selectable_label(is_current, d.display().to_string())
+                    .clicked()
+                {
+                    self.panels[idx].navigate_to(d);
+                    ui.close();
+                }
+            }
+        });
     }
 
     /// 列头：名称 / 大小 / 修改时间，整列格可点击切换排序键与升降序，
@@ -1587,6 +1641,15 @@ fn render_splitter(ui: &mut egui::Ui, height: f32) -> Option<f32> {
     }
 }
 
+/// 栏当前目录的根展示名（Windows `C:\`；Unix `/`）；空路径回退 `/`。
+/// 复用面包屑首段（Windows Prefix+Root 已合并为 `C:\`）。
+fn drive_label(dir: &Path) -> String {
+    breadcrumb_segments(dir)
+        .first()
+        .map(|(_, label)| label.clone())
+        .unwrap_or_else(|| "/".to_string())
+}
+
 /// 面包屑分段：根（`C:\` 或 `/`）+ 各级目录名，每段带其完整路径。
 fn breadcrumb_segments(path: &Path) -> Vec<(PathBuf, String)> {
     let mut segments: Vec<(PathBuf, String)> = Vec::new();
@@ -1690,6 +1753,14 @@ mod tests {
         let labels: Vec<&str> = segs.iter().map(|(_, l)| l.as_str()).collect();
         assert_eq!(labels, ["/", "a", "b", "c"]);
         assert_eq!(segs[2].0, PathBuf::from("/a/b"));
+    }
+
+    #[test]
+    fn drive_label_takes_root_segment() {
+        assert_eq!(drive_label(Path::new("/a/b")), "/");
+        assert_eq!(drive_label(Path::new("")), "/");
+        #[cfg(windows)]
+        assert_eq!(drive_label(Path::new(r"C:\foo\bar")), r"C:\");
     }
 
     #[test]

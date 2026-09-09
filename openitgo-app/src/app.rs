@@ -324,6 +324,11 @@ fn accumulate_page_turn(acc: f32, delta: f32, threshold: f32) -> (f32, i32) {
 pub struct ReaderApp {
     pub current_view: View,
     pub last_view: View,
+    /// 回退落点（单层，「从哪来回哪去」）：仅由文件管理器的打开回调
+    /// 记录（FileManager），顶栏「← 返回」消费后清空；进入
+    /// Library/Settings（顶层目的地）时也清空。不用栈：本期只做
+    /// 「回文件浏览器」语义，避免视图间跳转都被记录的蔓延行为。
+    pub previous_view: Option<View>,
     pub settings: Settings,
     pub library_view: LibraryView,
     pub reader_view: ReaderView,
@@ -464,6 +469,7 @@ impl Default for ReaderApp {
         Self {
             current_view: View::Library,
             last_view: View::Library,
+            previous_view: None,
             settings,
             library_view,
             reader_view: ReaderView::default(),
@@ -613,6 +619,10 @@ impl eframe::App for ReaderApp {
         self.poll_media_covers();
         self.poll_extracts(&ctx);
 
+        // 进入 Library/Settings（顶层目的地）清空回退落点（在渲染顶栏前
+        // 同步，保证本帧按钮可见性一致）。
+        self.sync_previous_view();
+
         self.render_menu_bar(ui);
 
         match self.current_view.clone() {
@@ -636,6 +646,14 @@ impl eframe::App for ReaderApp {
         self.maybe_validate_window_geometry(&ctx);
         self.tick_persist_window_geometry(&ctx);
         self.sync_window_title(&ctx);
+    }
+}
+
+/// 顶栏「← 返回」按钮可见性：有回退落点且当前不在落点视图里。
+fn should_show_back_button(current: &View, previous: &Option<View>) -> bool {
+    match previous {
+        Some(target) => current != target,
+        None => false,
     }
 }
 
@@ -2492,6 +2510,8 @@ impl ReaderApp {
             if back {
                 self.current_view = View::Library;
             }
+            let opened_something =
+                open_archive.is_some() || open_path.is_some() || open_as_comic.is_some();
             if let Some(path) = open_archive {
                 // 双击压缩包 → 压缩包浏览视图（设计决策 3，不做面板内浏览）。
                 self.open_archive_browser(path);
@@ -2502,6 +2522,10 @@ impl ReaderApp {
             if let Some(path) = open_as_comic {
                 // 显式「作为漫画打开」：跳过启发式分流，直接走漫画链路。
                 self.open_comic(path);
+            }
+            // 打开动作真的让视图离开 FM 才记录回退落点；打开失败留在 FM 时不记。
+            if opened_something && self.current_view != View::FileManager {
+                self.previous_view = Some(View::FileManager);
             }
             if let Some(msg) = op_error {
                 self.error_message = Some(msg);
@@ -2720,6 +2744,17 @@ impl ReaderApp {
         let ctx = ui.ctx().clone();
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
+                // 全局回退：从文件管理器打开的内容一键回到双栏现场。
+                if should_show_back_button(&self.current_view, &self.previous_view) {
+                    if ui
+                        .button((icons::ARROW_LEFT, " 返回"))
+                        .on_hover_text("返回文件管理器")
+                        .clicked()
+                    {
+                        self.go_back_to_previous_view();
+                    }
+                    ui.separator();
+                }
                 ui.menu_button("文件", |ui| {
                     if ui.button("打开文件…").clicked() {
                         if let Some(path) = open_file_dialog().pick_file() {
@@ -3615,6 +3650,22 @@ impl ReaderApp {
             self.error_message = Some(format!("无法保存阅读设置: {}", e));
         }
         self.last_saved_comic_settings = Some(snapshot);
+    }
+
+    /// 回退落点维护：Library/Settings 是顶层目的地，进入即清空
+    /// previous_view（不回退）；其余视图保留 FM 回调记录的落点。
+    fn sync_previous_view(&mut self) {
+        if matches!(self.current_view, View::Library | View::Settings) {
+            self.previous_view = None;
+        }
+    }
+
+    /// 顶栏「← 返回」：回到记录的落点（通常是文件管理器），落点消费后
+    /// 清空；无落点兜底回书架。FileManagerView 常驻内存，双栏目录/选中/
+    /// 滚动状态原样恢复；视图离开钩子（历史记录/关闭清理）照常经
+    /// current_view 变化触发，不绕过。
+    fn go_back_to_previous_view(&mut self) {
+        self.current_view = self.previous_view.take().unwrap_or(View::Library);
     }
 
     /// 每帧检测文件管理器状态（布局/比例/预览开关/排序/两栏目录）与上次
@@ -5398,6 +5449,7 @@ mod tests {
             Self {
                 current_view: View::Library,
                 last_view: View::Library,
+                previous_view: None,
                 settings,
                 library_view,
                 reader_view: ReaderView::default(),
@@ -6298,6 +6350,60 @@ mod tests {
         app.maybe_save_comic_settings();
 
         assert_eq!(app.last_saved_comic_settings, None);
+    }
+
+    #[test]
+    fn test_should_show_back_button() {
+        assert!(!should_show_back_button(&View::Library, &None));
+        // 无落点不显示；已在落点视图里也不显示。
+        assert!(!should_show_back_button(
+            &View::FileManager,
+            &Some(View::FileManager)
+        ));
+        assert!(should_show_back_button(
+            &View::Reader,
+            &Some(View::FileManager)
+        ));
+        assert!(should_show_back_button(
+            &View::Archive(PathBuf::from("/tmp/a.zip")),
+            &Some(View::FileManager)
+        ));
+    }
+
+    #[test]
+    fn test_sync_previous_view_clears_on_top_level_views() {
+        let (mut app, _tmp) = app_with_temp_store();
+        app.previous_view = Some(View::FileManager);
+
+        app.current_view = View::Library;
+        app.sync_previous_view();
+        assert_eq!(app.previous_view, None);
+
+        app.previous_view = Some(View::FileManager);
+        app.current_view = View::Settings;
+        app.sync_previous_view();
+        assert_eq!(app.previous_view, None);
+
+        // 内容视图保留落点。
+        app.previous_view = Some(View::FileManager);
+        app.current_view = View::Archive(PathBuf::from("/tmp/a.zip"));
+        app.sync_previous_view();
+        assert_eq!(app.previous_view, Some(View::FileManager));
+    }
+
+    #[test]
+    fn test_go_back_to_previous_view_consumes_landing() {
+        let (mut app, _tmp) = app_with_temp_store();
+        app.previous_view = Some(View::FileManager);
+        app.current_view = View::Reader;
+
+        app.go_back_to_previous_view();
+        assert_eq!(app.current_view, View::FileManager);
+        assert_eq!(app.previous_view, None);
+
+        // 落点已消费：再按一次兜底回书架。
+        app.go_back_to_previous_view();
+        assert_eq!(app.current_view, View::Library);
     }
 
     #[test]

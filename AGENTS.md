@@ -152,6 +152,14 @@ cargo clippy --workspace --all-targets -- -D warnings
   闪退）；`render_row`/`open_ui_row` 的 entries 索引一律 `get` 防御。
   `FsPanel::poll()` 在非 Loading 状态必须原样返回（`mem::take` 会把 state
   先换成 Idle，曾被它每帧打回 Ready → app 恢复逻辑每 3 帧重列目录 → 闪烁）。
+  **盘符切换**：面包屑最左 `list_drives()`（panel.rs，Windows 枚举 A–Z 取
+  `read_dir` 可列出者；Unix 为 `/` + `/Volumes/*`），首次点开菜单才起一次性
+  后台线程枚举、结果缓存进 `drives`（在途时 `request_repaint_after` 轮询）。
+  **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
+  **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
+  FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`
+  进 Library/Settings 即清空（顶层目的地不回退）；消费后即 None，再按兜底回
+  书架。FileManagerView 常驻内存，返回时目录/选中/滚动原样恢复。
 - **PageLoader**: background IO + decode worker threads, results via channels；独立的
   `cover_loader` 负责库封面。**进度条悬停缩略图**：① 全尺寸解码且 compress=false 时
   顺产生成 256px 缩略图；② 悬停时 `request_page_thumbnail` 高优先级 + 按方向低优先
