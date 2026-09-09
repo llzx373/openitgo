@@ -66,6 +66,13 @@ pub struct FmStateSnapshot {
     pub dir_right: String,
     /// 常用目录书签（两栏共享）。
     pub bookmarks: Vec<String>,
+    /// 两栏标签页目录（活动标签 = 实时目录；只存目录路径，选中/焦点/过滤/
+    /// 滚动不持久化）与活动标签索引。旧 settings 无此数据时恢复端回退
+    /// dir_left/dir_right 的单标签行为。
+    pub tabs_left: Vec<String>,
+    pub tabs_right: Vec<String>,
+    pub active_tab_left: usize,
+    pub active_tab_right: usize,
 }
 
 pub struct FileManagerView {
@@ -196,6 +203,23 @@ fn drag_sources(selected: &HashSet<PathBuf>, row_path: &Path) -> Vec<PathBuf> {
     }
 }
 
+/// 标签条标题：目录 basename；根目录（如 `C:\`）无 basename 时显示完整
+/// 路径。超 20 字符截断 + 省略号（完整路径走悬停 tooltip）。
+fn tab_label(dir: &Path) -> String {
+    const MAX_CHARS: usize = 20;
+    let name = dir
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| dir.display().to_string());
+    if name.chars().count() > MAX_CHARS {
+        let truncated: String = name.chars().take(MAX_CHARS - 1).collect();
+        format!("{truncated}…")
+    } else {
+        name
+    }
+}
+
 impl FileManagerView {
     /// 从 settings 恢复布局/排序（app 构造时调用）。
     pub fn new(
@@ -275,7 +299,18 @@ impl FileManagerView {
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect(),
+            tabs_left: self.panel_tab_dirs(0),
+            tabs_right: self.panel_tab_dirs(1),
+            active_tab_left: self.panels[0].active_tab(),
+            active_tab_right: self.panels[1].active_tab(),
         }
+    }
+
+    /// 栏内全部标签的目录字符串（活动标签 = 实时 dir）。
+    fn panel_tab_dirs(&self, idx: usize) -> Vec<String> {
+        (0..self.panels[idx].tab_count())
+            .map(|i| self.panels[idx].tab_dir(i).display().to_string())
+            .collect()
     }
 
     /// 添加书签（两栏共享）；已在列表中时 no-op 返回 false。
@@ -787,8 +822,9 @@ impl FileManagerView {
         }
     }
 
-    /// 单栏内容：面包屑 → 状态（加载/失败）→ 列头 → 虚拟化明细列表。
+    /// 单栏内容：标签条 → 面包屑 → 状态（加载/失败）→ 列头 → 虚拟化明细列表。
     fn render_panel(&mut self, ui: &mut egui::Ui, idx: usize, intents: &mut FmIntents) {
+        self.render_tab_bar(ui, idx);
         self.render_breadcrumb(ui, idx);
         // 先抽出状态快照，避免 match 借用与臂内 &mut self 冲突。
         enum Phase {
@@ -828,6 +864,53 @@ impl FileManagerView {
                 self.render_column_header(ui, idx);
                 self.render_list(ui, idx, intents);
             }
+        }
+    }
+
+    /// 标签条（面包屑上方）：标签 = 目录 basename（根目录显示盘符/根名，
+    /// 超长截断，悬停全路径）；当前标签高亮，单击切换、中键关闭（剩 1 个
+    /// 禁关）、右侧「+」新建（复制当前目录）；过多时横向可滚动。
+    fn render_tab_bar(&mut self, ui: &mut egui::Ui, idx: usize) {
+        enum TabAction {
+            Switch(usize),
+            Close(usize),
+            New,
+        }
+        let mut action = None;
+        egui::ScrollArea::horizontal()
+            .id_salt(("fm_tab_bar", idx))
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    let count = self.panels[idx].tab_count();
+                    let active_tab = self.panels[idx].active_tab();
+                    for i in 0..count {
+                        let dir = self.panels[idx].tab_dir(i).to_path_buf();
+                        let resp = ui
+                            .add(egui::Button::new(tab_label(&dir)).selected(i == active_tab))
+                            .on_hover_text(dir.display().to_string());
+                        if resp.clicked() {
+                            action = Some(TabAction::Switch(i));
+                        }
+                        if resp.middle_clicked() && count > 1 {
+                            action = Some(TabAction::Close(i));
+                        }
+                    }
+                    if ui
+                        .add(egui::Button::new(icons::PLUS.as_str()).frame(false))
+                        .on_hover_text("新建标签（Ctrl+T）")
+                        .clicked()
+                    {
+                        action = Some(TabAction::New);
+                    }
+                });
+            });
+        match action {
+            Some(TabAction::Switch(i)) => self.panels[idx].switch_tab(i),
+            Some(TabAction::Close(i)) => self.panels[idx].close_tab(i),
+            Some(TabAction::New) => self.panels[idx].new_tab(),
+            None => {}
         }
     }
 
@@ -1254,6 +1337,13 @@ impl FileManagerView {
         let mut area = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
+        // 标签切换的滚动恢复（精确偏移，优先于焦点揭示——restore 时
+        // focus_scroll_pending 已置 false，两者不会同时触发）。
+        if let Some(offset) = panel.take_pending_scroll_restore() {
+            if offset > 0.0 {
+                area = area.vertical_scroll_offset(offset);
+            }
+        }
         if panel.focus_scroll_pending {
             panel.focus_scroll_pending = false;
             if panel.last_viewport_height > 0.0 {
@@ -1915,7 +2005,9 @@ impl FileManagerView {
         }
     }
 
-    /// 键盘导航（Explorer/TC 式）：Tab 切换焦点栏、↑/↓ 移动焦点并单选、
+    /// 键盘导航（Explorer/TC 式）：Tab 切换焦点栏（纯 Tab；Shift+Tab 不拦）、
+    /// Ctrl+Tab/Ctrl+Shift+Tab 标签循环、Ctrl+T 新建标签、Ctrl+W 关闭当前
+    /// 标签（剩 1 个忽略）、↑/↓ 移动焦点并单选、
     /// Shift+↑/↓ 从 anchor 扩选、Ctrl+↑/↓ 只移焦点、Home/End 跳首/末行、
     /// PgUp/PgDn 整页步进、Enter 打开焦点行、空格计算焦点目录大小、
     /// Backspace 上级、Ctrl+A 全选可见、Ctrl+R 刷新、Alt+←/→ 导航历史、
@@ -1923,7 +2015,7 @@ impl FileManagerView {
     /// `+`/`-` 弹「选择组」对话框、Ctrl+U 交换两栏、Ctrl+←/→ 栏间目录
     /// 同步、Ctrl+\ 回根目录、Ctrl+Q 对面栏快速预览（单栏 = 预览开关）、
     /// Ctrl+B 分支视图（「..」行/Esc 末级 = 退出分支）、
-    /// Esc 分级清 type-ahead 缓冲→过滤→选中。
+    /// Ctrl+M 批量重命名、Esc 分级清 type-ahead 缓冲→过滤→选中。
     /// 过滤框等文本输入占用键盘时不处理。
     /// 文件操作键：F2 重命名 / F5 复制 / F6 移动 / F7 新建文件夹 /
     /// F8(Delete) 删除（confirm_delete 时先弹确认框）；Ctrl+C/X/V 剪贴板。
@@ -1936,7 +2028,8 @@ impl FileManagerView {
             return;
         }
         let mods = ui.input(|i| i.modifiers);
-        // Tab 切换焦点栏（仅双栏；Shift/Ctrl+Tab 不拦，留给系统/输入焦点）。
+        // Tab 切换焦点栏（仅双栏；Shift/Ctrl+Tab 不拦——Ctrl+Tab 是标签
+        // 循环，见下；Shift+Tab 留给系统/输入焦点）。
         if matches!(self.layout, PanelLayout::Dual { .. })
             && !mods.shift
             && !mods.command
@@ -1953,6 +2046,23 @@ impl FileManagerView {
             FocusMove::Select
         };
         let active = self.active;
+        // Ctrl+Tab / Ctrl+Shift+Tab：焦点栏标签循环（与纯 Tab 切栏互不干扰）。
+        if mods.command && ui.input(|i| i.key_pressed(egui::Key::Tab)) {
+            if mods.shift {
+                self.panels[active].prev_tab();
+            } else {
+                self.panels[active].next_tab();
+            }
+        }
+        // Ctrl+T：新建标签（复制当前目录）；Ctrl+W：关闭当前标签
+        // （剩 1 个时 close_tab 自身 no-op）。
+        if mods.command && ui.input(|i| i.key_pressed(egui::Key::T)) {
+            self.panels[active].new_tab();
+        }
+        if mods.command && ui.input(|i| i.key_pressed(egui::Key::W)) {
+            let tab = self.panels[active].active_tab();
+            self.panels[active].close_tab(tab);
+        }
         if mods.alt && ui.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
             self.panels[active].go_back();
         }

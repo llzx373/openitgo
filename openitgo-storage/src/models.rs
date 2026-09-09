@@ -92,6 +92,17 @@ pub struct Settings {
     /// 文件管理器常用目录书签（两栏共享）。
     #[serde(default)]
     pub fm_bookmarks: Vec<String>,
+    /// 左/右栏标签页目录列表（活动标签 = 当前目录；只存目录路径）。
+    /// 空列表（旧 settings 无此字段）= 单标签，恢复回退 fm_dir_left/right。
+    #[serde(default)]
+    pub fm_tabs_left: Vec<String>,
+    #[serde(default)]
+    pub fm_tabs_right: Vec<String>,
+    /// 左/右栏活动标签索引（越界加载时 clamp）。
+    #[serde(default)]
+    pub fm_active_tab_left: usize,
+    #[serde(default)]
+    pub fm_active_tab_right: usize,
 }
 
 fn default_chrome_opacity() -> f32 {
@@ -165,6 +176,10 @@ impl Default for Settings {
             fm_dir_left: String::new(),
             fm_dir_right: String::new(),
             fm_bookmarks: Vec::new(),
+            fm_tabs_left: Vec::new(),
+            fm_tabs_right: Vec::new(),
+            fm_active_tab_left: 0,
+            fm_active_tab_right: 0,
         }
     }
 }
@@ -284,6 +299,20 @@ impl Settings {
                 self.fm_sort_key
             ));
         }
+        if !self.fm_tabs_left.is_empty() && self.fm_active_tab_left >= self.fm_tabs_left.len() {
+            return Err(format!(
+                "fm_active_tab_left {} out of range ({} tabs)",
+                self.fm_active_tab_left,
+                self.fm_tabs_left.len()
+            ));
+        }
+        if !self.fm_tabs_right.is_empty() && self.fm_active_tab_right >= self.fm_tabs_right.len() {
+            return Err(format!(
+                "fm_active_tab_right {} out of range ({} tabs)",
+                self.fm_active_tab_right,
+                self.fm_tabs_right.len()
+            ));
+        }
         Ok(())
     }
 
@@ -321,6 +350,19 @@ impl Settings {
         let mut seen = std::collections::HashSet::new();
         self.fm_bookmarks
             .retain(|b| !b.trim().is_empty() && seen.insert(b.clone()));
+        self.fm_active_tab_left =
+            clamp_active_tab(self.fm_tabs_left.len(), self.fm_active_tab_left);
+        self.fm_active_tab_right =
+            clamp_active_tab(self.fm_tabs_right.len(), self.fm_active_tab_right);
+    }
+}
+
+/// 活动标签索引 clamp 到标签列表范围内（空列表 → 0）。
+fn clamp_active_tab(tab_count: usize, active: usize) -> usize {
+    if tab_count == 0 {
+        0
+    } else {
+        active.min(tab_count - 1)
     }
 }
 

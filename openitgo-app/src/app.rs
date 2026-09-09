@@ -2462,22 +2462,39 @@ impl ReaderApp {
         });
     }
 
-    /// 双栏文件管理器视图：首次进入（面板 Idle）按 settings.fm_dir_left/right
-    /// 恢复两栏目录；行内意图经 FmCallbacks 帧尾翻译为打开动作。
+    /// 双栏文件管理器视图：首次进入（面板 Idle）恢复两栏标签页——
+    /// settings.fm_tabs_left/right 非空时整组恢复（目录逐个经
+    /// fallback_existing_dir 回退），为空（旧 settings）回退
+    /// fm_dir_left/right 的单标签行为；行内意图经 FmCallbacks 帧尾翻译为打开动作。
     fn render_file_manager(&mut self, ui: &mut egui::Ui) {
-        for (idx, saved) in [
-            self.settings.fm_dir_left.clone(),
-            self.settings.fm_dir_right.clone(),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for idx in 0..2 {
             if matches!(
                 self.file_manager_view.panels[idx].state,
                 PanelLoadState::Idle
             ) {
-                let dir = resolve_fm_dir(&saved);
-                self.file_manager_view.panels[idx].navigate_to(dir);
+                let (saved_tabs, saved_dir, active_tab) = if idx == 0 {
+                    (
+                        &self.settings.fm_tabs_left,
+                        &self.settings.fm_dir_left,
+                        self.settings.fm_active_tab_left,
+                    )
+                } else {
+                    (
+                        &self.settings.fm_tabs_right,
+                        &self.settings.fm_dir_right,
+                        self.settings.fm_active_tab_right,
+                    )
+                };
+                if saved_tabs.is_empty() {
+                    let dir = resolve_fm_dir(saved_dir);
+                    self.file_manager_view.panels[idx].navigate_to(dir);
+                } else {
+                    let dirs: Vec<PathBuf> = saved_tabs
+                        .iter()
+                        .map(|s| fallback_existing_dir(PathBuf::from(s)))
+                        .collect();
+                    self.file_manager_view.panels[idx].restore_tabs(dirs, active_tab);
+                }
             }
         }
         egui::CentralPanel::default().show(ui, |ui| {
@@ -3700,6 +3717,10 @@ impl ReaderApp {
         self.settings.fm_dir_left = snapshot.dir_left.clone();
         self.settings.fm_dir_right = snapshot.dir_right.clone();
         self.settings.fm_bookmarks = snapshot.bookmarks.clone();
+        self.settings.fm_tabs_left = snapshot.tabs_left.clone();
+        self.settings.fm_tabs_right = snapshot.tabs_right.clone();
+        self.settings.fm_active_tab_left = snapshot.active_tab_left;
+        self.settings.fm_active_tab_right = snapshot.active_tab_right;
         self.last_saved_fm_state = Some(snapshot);
     }
 

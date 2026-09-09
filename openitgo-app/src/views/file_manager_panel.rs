@@ -187,6 +187,34 @@ pub struct FsPanel {
     /// 超 TYPE_AHEAD_TIMEOUT 未续键即失效（状态栏显示与 Esc 清理由
     /// type_ahead_buffer/clear_type_ahead 统一处理）。
     type_ahead: Option<(String, Instant)>,
+    /// 栏内标签页（不变式：非空，tabs[active_tab] 概念上 = 当前面板实时
+    /// 状态——快照只在切走/关闭时回写，活动标签的目录以 panel.dir 为准）。
+    tabs: Vec<PanelTabSnapshot>,
+    active_tab: usize,
+    /// restore_tab 后的待恢复选中/焦点名（列举异步，poll 就绪时应用）。
+    pending_tab_restore: Option<PendingTabRestore>,
+    /// restore_tab 后的待恢复滚动偏移（render_list 首帧消费；精确恢复
+    /// 偏移而非焦点最小滚动揭示）。
+    pending_scroll_restore: Option<f32>,
+}
+
+/// 栏内标签页的可恢复快照（快照式标签：标签里不塞活面板，切换 =
+/// 快照当前状态 → 恢复目标快照 → 重新列举，避免 watcher/channel 悬挂）。
+/// focus 存文件名而非行索引——列举后按名定位（目录内容可能已变）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PanelTabSnapshot {
+    pub dir: PathBuf,
+    pub selected: Vec<PathBuf>,
+    pub focus_name: Option<String>,
+    pub filter: String,
+    pub scroll_offset: f32,
+}
+
+/// restore_tab 后待应用的选中/焦点（选中按路径恢复，焦点按文件名定位）。
+#[derive(Debug)]
+struct PendingTabRestore {
+    selected: HashSet<PathBuf>,
+    focus_name: Option<String>,
 }
 
 impl FsPanel {
@@ -222,6 +250,10 @@ impl FsPanel {
             watch: None,
             wake_ctx: None,
             type_ahead: None,
+            tabs: vec![PanelTabSnapshot::default()],
+            active_tab: 0,
+            pending_tab_restore: None,
+            pending_scroll_restore: None,
         }
     }
 
@@ -242,6 +274,10 @@ impl FsPanel {
         self.clear_dir_sizes();
         self.watch = None;
         self.type_ahead = None;
+        // 清掉上一目录遗留的标签恢复负载（restore_tab 在 start_listing
+        // 之后重新设置；用户在其就绪前又导航时不串目录）。
+        self.pending_tab_restore = None;
+        self.pending_scroll_restore = None;
         self.state = PanelLoadState::Loading(AsyncOpener::open(path, read_dir_entries));
     }
 
@@ -394,6 +430,132 @@ impl FsPanel {
         self.refresh();
     }
 
+    /// 当前状态打包为标签快照（切走/关闭时回写 tabs[active_tab]）。
+    pub fn snapshot_tab(&mut self) -> PanelTabSnapshot {
+        let focus_name = self
+            .focused_entry()
+            .and_then(|e| e.path.file_name().map(|s| s.to_string_lossy().to_string()));
+        let mut selected: Vec<PathBuf> = self.selected.iter().cloned().collect();
+        selected.sort();
+        PanelTabSnapshot {
+            dir: self.dir.clone(),
+            selected,
+            focus_name,
+            filter: self.filter.clone(),
+            scroll_offset: self.last_scroll_offset,
+        }
+    }
+
+    /// 恢复标签快照：重新列举目标目录（start_listing 语义——watcher 重建、
+    /// 目录大小/type-ahead 清、退出分支视图），选中/焦点/滚动在列举就绪后
+    /// 由 poll/render_list 应用。取舍：标签切换不进导航历史，历史随栏
+    /// 共享（各标签独立历史需把 history 一并纳入快照，从简不做）。
+    pub fn restore_tab(&mut self, snap: &PanelTabSnapshot) {
+        self.start_listing(snap.dir.clone());
+        self.filter = snap.filter.clone();
+        self.pending_tab_restore = Some(PendingTabRestore {
+            selected: snap.selected.iter().cloned().collect(),
+            focus_name: snap.focus_name.clone(),
+        });
+        self.pending_scroll_restore = Some(snap.scroll_offset);
+    }
+
+    /// 标签数（恒 ≥1）。
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+
+    /// 活动标签索引。
+    pub fn active_tab(&self) -> usize {
+        self.active_tab
+    }
+
+    /// 标签 i 的目录（活动标签 = 实时 dir，非活动 = 快照 dir）。
+    pub fn tab_dir(&self, i: usize) -> &Path {
+        if i == self.active_tab {
+            &self.dir
+        } else {
+            &self.tabs[i].dir
+        }
+    }
+
+    /// Ctrl+T / 「+」：新建标签（复制当前目录；选中/过滤/焦点不带入新
+    /// 标签），追加到末尾并切过去。
+    pub fn new_tab(&mut self) {
+        let current = self.snapshot_tab();
+        self.tabs[self.active_tab] = current;
+        self.tabs.push(PanelTabSnapshot {
+            dir: self.dir.clone(),
+            ..Default::default()
+        });
+        self.active_tab = self.tabs.len() - 1;
+        let snap = self.tabs[self.active_tab].clone();
+        self.restore_tab(&snap);
+    }
+
+    /// 切换标签：回写当前快照 → 恢复目标 → 重新列举。
+    pub fn switch_tab(&mut self, i: usize) {
+        if i == self.active_tab || i >= self.tabs.len() {
+            return;
+        }
+        let current = self.snapshot_tab();
+        self.tabs[self.active_tab] = current;
+        self.active_tab = i;
+        let snap = self.tabs[i].clone();
+        self.restore_tab(&snap);
+    }
+
+    /// 关闭标签：剩 1 个时 no-op（调用方禁用）。关当前标签切到相邻
+    /// （优先右邻，末尾取左邻），被关标签不回写；关非当前标签不动面板。
+    pub fn close_tab(&mut self, i: usize) {
+        if self.tabs.len() <= 1 || i >= self.tabs.len() {
+            return;
+        }
+        self.tabs.remove(i);
+        if i < self.active_tab {
+            self.active_tab -= 1;
+        } else if i == self.active_tab {
+            self.active_tab = i.min(self.tabs.len() - 1);
+            let snap = self.tabs[self.active_tab].clone();
+            self.restore_tab(&snap);
+        }
+    }
+
+    /// Ctrl+Tab：循环下一个标签。
+    pub fn next_tab(&mut self) {
+        self.switch_tab((self.active_tab + 1) % self.tabs.len());
+    }
+
+    /// Ctrl+Shift+Tab：循环上一个标签。
+    pub fn prev_tab(&mut self) {
+        self.switch_tab((self.active_tab + self.tabs.len() - 1) % self.tabs.len());
+    }
+
+    /// 启动恢复：整组标签目录 + 活动索引（目录由调用方按
+    /// fallback_existing_dir 回退；选中/过滤/滚动不持久化）。
+    /// 活动索引越界自动 clamp；dirs 为空退化为单空标签。
+    pub fn restore_tabs(&mut self, dirs: Vec<PathBuf>, active: usize) {
+        let mut dirs = dirs;
+        if dirs.is_empty() {
+            dirs.push(PathBuf::new());
+        }
+        self.tabs = dirs
+            .into_iter()
+            .map(|dir| PanelTabSnapshot {
+                dir,
+                ..Default::default()
+            })
+            .collect();
+        self.active_tab = active.min(self.tabs.len() - 1);
+        let dir = self.tabs[self.active_tab].dir.clone();
+        self.start_listing(dir);
+    }
+
+    /// render_list 消费一次性滚动恢复偏移（标签切换的精确恢复）。
+    pub fn take_pending_scroll_restore(&mut self) -> Option<f32> {
+        self.pending_scroll_restore.take()
+    }
+
     /// 每帧排空列举结果；返回 true = 仍在 Loading（调用方据此
     /// `request_repaint_after(100ms)`，遵循 egui 空闲不重绘约定）。
     pub fn poll(&mut self) -> bool {
@@ -417,12 +579,30 @@ impl FsPanel {
                 self.entries = listing.entries;
                 self.listing_truncated = listing.truncated;
                 self.entries_version += 1;
-                // refresh 路径：丢弃已不存在项的选中态；navigate 路径
-                // selected 已清空，retain 为 no-op。
                 let existing: HashSet<&Path> =
                     self.entries.iter().map(|e| e.path.as_path()).collect();
-                self.selected.retain(|p| existing.contains(p.as_path()));
-                self.focus = None;
+                if let Some(pending) = self.pending_tab_restore.take() {
+                    // 标签恢复：选中按存在性过滤；焦点按文件名定位（行索引在
+                    // 内容变化后无意义）；滚动由 pending_scroll_restore 精确
+                    // 恢复，不走焦点最小滚动揭示。
+                    self.selected = pending.selected;
+                    self.selected.retain(|p| existing.contains(p.as_path()));
+                    self.focus = pending.focus_name.and_then(|name| {
+                        let rows = self.rows();
+                        rows.iter()
+                            .position(|&i| {
+                                self.entries[i].path.file_name()
+                                    == Some(std::ffi::OsStr::new(name.as_str()))
+                            })
+                            .map(|pos| pos + 1)
+                    });
+                    self.focus_scroll_pending = false;
+                } else {
+                    // refresh 路径：丢弃已不存在项的选中态；navigate 路径
+                    // selected 已清空，retain 为 no-op。
+                    self.selected.retain(|p| existing.contains(p.as_path()));
+                    self.focus = None;
+                }
                 self.anchor = None;
                 self.state = PanelLoadState::Ready;
                 self.ensure_watch();
@@ -1504,5 +1684,149 @@ mod tests {
         assert!(panel.branch_view);
         panel.navigate_to(root.join("sub"));
         assert!(!panel.branch_view);
+    }
+
+    /// poll 到 Ready 的测试辅助。
+    fn poll_until_ready(panel: &mut FsPanel) {
+        for _ in 0..200 {
+            if !panel.poll() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(matches!(panel.state, PanelLoadState::Ready));
+    }
+
+    /// 标签页不变式：切换往返状态保持（选中/焦点按名/过滤恢复；快照在
+    /// 切走时回写）；新建标签复制当前目录但状态全新；标签切换不进导航
+    /// 历史（go_back 目标不受标签切换影响）。
+    #[test]
+    fn tab_switch_roundtrip_preserves_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_a = tmp.path().join("a");
+        let dir_b = tmp.path().join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        std::fs::write(dir_a.join("keep-me.txt"), b"x").unwrap();
+        std::fs::write(dir_a.join("other.txt"), b"y").unwrap();
+        std::fs::write(dir_b.join("b-file.txt"), b"z").unwrap();
+
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        panel.navigate_to(dir_a.clone());
+        poll_until_ready(&mut panel);
+        assert_eq!(panel.tab_count(), 1);
+        panel.selected.insert(dir_a.join("keep-me.txt"));
+        // 名称升序：keep-me.txt(行 1), other.txt(行 2)。
+        panel.focus = Some(2);
+        panel.filter = "txt".to_string();
+
+        // Ctrl+T：新标签复制当前目录，状态全新（选中/过滤清空）。
+        panel.new_tab();
+        poll_until_ready(&mut panel);
+        assert_eq!(panel.tab_count(), 2);
+        assert_eq!(panel.active_tab(), 1);
+        assert_eq!(panel.dir, dir_a);
+        assert!(panel.selected.is_empty());
+        assert!(panel.filter.is_empty());
+
+        // 新标签导航到 dir_b。
+        panel.navigate_to(dir_b.clone());
+        poll_until_ready(&mut panel);
+
+        // 切回标签 0：选中/焦点/过滤恢复（焦点按文件名定位）。
+        panel.switch_tab(0);
+        poll_until_ready(&mut panel);
+        assert_eq!(panel.dir, dir_a);
+        assert!(panel.selected.contains(&dir_a.join("keep-me.txt")));
+        assert_eq!(panel.filter, "txt");
+        assert_eq!(
+            panel.focused_entry().map(|e| e.path.clone()),
+            Some(dir_a.join("other.txt"))
+        );
+        // 标签切换不进导航历史：回退仍是 navigate 历史里的上一个目录。
+        assert!(panel.can_go_back());
+
+        // 往返：标签 1 恢复为 dir_b 实时状态；再回标签 0 仍是 dir_a。
+        panel.switch_tab(1);
+        poll_until_ready(&mut panel);
+        assert_eq!(panel.dir, dir_b);
+        panel.prev_tab();
+        poll_until_ready(&mut panel);
+        assert_eq!(panel.dir, dir_a);
+        assert_eq!(panel.active_tab(), 0);
+        // 循环：prev 从 0 绕到末尾。
+        panel.prev_tab();
+        poll_until_ready(&mut panel);
+        assert_eq!(panel.active_tab(), 1);
+        assert_eq!(panel.dir, dir_b);
+    }
+
+    /// 关闭标签：关非当前标签只收缩列表；关当前标签切相邻（优先右邻，
+    /// 末尾取左邻）并恢复其快照；剩 1 个时 no-op。
+    #[test]
+    fn tab_close_switches_to_neighbor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_a = tmp.path().join("a");
+        let dir_b = tmp.path().join("b");
+        let dir_c = tmp.path().join("c");
+        for d in [&dir_a, &dir_b, &dir_c] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        panel.navigate_to(dir_a.clone());
+        poll_until_ready(&mut panel);
+        panel.new_tab();
+        poll_until_ready(&mut panel);
+        panel.navigate_to(dir_b.clone());
+        poll_until_ready(&mut panel);
+        panel.new_tab();
+        poll_until_ready(&mut panel);
+        panel.navigate_to(dir_c.clone());
+        poll_until_ready(&mut panel);
+        // tabs = [a, b, c]，active = 2。
+        assert_eq!(panel.tab_count(), 3);
+
+        // 剩 1 个前关闭非当前标签（i < active）：只收缩，面板不动。
+        panel.close_tab(0);
+        assert_eq!(panel.tab_count(), 2);
+        assert_eq!(panel.active_tab(), 1);
+        assert_eq!(panel.dir, dir_c);
+
+        // 关当前标签（末尾）：切到左邻并恢复其快照（dir_b）。
+        panel.close_tab(1);
+        poll_until_ready(&mut panel);
+        assert_eq!(panel.tab_count(), 1);
+        assert_eq!(panel.active_tab(), 0);
+        assert_eq!(panel.dir, dir_b);
+
+        // 剩 1 个：no-op。
+        panel.close_tab(0);
+        assert_eq!(panel.tab_count(), 1);
+        assert_eq!(panel.dir, dir_b);
+    }
+
+    /// 启动恢复：restore_tabs 建整组标签并 clamp 活动索引；空 dirs
+    /// 退化为单标签。
+    #[test]
+    fn restore_tabs_clamps_active_and_lists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_a = tmp.path().join("a");
+        let dir_b = tmp.path().join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        panel.restore_tabs(vec![dir_a, dir_b.clone()], 5);
+        assert_eq!(panel.tab_count(), 2);
+        assert_eq!(panel.active_tab(), 1);
+        poll_until_ready(&mut panel);
+        assert_eq!(panel.dir, dir_b);
+        // 非活动标签目录保留（tab_dir 读取）。
+        assert_eq!(panel.tab_dir(0), tmp.path().join("a").as_path());
+
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        panel.restore_tabs(Vec::new(), 0);
+        assert_eq!(panel.tab_count(), 1);
     }
 }
