@@ -801,6 +801,7 @@ pub mod windows {
     pub mod file_assoc;
     pub mod mpv_view;
     pub mod restore_rect;
+    pub mod shell_verbs;
 }
 
 /// 还原矩形 stub（非 Windows）：无操作。
@@ -951,6 +952,31 @@ pub mod clipboard_files {
 /// Unified clipboard-files API (`crate::platform::clipboard_files`)。
 #[cfg(target_os = "windows")]
 pub use windows::clipboard_files;
+
+/// Shell 动词 stub（非 Windows）：`is_supported` 恒 false，调用一律 Err。
+#[cfg(not(target_os = "windows"))]
+pub mod shell_verbs {
+    use std::path::Path;
+
+    /// 非 Windows 不支持 Shell 动词（属性/打开方式）。
+    pub fn is_supported() -> bool {
+        false
+    }
+
+    /// 非 Windows 不支持。
+    pub fn show_properties(_path: &Path) -> Result<(), String> {
+        Err("系统属性对话框仅支持 Windows".to_string())
+    }
+
+    /// 非 Windows 不支持。
+    pub fn show_open_with(_path: &Path) -> Result<(), String> {
+        Err("系统「打开方式」对话框仅支持 Windows".to_string())
+    }
+}
+
+/// Unified shell-verbs API (`crate::platform::shell_verbs`)。
+#[cfg(target_os = "windows")]
+pub use windows::shell_verbs;
 
 /// Unified video-view API used by views/media.rs (`PendingVideoView`
 /// two-phase construction + `MpvNativeView`).

@@ -13,7 +13,7 @@ use crate::opener::{AsyncOpener, OpenStatus};
 use crate::views::archive::{format_mtime, human_size};
 use crate::views::file_manager_dialog::{
     CompressDialog, ConflictDialog, CopyMoveDialog, DeleteDialog, FmDialog, FmDialogOutcome,
-    MultiRenameDialog, NewDirDialog, RenameDialog, SelectGroupDialog,
+    MultiRenameDialog, NewDirDialog, NewFileDialog, RenameDialog, SelectGroupDialog,
 };
 use crate::views::file_manager_panel::{
     fallback_existing_dir, list_drives, FocusMove, FsPanel, PanelLoadState, PanelViewMode,
@@ -26,8 +26,8 @@ use crate::views::file_manager_thumbs::{
     THUMB_CELL_H, THUMB_CELL_W, THUMB_MAX_DIM,
 };
 use crate::views::file_ops::{
-    create_dir, format_eta, rename_entry, suggest_folder_name, FileOpManager, FinishedOp, OpKind,
-    OpSpeedMeter,
+    create_dir, create_text_file, format_eta, rename_entry, suggest_folder_name,
+    suggest_text_file_name, FileOpManager, FinishedOp, OpKind, OpSpeedMeter,
 };
 use crate::views::preview_bytes::{is_previewable_name, load_file_preview, PreviewData};
 use egui_phosphor_icons::{icons, Icon};
@@ -155,6 +155,14 @@ pub struct FileManagerView {
     /// 执行期冲突问答（ConflictMode::Ask「逐个询问」）：待答的 worker 询问
     /// + 弹窗状态；Some 时屏蔽面板键盘（同 self.dialog 机制）。
     pending_conflict: Option<(u64, ConflictDialog)>,
+    /// 面包屑路径编辑（铅笔按钮）：正在编辑的栏 idx；None = 未编辑。
+    breadcrumb_edit: Option<usize>,
+    /// 编辑中文本（进入时预填当前目录完整路径）。
+    breadcrumb_edit_text: String,
+    /// 首帧 request_focus 一次性标志（同 SelectGroupDialog 模式）。
+    breadcrumb_edit_focused: bool,
+    /// Enter 后路径不存在：红字提示并保持编辑态（文本变化即清）。
+    breadcrumb_edit_error: bool,
 }
 
 /// 帧内意图：行内交互写入，帧尾统一触发回调（避免回调嵌套借用）。
@@ -332,6 +340,10 @@ impl FileManagerView {
             panel_drop_rects: [None, None],
             search: SearchDialog::default(),
             pending_conflict: None,
+            breadcrumb_edit: None,
+            breadcrumb_edit_text: String::new(),
+            breadcrumb_edit_focused: false,
+            breadcrumb_edit_error: false,
         }
     }
 
@@ -1055,7 +1067,8 @@ impl FileManagerView {
         }
     }
 
-    /// 面包屑：盘符下拉（最左）+ 路径分段可点击跳回；焦点栏铺淡底色高亮。
+    /// 面包屑：盘符下拉（最左）+ 路径分段可点击跳回 + 铅笔按钮路径编辑；
+    /// 焦点栏铺淡底色高亮。
     fn render_breadcrumb(&mut self, ui: &mut egui::Ui, idx: usize) {
         let active = self.active == idx;
         let fill = if active {
@@ -1100,6 +1113,45 @@ impl FileManagerView {
                     self.render_drive_switcher(ui, idx);
                     self.render_bookmarks_button(ui, idx);
                     ui.separator();
+                    // 路径编辑态：TextEdit 替换分段；Enter 导航 / Esc 还原，
+                    // 无效路径红字保持编辑态（egui_wants_keyboard_input 会
+                    // 屏蔽面板全局键，Enter/Esc 在此自行检测）。
+                    if self.breadcrumb_edit == Some(idx) {
+                        let response = ui.add(
+                            egui::TextEdit::singleline(&mut self.breadcrumb_edit_text)
+                                .desired_width(ui.available_width().max(240.0)),
+                        );
+                        if !self.breadcrumb_edit_focused {
+                            response.request_focus();
+                            self.breadcrumb_edit_focused = true;
+                        }
+                        if response.changed() {
+                            self.breadcrumb_edit_error = false;
+                        }
+                        if self.breadcrumb_edit_error {
+                            ui.colored_label(ui.visuals().error_fg_color, "路径不存在");
+                        }
+                        // 单行输入框 Enter 自动失焦（同 SelectGroupDialog 注释）。
+                        let enter =
+                            response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let esc = ui.input(|i| i.key_pressed(egui::Key::Escape))
+                            && (response.has_focus() || response.lost_focus());
+                        if enter {
+                            let typed = PathBuf::from(self.breadcrumb_edit_text.trim());
+                            if typed.is_dir() {
+                                // 导航竞态兜底同书签跳转。
+                                let target = fallback_existing_dir(typed);
+                                self.breadcrumb_edit = None;
+                                self.panels[idx].navigate_to(target);
+                            } else {
+                                self.breadcrumb_edit_error = true;
+                                response.request_focus();
+                            }
+                        } else if esc {
+                            self.breadcrumb_edit = None;
+                        }
+                        return;
+                    }
                     let dir = self.panels[idx].dir.clone();
                     let branch = self.panels[idx].branch_view;
                     let segments = breadcrumb_segments(&dir);
@@ -1133,6 +1185,17 @@ impl FileManagerView {
                     // 分支视图状态指示（路径后弱色标记）。
                     if branch {
                         ui.label(egui::RichText::new("[分支]").weak());
+                    }
+                    // 铅笔按钮：进入路径编辑态（预填当前目录完整路径）。
+                    if ui
+                        .add(egui::Button::new(icons::PENCIL_SIMPLE.as_str()).frame(false))
+                        .on_hover_text("编辑路径")
+                        .clicked()
+                    {
+                        self.breadcrumb_edit = Some(idx);
+                        self.breadcrumb_edit_text = self.panels[idx].dir.display().to_string();
+                        self.breadcrumb_edit_focused = false;
+                        self.breadcrumb_edit_error = false;
                     }
                 });
             });
@@ -1734,6 +1797,16 @@ impl FileManagerView {
             self.open_ui_row(idx, rows, row, intents);
             ui.close();
         }
+        // 「打开方式…」：仅文件行 + Windows（Shell openas 动词）。
+        if !e.is_dir
+            && crate::platform::shell_verbs::is_supported()
+            && ui.button((icons::LIST_BULLETS, " 打开方式…")).clicked()
+        {
+            if let Err(err) = crate::platform::shell_verbs::show_open_with(&e.path) {
+                intents.op_error = Some(err);
+            }
+            ui.close();
+        }
         let comic_openable = e.is_dir || archive_kind(&e.path).is_some();
         if comic_openable && ui.button((icons::BOOK_OPEN, " 作为漫画打开")).clicked() {
             intents.open_as_comic = Some(e.path.clone());
@@ -1840,6 +1913,10 @@ impl FileManagerView {
             self.dialog = Some(FmDialog::NewDir(NewDirDialog::new(parent, suggested)));
             ui.close();
         }
+        if ui.button((icons::FILE_PLUS, " 新建文本文件")).clicked() {
+            self.open_new_file_dialog(idx);
+            ui.close();
+        }
         ui.separator();
         if ui.button((icons::TRASH, " 删除")).clicked() {
             let targets = self.op_targets(idx);
@@ -1851,6 +1928,16 @@ impl FileManagerView {
                 }
             }
             ui.close();
+        }
+        // 「属性」：末尾（Explorer 惯例；非 Windows 隐藏）。
+        if crate::platform::shell_verbs::is_supported() {
+            ui.separator();
+            if ui.button((icons::INFO, " 属性")).clicked() {
+                if let Err(err) = crate::platform::shell_verbs::show_properties(&e.path) {
+                    intents.op_error = Some(err);
+                }
+                ui.close();
+            }
         }
     }
 
@@ -2349,6 +2436,13 @@ impl FileManagerView {
         self.search.open_with(root);
     }
 
+    /// 新建文本文件对话框（Shift+F4 / 右键菜单共用）：父目录 = 指定栏当前目录。
+    fn open_new_file_dialog(&mut self, idx: usize) {
+        let parent = self.panels[idx].dir.clone();
+        let suggested = suggest_text_file_name(&parent);
+        self.dialog = Some(FmDialog::NewFile(NewFileDialog::new(parent, suggested)));
+    }
+
     /// 渲染搜索对话框并消费动作：跳转 = 焦点栏 reveal 并关闭；
     /// 「输送到焦点栏」= 命中集注入焦点栏（分支视图同款）并关闭。
     fn render_search_dialog(&mut self, ctx: &egui::Context) {
@@ -2427,6 +2521,12 @@ impl FileManagerView {
                 Ok(new_path) => self.refresh_panel_of(&new_path),
                 Err(e) => intents.op_error = Some(e),
             },
+            FmDialogOutcome::ConfirmNewFile { parent, name } => {
+                match create_text_file(&parent, &name) {
+                    Ok(new_path) => self.refresh_panel_of(&new_path),
+                    Err(e) => intents.op_error = Some(e),
+                }
+            }
             FmDialogOutcome::SelectGroup {
                 pattern,
                 select,
@@ -2525,7 +2625,8 @@ impl FileManagerView {
     /// Ctrl+M 批量重命名、Esc 分级清 type-ahead 缓冲→过滤→选中。
     /// 过滤框等文本输入占用键盘时不处理。
     /// 文件操作键：F2 重命名 / F5 复制 / F6 移动 / F7 新建文件夹 /
-    /// F8(Delete) 删除（confirm_delete 时先弹确认框）；Ctrl+C/X/V 剪贴板。
+    /// Shift+F4 新建文本文件 / F8(Delete) 删除（confirm_delete 时先弹确认框）；
+    /// Alt+Enter 焦点项系统属性；Ctrl+C/X/V 剪贴板。
     fn handle_keyboard(&mut self, ui: &egui::Ui, intents: &mut FmIntents, confirm_delete: bool) {
         // 对话框打开时屏蔽面板键盘（输入归对话框；冲突问答窗同此机制）。
         if self.dialog.is_some() || self.pending_conflict.is_some() {
@@ -2579,6 +2680,17 @@ impl FileManagerView {
         // Alt+↓：开/关焦点栏的目录历史下拉（一次性请求，面包屑渲染时消费）。
         if mods.alt && ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
             self.history_menu_toggle = true;
+        }
+        // Alt+Enter：焦点项系统「属性」对话框（同 Explorer；非 Windows 无此键位）。
+        if mods.alt
+            && crate::platform::shell_verbs::is_supported()
+            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+        {
+            if let Some(entry) = self.panels[active].focused_entry() {
+                if let Err(e) = crate::platform::shell_verbs::show_properties(&entry.path) {
+                    intents.op_error = Some(e);
+                }
+            }
         }
         // 鼠标侧键：Extra1 = 后退，Extra2 = 前进（仅本视图；漫画阅读器侧
         // 键翻页在 app.rs 的 View::Reader 分支处理，不冲突）。
@@ -2659,6 +2771,10 @@ impl FileManagerView {
             let parent = self.panels[active].dir.clone();
             let suggested = suggest_folder_name(&parent);
             self.dialog = Some(FmDialog::NewDir(NewDirDialog::new(parent, suggested)));
+        }
+        // Shift+F4：新建文本文件（TC 语义；F4 本身未绑定）。
+        if mods.shift && ui.input(|i| i.key_pressed(egui::Key::F4)) {
+            self.open_new_file_dialog(active);
         }
         if ui.input(|i| i.key_pressed(egui::Key::F8) || i.key_pressed(egui::Key::Delete)) {
             let targets = self.op_targets(active);

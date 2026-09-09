@@ -131,7 +131,8 @@ cargo clippy --workspace --all-targets -- -D warnings
   `SortKey`）；`file_ops.rs` 文件操作引擎（`OpKind::Compress` 桥接 parser
   `create_zip`，dest_dir 记 zip 父目录使完成后栏刷新自动生效）；
   `file_manager_dialog.rs` 确认对话框
-  （复制/移动/删除/重命名/新建文件夹/压缩为 zip，对齐 `extract_dialog.rs` 模式）。
+  （复制/移动/删除/重命名/新建文件夹/新建文本文件/压缩为 zip，对齐
+  `extract_dialog.rs` 模式）。
   **选择模型与 Archive 的差异**：`selected: HashSet<PathBuf>` **含目录**
   （Archive 只存文件条目名、目录选中态派生自后代统计）；焦点是 UI 行索引
   usize（0 = 「..」上级行，盘符根禁用上级）。**file_ops 约定**：每任务一条后台
@@ -224,6 +225,19 @@ cargo clippy --workspace --all-targets -- -D warnings
   否则导航/refresh 后 `pending_reveal` 在 poll Ready 应用）；「输送到焦点栏」
   = `FsPanel::inject_entries_branch`（命中集直接注入 + branch_view=true，
   同分支视图约定 name 存显示名，退出条件与分支视图一致 navigate/refresh）。
+  **新建文本文件（Shift+F4 / 右键 FILE_PLUS）**：`file_ops::suggest_text_file_name`
+  （「新建文本文件.txt」重名 `(2)` 递增，扩展名固定末尾）+ `create_text_file`
+  （`create_new(true)` 防竞态覆盖）；确认经 `FmDialogOutcome::ConfirmNewFile` →
+  `refresh_panel_of` 创建后选中（同新建文件夹）。
+  **Shell 动词（Windows only）**：`platform::shell_verbs`（非 Windows stub
+  `is_supported()` false，菜单项隐藏）——`ShellExecuteExW` +
+  `SEE_MASK_INVOKEIDLIST` 调 `properties`/`openas` 动词（Explorer 右键同款
+  系统对话框，Shell 自管无需父窗口）；入口 = Alt+Enter（焦点项属性）+
+  右键「打开方式…」（仅文件行，「打开」下方）/ 菜单末尾「属性」(INFO)。
+  **面包屑路径编辑**：铅笔按钮 → TextEdit 替换分段（`breadcrumb_edit`
+  会话态，Enter/Esc 在编辑 UI 内自测——egui_wants_keyboard_input 会屏蔽
+  面板全局键）；Enter 校验 `is_dir()` 后 `navigate_to(fallback_existing_dir)`
+  兜底，无效红字「路径不存在」保持编辑（文本变化即清），Esc 还原。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

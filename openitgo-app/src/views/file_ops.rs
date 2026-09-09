@@ -1005,6 +1005,40 @@ pub fn suggest_folder_name(parent: &Path) -> String {
     base.to_string()
 }
 
+/// 新建文本文件（瞬时操作）：create_new 防竞态覆盖已存在文件；
+/// 重名/非法名校验失败返回 Err。
+pub fn create_text_file(parent: &Path, name: &str) -> Result<PathBuf, String> {
+    validate_entry_name(name)?;
+    let path = parent.join(name.trim());
+    if verbatim_path(&path).exists() {
+        return Err("已存在同名文件或文件夹".to_string());
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(verbatim_path(&path))
+        .map_err(|e| format!("无法创建文件: {e}"))?;
+    Ok(path)
+}
+
+/// 新建文本文件的默认名建议：「新建文本文件.txt」，重名时
+/// 「新建文本文件 (2).txt」递增（扩展名固定在末尾）。
+pub fn suggest_text_file_name(parent: &Path) -> String {
+    let base = "新建文本文件";
+    let ext = ".txt";
+    let candidate = format!("{base}{ext}");
+    if !verbatim_path(&parent.join(&candidate)).exists() {
+        return candidate;
+    }
+    for i in 2..1000u32 {
+        let candidate = format!("{base} ({i}){ext}");
+        if !verbatim_path(&parent.join(&candidate)).exists() {
+            return candidate;
+        }
+    }
+    format!("{base}{ext}")
+}
+
 /// 状态栏速度/ETA 估算：对 done_bytes 的增量做指数滑动平均（EMA）。
 /// 纯函数式采样（now 由调用方传入），与 egui 无关，可单测。
 pub struct OpSpeedMeter {
@@ -1604,6 +1638,21 @@ mod tests {
         assert!(d.is_dir());
         assert!(create_dir(t.path(), "新建文件夹").is_err());
         assert_eq!(suggest_folder_name(t.path()), "新建文件夹 (2)");
+    }
+
+    #[test]
+    fn create_text_file_and_suggest() {
+        let t = TempTree::new("new-text-file");
+        // 默认建议名 + 创建为空文件
+        assert_eq!(suggest_text_file_name(t.path()), "新建文本文件.txt");
+        let f = create_text_file(t.path(), "新建文本文件.txt").unwrap();
+        assert!(f.is_file());
+        assert_eq!(std::fs::metadata(&f).unwrap().len(), 0);
+        // 重名 → 拒绝 + 建议名递增（扩展名保持末尾）
+        assert!(create_text_file(t.path(), "新建文本文件.txt").is_err());
+        assert_eq!(suggest_text_file_name(t.path()), "新建文本文件 (2).txt");
+        // 非法字符
+        assert!(create_text_file(t.path(), "a/b.txt").is_err());
     }
 
     /// 删除走回收站：Windows 本机实跑（CI Linux 无回收站/gio）。

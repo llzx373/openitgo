@@ -1,5 +1,5 @@
 //! 文件管理器操作对话框：复制/移动确认、删除确认（防误删 + 「不再询问」）、
-//! 重命名、新建文件夹、选择组（通配模式选择/取消选择）。对齐
+//! 重命名、新建文件夹/文本文件、选择组（通配模式选择/取消选择）。对齐
 //! `extract_dialog.rs` 模式：状态 struct + 每帧 `ui(ctx)`，`None` = 仍开着，
 //! `Some(FmDialogOutcome)` = 本帧关闭（确认或取消），由 FileManagerView
 //! 统一消费。全部 UI 文本中文。
@@ -18,6 +18,7 @@ pub enum FmDialog {
     Delete(DeleteDialog),
     Rename(RenameDialog),
     NewDir(NewDirDialog),
+    NewFile(NewFileDialog),
     Compress(CompressDialog),
     SelectGroup(SelectGroupDialog),
     MultiRename(MultiRenameDialog),
@@ -45,6 +46,10 @@ pub enum FmDialogOutcome {
         parent: PathBuf,
         name: String,
     },
+    ConfirmNewFile {
+        parent: PathBuf,
+        name: String,
+    },
     ConfirmCompress {
         sources: Vec<PathBuf>,
         dest_zip: PathBuf,
@@ -69,6 +74,7 @@ impl FmDialog {
             FmDialog::Delete(d) => d.ui(ctx),
             FmDialog::Rename(d) => d.ui(ctx),
             FmDialog::NewDir(d) => d.ui(ctx),
+            FmDialog::NewFile(d) => d.ui(ctx),
             FmDialog::Compress(d) => d.ui(ctx),
             FmDialog::SelectGroup(d) => d.ui(ctx),
             FmDialog::MultiRename(d) => d.ui(ctx),
@@ -551,6 +557,59 @@ impl NewDirDialog {
                         .clicked()
                     {
                         outcome = Some(FmDialogOutcome::ConfirmNewDir {
+                            parent: self.parent.clone(),
+                            name: self.name.trim().to_string(),
+                        });
+                    }
+                    if ui.button("取消").clicked() {
+                        outcome = Some(FmDialogOutcome::Cancelled);
+                    }
+                });
+            });
+        if !open {
+            outcome = Some(FmDialogOutcome::Cancelled);
+        }
+        outcome
+    }
+}
+
+/// 新建文本文件：默认名「新建文本文件.txt」（重名自动递增建议），
+/// 确认后创建空文件并选中。
+pub struct NewFileDialog {
+    parent: PathBuf,
+    name: String,
+}
+
+impl NewFileDialog {
+    pub fn new(parent: PathBuf, suggested: String) -> Self {
+        Self {
+            parent,
+            name: suggested,
+        }
+    }
+
+    fn ui(&mut self, ctx: &egui::Context) -> Option<FmDialogOutcome> {
+        let mut outcome = None;
+        let mut open = true;
+        egui::Window::new("新建文本文件")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("文件名称：");
+                ui.add(egui::TextEdit::singleline(&mut self.name).desired_width(320.0));
+                let error = name_error(Some(&self.parent), &self.name, None);
+                if let Some(err) = &error {
+                    ui.colored_label(ui.visuals().error_fg_color, err);
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(error.is_none(), egui::Button::new("创建"))
+                        .clicked()
+                    {
+                        outcome = Some(FmDialogOutcome::ConfirmNewFile {
                             parent: self.parent.clone(),
                             name: self.name.trim().to_string(),
                         });
