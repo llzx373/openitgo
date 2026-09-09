@@ -38,6 +38,11 @@ pub(crate) fn load_file_preview(path: &Path) -> Result<PreviewData, String> {
     Ok(classify_preview_bytes(&name, &bytes))
 }
 
+/// 预览图解码的宽/高上限：预览纹理最终经 `ctx.load_texture` 进 wgpu，任一边
+/// 超过 `max_texture_dimension_2d`（一般 8192）会在 create_texture 校验 panic
+/// 闪退；同时限制解码分配，防解压炸弹 OOM（长条图/超大图转 Note 说明）。
+const PREVIEW_IMAGE_MAX_DIM: u32 = 8192;
+
 /// 按扩展名与内容嗅探分类已读出的字节（纯函数，便于单测）。
 pub(crate) fn classify_preview_bytes(name: &str, bytes: &[u8]) -> PreviewData {
     let is_image = Path::new(name)
@@ -45,13 +50,29 @@ pub(crate) fn classify_preview_bytes(name: &str, bytes: &[u8]) -> PreviewData {
         .and_then(|e| e.to_str())
         .is_some_and(openitgo_parser::traits::is_image_extension);
     if is_image {
-        return match image::load_from_memory(bytes) {
+        let mut reader =
+            match image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format() {
+                Ok(r) => r,
+                Err(e) => return PreviewData::Note(format!("无法识别图片格式: {e}")),
+            };
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(PREVIEW_IMAGE_MAX_DIM);
+        limits.max_image_height = Some(PREVIEW_IMAGE_MAX_DIM);
+        reader.limits(limits);
+        return match reader.decode() {
             Ok(img) => {
                 let rgba = img.to_rgba8();
                 let size = [rgba.width() as usize, rgba.height() as usize];
                 PreviewData::Image(egui::ColorImage::from_rgba_unmultiplied(size, &rgba))
             }
-            Err(e) => PreviewData::Note(format!("无法解码图片: {e}")),
+            Err(e) => {
+                let msg = if matches!(e, image::ImageError::Limits(_)) {
+                    format!("图片尺寸超过 {PREVIEW_IMAGE_MAX_DIM}px，不预览")
+                } else {
+                    format!("无法解码图片: {e}")
+                };
+                PreviewData::Note(msg)
+            }
         };
     }
     let prefix = &bytes[..bytes.len().min(TEXT_SNIFF_BYTES)];
@@ -148,6 +169,33 @@ mod tests {
             classify_preview_bytes("p.png", b"not a png"),
             PreviewData::Note(_)
         ));
+    }
+
+    /// 回归（预览闪退）：超过 GPU 纹理上限（8192）的图片必须走 Note，
+    /// 不能进 ColorImage——否则 load_texture 后 wgpu create_texture 校验 panic。
+    #[test]
+    fn classify_preview_bytes_rejects_oversized_image() {
+        let wide =
+            image::RgbaImage::from_pixel(PREVIEW_IMAGE_MAX_DIM + 1, 1, image::Rgba([0, 0, 0, 255]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(wide)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        match classify_preview_bytes("big.png", &buf.into_inner()) {
+            PreviewData::Note(n) => assert!(n.contains("不预览"), "{n}"),
+            other => panic!("expected Note, got {other:?}"),
+        }
+        // 边界值本身仍可正常解码。
+        let ok =
+            image::RgbaImage::from_pixel(PREVIEW_IMAGE_MAX_DIM, 1, image::Rgba([0, 0, 0, 255]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(ok)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        match classify_preview_bytes("ok.png", &buf.into_inner()) {
+            PreviewData::Image(ci) => assert_eq!(ci.size, [PREVIEW_IMAGE_MAX_DIM as usize, 1]),
+            other => panic!("expected Image, got {other:?}"),
+        }
     }
 
     #[test]

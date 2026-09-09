@@ -481,8 +481,12 @@ impl FileManagerView {
                         },
                     );
                     rects.push((0, left.response.rect));
+                    // total_w 为 0（窗口被压扁的退化帧）时除法产生 NaN，
+                    // NaN ratio 会传染进后续布局计算。
                     if let Some(delta) = render_splitter(ui, height) {
-                        ratio = (ratio + delta / total_w).clamp(RATIO_MIN, RATIO_MAX);
+                        if total_w > 0.0 {
+                            ratio = (ratio + delta / total_w).clamp(RATIO_MIN, RATIO_MAX);
+                        }
                     }
                     let right_w = ui.available_width();
                     let right = ui.allocate_ui_with_layout(
@@ -515,7 +519,10 @@ impl FileManagerView {
                         );
                         rects.push((0, panel.response.rect));
                         if let Some(delta) = render_splitter(ui, height) {
-                            preview_ratio = (preview_ratio - delta / total_w).clamp(RATIO_MIN, 0.6);
+                            if total_w > 0.0 {
+                                preview_ratio =
+                                    (preview_ratio - delta / total_w).clamp(RATIO_MIN, 0.6);
+                            }
                         }
                         let w = ui.available_width();
                         ui.allocate_ui_with_layout(
@@ -1865,5 +1872,194 @@ mod tests {
             view.panels[0].last_scroll_offset, left_after,
             "左栏不应跟随右栏滚动"
         );
+    }
+
+    // ---- 预览链路回归（查看预览崩溃）----
+
+    fn key_events(key: egui::Key) -> Vec<egui::Event> {
+        let mods = egui::Modifiers::NONE;
+        vec![
+            egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: mods,
+            },
+            egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: mods,
+            },
+        ]
+    }
+
+    /// 2x2 红 PNG 字节。
+    fn test_png_bytes() -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        buf.into_inner()
+    }
+
+    /// 单击扫描定位「指定文件名的焦点行」（跳过顶栏/面包屑/列头）。
+    fn locate_file_row(
+        ctx: &egui::Context,
+        view: &mut FileManagerView,
+        t: &mut f64,
+        file_name: &str,
+    ) -> egui::Pos2 {
+        let mut y = 95.0;
+        while y < 500.0 {
+            *t += 1.0;
+            let pos = egui::pos2(200.0, y);
+            headless_frame(ctx, view, *t, primary_click_events(pos));
+            let hit = view.panels[view.active]
+                .focused_entry()
+                .is_some_and(|e| e.name == file_name);
+            if hit {
+                return pos;
+            }
+            y += 5.0;
+        }
+        panic!("未能定位到文件行 {file_name}");
+    }
+
+    /// 单栏预览：选中图片行 → 后台加载 → 纹理上传渲染若干帧；
+    /// 再切「原始尺寸」模式渲染（独立双向滚动区路径）。
+    #[test]
+    fn preview_image_load_and_render() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.png"), test_png_bytes()).unwrap();
+        std::fs::write(tmp.path().join("b.txt"), "hello").unwrap();
+        let mut view = FileManagerView::new("single", 0.5, true, "name", true);
+        navigate_ready(&mut view.panels[0], tmp.path());
+        let ctx = egui::Context::default();
+        setup_test_fonts(&ctx);
+        let mut t = 0.0;
+        headless_frame(&ctx, &mut view, t, vec![]);
+        let pos = locate_file_row(&ctx, &mut view, &mut t, "a.png");
+
+        // 单击图片行 → 焦点 → sync_preview_target 发起后台读取。
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, primary_click_events(pos));
+        assert!(view.preview.is_some(), "应发起预览读取");
+        // 排空加载并渲染（含纹理上传帧）。
+        for _ in 0..30 {
+            t += 1.0;
+            headless_frame(&ctx, &mut view, t, vec![]);
+            if view.preview_tex.is_some() {
+                break;
+            }
+        }
+        assert!(view.preview_tex.is_some(), "图片预览应已上传纹理");
+        // 原始尺寸模式（ScrollArea::both 路径）。
+        view.preview_full_size = true;
+        for _ in 0..3 {
+            t += 1.0;
+            headless_frame(&ctx, &mut view, t, vec![]);
+        }
+    }
+
+    /// 竞态：预览在途时导航离开（clear_preview 先行），结果晚到不应 panic。
+    #[test]
+    fn preview_navigate_away_while_loading() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.png"), test_png_bytes()).unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("c.txt"), "x").unwrap();
+        let mut view = FileManagerView::new("single", 0.5, true, "name", true);
+        navigate_ready(&mut view.panels[0], tmp.path());
+        let ctx = egui::Context::default();
+        setup_test_fonts(&ctx);
+        let mut t = 0.0;
+        headless_frame(&ctx, &mut view, t, vec![]);
+        let pos = locate_file_row(&ctx, &mut view, &mut t, "a.png");
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, primary_click_events(pos));
+        assert!(view.preview.is_some());
+        // 加载在途时直接导航进子目录（焦点清空 → clear_preview）。
+        view.panels[0].navigate_to(sub.clone());
+        for _ in 0..30 {
+            t += 1.0;
+            view.panels[0].poll();
+            headless_frame(&ctx, &mut view, t, vec![]);
+        }
+        assert_eq!(view.panels[0].dir, sub);
+        assert!(matches!(view.panels[0].state, PanelLoadState::Ready));
+    }
+
+    /// 损坏图片（扩展名 png、内容垃圾）→ Note 路径渲染。
+    #[test]
+    fn preview_corrupt_image_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.png"), b"not a png at all").unwrap();
+        let mut view = FileManagerView::new("single", 0.5, true, "name", true);
+        navigate_ready(&mut view.panels[0], tmp.path());
+        let ctx = egui::Context::default();
+        setup_test_fonts(&ctx);
+        let mut t = 0.0;
+        headless_frame(&ctx, &mut view, t, vec![]);
+        let pos = locate_file_row(&ctx, &mut view, &mut t, "a.png");
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, primary_click_events(pos));
+        for _ in 0..30 {
+            t += 1.0;
+            headless_frame(&ctx, &mut view, t, vec![]);
+            if view.preview_note.is_some() {
+                break;
+            }
+        }
+        assert!(view.preview_note.is_some(), "损坏图片应走 Note 说明");
+    }
+
+    /// F3 弹窗（双栏）：打开 → 移动焦点换内容 → Esc 关闭，全程渲染。
+    #[test]
+    fn preview_f3_window_open_switch_close() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.png"), test_png_bytes()).unwrap();
+        std::fs::write(tmp.path().join("b.txt"), "hello").unwrap();
+        std::fs::write(tmp.path().join("c.bin"), [0xFF, 0xFE, 0x00]).unwrap();
+        let mut view = FileManagerView::new("dual", 0.5, false, "name", true);
+        navigate_ready(&mut view.panels[0], tmp.path());
+        navigate_ready(&mut view.panels[1], tmp.path());
+        let ctx = egui::Context::default();
+        setup_test_fonts(&ctx);
+        let mut t = 0.0;
+        headless_frame(&ctx, &mut view, t, vec![]);
+        let pos = locate_file_row(&ctx, &mut view, &mut t, "a.png");
+        // 焦点落到 a.png 后开 F3 弹窗。
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, primary_click_events(pos));
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, key_events(egui::Key::F3));
+        assert!(view.preview_window_open, "F3 应打开预览弹窗");
+        // 加载 + 渲染若干帧（弹窗与面板同帧共存）。
+        for _ in 0..10 {
+            t += 1.0;
+            headless_frame(&ctx, &mut view, t, vec![]);
+        }
+        // ↓ 移焦点到 b.txt（弹窗内容切换），再 ↓ 到 c.bin（不支持类型）。
+        for _ in 0..2 {
+            t += 1.0;
+            headless_frame(&ctx, &mut view, t, key_events(egui::Key::ArrowDown));
+            for _ in 0..5 {
+                t += 1.0;
+                headless_frame(&ctx, &mut view, t, vec![]);
+            }
+        }
+        // Esc 关弹窗。
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, key_events(egui::Key::Escape));
+        assert!(!view.preview_window_open, "Esc 应关闭弹窗");
+        for _ in 0..3 {
+            t += 1.0;
+            headless_frame(&ctx, &mut view, t, vec![]);
+        }
     }
 }
