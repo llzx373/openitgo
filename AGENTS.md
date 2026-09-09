@@ -229,7 +229,11 @@ cargo clippy --workspace --all-targets -- -D warnings
   分页用内嵌 CSS `columns`。Pagination transforms 只能加在 `#column-view` 内的
   `#column-content` 上，`#column-view` 本身是事件容器不可平移。自定义协议回调的
   URI 是绝对 URL：`ebook://reader/res/...` 中 `reader` 是 host，不会出现在
-  `uri().path()`——资源判别符必须放在 path/query。**菜单停放（#52）**：egui 弹层
+  `uri().path()`——资源判别符必须放在 path/query。**WebView2 (Windows) 约束**：
+  wry 用 `http://ebook.*` workaround 拦截自定义协议，页面内绝对 `ebook://...`
+  请求（fetch/img/字体）不会被拦截、直接失败（fetch 报 TypeError: Failed to
+  fetch）——JS 与章节 HTML 内一律用相对 URL（`?chapter=N`、`/res/...`），由
+  当前 origin 解析后在各平台都能命中协议回调。**菜单停放（#52）**：egui 弹层
   无法穿透原生 webview，菜单打开时 `render_ebook` 用 `menu_overlay_open(ctx)` 驱动
   `EbookView::set_webview_hidden`（wry `set_visible(false)`，状态去重避免每帧
   IPC）。**位置保持**：字号/边距/主题变化按字符偏移保持，窗口 resize 防抖后按滚动

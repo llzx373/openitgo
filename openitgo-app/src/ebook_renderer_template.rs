@@ -743,7 +743,9 @@ async function preloadChapter(index) {{
   const id = 'preload-chapter-' + index;
   if (document.getElementById(id)) return;
   try {{
-    const res = await fetch('ebook://reader?chapter=' + index);
+    // Query-only relative URL: resolves to ebook://reader?chapter=N on
+    // WebKit, and to wry's http://ebook.* workaround origin on WebView2.
+    const res = await fetch('?chapter=' + index);
     const html = await res.text();
     const template = document.createElement('template');
     template.id = id;
@@ -778,7 +780,7 @@ async function loadChapter(index, charOffset) {{
   // A new chapter always needs a fresh layout.
   layoutCache.key = null;
   try {{
-    const res = await fetch('ebook://reader?chapter=' + currentChapter);
+    const res = await fetch('?chapter=' + currentChapter);
     currentChapterHtml = await res.text();
     columnContent.innerHTML = currentChapterHtml;
     hideError();
@@ -2421,8 +2423,8 @@ mod tests {
             "preloadChapter should parse into an inert template"
         );
         assert!(
-            fn_body.contains("ebook://reader?chapter="),
-            "preloadChapter should fetch from the ebook protocol"
+            fn_body.contains("'?chapter='"),
+            "preloadChapter should fetch from the ebook protocol via a relative URL"
         );
         assert!(
             !fn_body.contains("columnContent.innerHTML = html"),

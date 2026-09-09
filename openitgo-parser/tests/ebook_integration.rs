@@ -258,15 +258,9 @@ fn test_epub_chapter_rewrites_img_and_injects_font_face() {
 
     let ebook = parse_ebook(&path).unwrap();
     let html = openitgo_parser::html::render_chapter_html(&ebook, 0).unwrap();
-    assert!(
-        html.contains("ebook://reader/res/OEBPS/Images/pic.png"),
-        "got: {html}"
-    );
+    assert!(html.contains("/res/OEBPS/Images/pic.png"), "got: {html}");
     assert!(html.contains("@font-face"), "got: {html}");
-    assert!(
-        html.contains("ebook://reader/res/OEBPS/Fonts/f.ttf"),
-        "got: {html}"
-    );
+    assert!(html.contains("/res/OEBPS/Fonts/f.ttf"), "got: {html}");
     assert!(
         !html.contains("color: red"),
         "book layout CSS must be dropped: {html}"
@@ -393,7 +387,7 @@ fn test_render_chapter_with_fragment_href() {
     // 封面章：NCX href 带 #fragment，zip 精确匹配必须先去 fragment
     let html = openitgo_parser::html::render_chapter_html(&ebook, 0).unwrap();
     assert!(
-        html.contains("ebook://reader/res/OPS/images/cover.jpg"),
+        html.contains("/res/OPS/images/cover.jpg"),
         "封面章内图片应按章节目录改写: {html}"
     );
 }
