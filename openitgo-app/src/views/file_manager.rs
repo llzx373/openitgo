@@ -609,6 +609,34 @@ impl FileManagerView {
             .inner_margin(egui::Margin::symmetric(4, 2))
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
+                    let back_tip = self.panels[idx]
+                        .back_target()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "后退".to_string());
+                    if ui
+                        .add_enabled(
+                            self.panels[idx].can_go_back(),
+                            egui::Button::new(icons::CARET_LEFT.as_str()).frame(false),
+                        )
+                        .on_hover_text(back_tip)
+                        .clicked()
+                    {
+                        self.panels[idx].go_back();
+                    }
+                    let forward_tip = self.panels[idx]
+                        .forward_target()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "前进".to_string());
+                    if ui
+                        .add_enabled(
+                            self.panels[idx].can_go_forward(),
+                            egui::Button::new(icons::CARET_RIGHT.as_str()).frame(false),
+                        )
+                        .on_hover_text(forward_tip)
+                        .clicked()
+                    {
+                        self.panels[idx].go_forward();
+                    }
                     self.render_drive_switcher(ui, idx);
                     ui.separator();
                     let dir = self.panels[idx].dir.clone();
@@ -1299,6 +1327,14 @@ impl FileManagerView {
             self.panels[active].go_back();
         }
         if mods.alt && ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+            self.panels[active].go_forward();
+        }
+        // 鼠标侧键：Extra1 = 后退，Extra2 = 前进（仅本视图；漫画阅读器侧
+        // 键翻页在 app.rs 的 View::Reader 分支处理，不冲突）。
+        if ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Extra1)) {
+            self.panels[active].go_back();
+        }
+        if ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Extra2)) {
             self.panels[active].go_forward();
         }
         // 应用内剪贴板：Ctrl+C 复制 / Ctrl+X 剪切 / Ctrl+V 粘贴（经确认框）。

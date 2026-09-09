@@ -175,6 +175,28 @@ impl FsPanel {
         }
     }
 
+    /// 是否可后退（历史 UI 按钮的 disabled 态）。
+    pub fn can_go_back(&self) -> bool {
+        self.history_pos > 1
+    }
+
+    /// 是否可前进。
+    pub fn can_go_forward(&self) -> bool {
+        self.history_pos < self.history.len()
+    }
+
+    /// 后退的目标目录（tooltip 用）。
+    pub fn back_target(&self) -> Option<&Path> {
+        self.can_go_back()
+            .then(|| self.history[self.history_pos - 2].as_path())
+    }
+
+    /// 前进的目标目录（tooltip 用）。
+    pub fn forward_target(&self) -> Option<&Path> {
+        self.can_go_forward()
+            .then(|| self.history[self.history_pos].as_path())
+    }
+
     /// Backspace/「..」行：进入上级目录；已在根目录（如 `C:\`）时 no-op。
     pub fn parent_dir(&mut self) -> bool {
         match self.dir.parent() {
@@ -549,6 +571,39 @@ mod tests {
         for d in &drives {
             assert!(std::fs::read_dir(d).is_ok(), "{d:?} 应可列出");
         }
+    }
+
+    /// 导航历史查询：初始不可后退/前进；navigate 两次后可后退；
+    /// 后退后可前进；新 navigate 截断前进分支后不可再前进。
+    #[test]
+    fn can_go_back_forward_tracks_history() {
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        assert!(!panel.can_go_back());
+        assert!(!panel.can_go_forward());
+        assert_eq!(panel.back_target(), None);
+        assert_eq!(panel.forward_target(), None);
+
+        let dir_a = std::env::temp_dir();
+        let dir_b = dir_a.join("openitgo-test-history");
+        let dir_c = dir_a.join("openitgo-test-history-c");
+        panel.navigate_to(dir_a.clone());
+        assert!(!panel.can_go_back());
+        assert!(!panel.can_go_forward());
+
+        panel.navigate_to(dir_b.clone());
+        assert!(panel.can_go_back());
+        assert!(!panel.can_go_forward());
+        assert_eq!(panel.back_target(), Some(dir_a.as_path()));
+
+        assert!(panel.go_back());
+        assert!(!panel.can_go_back());
+        assert!(panel.can_go_forward());
+        assert_eq!(panel.forward_target(), Some(dir_b.as_path()));
+
+        panel.navigate_to(dir_c);
+        assert!(panel.can_go_back());
+        assert!(!panel.can_go_forward());
+        assert_eq!(panel.forward_target(), None);
     }
 
     /// navigate 到真实目录 → poll 至 Ready 后状态稳定，再 poll 不再变化。
