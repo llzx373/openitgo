@@ -282,6 +282,8 @@ impl FileManagerView {
         for panel in &mut self.panels {
             let was_loading = matches!(panel.state, PanelLoadState::Loading(_));
             loading |= panel.poll();
+            // 目录大小计算在途：主动重绘排空结果（egui 空闲不重绘）。
+            loading |= panel.dir_sizes_in_flight();
             // 列举完成（navigate/refresh）：预览目标属于该栏且已消失则清预览。
             if was_loading && !matches!(panel.state, PanelLoadState::Loading(_)) {
                 if let Some(target) = &self.preview_path {
@@ -945,6 +947,10 @@ impl FileManagerView {
         let selected = entry
             .as_ref()
             .is_some_and(|e| panel.selected.contains(&e.path));
+        let dir_size = entry
+            .as_ref()
+            .filter(|e| e.is_dir)
+            .and_then(|e| panel.dir_sizes.get(&e.path).copied());
         let focused = panel.focus == Some(row);
         let at_root = panel.is_root();
         let parent_enabled = !at_root;
@@ -988,7 +994,7 @@ impl FileManagerView {
         );
 
         // 行内容：图标 + 名称；右侧固定宽的大小/修改时间列
-        // （目录行与「..」行大小列留空）。
+        // （目录行大小列仅在「计算大小」已算出时显示，未命中留空）。
         let content = rect.shrink2(egui::vec2(6.0, 2.0));
         // 名称列在列块左缘前截断（跟随 col_shift），不与大小列文字叠字。
         let name_right = (layout.size_left - 6.0).max(content.min.x + 20.0);
@@ -1035,6 +1041,15 @@ impl FileManagerView {
                                 col,
                             );
                         }
+                    } else if let Some(size) = dir_size {
+                        // 目录大小比文件大小再弱一档，与精确文件大小区分。
+                        painter.text(
+                            egui::pos2(layout.mtime_left, cy),
+                            egui::Align2::RIGHT_CENTER,
+                            human_size(size),
+                            font_id.clone(),
+                            col.gamma_multiply(0.6),
+                        );
                     }
                     painter.text(
                         egui::pos2(layout.content_right, cy),
@@ -1114,6 +1129,22 @@ impl FileManagerView {
                 }
                 if ui.button((icons::ARROW_CLOCKWISE, " 刷新")).clicked() {
                     self.panels[idx].refresh();
+                    ui.close();
+                }
+                let dir_targets: Vec<PathBuf> = self.panels[idx]
+                    .entries
+                    .iter()
+                    .filter(|e| e.is_dir && targets.contains(&e.path))
+                    .map(|e| e.path.clone())
+                    .collect();
+                if ui
+                    .add_enabled(
+                        !dir_targets.is_empty(),
+                        egui::Button::new((icons::GAUGE, " 计算大小")),
+                    )
+                    .clicked()
+                {
+                    self.panels[idx].request_dir_sizes(dir_targets);
                     ui.close();
                 }
                 ui.separator();
@@ -1347,8 +1378,9 @@ impl FileManagerView {
 
     /// 键盘导航（Explorer/TC 式）：Tab 切换焦点栏、↑/↓ 移动焦点并单选、
     /// Shift+↑/↓ 从 anchor 扩选、Ctrl+↑/↓ 只移焦点、Home/End 跳首/末行、
-    /// PgUp/PgDn 整页步进、Enter 打开焦点行、Backspace 上级、Ctrl+A 全选可见、
-    /// Ctrl+R 刷新、Alt+←/→ 导航历史、Esc 清过滤或清空选中。
+    /// PgUp/PgDn 整页步进、Enter 打开焦点行、空格计算焦点目录大小、
+    /// Backspace 上级、Ctrl+A 全选可见、Ctrl+R 刷新、Alt+←/→ 导航历史、
+    /// Esc 清过滤或清空选中。
     /// 过滤框等文本输入占用键盘时不处理。
     /// 文件操作键：F2 重命名 / F5 复制 / F6 移动 / F7 新建文件夹 /
     /// F8(Delete) 删除（confirm_delete 时先弹确认框）；Ctrl+C/X/V 剪贴板。
@@ -1481,6 +1513,18 @@ impl FileManagerView {
             let rows = self.panels[active].rows();
             if let Some(row) = self.panels[active].focus {
                 self.open_ui_row(active, &rows, row, intents);
+            }
+        }
+        // 空格：计算焦点目录大小（文件/「..」/无焦点忽略）。
+        if !mods.command
+            && !mods.shift
+            && !mods.alt
+            && ui.input(|i| i.key_pressed(egui::Key::Space))
+        {
+            if let Some(entry) = self.panels[active].focused_entry() {
+                if entry.is_dir {
+                    self.panels[active].request_dir_sizes(vec![entry.path]);
+                }
             }
         }
         // F3：双栏模式对焦点文件弹临时预览窗（再按 F3 / Esc / 关闭按钮关窗）。

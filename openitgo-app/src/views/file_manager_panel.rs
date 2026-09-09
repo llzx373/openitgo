@@ -8,8 +8,12 @@
 
 use crate::opener::{AsyncOpener, OpenStatus};
 use crate::views::file_manager_rows::{is_hidden_name, list_rows, FsEntry, SortKey};
-use std::collections::HashSet;
+use crate::views::file_ops::dir_size;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::sync::Arc;
 
 /// 明细列表行高（pt），虚拟化滚动要求固定行高（同 archive.rs 约定）。
 pub(crate) const ROW_HEIGHT: f32 = 22.0;
@@ -95,6 +99,15 @@ pub struct FsPanel {
     pub last_viewport_height: f32,
     /// 实际行距（渲染时每帧更新）：PgUp/PgDn 步进与焦点滚动定位用。
     pub last_row_pitch: f32,
+    /// 已算出的目录总大小（右键「计算大小」/空格触发，大小列显示用）；
+    /// navigate/refresh 时清空（目录内容可能已变）。
+    pub dir_sizes: HashMap<PathBuf, u64>,
+    /// 在途目录大小计算的接收端与取消标志（worker 逐个目录累加后经
+    /// channel 回报，poll 排空进 dir_sizes）。
+    dir_size_rx: Option<Receiver<(PathBuf, u64)>>,
+    dir_size_cancel: Option<Arc<AtomicBool>>,
+    /// 已请求未回报的目录（去重 + 重启任务时并入新线程清单）。
+    dir_size_pending: Vec<PathBuf>,
 }
 
 impl FsPanel {
@@ -121,6 +134,10 @@ impl FsPanel {
             last_scroll_offset: 0.0,
             last_viewport_height: 0.0,
             last_row_pitch: 0.0,
+            dir_sizes: HashMap::new(),
+            dir_size_rx: None,
+            dir_size_cancel: None,
+            dir_size_pending: Vec::new(),
         }
     }
 
@@ -136,6 +153,7 @@ impl FsPanel {
         self.focus_scroll_pending = false;
         self.last_scroll_offset = 0.0;
         self.last_viewport_height = 0.0;
+        self.clear_dir_sizes();
         self.state = PanelLoadState::Loading(AsyncOpener::open(path, read_dir_entries));
     }
 
@@ -224,6 +242,7 @@ impl FsPanel {
         if matches!(self.state, PanelLoadState::Loading(_)) {
             return;
         }
+        self.clear_dir_sizes();
         let dir = self.dir.clone();
         self.state = PanelLoadState::Loading(AsyncOpener::open(dir, read_dir_entries));
     }
@@ -231,6 +250,7 @@ impl FsPanel {
     /// 每帧排空列举结果；返回 true = 仍在 Loading（调用方据此
     /// `request_repaint_after(100ms)`，遵循 egui 空闲不重绘约定）。
     pub fn poll(&mut self) -> bool {
+        self.poll_dir_sizes();
         // mem::take 会把 state 先换成 Default(Idle)，必须先确认 Loading 再
         // take——否则 Ready/Failed 会被静默打回 Idle，触发 app 侧「Idle =
         // 首次进入」恢复逻辑每帧重列目录（列表闪烁 + 选中/焦点被清）。
@@ -263,6 +283,87 @@ impl FsPanel {
                 false
             }
         }
+    }
+
+    /// 按需后台计算目录总大小：过滤掉已算出/已请求的目录；已有在途任务
+    /// 时取消并以「剩余 pending + 本次新增」重启 worker（旧 receiver 丢弃，
+    /// 迟到的结果自然失效）。结果经 channel 回报，poll 排空进 dir_sizes。
+    pub fn request_dir_sizes(&mut self, paths: Vec<PathBuf>) {
+        for p in paths {
+            if !self.dir_sizes.contains_key(&p) && !self.dir_size_pending.contains(&p) {
+                self.dir_size_pending.push(p);
+            }
+        }
+        if self.dir_size_pending.is_empty() {
+            return;
+        }
+        if let Some(cancel) = self.dir_size_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.dir_size_rx = None;
+        let paths = self.dir_size_pending.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let (tx, rx) = channel();
+        std::thread::Builder::new()
+            .name("fm-dir-size".into())
+            .spawn(move || {
+                for path in paths {
+                    if worker_cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let size = dir_size(&path, &worker_cancel);
+                    if worker_cancel.load(Ordering::Relaxed) || tx.send((path, size)).is_err() {
+                        return;
+                    }
+                }
+            })
+            .expect("spawn fm-dir-size worker");
+        self.dir_size_cancel = Some(cancel);
+        self.dir_size_rx = Some(rx);
+    }
+
+    /// 排空目录大小结果进 dir_sizes；worker 结束（channel 断开）后清任务句柄。
+    fn poll_dir_sizes(&mut self) {
+        let Some(rx) = self.dir_size_rx.take() else {
+            return;
+        };
+        let mut disconnected = false;
+        loop {
+            match rx.try_recv() {
+                Ok((path, size)) => {
+                    self.dir_size_pending.retain(|p| p != &path);
+                    self.dir_sizes.insert(path, size);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+        if disconnected {
+            self.dir_size_cancel = None;
+            self.dir_size_pending.clear();
+        } else {
+            self.dir_size_rx = Some(rx);
+        }
+    }
+
+    /// 目录大小计算是否在途（调用方据此 request_repaint_after 排空结果）。
+    pub fn dir_sizes_in_flight(&self) -> bool {
+        self.dir_size_rx.is_some()
+    }
+
+    /// 取消在途目录大小计算并清空已算结果（navigate/refresh：目录内容
+    /// 可能已变）。worker 看到 cancel 或 send 失败即退出。
+    fn clear_dir_sizes(&mut self) {
+        if let Some(cancel) = self.dir_size_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.dir_size_rx = None;
+        self.dir_size_pending.clear();
+        self.dir_sizes.clear();
     }
 
     /// 当前行模型（目录优先 + 排序 + 过滤，见 file_manager_rows::list_rows）；
@@ -639,6 +740,54 @@ mod tests {
 
         panel.show_hidden = true;
         assert_eq!(panel.rows().len(), 4);
+    }
+
+    /// 目录大小：request → poll 排空进 dir_sizes；重复请求已算出的目录为
+    /// no-op；refresh/navigate 取消在途任务并清空已算结果。
+    #[test]
+    fn dir_sizes_request_poll_and_clear() {
+        let root = std::env::temp_dir().join(format!(
+            "openitgo-fm-dirsize-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/f.txt"), b"123456").unwrap();
+        std::fs::write(root.join("g.txt"), b"12").unwrap();
+
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        panel.request_dir_sizes(vec![root.join("sub")]);
+        assert!(panel.dir_sizes_in_flight());
+        for _ in 0..200 {
+            panel.poll();
+            if !panel.dir_sizes_in_flight() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(panel.dir_sizes.get(&root.join("sub")), Some(&6));
+        assert!(!panel.dir_sizes_in_flight());
+
+        // 已算出的目录重复请求 = no-op（不起新任务）。
+        panel.request_dir_sizes(vec![root.join("sub")]);
+        assert!(!panel.dir_sizes_in_flight());
+
+        // refresh 取消在途任务并清空结果。
+        panel.request_dir_sizes(vec![root.join("sub"), root.clone()]);
+        panel.refresh();
+        assert!(panel.dir_sizes.is_empty());
+        assert!(!panel.dir_sizes_in_flight());
+
+        // navigate 同样取消并清空。
+        panel.request_dir_sizes(vec![root.join("sub")]);
+        panel.navigate_to(root.clone());
+        assert!(panel.dir_sizes.is_empty());
+        assert!(!panel.dir_sizes_in_flight());
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// 导航历史查询：初始不可后退/前进；navigate 两次后可后退；

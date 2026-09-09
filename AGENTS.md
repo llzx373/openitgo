@@ -157,6 +157,15 @@ cargo clippy --workspace --all-targets -- -D warnings
   **盘符切换**：面包屑最左 `list_drives()`（panel.rs，Windows 枚举 A–Z 取
   `read_dir` 可列出者；Unix 为 `/` + `/Volumes/*`），首次点开菜单才起一次性
   后台线程枚举、结果缓存进 `drives`（在途时 `request_repaint_after` 轮询）。
+  **目录大小计算**：右键「计算大小」（选中集含目录时可用）/ 空格（焦点目录）
+  触发 `FsPanel::request_dir_sizes`——过滤已算出/已请求项，已有在途任务时
+  取消并以「剩余 pending + 新增」重启单 worker 线程，结果经 channel 在
+  `poll()`（Loading 检查之前）排空进 `dir_sizes`，在途时 `dir_sizes_in_flight()`
+  驱动 `request_repaint_after`；navigate/refresh 取消在途并清空。worker 核心
+  是 `file_ops::dir_size(path, cancel)`：递归累加文件 len，不跟进符号链接
+  （防环且链接不计）、单项失败跳过、cancel 提前返回已累加值、`verbatim_path`
+  包长路径。目录行大小列命中 `dir_sizes` 时以比文件大小弱一档的颜色显示，
+  未命中留空。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

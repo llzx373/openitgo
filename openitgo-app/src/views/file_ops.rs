@@ -468,6 +468,36 @@ fn resolve_conflict_name(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// 目录总大小（字节）：递归累加文件 len；不跟进符号链接（防环，链接本身
+/// 不计入）；单项 read_dir/file_type/metadata 失败跳过不计；cancel 置位
+/// 提前返回已累加值。文件管理器「计算大小」的后台 worker 用。
+pub(crate) fn dir_size(path: &Path, cancel: &AtomicBool) -> u64 {
+    let mut total = 0;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if cancel.load(Ordering::Relaxed) {
+            return total;
+        }
+        let Ok(rd) = std::fs::read_dir(verbatim_path(&dir)) else {
+            continue;
+        };
+        for item in rd.flatten() {
+            let Ok(ft) = item.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                stack.push(item.path());
+            } else if let Ok(m) = item.metadata() {
+                total += m.len();
+            }
+        }
+    }
+    total
+}
+
 /// Windows 长路径（>MAX_PATH=260）支持：本程序 manifest 未声明
 /// longPathAware，Win32 文件 API 默认拒绝超长路径，需加 `\\?\`
 /// （verbatim）前缀。仅转换超过 240 字符（留余量）的绝对路径——普通路径
@@ -698,6 +728,36 @@ mod tests {
         // sub + deep + b.txt + c.txt
         assert_eq!(items, 4);
         assert_eq!(bytes, 8);
+    }
+
+    #[test]
+    fn dir_size_sums_nested_files() {
+        let t = TempTree::new("dirsize");
+        write_file(&t.path().join("a.txt"), b"1234");
+        write_file(&t.path().join("sub/b.txt"), b"123456");
+        write_file(&t.path().join("sub/deep/c.txt"), b"12");
+        let cancel = AtomicBool::new(false);
+        assert_eq!(dir_size(t.path(), &cancel), 12);
+        assert_eq!(dir_size(&t.path().join("sub"), &cancel), 8);
+    }
+
+    #[test]
+    fn dir_size_cancel_returns_partial_early() {
+        let t = TempTree::new("dirsize-cancel");
+        write_file(&t.path().join("a.txt"), b"1234");
+        let cancel = AtomicBool::new(true);
+        assert_eq!(dir_size(t.path(), &cancel), 0);
+    }
+
+    /// 符号链接目录不跟进（防环）：链接指向的内容不计入。
+    #[cfg(unix)]
+    #[test]
+    fn dir_size_does_not_follow_symlinks() {
+        let t = TempTree::new("dirsize-symlink");
+        write_file(&t.path().join("real/x.txt"), b"1234");
+        std::os::unix::fs::symlink(t.path().join("real"), t.path().join("link")).unwrap();
+        let cancel = AtomicBool::new(false);
+        assert_eq!(dir_size(t.path(), &cancel), 4);
     }
 
     #[test]
