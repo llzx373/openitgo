@@ -473,7 +473,12 @@ impl FileManagerView {
                     let left = ui.allocate_ui_with_layout(
                         egui::vec2(left_w, height),
                         egui::Layout::top_down(egui::Align::Min),
-                        |ui| self.render_panel(ui, 0, intents),
+                        // push_id 按栏隔离 widget Id 子树：否则两栏同位置控件的
+                        // auto-id 相同（ScrollArea 滚动状态、列宽拖拽、列头点击
+                        // 的持久状态被跨栏共享，滚左栏右栏跟着动）。
+                        |ui| {
+                            ui.push_id(("fm_panel", 0), |ui| self.render_panel(ui, 0, intents));
+                        },
                     );
                     rects.push((0, left.response.rect));
                     if let Some(delta) = render_splitter(ui, height) {
@@ -483,7 +488,9 @@ impl FileManagerView {
                     let right = ui.allocate_ui_with_layout(
                         egui::vec2(right_w, height),
                         egui::Layout::top_down(egui::Align::Min),
-                        |ui| self.render_panel(ui, 1, intents),
+                        |ui| {
+                            ui.push_id(("fm_panel", 1), |ui| self.render_panel(ui, 1, intents));
+                        },
                     );
                     rects.push((1, right.response.rect));
                 });
@@ -502,7 +509,9 @@ impl FileManagerView {
                         let panel = ui.allocate_ui_with_layout(
                             egui::vec2(panel_w, height),
                             egui::Layout::top_down(egui::Align::Min),
-                            |ui| self.render_panel(ui, 0, intents),
+                            |ui| {
+                                ui.push_id(("fm_panel", 0), |ui| self.render_panel(ui, 0, intents));
+                            },
                         );
                         rects.push((0, panel.response.rect));
                         if let Some(delta) = render_splitter(ui, height) {
@@ -520,7 +529,9 @@ impl FileManagerView {
                     let panel = ui.allocate_ui_with_layout(
                         egui::vec2(total_w, height),
                         egui::Layout::top_down(egui::Align::Min),
-                        |ui| self.render_panel(ui, 0, intents),
+                        |ui| {
+                            ui.push_id(("fm_panel", 0), |ui| self.render_panel(ui, 0, intents));
+                        },
                     );
                     rects.push((0, panel.response.rect));
                 }
@@ -786,6 +797,13 @@ impl FileManagerView {
         let active = self.active == idx;
         let output = area.show_rows(ui, ROW_HEIGHT, row_count, |ui, range| {
             for row in range {
+                // 行内交互（双击目录/「..」、右键「打开」）可触发 navigate_to /
+                // refresh：entries 当场清空、rows 快照即刻失效，继续按旧行索引
+                // 渲染剩余行会越界 panic（双击目录闪退的根因）。状态离开 Ready
+                // 就停笔，下一帧用新行模型整帧重画。
+                if !matches!(self.panels[idx].state, PanelLoadState::Ready) {
+                    break;
+                }
                 self.render_row(ui, idx, &rows, row, active, intents);
             }
         });
@@ -807,10 +825,13 @@ impl FileManagerView {
     ) {
         let panel = &mut self.panels[idx];
         let is_parent = row == 0;
+        // rows 可能是导航前的旧快照（同帧行内双击已清空 entries）：用 get
+        // 防御，越界行本帧按「..」样式渲染，下一帧即被新行模型替换。
         let entry: Option<FsEntry> = if is_parent {
             None
         } else {
-            rows.get(row - 1).map(|&i| panel.entries[i].clone())
+            rows.get(row - 1)
+                .and_then(|&i| panel.entries.get(i).cloned())
         };
         let selected = entry
             .as_ref()
@@ -1031,10 +1052,13 @@ impl FileManagerView {
             self.panels[idx].parent_dir();
             return;
         }
-        let Some(&entry_idx) = rows.get(row - 1) else {
+        // rows 与 entries 之间存在失配窗口（同帧前面的行已触发导航），用 get 防御。
+        let Some(entry) = rows
+            .get(row - 1)
+            .and_then(|&entry_idx| self.panels[idx].entries.get(entry_idx).cloned())
+        else {
             return;
         };
-        let entry = self.panels[idx].entries[entry_idx].clone();
         if entry.is_dir {
             self.panels[idx].navigate_to(entry.path.clone());
         } else if archive_kind(&entry.path).is_some() {
@@ -1669,5 +1693,177 @@ mod tests {
         assert_eq!(min_scroll_to_reveal(100.0, 200.0, 50.0), 50.0);
         // 下方越界：贴底
         assert_eq!(min_scroll_to_reveal(100.0, 200.0, 280.0), 102.0);
+    }
+
+    // ---- 无头 egui 测试基座：注入输入事件驱动 FileManagerView 真实渲染帧 ----
+
+    /// 跑一帧真实渲染（含行交互/意图分发），events 为本帧注入的输入。
+    fn headless_frame(
+        ctx: &egui::Context,
+        view: &mut FileManagerView,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            view.ui(
+                ui,
+                FmCallbacks {
+                    on_back: &mut || {},
+                    on_open_path: &mut |_| {},
+                    on_open_archive: &mut |_| {},
+                    on_open_as_comic: &mut |_| {},
+                    on_op_error: &mut |_| {},
+                    on_confirm_delete_change: &mut |_| {},
+                },
+                false,
+            );
+        });
+    }
+
+    fn primary_click_events(pos: egui::Pos2) -> Vec<egui::Event> {
+        let button = egui::PointerButton::Primary;
+        vec![
+            egui::Event::PointerButton {
+                pos,
+                button,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos,
+                button,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    /// navigate 并 poll 到 Ready（AsyncOpener 后台线程）。
+    fn navigate_ready(panel: &mut FsPanel, dir: &Path) {
+        panel.navigate_to(dir.to_path_buf());
+        for _ in 0..400 {
+            if !panel.poll() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("目录列举未在限时内完成");
+    }
+
+    /// epaint 0.35 对未注册的字体族直接 panic：FM 行/按钮用磷图标字体
+    /// （fonts.rs 在 lib crate root，bin 测试目标够不到，此处内联最小版）。
+    fn setup_test_fonts(ctx: &egui::Context) {
+        let mut fonts = egui::FontDefinitions::default();
+        egui_phosphor_icons::add_fonts(&mut fonts);
+        ctx.set_fonts(fonts);
+    }
+
+    /// 回归（双击目录闪退）：双击目录行同帧 navigate_to 清空 entries，
+    /// render_list 的循环若继续按导航前 rows 快照渲染后续行，render_row
+    /// 里 entries[i] 越界 panic。修复后状态离开 Ready 即停笔。
+    #[test]
+    fn double_click_dir_mid_frame_does_not_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        for d in ["d1", "d2", "d3"] {
+            std::fs::create_dir(tmp.path().join(d)).unwrap();
+        }
+        for f in ["f1", "f2", "f3"] {
+            std::fs::write(tmp.path().join(f), b"x").unwrap();
+        }
+        let mut view = FileManagerView::new("single", 0.5, false, "name", true);
+        navigate_ready(&mut view.panels[0], tmp.path());
+        let ctx = egui::Context::default();
+        setup_test_fonts(&ctx);
+        let mut t = 0.0;
+        headless_frame(&ctx, &mut view, t, vec![]); // 布局帧
+
+        // 自上而下单击扫描，定位 UI 行 1（第一个目录 d1）的 y。
+        // y 从 95 起跳过顶栏/面包屑/列头（面包屑单击会导航、污染扫描）。
+        let mut row1_pos = None;
+        let mut y = 95.0;
+        while y < 500.0 {
+            t += 1.0; // 间隔超过 max_double_click_delay，避免连击计数干扰
+            let pos = egui::pos2(200.0, y);
+            headless_frame(&ctx, &mut view, t, primary_click_events(pos));
+            if view.panels[0].focus == Some(1) {
+                row1_pos = Some(pos);
+                break;
+            }
+            y += 5.0;
+        }
+        let pos = row1_pos.expect("未能定位到行 1（d1）");
+        // 扫描期间的点击可能改动选中态；重置回被测目录（布局不变，y 仍有效）。
+        navigate_ready(&mut view.panels[0], tmp.path());
+        headless_frame(&ctx, &mut view, t, vec![]);
+
+        // 双击 d1 → navigate_to 同帧清 entries：修复前下一行渲染即越界 panic。
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, primary_click_events(pos));
+        t += 0.1;
+        headless_frame(&ctx, &mut view, t, primary_click_events(pos));
+        for _ in 0..20 {
+            t += 1.0;
+            view.panels[0].poll();
+            headless_frame(&ctx, &mut view, t, vec![]);
+        }
+        assert!(view.panels[0].dir.ends_with("d1"));
+        assert!(matches!(view.panels[0].state, PanelLoadState::Ready));
+    }
+
+    /// 回归（双栏滚动串扰）：两栏 ScrollArea 曾共享 auto-id，滚动状态
+    /// 互相跟随。修复后每栏 push_id 隔离，滚左栏右栏不动、反之亦然。
+    #[test]
+    fn dual_panels_scroll_independently() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..200 {
+            std::fs::write(tmp.path().join(format!("f{i:03}")), b"x").unwrap();
+        }
+        let mut view = FileManagerView::new("dual", 0.5, false, "name", true);
+        navigate_ready(&mut view.panels[0], tmp.path());
+        navigate_ready(&mut view.panels[1], tmp.path());
+        let ctx = egui::Context::default();
+        setup_test_fonts(&ctx);
+        let mut t = 0.0;
+        headless_frame(&ctx, &mut view, t, vec![]); // 布局帧
+
+        let wheel_down = |pos: egui::Pos2| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Line,
+                    delta: egui::vec2(0.0, -5.0),
+                    modifiers: egui::Modifiers::NONE,
+                    phase: egui::TouchPhase::Move,
+                },
+            ]
+        };
+
+        // 滚左栏：右栏不应跟随。
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, wheel_down(egui::pos2(300.0, 400.0)));
+        let left_after = view.panels[0].last_scroll_offset;
+        assert!(left_after > 0.0, "滚轮应滚动左栏");
+        assert_eq!(
+            view.panels[1].last_scroll_offset, 0.0,
+            "右栏不应跟随左栏滚动"
+        );
+
+        // 滚右栏：左栏保持不动。
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, wheel_down(egui::pos2(980.0, 400.0)));
+        assert!(view.panels[1].last_scroll_offset > 0.0, "滚轮应滚动右栏");
+        assert_eq!(
+            view.panels[0].last_scroll_offset, left_after,
+            "左栏不应跟随右栏滚动"
+        );
     }
 }

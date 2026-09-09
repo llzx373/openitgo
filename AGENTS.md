@@ -143,7 +143,15 @@ cargo clippy --workspace --all-targets -- -D warnings
   取舍见 `FmStateSnapshot` 注释）；快照在离开 FileManager 视图时重置。设置页
   「文件管理器」tab 改默认布局/比例经 `apply_layout_settings` 同步到休眠视图
   （否则下次进入时快照写回会覆盖设置页改动）。压缩包双击进 Archive 视图
-  （设计决策 3，不做面板内浏览）。
+  （设计决策 3，不做面板内浏览）。**栏间 Id 隔离**：每栏内容包在
+  `ui.push_id(("fm_panel", idx), …)` 里——`allocate_ui_with_layout` 的子 ui
+  与父同 id_stack，不加盐两栏同位置控件共享持久状态（ScrollArea 滚动
+  串扰、列宽分隔条拖动联动）。**行内导航停笔**：`render_list` 的行循环每行
+  先查 `state == Ready`——行内双击/右键「打开」触发 `navigate_to`/`refresh`
+  当场清空 entries，继续按导航前 rows 快照渲染后续行会越界 panic（双击目录
+  闪退）；`render_row`/`open_ui_row` 的 entries 索引一律 `get` 防御。
+  `FsPanel::poll()` 在非 Loading 状态必须原样返回（`mem::take` 会把 state
+  先换成 Idle，曾被它每帧打回 Ready → app 恢复逻辑每 3 帧重列目录 → 闪烁）。
 - **PageLoader**: background IO + decode worker threads, results via channels；独立的
   `cover_loader` 负责库封面。**进度条悬停缩略图**：① 全尺寸解码且 compress=false 时
   顺产生成 256px 缩略图；② 悬停时 `request_page_thumbnail` 高优先级 + 按方向低优先
