@@ -88,15 +88,8 @@ pub(crate) fn classify_preview_bytes(name: &str, bytes: &[u8]) -> PreviewData {
     }
 }
 
-/// 按名字判断「大概率可预览」（图片扩展名或常见文本扩展名）——选中时
-/// 自动打开预览面板的门槛；最终能否预览仍由内容嗅探决定。
-pub(crate) fn is_previewable_name(name: &str) -> bool {
-    let Some(ext) = Path::new(name).extension().and_then(|e| e.to_str()) else {
-        return false;
-    };
-    if openitgo_parser::traits::is_image_extension(ext) {
-        return true;
-    }
+/// 常见文本扩展名集合（预览门槛与文件搜索的内容检索共用；小写比较）。
+pub(crate) fn is_text_extension(ext: &str) -> bool {
     matches!(
         ext.to_ascii_lowercase().as_str(),
         "txt"
@@ -135,6 +128,18 @@ pub(crate) fn is_previewable_name(name: &str) -> bool {
             | "vtt"
             | "nfo"
     )
+}
+
+/// 按名字判断「大概率可预览」（图片扩展名或常见文本扩展名）——选中时
+/// 自动打开预览面板的门槛；最终能否预览仍由内容嗅探决定。
+pub(crate) fn is_previewable_name(name: &str) -> bool {
+    let Some(ext) = Path::new(name).extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    if openitgo_parser::traits::is_image_extension(ext) {
+        return true;
+    }
+    is_text_extension(ext)
 }
 
 #[cfg(test)]

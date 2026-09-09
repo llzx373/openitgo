@@ -192,6 +192,21 @@ cargo clippy --workspace --all-targets -- -D warnings
   （`watch_debounce_ready` 纯函数）后调 `refresh()`（保留选中，同
   Ctrl+R）；去抖窗口内 `watch_refresh_pending()` 并入 ui() 的在途重绘
   判定。`start_listing` 丢弃旧 watcher，refresh 路径复用。
+  **文件搜索（Alt+F7，TC Search 简化版）**：`file_manager_search.rs`——
+  条件模型 `SearchQuery`（pattern 复用 `wildcard_match`、空 = `*`；大小区间
+  字节、只对文件生效；`newer_than_days`；recursive 默认开；content 仅
+  ≤1MB 文本扩展名文件、不区分大小写，文本集合与预览共用
+  `preview_bytes::is_text_extension`）；匹配判定纯函数
+  `meta_matches`/`entry_matches`（内容检查以 `read_text` 闭包惰性注入）。
+  `SearchTask` worker 走 collect_branch 同款迭代栈（目录也参与名称匹配、
+  符号链接目录不跟进），结果按 50 条/200ms 批量回发，命中上限 10 万截断，
+  Drop/关窗即取消。对话框为非模态 `egui::Window`（FileManagerView 持有，
+  搜索根 = 打开时焦点栏目录；入口 Alt+F7 / 顶栏「搜索」/ 右键「搜索…」；
+  纯 F7 新建文件夹需排 Alt 防同键双触发）。双击/Enter/右键「打开所在目录」
+  = 关闭对话框 + `FsPanel::reveal_path`（同目录就绪当场 `apply_reveal`，
+  否则导航/refresh 后 `pending_reveal` 在 poll Ready 应用）；「输送到焦点栏」
+  = `FsPanel::inject_entries_branch`（命中集直接注入 + branch_view=true，
+  同分支视图约定 name 存显示名，退出条件与分支视图一致 navigate/refresh）。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

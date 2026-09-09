@@ -228,6 +228,8 @@ pub struct FsPanel {
     /// restore_tab 后的待恢复滚动偏移（render_list 首帧消费；精确恢复
     /// 偏移而非焦点最小滚动揭示）。
     pending_scroll_restore: Option<f32>,
+    /// reveal_path 跨目录/退出注入模式后的待选中项（poll 就绪时应用）。
+    pending_reveal: Option<PathBuf>,
 }
 
 /// 栏内标签页的可恢复快照（快照式标签：标签里不塞活面板，切换 =
@@ -288,6 +290,7 @@ impl FsPanel {
             active_tab: 0,
             pending_tab_restore: None,
             pending_scroll_restore: None,
+            pending_reveal: None,
         }
     }
 
@@ -312,6 +315,7 @@ impl FsPanel {
         // 之后重新设置；用户在其就绪前又导航时不串目录）。
         self.pending_tab_restore = None;
         self.pending_scroll_restore = None;
+        self.pending_reveal = None;
         self.state = PanelLoadState::Loading(AsyncOpener::open(path, read_dir_entries));
     }
 
@@ -462,6 +466,59 @@ impl FsPanel {
     pub fn exit_branch_view(&mut self) {
         self.branch_view = false;
         self.refresh();
+    }
+
+    /// 搜索结果「输送到焦点栏」：命中集作为 entries 直接注入（分支视图
+    /// 同款展示——name 已含 `rel_dir/name` 显示名）。重置语义同
+    /// enter_branch_view（清选择/焦点/缓存，不动导航历史），但跳过
+    /// Loading 直接就绪；退出条件与分支视图一致（navigate/refresh 回
+    /// 普通列举）。watcher 维持当前目录监听，FS 事件触发 refresh 即退出。
+    pub fn inject_entries_branch(&mut self, entries: Vec<FsEntry>) {
+        self.branch_view = true;
+        self.entries = entries;
+        self.listing_truncated = false;
+        self.entries_version += 1;
+        self.rows_cache = None;
+        self.selected.clear();
+        self.focus = None;
+        self.anchor = None;
+        self.focus_scroll_pending = false;
+        self.clear_dir_sizes();
+        self.type_ahead = None;
+        self.pending_reveal = None;
+        self.state = PanelLoadState::Ready;
+    }
+
+    /// 揭示一个全路径（搜索结果双击/「打开所在目录」）：同目录已就绪且
+    /// 普通列举 = 当场选中并滚动揭示；否则导航到所在目录（分支/注入
+    /// 模式同目录则 refresh 退出注入），就绪后由 poll 应用 pending_reveal。
+    pub fn reveal_path(&mut self, path: PathBuf) {
+        let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        if parent == self.dir && matches!(self.state, PanelLoadState::Ready) && !self.branch_view {
+            self.apply_reveal(&path);
+            return;
+        }
+        if parent == self.dir {
+            // 同目录但在分支/注入视图或 Failed：refresh 回普通列举
+            // （Loading 中 refresh no-op，就绪后照常应用 pending_reveal）。
+            self.refresh();
+        } else {
+            self.navigate_to(parent);
+        }
+        self.pending_reveal = Some(path);
+    }
+
+    /// 选中并滚动揭示一个已在 entries 中的路径（reveal_path 的就绪应用）。
+    fn apply_reveal(&mut self, path: &Path) {
+        self.selected.clear();
+        self.selected.insert(path.to_path_buf());
+        let rows = self.rows();
+        self.focus = rows
+            .iter()
+            .position(|&i| self.entries[i].path == path)
+            .map(|pos| pos + 1);
+        self.anchor = self.focus;
+        self.focus_scroll_pending = self.focus.is_some();
     }
 
     /// 当前状态打包为标签快照（切走/关闭时回写 tabs[active_tab]）。
@@ -631,13 +688,18 @@ impl FsPanel {
                             .map(|pos| pos + 1)
                     });
                     self.focus_scroll_pending = false;
+                    self.anchor = None;
+                } else if let Some(path) = self.pending_reveal.take() {
+                    // reveal_path 跳转：选中目标并滚动揭示（焦点按全路径定位，
+                    // anchor 由 apply_reveal 一并设置）。
+                    self.apply_reveal(&path);
                 } else {
                     // refresh 路径：丢弃已不存在项的选中态；navigate 路径
                     // selected 已清空，retain 为 no-op。
                     self.selected.retain(|p| existing.contains(p.as_path()));
                     self.focus = None;
+                    self.anchor = None;
                 }
-                self.anchor = None;
                 self.state = PanelLoadState::Ready;
                 self.ensure_watch();
                 false
@@ -1718,6 +1780,66 @@ mod tests {
         assert!(panel.branch_view);
         panel.navigate_to(root.join("sub"));
         assert!(!panel.branch_view);
+    }
+
+    /// 搜索注入（inject_entries_branch）：命中集作为分支式展示直接就绪，
+    /// reveal_path 退出注入后选中目标；同目录当场选中、跨目录导航后
+    /// poll 应用 pending_reveal。
+    #[test]
+    fn inject_entries_branch_and_reveal_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.txt"), b"a").unwrap();
+        std::fs::write(root.join("sub/b.txt"), b"b").unwrap();
+
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        panel.navigate_to(root.to_path_buf());
+        poll_until_ready(&mut panel);
+
+        // 注入：直接 Ready、分支标志、显示名条目（同分支视图约定）。
+        let mk = |name: &str, path: PathBuf, rel_dir: &str| FsEntry {
+            name: name.to_string(),
+            path,
+            is_dir: false,
+            size: Some(1),
+            mtime: None,
+            is_symlink: false,
+            is_hidden: false,
+            rel_dir: rel_dir.to_string(),
+        };
+        panel.inject_entries_branch(vec![
+            mk("a.txt", root.join("a.txt"), ""),
+            mk("sub/b.txt", root.join("sub/b.txt"), "sub"),
+        ]);
+        assert!(panel.branch_view);
+        assert!(matches!(panel.state, PanelLoadState::Ready));
+        assert_eq!(panel.entries.len(), 2);
+        assert_eq!(panel.entries[1].name, "sub/b.txt");
+
+        // 注入模式下同目录 reveal：退出注入回普通列举，就绪后选中目标。
+        panel.reveal_path(root.join("a.txt"));
+        assert!(!panel.branch_view);
+        poll_until_ready(&mut panel);
+        assert!(panel.selected.contains(&root.join("a.txt")));
+        // 目录优先排序（sub 在前）→ a.txt 是 UI 行 2（行 0 = 「..」）。
+        assert_eq!(panel.focus, Some(2));
+
+        // 普通模式同目录 reveal：不重新列举，当场选中。
+        panel.reveal_path(root.join("sub"));
+        assert!(matches!(panel.state, PanelLoadState::Ready));
+        assert_eq!(panel.selected.len(), 1);
+        assert!(panel.selected.contains(&root.join("sub")));
+        assert_eq!(panel.focus, Some(1));
+
+        // 跨目录 reveal：从 sub 揭示 root/a.txt（导航 + pending_reveal）。
+        panel.navigate_to(root.join("sub"));
+        poll_until_ready(&mut panel);
+        panel.reveal_path(root.join("a.txt"));
+        poll_until_ready(&mut panel);
+        assert_eq!(panel.dir, root);
+        assert!(panel.selected.contains(&root.join("a.txt")));
+        assert_eq!(panel.focus, Some(2));
     }
 
     /// poll 到 Ready 的测试辅助。

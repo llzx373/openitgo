@@ -20,6 +20,7 @@ use crate::views::file_manager_panel::{
     COL_RIGHT_PAD, ROW_HEIGHT,
 };
 use crate::views::file_manager_rows::{FsEntry, SortKey};
+use crate::views::file_manager_search::{SearchDialog, SearchUiAction};
 use crate::views::file_manager_thumbs::{
     grid_cols, grid_row_count, grid_row_of, truncate_cell_name, ThumbCache, ThumbKey, ThumbLookup,
     THUMB_CELL_H, THUMB_CELL_W, THUMB_MAX_DIM,
@@ -143,6 +144,8 @@ pub struct FileManagerView {
     thumb_visible: [Option<(usize, usize, usize)>; 2],
     /// 外部拖入的落点区域（render_panels 每帧记录；快览替换栏为 None）。
     panel_drop_rects: [Option<egui::Rect>; 2],
+    /// 文件搜索对话框（Alt+F7；非模态 egui::Window，worker 关闭即取消）。
+    search: SearchDialog,
 }
 
 /// 帧内意图：行内交互写入，帧尾统一触发回调（避免回调嵌套借用）。
@@ -318,6 +321,7 @@ impl FileManagerView {
             thumbs: ThumbCache::new(),
             thumb_visible: [None, None],
             panel_drop_rects: [None, None],
+            search: SearchDialog::default(),
         }
     }
 
@@ -673,6 +677,8 @@ impl FileManagerView {
         self.render_preview_window(ui.ctx());
         // 文件操作确认对话框（复制/移动/删除/重命名/新建文件夹）。
         self.render_dialog(ui.ctx(), &mut intents);
+        // 文件搜索对话框（非模态 egui::Window）。
+        self.render_search_dialog(ui.ctx());
 
         // 帧尾统一外抛回调。
         if intents.back {
@@ -784,6 +790,14 @@ impl FileManagerView {
                     *preview_open = !*preview_open;
                     self.saved_preview_open = *preview_open;
                 }
+            }
+            ui.separator();
+            if ui
+                .button((icons::MAGNIFYING_GLASS, " 搜索"))
+                .on_hover_text("文件搜索（Alt+F7）")
+                .clicked()
+            {
+                self.open_search_dialog();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add(
@@ -1722,6 +1736,10 @@ impl FileManagerView {
             self.panels[idx].refresh();
             ui.close();
         }
+        if ui.button((icons::MAGNIFYING_GLASS, " 搜索…")).clicked() {
+            self.open_search_dialog();
+            ui.close();
+        }
         let dir_targets: Vec<PathBuf> = self.panels[idx]
             .entries
             .iter()
@@ -2281,6 +2299,32 @@ impl FileManagerView {
         }
     }
 
+    /// 打开文件搜索对话框（Alt+F7 / 顶栏按钮 / 右键菜单共用）：
+    /// 搜索根 = 焦点栏当前目录。
+    fn open_search_dialog(&mut self) {
+        let root = self.panels[self.active].dir.clone();
+        self.search.open_with(root);
+    }
+
+    /// 渲染搜索对话框并消费动作：跳转 = 焦点栏 reveal 并关闭；
+    /// 「输送到焦点栏」= 命中集注入焦点栏（分支视图同款）并关闭。
+    fn render_search_dialog(&mut self, ctx: &egui::Context) {
+        match self.search.ui(ctx) {
+            SearchUiAction::None => {}
+            SearchUiAction::Reveal(path) => {
+                let active = self.active;
+                self.panels[active].reveal_path(path);
+                self.search.close();
+            }
+            SearchUiAction::FeedToPanel => {
+                let entries = self.search.feed_entries();
+                let active = self.active;
+                self.panels[active].inject_entries_branch(entries);
+                self.search.close();
+            }
+        }
+    }
+
     fn apply_dialog_outcome(&mut self, outcome: FmDialogOutcome, intents: &mut FmIntents) {
         let sys_cut_paste = std::mem::take(&mut self.sys_clipboard_cut_pending);
         match outcome {
@@ -2535,6 +2579,10 @@ impl FileManagerView {
             }
         }
         // 文件操作：F2 重命名 / F5 复制 / F6 移动 / F7 新建文件夹 / F8(Del) 删除。
+        // Alt+F7 = 文件搜索（TC 语义；纯 F7 需排 Alt，否则同键双触发）。
+        if mods.alt && ui.input(|i| i.key_pressed(egui::Key::F7)) {
+            self.open_search_dialog();
+        }
         if ui.input(|i| i.key_pressed(egui::Key::F2)) {
             if let Some(entry) = self.panels[active].focused_entry() {
                 self.dialog = Some(FmDialog::Rename(RenameDialog::new(entry.path)));
@@ -2552,7 +2600,7 @@ impl FileManagerView {
                 self.open_copy_move_dialog(OpKind::Move, targets, active);
             }
         }
-        if ui.input(|i| i.key_pressed(egui::Key::F7)) {
+        if !mods.alt && ui.input(|i| i.key_pressed(egui::Key::F7)) {
             let parent = self.panels[active].dir.clone();
             let suggested = suggest_folder_name(&parent);
             self.dialog = Some(FmDialog::NewDir(NewDirDialog::new(parent, suggested)));
