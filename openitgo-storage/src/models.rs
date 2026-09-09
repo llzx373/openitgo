@@ -133,7 +133,7 @@ impl Default for Settings {
             real_image_cache_pages: 10,
             window_size: (1280.0, 800.0),
             window_pos: None,
-            window_maximized: false,
+            window_maximized: true,
             show_toolbar: true,
             show_statusbar: true,
             invert_scroll: false,
