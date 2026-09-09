@@ -8,7 +8,7 @@
 
 use crate::opener::{AsyncOpener, OpenStatus};
 use crate::views::file_manager_rows::{
-    is_hidden_name, list_rows, select_by_pattern, FsEntry, SortKey,
+    is_hidden_name, list_rows, select_by_pattern, type_ahead_match, FsEntry, SortKey,
 };
 use crate::views::file_ops::dir_size;
 use std::collections::{HashMap, HashSet};
@@ -33,6 +33,8 @@ pub(crate) const COL_RIGHT_PAD: f32 = 6.0;
 /// FS watch 事件去抖窗口：距最后一次事件满此时长才触发 refresh
 /// （批量外部改动合并为一次重列）。
 pub(crate) const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
+/// type-ahead 缓冲的有效窗口：距上次按键超过此时长则下次按键重开缓冲。
+pub(crate) const TYPE_AHEAD_TIMEOUT: Duration = Duration::from_millis(800);
 
 /// 面板目录列举状态机：Idle（未初始化，等恢复目录）→ Loading → Ready/Failed。
 /// （`AsyncOpener` 的通道本身携带 `Result<T, String>`，无需再套一层。）
@@ -161,6 +163,10 @@ pub struct FsPanel {
     /// 监听回调唤醒 UI 用的 egui Context（视图首帧 ui() 注入；无头测试
     /// 为 None，回调只发 channel 信号）。
     wake_ctx: Option<egui::Context>,
+    /// type-ahead（type-to-select）缓冲：累计字符 + 最后按键时间；
+    /// 超 TYPE_AHEAD_TIMEOUT 未续键即失效（状态栏显示与 Esc 清理由
+    /// type_ahead_buffer/clear_type_ahead 统一处理）。
+    type_ahead: Option<(String, Instant)>,
 }
 
 impl FsPanel {
@@ -193,6 +199,7 @@ impl FsPanel {
             dir_size_pending: Vec::new(),
             watch: None,
             wake_ctx: None,
+            type_ahead: None,
         }
     }
 
@@ -210,6 +217,7 @@ impl FsPanel {
         self.last_viewport_height = 0.0;
         self.clear_dir_sizes();
         self.watch = None;
+        self.type_ahead = None;
         self.state = PanelLoadState::Loading(AsyncOpener::open(path, read_dir_entries));
     }
 
@@ -262,6 +270,26 @@ impl FsPanel {
     /// 是否可前进。
     pub fn can_go_forward(&self) -> bool {
         self.history_pos < self.history.len()
+    }
+
+    /// 历史列表（新→旧）：第二元素 = 是否当前目录（历史下拉菜单展示用）。
+    pub fn history_list(&self) -> Vec<(PathBuf, bool)> {
+        (0..self.history.len())
+            .rev()
+            .map(|i| (self.history[i].clone(), i + 1 == self.history_pos))
+            .collect()
+    }
+
+    /// 历史直跳（历史下拉菜单用）：移动 history_pos 到 pos（1 起，对应
+    /// history[pos-1]）并切目录；不截断历史、不重复压栈（同 go_back/
+    /// go_forward 的目录切换路径）。非法位置或与当前相同为 no-op。
+    pub fn navigate_history_to(&mut self, pos: usize) {
+        if pos == 0 || pos > self.history.len() || pos == self.history_pos {
+            return;
+        }
+        self.history_pos = pos;
+        let path = self.history[pos - 1].clone();
+        self.start_listing(path);
     }
 
     /// 后退的目标目录（tooltip 用）。
@@ -608,6 +636,48 @@ impl FsPanel {
                     self.selected.remove(&path);
                 }
             }
+        }
+    }
+
+    /// type-ahead（type-to-select）缓冲追加一个可打印字符：距上次按键超
+    /// TYPE_AHEAD_TIMEOUT 先重置缓冲；相同单字符重复输入（"eee"）时匹配串
+    /// 保持该单字符，从当前焦点后环形跳下一个匹配（Explorer 语义）。
+    /// 返回命中行的 UI 行索引（调用方据此 focus_row 移动焦点并单选）。
+    pub fn type_ahead_push(&mut self, c: char) -> Option<usize> {
+        let now = Instant::now();
+        let prev = match self.type_ahead.take() {
+            Some((buf, t)) if now.duration_since(t) <= TYPE_AHEAD_TIMEOUT => buf,
+            _ => String::new(),
+        };
+        let cycle = !prev.is_empty() && prev.chars().all(|b| b == c);
+        let mut buf = prev;
+        buf.push(c);
+        let needle: String = if cycle { c.to_string() } else { buf.clone() };
+        let rows = self.rows();
+        let hit = type_ahead_match(&self.entries, &rows, &needle, self.focus);
+        self.type_ahead = Some((buf, now));
+        hit
+    }
+
+    /// 当前 type-ahead 缓冲（状态栏显示用）；超窗未续键视为已失效。
+    pub fn type_ahead_buffer(&self) -> Option<&str> {
+        match &self.type_ahead {
+            Some((buf, t)) if t.elapsed() <= TYPE_AHEAD_TIMEOUT => Some(buf.as_str()),
+            _ => None,
+        }
+    }
+
+    /// 清空 type-ahead 缓冲（Esc 第一级语义）。
+    pub fn clear_type_ahead(&mut self) {
+        self.type_ahead = None;
+    }
+
+    /// 焦点直达指定 UI 行（type-ahead 命中用）：语义与 ↑/↓ 相同，
+    /// 由 mode 决定选中行为；越界行 no-op。
+    pub fn focus_row(&mut self, row: usize, mode: FocusMove) {
+        let row_count = self.rows().len() + 1;
+        if row < row_count {
+            self.apply_focus_move(row_count, row, mode);
         }
     }
 
@@ -1131,5 +1201,85 @@ mod tests {
         panel.apply_pattern_selection("", true, false);
         assert_eq!(panel.selected.len(), 3);
         assert!(panel.focus.is_none());
+    }
+
+    /// type-ahead：连续按键累计匹配；相同单字符重复输入环形跳下一个；
+    /// 命中后 focus_row(Select) 单选并置最小滚动揭示；Esc 清缓冲。
+    #[test]
+    fn type_ahead_cycles_and_selects() {
+        let mk = |name: &str| FsEntry {
+            name: name.to_string(),
+            path: PathBuf::from(name),
+            is_dir: false,
+            size: Some(1),
+            mtime: None,
+            is_symlink: false,
+            is_hidden: false,
+        };
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        // 名称升序：abc, ep1, ep2, notes（UI 行 1..=4）
+        panel.entries = vec![mk("ep2"), mk("notes"), mk("abc"), mk("ep1")];
+        panel.entries_version = 1;
+        panel.state = PanelLoadState::Ready;
+
+        // "e" → 行 2（ep1）；再 "e"（同字符重复）→ 行 3（ep2）；再 "e" 回卷行 2。
+        assert_eq!(panel.type_ahead_push('e'), Some(2));
+        panel.focus_row(2, FocusMove::Select);
+        assert_eq!(panel.type_ahead_push('e'), Some(3));
+        panel.focus_row(3, FocusMove::Select);
+        assert_eq!(panel.type_ahead_push('e'), Some(2));
+        assert_eq!(panel.type_ahead_buffer(), Some("eee"));
+        // 命中后焦点/选中/揭示标记（Select 语义同 ↑↓）。
+        panel.focus_row(2, FocusMove::Select);
+        assert_eq!(panel.focus, Some(2));
+        assert!(panel.selected.contains(&PathBuf::from("ep1")));
+        assert!(panel.focus_scroll_pending);
+        // 缓冲超时后下次按键重开（直接改写时间戳模拟）。
+        if let Some((_, t)) = &mut panel.type_ahead {
+            *t = Instant::now() - TYPE_AHEAD_TIMEOUT - Duration::from_millis(1);
+        }
+        assert_eq!(panel.type_ahead_buffer(), None);
+        assert_eq!(panel.type_ahead_push('n'), Some(4));
+        assert_eq!(panel.type_ahead_buffer(), Some("n"));
+        // Esc 清缓冲。
+        panel.clear_type_ahead();
+        assert_eq!(panel.type_ahead_buffer(), None);
+    }
+
+    /// 历史下拉：history_list 新→旧且标记当前项；navigate_history_to
+    /// 直跳不截断历史、不压栈，可继续后退/前进。
+    #[test]
+    fn history_list_and_direct_jump() {
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        let dir_a = std::env::temp_dir().join("openitgo-test-histlist-a");
+        let dir_b = std::env::temp_dir().join("openitgo-test-histlist-b");
+        let dir_c = std::env::temp_dir().join("openitgo-test-histlist-c");
+        panel.navigate_to(dir_a.clone());
+        panel.navigate_to(dir_b.clone());
+        panel.navigate_to(dir_c.clone());
+
+        let list = panel.history_list();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0], (dir_c.clone(), true));
+        assert_eq!(list[1], (dir_b.clone(), false));
+        assert_eq!(list[2], (dir_a.clone(), false));
+
+        // 直跳到最旧（pos 1 = dir_a）：历史不截断，仍可前进回 dir_c。
+        panel.navigate_history_to(1);
+        assert!(panel.can_go_forward());
+        assert_eq!(panel.forward_target(), Some(dir_b.as_path()));
+        assert_eq!(panel.history_list()[2], (dir_a.clone(), true));
+
+        // 跳到 pos 3（dir_c）：可后退。
+        panel.navigate_history_to(3);
+        assert!(panel.can_go_back());
+        assert!(!panel.can_go_forward());
+
+        // 非法位置 / 当前位置 = no-op。
+        panel.navigate_history_to(0);
+        panel.navigate_history_to(99);
+        panel.navigate_history_to(3);
+        assert!(panel.can_go_back());
+        assert!(!panel.can_go_forward());
     }
 }

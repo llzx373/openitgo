@@ -108,6 +108,32 @@ pub fn select_by_pattern(
         .collect()
 }
 
+/// type-to-select 快速定位：从 after_row（UI 行索引）+1 起环形查找第一个
+/// `name.to_lowercase().starts_with(needle)` 的可见行，返回 UI 行索引
+/// （1 起）。needle 为空 / 无匹配返回 None；after_row=None 从头找。
+pub fn type_ahead_match(
+    entries: &[FsEntry],
+    rows: &[usize],
+    needle: &str,
+    after_row: Option<usize>,
+) -> Option<usize> {
+    let needle = needle.to_lowercase();
+    if needle.is_empty() || rows.is_empty() {
+        return None;
+    }
+    let count = rows.len();
+    // 起点（rows 下标）：after_row 是 UI 行索引（= 下标 + 1），其后一条目
+    // 的下标 = after_row；越界/末行取模回卷。None 从下标 0 开始。
+    let start = after_row.map_or(0, |r| r % count);
+    for off in 0..count {
+        let i = (start + off) % count;
+        if entries[rows[i]].name.to_lowercase().starts_with(&needle) {
+            return Some(i + 1);
+        }
+    }
+    None
+}
+
 /// 数字感知、大小写不敏感的自然排序比较（"EP2" < "EP10"）。
 /// 连续数字段按数值比较，其余字符按小写后的字典序逐字符比较。
 pub fn natural_cmp(a: &str, b: &str) -> Ordering {
@@ -472,5 +498,37 @@ mod tests {
         // 无匹配 / 空 pattern
         assert!(select_by_pattern(&entries, &rows, "*.7z", false).is_empty());
         assert!(select_by_pattern(&entries, &rows, "  ", false).is_empty());
+    }
+
+    #[test]
+    fn type_ahead_match_searches_after_row_with_wrap() {
+        let entries = vec![
+            entry("docs", true, None, None),
+            entry("ep1.zip", false, Some(1), None),
+            entry("ep2.zip", false, Some(1), None),
+            entry("notes.txt", false, Some(1), None),
+        ];
+        // 名称升序：docs(1), ep1(2), ep2(3), notes(4)
+        let rows = list_rows(&entries, "", SortKey::Name, true, true);
+        assert_eq!(
+            names(&entries, &rows),
+            ["docs", "ep1.zip", "ep2.zip", "notes.txt"]
+        );
+        // 从头（None）找第一个 ep* → 行 2
+        assert_eq!(type_ahead_match(&entries, &rows, "ep", None), Some(2));
+        // 从行 2 之后找 → 行 3
+        assert_eq!(type_ahead_match(&entries, &rows, "ep", Some(2)), Some(3));
+        // 从行 3 之后找 → 环形回到行 2
+        assert_eq!(type_ahead_match(&entries, &rows, "ep", Some(3)), Some(2));
+        // 从末行之后找同样回卷
+        assert_eq!(type_ahead_match(&entries, &rows, "ep", Some(4)), Some(2));
+        // 大小写不敏感（needle 与 name 双向）
+        assert_eq!(type_ahead_match(&entries, &rows, "EP1", None), Some(2));
+        assert_eq!(type_ahead_match(&entries, &rows, "DOC", None), Some(1));
+        // 无匹配 / 空 needle
+        assert_eq!(type_ahead_match(&entries, &rows, "zzz", None), None);
+        assert_eq!(type_ahead_match(&entries, &rows, "", None), None);
+        // 前缀匹配不是子串匹配
+        assert_eq!(type_ahead_match(&entries, &rows, "p1", None), None);
     }
 }

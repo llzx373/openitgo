@@ -109,6 +109,9 @@ pub struct FileManagerView {
     bookmarks: Vec<PathBuf>,
     /// 「选择组」对话框上次使用的模式（会话内记忆，不落盘）。
     select_group_pattern: String,
+    /// Alt+↓ 的一次性请求：下一帧焦点栏的历史下拉菜单开/关切换
+    /// （弹层开关状态在 egui memory，键盘段无法直接触达）。
+    history_menu_toggle: bool,
 }
 
 /// 帧内意图：行内交互写入，帧尾统一触发回调（避免回调嵌套借用）。
@@ -233,6 +236,7 @@ impl FileManagerView {
             confirm_delete: true,
             bookmarks: bookmarks.iter().map(PathBuf::from).collect(),
             select_group_pattern: String::new(),
+            history_menu_toggle: false,
         }
     }
 
@@ -405,6 +409,13 @@ impl FileManagerView {
                         format!("已选 {selected} 项")
                     };
                     ui.label(label);
+                }
+                // type-ahead 缓冲（type-to-select）：弱色显示，到期自动消失
+                // （主动重绘推进过期判定）。
+                if let Some(buf) = panel.type_ahead_buffer() {
+                    ui.separator();
+                    ui.label(egui::RichText::new(format!("定位: {buf}")).weak());
+                    ui.ctx().request_repaint_after(Duration::from_millis(200));
                 }
                 ui.separator();
                 ui.label(egui::RichText::new("Tab 切换栏 · 双击打开 · 右键菜单").weak());
@@ -740,6 +751,7 @@ impl FileManagerView {
                     {
                         self.panels[idx].go_forward();
                     }
+                    self.render_history_button(ui, idx);
                     self.render_drive_switcher(ui, idx);
                     self.render_bookmarks_button(ui, idx);
                     ui.separator();
@@ -773,6 +785,53 @@ impl FileManagerView {
                         self.panels[idx].navigate_to(path);
                     }
                 });
+            });
+    }
+
+    /// 历史下拉按钮（‹ › 旁）：菜单列出目录历史（新→旧，当前项打勾 ✓，
+    /// 悬停显示完整路径），点击直跳；Alt+↓ 经 history_menu_toggle 一次性
+    /// 请求切换焦点栏菜单的开/关（与点击共用同一 memory 弹层状态）。
+    fn render_history_button(&mut self, ui: &mut egui::Ui, idx: usize) {
+        let response = ui
+            .add(egui::Button::new(icons::CLOCK_COUNTER_CLOCKWISE.as_str()).frame(false))
+            .on_hover_text("目录历史（Alt+↓）");
+        let kb_toggle = self.history_menu_toggle && self.active == idx;
+        if kb_toggle {
+            self.history_menu_toggle = false;
+        }
+        let set = (response.clicked() || kb_toggle).then_some(egui::SetOpenCommand::Toggle);
+        egui::Popup::menu(&response)
+            .id(egui::Id::new(("fm_history_menu", idx)))
+            .open_memory(set)
+            .show(|ui| {
+                let history = self.panels[idx].history_list();
+                if history.is_empty() {
+                    ui.label(egui::RichText::new("（无历史）").weak());
+                    return;
+                }
+                ui.set_min_width(320.0);
+                let mut jump: Option<usize> = None;
+                let count = history.len();
+                for (i, (path, is_current)) in history.iter().enumerate() {
+                    let display = path.display().to_string();
+                    let text = if *is_current {
+                        format!("✓ {display}")
+                    } else {
+                        display.clone()
+                    };
+                    if ui
+                        .selectable_label(*is_current, text)
+                        .on_hover_text(&display)
+                        .clicked()
+                    {
+                        // 菜单序 i（新→旧）→ 历史 pos = count - i（1 起）。
+                        jump = Some(count - i);
+                        ui.close();
+                    }
+                }
+                if let Some(pos) = jump {
+                    self.panels[idx].navigate_history_to(pos);
+                }
             });
     }
 
@@ -1670,7 +1729,9 @@ impl FileManagerView {
     /// Shift+↑/↓ 从 anchor 扩选、Ctrl+↑/↓ 只移焦点、Home/End 跳首/末行、
     /// PgUp/PgDn 整页步进、Enter 打开焦点行、空格计算焦点目录大小、
     /// Backspace 上级、Ctrl+A 全选可见、Ctrl+R 刷新、Alt+←/→ 导航历史、
-    /// `*` 反选、`+`/`-` 弹「选择组」对话框、Esc 清过滤或清空选中。
+    /// Alt+↓ 历史下拉开关、可打印字符 type-ahead 定位、`*` 反选、
+    /// `+`/`-` 弹「选择组」对话框、Ctrl+U 交换两栏、Ctrl+←/→ 栏间目录
+    /// 同步、Ctrl+\ 回根目录、Esc 分级清 type-ahead 缓冲→过滤→选中。
     /// 过滤框等文本输入占用键盘时不处理。
     /// 文件操作键：F2 重命名 / F5 复制 / F6 移动 / F7 新建文件夹 /
     /// F8(Delete) 删除（confirm_delete 时先弹确认框）；Ctrl+C/X/V 剪贴板。
@@ -1705,6 +1766,10 @@ impl FileManagerView {
         }
         if mods.alt && ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
             self.panels[active].go_forward();
+        }
+        // Alt+↓：开/关焦点栏的目录历史下拉（一次性请求，面包屑渲染时消费）。
+        if mods.alt && ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+            self.history_menu_toggle = true;
         }
         // 鼠标侧键：Extra1 = 后退，Extra2 = 前进（仅本视图；漫画阅读器侧
         // 键翻页在 app.rs 的 View::Reader 分支处理，不冲突）。
@@ -1776,22 +1841,30 @@ impl FileManagerView {
         if mods.command && ui.input(|i| i.key_pressed(egui::Key::A)) {
             self.panels[active].select_all_visible();
         }
-        // `*` 反选 / `+`「选择组」对话框 / `-` 同框预置取消选择（TC 语义）。
+        // `*` 反选 / `+`「选择组」对话框 / `-` 同框预置取消选择（TC 语义），
+        // 其余可打印字符进 type-ahead（type-to-select）缓冲。
         // egui 0.35 的 Key 枚举没有小键盘乘/加/减键，主键盘 `*` 又是 Shift+8，
         // 统一用 Event::Text 捕获——文本事件只在无控件占用键盘时产生
         // （上面 egui_wants_keyboard_input 已挡掉过滤框/对话框输入）。
-        let (star, plus, minus) = ui.input(|i| {
-            i.events
-                .iter()
-                .fold((false, false, false), |(s, p, m), e| match e {
-                    egui::Event::Text(t) => match t.as_str() {
-                        "*" => (true, p, m),
-                        "+" => (s, true, m),
-                        "-" => (s, p, true),
-                        _ => (s, p, m),
-                    },
-                    _ => (s, p, m),
-                })
+        // 空格保留给「计算焦点目录大小」，不进 type-ahead。
+        let (star, plus, minus, type_chars) = ui.input(|i| {
+            let (mut star, mut plus, mut minus) = (false, false, false);
+            let mut chars = Vec::new();
+            for e in &i.events {
+                if let egui::Event::Text(t) = e {
+                    for c in t.chars() {
+                        match c {
+                            '*' => star = true,
+                            '+' => plus = true,
+                            '-' => minus = true,
+                            ' ' => {}
+                            c if !c.is_control() => chars.push(c),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            (star, plus, minus, chars)
         });
         if star {
             self.panels[active].invert_selection();
@@ -1807,6 +1880,48 @@ impl FileManagerView {
                 self.select_group_pattern.clone(),
                 true,
             )));
+        }
+        // type-to-select：命中即移动焦点并单选（Select 语义同 ↑/↓，
+        // 经 focus_row 置最小滚动揭示）；Ctrl/Alt 组合键不产出定位字符。
+        if !mods.command && !mods.alt {
+            let panel = &mut self.panels[active];
+            for c in type_chars {
+                if let Some(row) = panel.type_ahead_push(c) {
+                    panel.focus_row(row, FocusMove::Select);
+                }
+            }
+        }
+        // 栏间快捷键（仅双栏）：Ctrl+U 交换两栏（watcher/loader 随结构体走，
+        // active 不变；快照 diff 自然写回 dir_left/dir_right）。
+        let dual = matches!(self.layout, PanelLayout::Dual { .. });
+        if dual && mods.command && ui.input(|i| i.key_pressed(egui::Key::U)) {
+            self.panels.swap(0, 1);
+        }
+        // Ctrl+→：另一栏跳到本栏焦点目录（焦点非目录则跳本栏当前目录）；
+        // Ctrl+←：反向（本栏 ← 另一栏焦点目录/当前目录）。
+        if dual && mods.command && ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+            let target = match self.panels[active].focused_entry() {
+                Some(e) if e.is_dir => e.path,
+                _ => self.panels[active].dir.clone(),
+            };
+            self.panels[1 - active].navigate_to(target);
+        }
+        if dual && mods.command && ui.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+            let other = 1 - active;
+            let target = match self.panels[other].focused_entry() {
+                Some(e) if e.is_dir => e.path,
+                _ => self.panels[other].dir.clone(),
+            };
+            self.panels[active].navigate_to(target);
+        }
+        // Ctrl+\：本栏回根目录（同面包屑段点击根段）。
+        if mods.command && ui.input(|i| i.key_pressed(egui::Key::Backslash)) {
+            let panel_dir = self.panels[active].dir.clone();
+            if !panel_dir.as_os_str().is_empty() {
+                if let Some(root) = panel_dir.ancestors().last() {
+                    self.panels[active].navigate_to(root.to_path_buf());
+                }
+            }
         }
         if mods.command && ui.input(|i| i.key_pressed(egui::Key::R)) {
             self.panels[active].refresh();
@@ -1867,7 +1982,9 @@ impl FileManagerView {
                 self.preview_window_open = false;
             } else {
                 let panel = &mut self.panels[active];
-                if !panel.filter.is_empty() {
+                if panel.type_ahead_buffer().is_some() {
+                    panel.clear_type_ahead();
+                } else if !panel.filter.is_empty() {
                     panel.filter.clear();
                 } else {
                     panel.clear_selection();
