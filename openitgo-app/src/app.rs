@@ -5,7 +5,7 @@ use crate::opener::{AsyncOpener, OpenStatus};
 use crate::shortcuts::is_shortcut_pressed;
 use crate::timing;
 use crate::views::file_manager::{FileManagerView, FmCallbacks, FmStateSnapshot};
-use crate::views::file_manager_panel::PanelLoadState;
+use crate::views::file_manager_panel::{fallback_existing_dir, PanelLoadState};
 use crate::views::file_manager_rows::natural_cmp;
 use crate::views::settings::{SettingsTab, SettingsView};
 use crate::views::{
@@ -465,6 +465,7 @@ impl Default for ReaderApp {
             settings.fm_preview_open,
             &settings.fm_sort_key,
             settings.fm_sort_asc,
+            &settings.fm_bookmarks,
         );
         Self {
             current_view: View::Library,
@@ -722,22 +723,13 @@ fn initial_open_path(
     [env_open, arg1].into_iter().flatten().find(|p| p.exists())
 }
 
-/// 文件管理器目录恢复（决策 5）：空串或目录不存在 → 逐级回退最近存在
-/// 祖先 → 最终回退用户主目录。
+/// 文件管理器目录恢复（决策 5）：空串回用户主目录；目录不存在的逐级
+/// 回退逻辑与书签跳转共用 `fallback_existing_dir`。
 fn resolve_fm_dir(saved: &str) -> PathBuf {
-    let home = || dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     if saved.is_empty() {
-        return home();
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     }
-    let mut path = PathBuf::from(saved);
-    loop {
-        if path.is_dir() {
-            return path;
-        }
-        if !path.pop() {
-            return home();
-        }
-    }
+    fallback_existing_dir(PathBuf::from(saved))
 }
 
 impl ReaderApp {
@@ -3683,8 +3675,8 @@ impl ReaderApp {
         self.current_view = self.previous_view.take().unwrap_or(View::Library);
     }
 
-    /// 每帧检测文件管理器状态（布局/比例/预览开关/排序/两栏目录）与上次
-    /// 快照是否不同：不同则写回 settings.fm_*。**不自行落盘**——settings 由
+    /// 每帧检测文件管理器状态（布局/比例/预览开关/排序/两栏目录/书签）与
+    /// 上次快照是否不同：不同则写回 settings.fm_*。**不自行落盘**——settings 由
     /// on_exit 统一 save_settings（与 fm_confirm_delete 等字段同一通道）；
     /// 集中帧尾 diff 可捕获拖分隔条、切布局、导航、点表头排序等所有来源。
     /// 快照在离开 FileManager 视图时重置（下次进入重新采集）。
@@ -3704,6 +3696,7 @@ impl ReaderApp {
         self.settings.fm_sort_asc = snapshot.sort_asc;
         self.settings.fm_dir_left = snapshot.dir_left.clone();
         self.settings.fm_dir_right = snapshot.dir_right.clone();
+        self.settings.fm_bookmarks = snapshot.bookmarks.clone();
         self.last_saved_fm_state = Some(snapshot);
     }
 
@@ -5460,6 +5453,7 @@ mod tests {
                 settings.fm_preview_open,
                 &settings.fm_sort_key,
                 settings.fm_sort_asc,
+                &settings.fm_bookmarks,
             );
             Self {
                 current_view: View::Library,
@@ -6438,6 +6432,24 @@ mod tests {
         app.file_manager_view.panels[0].navigate_to(tmp.path().to_path_buf());
         app.maybe_save_fm_state();
         assert_eq!(app.settings.fm_dir_left, tmp.path().display().to_string());
+    }
+
+    #[test]
+    fn test_maybe_save_fm_state_writes_bookmarks() {
+        let (mut app, _tmp) = app_with_temp_store();
+        app.current_view = View::FileManager;
+        app.maybe_save_fm_state();
+        assert!(app.settings.fm_bookmarks.is_empty());
+
+        // 加书签 → diff 后写回 settings.fm_bookmarks（不自行落盘）。
+        app.file_manager_view.add_bookmark(Path::new("/a"));
+        app.maybe_save_fm_state();
+        assert_eq!(app.settings.fm_bookmarks, ["/a".to_string()]);
+
+        // 移除书签同样经快照 diff 写回。
+        app.file_manager_view.remove_bookmark(Path::new("/a"));
+        app.maybe_save_fm_state();
+        assert!(app.settings.fm_bookmarks.is_empty());
     }
 
     #[test]

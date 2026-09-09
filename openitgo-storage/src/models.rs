@@ -89,6 +89,9 @@ pub struct Settings {
     pub fm_dir_left: String,
     #[serde(default)]
     pub fm_dir_right: String,
+    /// 文件管理器常用目录书签（两栏共享）。
+    #[serde(default)]
+    pub fm_bookmarks: Vec<String>,
 }
 
 fn default_chrome_opacity() -> f32 {
@@ -161,6 +164,7 @@ impl Default for Settings {
             fm_show_hidden: true,
             fm_dir_left: String::new(),
             fm_dir_right: String::new(),
+            fm_bookmarks: Vec::new(),
         }
     }
 }
@@ -314,6 +318,9 @@ impl Settings {
         if !matches!(self.fm_sort_key.as_str(), "size" | "mtime") {
             self.fm_sort_key = default_fm_sort_key();
         }
+        let mut seen = std::collections::HashSet::new();
+        self.fm_bookmarks
+            .retain(|b| !b.trim().is_empty() && seen.insert(b.clone()));
     }
 }
 
@@ -911,6 +918,34 @@ mod tests {
 
         let loaded: Settings = serde_json::from_str("{}").unwrap();
         assert!(loaded.fm_show_hidden);
+    }
+
+    #[test]
+    fn test_fm_bookmarks_roundtrip_default_and_sanitize() {
+        let s = Settings {
+            fm_bookmarks: vec!["C:\\a".to_string(), "D:\\b".to_string()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.fm_bookmarks, ["C:\\a", "D:\\b"]);
+        assert_eq!(s, loaded);
+
+        let loaded: Settings = serde_json::from_str("{}").unwrap();
+        assert!(loaded.fm_bookmarks.is_empty());
+
+        let mut s = Settings {
+            fm_bookmarks: vec![
+                "C:\\a".to_string(),
+                "  ".to_string(),
+                "C:\\a".to_string(),
+                "D:\\b".to_string(),
+                "D:\\b".to_string(),
+            ],
+            ..Default::default()
+        };
+        s.clamp();
+        assert_eq!(s.fm_bookmarks, ["C:\\a", "D:\\b"]);
     }
 
     #[test]

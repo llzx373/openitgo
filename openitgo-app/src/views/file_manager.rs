@@ -15,7 +15,8 @@ use crate::views::file_manager_dialog::{
     CopyMoveDialog, DeleteDialog, FmDialog, FmDialogOutcome, NewDirDialog, RenameDialog,
 };
 use crate::views::file_manager_panel::{
-    list_drives, FocusMove, FsPanel, PanelLoadState, COL_RIGHT_PAD, ROW_HEIGHT,
+    fallback_existing_dir, list_drives, FocusMove, FsPanel, PanelLoadState, COL_RIGHT_PAD,
+    ROW_HEIGHT,
 };
 use crate::views::file_manager_rows::{FsEntry, SortKey};
 use crate::views::file_ops::{
@@ -60,6 +61,8 @@ pub struct FmStateSnapshot {
     /// 两栏当前目录（字符串；空 = 用户主目录，跟随 resolve_fm_dir 语义）。
     pub dir_left: String,
     pub dir_right: String,
+    /// 常用目录书签（两栏共享）。
+    pub bookmarks: Vec<String>,
 }
 
 pub struct FileManagerView {
@@ -100,6 +103,8 @@ pub struct FileManagerView {
     drives_rx: Option<std::sync::mpsc::Receiver<Vec<PathBuf>>>,
     /// 删除前是否弹确认框（settings.fm_confirm_delete 快照，供右键菜单使用）。
     confirm_delete: bool,
+    /// 常用目录书签（两栏共享，权威走快照写回 settings.fm_bookmarks）。
+    bookmarks: Vec<PathBuf>,
 }
 
 /// 帧内意图：行内交互写入，帧尾统一触发回调（避免回调嵌套借用）。
@@ -166,6 +171,7 @@ impl FileManagerView {
         preview_open: bool,
         sort_key: &str,
         sort_asc: bool,
+        bookmarks: &[String],
     ) -> Self {
         let layout = if layout == "single" {
             PanelLayout::Single { preview_open }
@@ -200,6 +206,7 @@ impl FileManagerView {
             drives: None,
             drives_rx: None,
             confirm_delete: true,
+            bookmarks: bookmarks.iter().map(PathBuf::from).collect(),
         }
     }
 
@@ -224,7 +231,28 @@ impl FileManagerView {
             sort_asc: panel.sort_asc,
             dir_left: self.panels[0].dir.display().to_string(),
             dir_right: self.panels[1].dir.display().to_string(),
+            bookmarks: self
+                .bookmarks
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
         }
+    }
+
+    /// 添加书签（两栏共享）；已在列表中时 no-op 返回 false。
+    pub fn add_bookmark(&mut self, dir: &Path) -> bool {
+        if self.bookmarks.iter().any(|b| b == dir) {
+            return false;
+        }
+        self.bookmarks.push(dir.to_path_buf());
+        true
+    }
+
+    /// 移除书签；不在列表中返回 false。
+    pub fn remove_bookmark(&mut self, dir: &Path) -> bool {
+        let before = self.bookmarks.len();
+        self.bookmarks.retain(|b| b != dir);
+        self.bookmarks.len() != before
     }
 
     /// 设置页改动默认布局/双栏比例时同步到本视图（此时视图休眠）。
@@ -660,6 +688,7 @@ impl FileManagerView {
                         self.panels[idx].go_forward();
                     }
                     self.render_drive_switcher(ui, idx);
+                    self.render_bookmarks_button(ui, idx);
                     ui.separator();
                     let dir = self.panels[idx].dir.clone();
                     let segments = breadcrumb_segments(&dir);
@@ -739,6 +768,68 @@ impl FileManagerView {
                 }
             }
         });
+    }
+
+    /// 面包屑上的书签菜单（两栏共享一份）：「添加当前目录」+ 书签列表
+    /// （点击跳转，目录不存在逐级回退最近存在祖先；✕ 移除，菜单不收起）。
+    fn render_bookmarks_button(&mut self, ui: &mut egui::Ui, idx: usize) {
+        let button = egui::Button::new(icons::STAR.as_str()).frame(false);
+        let config = egui::containers::menu::MenuConfig::new()
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        egui::containers::menu::MenuButton::from_button(button)
+            .config(config)
+            .ui(ui, |ui| {
+                ui.set_min_width(280.0);
+                let dir = self.panels[idx].dir.clone();
+                let already = self.bookmarks.iter().any(|b| b == &dir);
+                if ui
+                    .add_enabled(!already, egui::Button::new("添加当前目录"))
+                    .clicked()
+                {
+                    self.add_bookmark(&dir);
+                    ui.close();
+                }
+                ui.separator();
+                if self.bookmarks.is_empty() {
+                    ui.label(egui::RichText::new("（无书签）").weak());
+                    return;
+                }
+                let mut jump: Option<PathBuf> = None;
+                let mut remove: Option<PathBuf> = None;
+                for bm in &self.bookmarks {
+                    let tip = bm.display().to_string();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new(icons::X.as_str()).frame(false).small())
+                            .on_hover_text("移除书签")
+                            .clicked()
+                        {
+                            remove = Some(bm.clone());
+                        }
+                        if ui
+                            .add(
+                                egui::Label::new(tip.as_str())
+                                    .truncate()
+                                    .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text(&tip)
+                            .clicked()
+                        {
+                            jump = Some(bm.clone());
+                        }
+                    });
+                }
+                if let Some(bm) = remove {
+                    self.remove_bookmark(&bm);
+                }
+                if let Some(bm) = jump {
+                    let target = fallback_existing_dir(bm);
+                    self.panels[idx].navigate_to(target);
+                    ui.close();
+                }
+            })
+            .0
+            .on_hover_text("常用目录书签");
     }
 
     /// 列头：名称 / 大小 / 修改时间，整列格可点击切换排序键与升降序，
@@ -1908,6 +1999,33 @@ mod tests {
         assert_eq!(min_scroll_to_reveal(100.0, 200.0, 280.0), 102.0);
     }
 
+    #[test]
+    fn bookmark_add_dedup_remove_and_snapshot() {
+        let mut view = FileManagerView::new("dual", 0.5, false, "name", true, &[]);
+        let a = PathBuf::from("/a");
+        let b = PathBuf::from("/b");
+
+        assert!(view.add_bookmark(&a));
+        assert!(view.add_bookmark(&b));
+        // 去重：重复添加 no-op。
+        assert!(!view.add_bookmark(&a));
+        assert_eq!(
+            view.snapshot().bookmarks,
+            ["/a".to_string(), "/b".to_string()]
+        );
+
+        assert!(view.remove_bookmark(&a));
+        assert!(!view.remove_bookmark(&a));
+        assert_eq!(view.snapshot().bookmarks, ["/b".to_string()]);
+    }
+
+    #[test]
+    fn snapshot_restores_bookmarks_from_constructor() {
+        let saved = vec!["/a".to_string(), "/b".to_string()];
+        let view = FileManagerView::new("dual", 0.5, false, "name", true, &saved);
+        assert_eq!(view.snapshot().bookmarks, saved);
+    }
+
     // ---- 无头 egui 测试基座：注入输入事件驱动 FileManagerView 真实渲染帧 ----
 
     /// 跑一帧真实渲染（含行交互/意图分发），events 为本帧注入的输入。
@@ -1994,7 +2112,7 @@ mod tests {
         for f in ["f1", "f2", "f3"] {
             std::fs::write(tmp.path().join(f), b"x").unwrap();
         }
-        let mut view = FileManagerView::new("single", 0.5, false, "name", true);
+        let mut view = FileManagerView::new("single", 0.5, false, "name", true, &[]);
         navigate_ready(&mut view.panels[0], tmp.path());
         let ctx = egui::Context::default();
         setup_test_fonts(&ctx);
@@ -2042,7 +2160,7 @@ mod tests {
         for i in 0..200 {
             std::fs::write(tmp.path().join(format!("f{i:03}")), b"x").unwrap();
         }
-        let mut view = FileManagerView::new("dual", 0.5, false, "name", true);
+        let mut view = FileManagerView::new("dual", 0.5, false, "name", true, &[]);
         navigate_ready(&mut view.panels[0], tmp.path());
         navigate_ready(&mut view.panels[1], tmp.path());
         let ctx = egui::Context::default();
@@ -2144,7 +2262,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a.png"), test_png_bytes()).unwrap();
         std::fs::write(tmp.path().join("b.txt"), "hello").unwrap();
-        let mut view = FileManagerView::new("single", 0.5, true, "name", true);
+        let mut view = FileManagerView::new("single", 0.5, true, "name", true, &[]);
         navigate_ready(&mut view.panels[0], tmp.path());
         let ctx = egui::Context::default();
         setup_test_fonts(&ctx);
@@ -2181,7 +2299,7 @@ mod tests {
         let sub = tmp.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
         std::fs::write(sub.join("c.txt"), "x").unwrap();
-        let mut view = FileManagerView::new("single", 0.5, true, "name", true);
+        let mut view = FileManagerView::new("single", 0.5, true, "name", true, &[]);
         navigate_ready(&mut view.panels[0], tmp.path());
         let ctx = egui::Context::default();
         setup_test_fonts(&ctx);
@@ -2207,7 +2325,7 @@ mod tests {
     fn preview_corrupt_image_note() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a.png"), b"not a png at all").unwrap();
-        let mut view = FileManagerView::new("single", 0.5, true, "name", true);
+        let mut view = FileManagerView::new("single", 0.5, true, "name", true, &[]);
         navigate_ready(&mut view.panels[0], tmp.path());
         let ctx = egui::Context::default();
         setup_test_fonts(&ctx);
@@ -2233,7 +2351,7 @@ mod tests {
         std::fs::write(tmp.path().join("a.png"), test_png_bytes()).unwrap();
         std::fs::write(tmp.path().join("b.txt"), "hello").unwrap();
         std::fs::write(tmp.path().join("c.bin"), [0xFF, 0xFE, 0x00]).unwrap();
-        let mut view = FileManagerView::new("dual", 0.5, false, "name", true);
+        let mut view = FileManagerView::new("dual", 0.5, false, "name", true, &[]);
         navigate_ready(&mut view.panels[0], tmp.path());
         navigate_ready(&mut view.panels[1], tmp.path());
         let ctx = egui::Context::default();

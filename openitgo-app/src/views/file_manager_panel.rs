@@ -663,6 +663,20 @@ pub fn list_drives() -> Vec<PathBuf> {
     }
 }
 
+/// 目标不存在时逐级回退到最近存在的祖先目录；全灭回用户主目录
+/// （书签跳转与启动恢复 fm_dir_* 共用）。
+pub fn fallback_existing_dir(path: PathBuf) -> PathBuf {
+    let mut path = path;
+    loop {
+        if path.is_dir() {
+            return path;
+        }
+        if !path.pop() {
+            return dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,6 +713,20 @@ mod tests {
         for d in &drives {
             assert!(std::fs::read_dir(d).is_ok(), "{d:?} 应可列出");
         }
+    }
+
+    /// 书签跳转/启动恢复的回退：目标存在原样返回；尾部若干级不存在
+    /// 时回到最近存在的祖先目录。
+    #[test]
+    fn fallback_existing_dir_climbs_to_nearest_existing_ancestor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let deep = tmp.path().join("a").join("b");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        assert_eq!(fallback_existing_dir(deep.clone()), deep);
+
+        let missing = deep.join("gone").join("deeper");
+        assert_eq!(fallback_existing_dir(missing), deep);
     }
 
     /// show_hidden=false 时 rows() 排除隐藏条目（RowsKey 含 show_hidden，

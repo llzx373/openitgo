@@ -139,7 +139,9 @@ cargo clippy --workspace --all-targets -- -D warnings
   `fm_layout`/`fm_dual_ratio`/`fm_preview_open`/`fm_sort_key`/`fm_sort_asc`/
   `fm_dir_left`/`fm_dir_right`/`fm_confirm_delete`/`fm_show_hidden`（隐藏 =
   `.` 开头或 Windows FILE_ATTRIBUTE_HIDDEN，行模型过滤不进快照，权威在
-  settings，与 confirm_delete 同走 ui() 每帧下发）；`FileManagerView::snapshot()`
+  settings，与 confirm_delete 同走 ui() 每帧下发）/`fm_bookmarks`（常用目录
+  书签，两栏共享；面包屑星标菜单管理，点击跳转经 `fallback_existing_dir`
+  逐级回退最近存在祖先，与启动恢复 fm_dir_* 共用）；`FileManagerView::snapshot()`
   采集，`maybe_save_fm_state`（`App::update` 末尾）diff 快照后写回 settings——
   **不自行落盘**，退出时 `on_exit` 统一 `save_settings`（排序只持久化活动栏，
   取舍见 `FmStateSnapshot` 注释）；快照在离开 FileManager 视图时重置。设置页
