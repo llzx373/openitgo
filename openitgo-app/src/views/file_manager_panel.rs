@@ -1,6 +1,7 @@
 //! 双栏文件管理器的单面板状态：目录列举（`AsyncOpener` 后台线程 + 每帧
-//! `poll()` 接收）、Explorer 式选择、排序、导航历史。行渲染与双栏布局在
-//! `file_manager.rs`；纯函数行模型在 `file_manager_rows.rs`。
+//! `poll()` 接收）、Explorer 式选择、排序、导航历史、分支视图（Ctrl+B
+//! 递归扁平列举）。行渲染与双栏布局在 `file_manager.rs`；纯函数行模型在
+//! `file_manager_rows.rs`。
 //!
 //! 选择模型与 Archive 视图不同：`selected` 直接存 `PathBuf` 且**含目录**
 //! （本地 FS 的目录是一等操作对象），选择/焦点用 UI 行索引
@@ -42,10 +43,21 @@ pub(crate) const TYPE_AHEAD_TIMEOUT: Duration = Duration::from_millis(800);
 pub enum PanelLoadState {
     #[default]
     Idle,
-    Loading(AsyncOpener<Vec<FsEntry>>),
+    Loading(AsyncOpener<DirListing>),
     Ready,
     Failed(String),
 }
+
+/// 目录列举结果：分支视图（Ctrl+B）递归收集超 `BRANCH_MAX_ENTRIES`
+/// 截断时 truncated=true（UI 状态栏提示「结果过多已截断」）。
+#[derive(Clone)]
+pub struct DirListing {
+    pub entries: Vec<FsEntry>,
+    pub truncated: bool,
+}
+
+/// 分支视图递归收集上限：超过即截断（防巨型目录树拖垮列举）。
+pub(crate) const BRANCH_MAX_ENTRIES: usize = 200_000;
 
 /// 键盘焦点移动模式（move_focus 共用核心，同 archive.rs 的 FocusMove）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +78,8 @@ struct RowsKey {
     sort_key: SortKey,
     sort_asc: bool,
     show_hidden: bool,
+    /// 分支视图标志（分支/普通列举的 name 语义不同，缓存必须按此失效）。
+    branch: bool,
 }
 
 /// 当前目录的 FS 变更监听（非递归）：事件经 channel 汇入 poll 去抖后
@@ -127,6 +141,12 @@ pub struct FsPanel {
     /// 是否显示隐藏文件（settings.fm_show_hidden 经 ui() 每帧下发；
     /// 纳入 RowsKey，切换时 rows_cache 自动失效）。
     pub show_hidden: bool,
+    /// 分支视图（Ctrl+B）：当前目录 + 所有子目录的文件扁平列举（目录行
+    /// 不列出）。navigate_to/refresh/「..」行/Esc 退出。已知取舍：FS watch
+    /// 只监听顶层目录（非递归），分支模式下子目录变化不自动刷新。
+    pub branch_view: bool,
+    /// 分支列举超 BRANCH_MAX_ENTRIES 被截断（状态栏提示用；普通列举恒 false）。
+    pub listing_truncated: bool,
     /// 导航历史（访问顺序）；history_pos = 当前位置（当前目录 =
     /// history[history_pos-1]），前进分支在 navigate_to 时截断。
     history: Vec<PathBuf>,
@@ -182,6 +202,8 @@ impl FsPanel {
             sort_asc,
             filter: String::new(),
             show_hidden: true,
+            branch_view: false,
+            listing_truncated: false,
             history: Vec::new(),
             history_pos: 0,
             rows_cache: None,
@@ -204,7 +226,9 @@ impl FsPanel {
     }
 
     /// 后台列举目录（清选择/焦点/缓存）；调用方负责压历史。
+    /// 任何导航都退出分支视图回普通列举。
     fn start_listing(&mut self, path: PathBuf) {
+        self.branch_view = false;
         self.dir = path.clone();
         self.entries.clear();
         self.entries_version += 1;
@@ -322,13 +346,52 @@ impl FsPanel {
 
     /// Ctrl+R 重列当前目录：不动历史、不清选中；poll 成功时按新条目集
     /// 过滤掉已不存在项的选中态（焦点索引失效，一并清空）。
+    /// 同时退出分支视图回普通列举（含 FS watch 触发的自动 refresh）。
     pub fn refresh(&mut self) {
         if matches!(self.state, PanelLoadState::Loading(_)) {
             return;
         }
+        self.branch_view = false;
         self.clear_dir_sizes();
         let dir = self.dir.clone();
         self.state = PanelLoadState::Loading(AsyncOpener::open(dir, read_dir_entries));
+    }
+
+    /// Ctrl+B 分支视图开关：进入 = 当前目录 + 所有子目录文件扁平列举；
+    /// 退出 = 回普通列举（保留选中，嵌套文件的选中态在 poll 时按存在性
+    /// 过滤，同 refresh）。
+    pub fn toggle_branch_view(&mut self) {
+        if self.branch_view {
+            self.exit_branch_view();
+        } else {
+            self.enter_branch_view();
+        }
+    }
+
+    /// 进入分支视图：递归列举当前目录（清空选择/焦点/缓存，重置语义同
+    /// start_listing，但不动导航历史）。
+    pub fn enter_branch_view(&mut self) {
+        if matches!(self.state, PanelLoadState::Loading(_)) {
+            return;
+        }
+        self.branch_view = true;
+        let path = self.dir.clone();
+        self.entries.clear();
+        self.entries_version += 1;
+        self.rows_cache = None;
+        self.selected.clear();
+        self.focus = None;
+        self.anchor = None;
+        self.focus_scroll_pending = false;
+        self.clear_dir_sizes();
+        self.type_ahead = None;
+        self.state = PanelLoadState::Loading(AsyncOpener::open(path, read_dir_entries_recursive));
+    }
+
+    /// 退出分支视图（「..」行 / Esc / Ctrl+B）：回普通列举（同 refresh）。
+    pub fn exit_branch_view(&mut self) {
+        self.branch_view = false;
+        self.refresh();
     }
 
     /// 每帧排空列举结果；返回 true = 仍在 Loading（调用方据此
@@ -350,8 +413,9 @@ impl FsPanel {
                 self.state = PanelLoadState::Loading(opener);
                 true
             }
-            OpenStatus::Ready(Ok(entries)) => {
-                self.entries = entries;
+            OpenStatus::Ready(Ok(listing)) => {
+                self.entries = listing.entries;
+                self.listing_truncated = listing.truncated;
                 self.entries_version += 1;
                 // refresh 路径：丢弃已不存在项的选中态；navigate 路径
                 // selected 已清空，retain 为 no-op。
@@ -512,6 +576,7 @@ impl FsPanel {
             sort_key: self.sort_key,
             sort_asc: self.sort_asc,
             show_hidden: self.show_hidden,
+            branch: self.branch_view,
         };
         if let Some((k, rows)) = &self.rows_cache {
             if *k == key {
@@ -796,7 +861,7 @@ impl FsPanel {
 
 /// 后台线程收集目录条目：单项读取失败（权限等）跳过；metadata 跟随符号
 /// 链接（size/mtime/is_dir 取链接目标），失败降级为空值但保留条目。
-fn read_dir_entries(path: &Path) -> Result<Vec<FsEntry>, String> {
+fn read_dir_entries(path: &Path) -> Result<DirListing, String> {
     let rd = std::fs::read_dir(path).map_err(|e| format!("无法读取目录: {e}"))?;
     let mut entries = Vec::new();
     for item in rd {
@@ -822,9 +887,76 @@ fn read_dir_entries(path: &Path) -> Result<Vec<FsEntry>, String> {
             mtime,
             is_symlink,
             is_hidden,
+            rel_dir: String::new(),
         });
     }
-    Ok(entries)
+    Ok(DirListing {
+        entries,
+        truncated: false,
+    })
+}
+
+/// 分支视图（Ctrl+B）递归列举：当前目录 + 所有子目录的文件扁平收集，
+/// 超 BRANCH_MAX_ENTRIES 截断（truncated 上报）。
+fn read_dir_entries_recursive(path: &Path) -> Result<DirListing, String> {
+    collect_branch(path, BRANCH_MAX_ENTRIES)
+}
+
+/// 递归收集核心（max 参数化便于测试截断）：目录不产出条目（分支视图
+/// 无目录行，符号链接目录不跟进防环、按文件条目计）；单项失败跳过；
+/// 分支条目的 name 直接存显示名（顶层 = 文件名，子目录 = `rel_dir/name`，
+/// 分隔符统一 `/`），排序/过滤/type-ahead/渲染无需特判。
+fn collect_branch(path: &Path, max: usize) -> Result<DirListing, String> {
+    // 顶层目录不可读 = 错误（同普通列举）；子目录失败跳过。
+    std::fs::read_dir(path).map_err(|e| format!("无法读取目录: {e}"))?;
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    let mut stack: Vec<(PathBuf, String)> = vec![(path.to_path_buf(), String::new())];
+    'outer: while let Some((dir, rel)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for item in rd.flatten() {
+            let item_path = item.path();
+            let name = item.file_name().to_string_lossy().into_owned();
+            let ft = item.file_type().ok();
+            let is_symlink = ft.map(|t| t.is_symlink()).unwrap_or(false);
+            if !is_symlink && ft.map(|t| t.is_dir()).unwrap_or(false) {
+                let child_rel = if rel.is_empty() {
+                    name
+                } else {
+                    format!("{rel}/{name}")
+                };
+                stack.push((item_path, child_rel));
+                continue;
+            }
+            if entries.len() >= max {
+                truncated = true;
+                break 'outer;
+            }
+            let meta = item.metadata().ok();
+            let size = meta.as_ref().filter(|m| m.is_file()).map(|m| m.len());
+            let is_hidden = is_hidden_name(&name) || windows_attr_hidden(meta.as_ref());
+            let mtime = meta.and_then(|m| m.modified().ok());
+            let display = if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            };
+            entries.push(FsEntry {
+                name: display,
+                path: item_path,
+                // 分支视图不产出目录行（符号链接目录也按文件计）。
+                is_dir: false,
+                size,
+                mtime,
+                is_symlink,
+                is_hidden,
+                rel_dir: rel.clone(),
+            });
+        }
+    }
+    Ok(DirListing { entries, truncated })
 }
 
 #[cfg(windows)]
@@ -951,6 +1083,7 @@ mod tests {
             mtime: None,
             is_symlink: false,
             is_hidden,
+            rel_dir: String::new(),
         };
         let mut panel = FsPanel::new(SortKey::Name, true);
         panel.entries = vec![
@@ -1169,6 +1302,7 @@ mod tests {
             mtime: None,
             is_symlink: false,
             is_hidden: false,
+            rel_dir: String::new(),
         };
         let mut panel = FsPanel::new(SortKey::Name, true);
         // 名称升序：docs, EP1（目录）, EP2.zip, notes.txt
@@ -1215,6 +1349,7 @@ mod tests {
             mtime: None,
             is_symlink: false,
             is_hidden: false,
+            rel_dir: String::new(),
         };
         let mut panel = FsPanel::new(SortKey::Name, true);
         // 名称升序：abc, ep1, ep2, notes（UI 行 1..=4）
@@ -1281,5 +1416,93 @@ mod tests {
         panel.navigate_history_to(3);
         assert!(panel.can_go_back());
         assert!(!panel.can_go_forward());
+    }
+
+    /// 分支列举：当前目录 + 所有子目录的文件扁平收集，name = 显示名
+    /// （`rel_dir/name`），目录不产出条目，rel_dir 记录相对子目录路径；
+    /// 超 max 截断并上报 truncated。
+    #[test]
+    fn branch_listing_flattens_files_with_display_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("sub/deep")).unwrap();
+        std::fs::write(root.join("a.txt"), b"a").unwrap();
+        std::fs::write(root.join("sub/b.txt"), b"b").unwrap();
+        std::fs::write(root.join("sub/deep/c.txt"), b"c").unwrap();
+
+        let listing = collect_branch(root, BRANCH_MAX_ENTRIES).unwrap();
+        assert!(!listing.truncated);
+        assert_eq!(listing.entries.len(), 3);
+        assert!(listing.entries.iter().all(|e| !e.is_dir));
+        let mut by_name: std::collections::HashMap<&str, &FsEntry> = listing
+            .entries
+            .iter()
+            .map(|e| (e.name.as_str(), e))
+            .collect();
+        let top = by_name.remove("a.txt").expect("顶层文件");
+        assert_eq!(top.rel_dir, "");
+        let sub = by_name.remove("sub/b.txt").expect("子目录文件");
+        assert_eq!(sub.rel_dir, "sub");
+        let deep = by_name.remove("sub/deep/c.txt").expect("深层文件");
+        assert_eq!(deep.rel_dir, "sub/deep");
+        assert!(by_name.is_empty(), "目录不得产出条目: {by_name:?}");
+        // path 均为全路径（双击/文件操作无需特判）。
+        assert!(listing.entries.iter().all(|e| e.path.is_absolute()));
+
+        // 截断：max=2 → 2 条 + truncated。
+        let listing = collect_branch(root, 2).unwrap();
+        assert!(listing.truncated);
+        assert_eq!(listing.entries.len(), 2);
+    }
+
+    /// 分支视图开关：进入递归列举（就绪后条目为扁平文件 + 显示名），
+    /// navigate/refresh 自动退出回普通列举。
+    #[test]
+    fn branch_view_toggle_and_auto_exit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/b.txt"), b"b").unwrap();
+        let poll_ready = |panel: &mut FsPanel| {
+            for _ in 0..200 {
+                if !panel.poll() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(matches!(panel.state, PanelLoadState::Ready));
+        };
+
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        panel.navigate_to(root.to_path_buf());
+        poll_ready(&mut panel);
+        assert!(!panel.branch_view);
+        // 普通列举：只有目录行 sub。
+        assert_eq!(panel.entries.len(), 1);
+        assert!(panel.entries[0].is_dir);
+
+        // 进入分支：扁平列出 sub/b.txt（显示名带相对路径）。
+        panel.toggle_branch_view();
+        assert!(panel.branch_view);
+        poll_ready(&mut panel);
+        assert!(panel.branch_view);
+        assert_eq!(panel.entries.len(), 1);
+        assert_eq!(panel.entries[0].name, "sub/b.txt");
+        assert!(!panel.entries[0].is_dir);
+        assert!(!panel.listing_truncated);
+
+        // 退出分支：回普通列举。
+        panel.toggle_branch_view();
+        assert!(!panel.branch_view);
+        poll_ready(&mut panel);
+        assert_eq!(panel.entries.len(), 1);
+        assert!(panel.entries[0].is_dir);
+
+        // 分支模式下 navigate 到其他目录自动退出分支（start_listing 清标志）。
+        panel.enter_branch_view();
+        poll_ready(&mut panel);
+        assert!(panel.branch_view);
+        panel.navigate_to(root.join("sub"));
+        assert!(!panel.branch_view);
     }
 }

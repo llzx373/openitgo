@@ -411,6 +411,13 @@ impl FileManagerView {
                 let total = panel.entries.len();
                 let selected = panel.selected.len();
                 ui.label(format!("共 {total} 项"));
+                // 分支列举超上限截断提示。
+                if panel.listing_truncated {
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new("结果过多已截断").color(ui.visuals().warn_fg_color),
+                    );
+                }
                 if selected > 0 {
                     // 选中集总大小：文件直接求和；目录仅计入「计算大小」已缓存
                     // 的值，未命中不触发计算（0 字节选中集不显示，避免误导）。
@@ -870,6 +877,7 @@ impl FileManagerView {
                     self.render_bookmarks_button(ui, idx);
                     ui.separator();
                     let dir = self.panels[idx].dir.clone();
+                    let branch = self.panels[idx].branch_view;
                     let segments = breadcrumb_segments(&dir);
                     if segments.is_empty() {
                         ui.label(egui::RichText::new("…").weak());
@@ -897,6 +905,10 @@ impl FileManagerView {
                     }
                     if let Some(path) = jump {
                         self.panels[idx].navigate_to(path);
+                    }
+                    // 分支视图状态指示（路径后弱色标记）。
+                    if branch {
+                        ui.label(egui::RichText::new("[分支]").weak());
                     }
                 });
             });
@@ -1290,6 +1302,7 @@ impl FileManagerView {
     ) {
         let panel = &mut self.panels[idx];
         let is_parent = row == 0;
+        let branch = panel.branch_view;
         // rows 可能是导航前的旧快照（同帧行内双击已清空 entries）：用 get
         // 防御，越界行本帧按「..」样式渲染，下一帧即被新行模型替换。
         let entry: Option<FsEntry> = if is_parent {
@@ -1307,7 +1320,8 @@ impl FileManagerView {
             .and_then(|e| panel.dir_sizes.get(&e.path).copied());
         let focused = panel.focus == Some(row);
         let at_root = panel.is_root();
-        let parent_enabled = !at_root;
+        // 分支模式下「..」行 = 退出分支视图（根目录也可用）。
+        let parent_enabled = branch || !at_root;
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), ROW_HEIGHT),
             egui::Sense::click_and_drag(),
@@ -1448,7 +1462,9 @@ impl FileManagerView {
         }
         if response.double_clicked() {
             if is_parent {
-                if parent_enabled {
+                if branch {
+                    self.panels[idx].exit_branch_view();
+                } else if parent_enabled {
                     self.panels[idx].parent_dir();
                 }
             } else {
@@ -1577,9 +1593,16 @@ impl FileManagerView {
                 }
             });
         }
-        // 悬停信息提示（被截断名称的完整信息）：全路径 + 大小；「..」= 上级目录提示。
+        // 悬停信息提示（被截断名称的完整信息）：全路径 + 大小；
+        // 「..」= 上级目录 / 分支模式 = 退出分支视图提示。
         let tip = match &entry {
-            None => "上级目录".to_string(),
+            None => {
+                if branch {
+                    "退出分支视图".to_string()
+                } else {
+                    "上级目录".to_string()
+                }
+            }
             Some(e) => {
                 let mut tip = e.path.display().to_string();
                 if !e.is_dir {
@@ -1597,7 +1620,11 @@ impl FileManagerView {
     /// 目录 = 栏内进入；压缩包 = Archive 视图；其余 = open_path 分发。
     fn open_ui_row(&mut self, idx: usize, rows: &[usize], row: usize, intents: &mut FmIntents) {
         if row == 0 {
-            self.panels[idx].parent_dir();
+            if self.panels[idx].branch_view {
+                self.panels[idx].exit_branch_view();
+            } else {
+                self.panels[idx].parent_dir();
+            }
             return;
         }
         // rows 与 entries 之间存在失配窗口（同帧前面的行已触发导航），用 get 防御。
@@ -1850,6 +1877,7 @@ impl FileManagerView {
     /// Alt+↓ 历史下拉开关、可打印字符 type-ahead 定位、`*` 反选、
     /// `+`/`-` 弹「选择组」对话框、Ctrl+U 交换两栏、Ctrl+←/→ 栏间目录
     /// 同步、Ctrl+\ 回根目录、Ctrl+Q 对面栏快速预览（单栏 = 预览开关）、
+    /// Ctrl+B 分支视图（「..」行/Esc 末级 = 退出分支）、
     /// Esc 分级清 type-ahead 缓冲→过滤→选中。
     /// 过滤框等文本输入占用键盘时不处理。
     /// 文件操作键：F2 重命名 / F5 复制 / F6 移动 / F7 新建文件夹 /
@@ -2042,6 +2070,10 @@ impl FileManagerView {
                 }
             }
         }
+        // Ctrl+B：分支视图开关（当前目录 + 所有子目录文件扁平列出）。
+        if mods.command && ui.input(|i| i.key_pressed(egui::Key::B)) {
+            self.panels[active].toggle_branch_view();
+        }
         // Ctrl+Q：双栏 = 开关对面栏快速预览（快览面板恒渲染非活动栏位置，
         // 目标 = 活动栏焦点文件）；单栏 = 切换预览面板（同顶栏「预览」）。
         // Q 是字母键，但 type-ahead 捕获有 !mods.command 门控，不会抢键。
@@ -2123,8 +2155,11 @@ impl FileManagerView {
                     panel.clear_type_ahead();
                 } else if !panel.filter.is_empty() {
                     panel.filter.clear();
-                } else {
+                } else if !panel.selected.is_empty() {
                     panel.clear_selection();
+                } else if panel.branch_view {
+                    // 分支模式且缓冲/过滤/选中均空：退出分支视图。
+                    panel.exit_branch_view();
                 }
             }
         }

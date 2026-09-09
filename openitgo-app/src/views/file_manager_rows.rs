@@ -9,6 +9,8 @@ use std::time::SystemTime;
 /// 文件系统目录列表中的一个条目（由调用方经 `read_dir` 收集）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsEntry {
+    /// 显示名：普通列举 = 文件名；分支视图（Ctrl+B）= `rel_dir/name`
+    /// （顶层仅文件名），排序/过滤/type-ahead/渲染统一按此字段工作。
     pub name: String,
     pub path: PathBuf,
     pub is_dir: bool,
@@ -18,6 +20,8 @@ pub struct FsEntry {
     pub is_symlink: bool,
     /// 隐藏文件（`.` 开头或 Windows FILE_ATTRIBUTE_HIDDEN）。
     pub is_hidden: bool,
+    /// 相对当前目录的子目录路径（`/` 分隔；普通列举与分支顶层为空串）。
+    pub rel_dir: String,
 }
 
 /// 跨平台一致的隐藏判定：文件名以 `.` 开头。
@@ -260,6 +264,7 @@ mod tests {
             mtime,
             is_symlink: false,
             is_hidden: is_hidden_name(name),
+            rel_dir: String::new(),
         }
     }
 
