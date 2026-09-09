@@ -1,4 +1,4 @@
-//! 文件操作引擎：复制/移动/删除的后台执行 + 进度/取消/冲突处理；
+//! 文件操作引擎：复制/移动/删除/压缩的后台执行 + 进度/取消/冲突处理；
 //! 重命名/新建文件夹为瞬时操作，提供同步 helper。对齐 extract 约定：
 //! 每任务一条后台线程、channel 上报进度、`Arc<AtomicBool>` 取消、
 //! 取消清理半成品目标文件（已完整复制/移动的保留并计入进度）、
@@ -33,6 +33,7 @@ pub enum OpKind {
     Copy,
     Move,
     Delete,
+    Compress,
 }
 
 impl OpKind {
@@ -41,6 +42,7 @@ impl OpKind {
             OpKind::Copy => "复制",
             OpKind::Move => "移动",
             OpKind::Delete => "删除",
+            OpKind::Compress => "压缩",
         }
     }
 }
@@ -154,6 +156,17 @@ impl FileOpManager {
         self.spawn_task(OpKind::Delete, sources, None, ConflictMode::Skip)
     }
 
+    /// 后台压缩 sources 为 dest_zip（zip 引擎在 parser 侧，逐项进度桥接进
+    /// OpProgress；dest_dir 记 dest_zip 的父目录使完成后栏刷新自动生效）。
+    pub fn start_compress(&mut self, sources: Vec<PathBuf>, dest_zip: PathBuf) -> u64 {
+        let dest_dir = dest_zip.parent().map(Path::to_path_buf);
+        let (id, cancel, tx) = self.push_task(OpKind::Compress, &sources, dest_dir);
+        std::thread::spawn(move || {
+            run_compress(sources, dest_zip, cancel, tx);
+        });
+        id
+    }
+
     fn start_transfer(
         &mut self,
         kind: OpKind,
@@ -171,6 +184,20 @@ impl FileOpManager {
         dest_dir: Option<PathBuf>,
         conflict: ConflictMode,
     ) -> u64 {
+        let (id, cancel, tx) = self.push_task(kind, &sources, dest_dir.clone());
+        std::thread::spawn(move || {
+            run_op(kind, sources, dest_dir, conflict, cancel, tx);
+        });
+        id
+    }
+
+    /// 登记任务并返回 (id, cancel, 事件发送端)，由调用方自起工作线程。
+    fn push_task(
+        &mut self,
+        kind: OpKind,
+        sources: &[PathBuf],
+        dest_dir: Option<PathBuf>,
+    ) -> (u64, Arc<AtomicBool>, Sender<OpEvent>) {
         self.next_id += 1;
         let id = self.next_id;
         let cancel = Arc::new(AtomicBool::new(false));
@@ -186,15 +213,12 @@ impl FileOpManager {
             kind,
             progress: OpProgress::default(),
             src_dirs,
-            dest_dir: dest_dir.clone(),
+            dest_dir,
             cancel: cancel.clone(),
             rx,
         };
         self.tasks.push(task);
-        std::thread::spawn(move || {
-            run_op(kind, sources, dest_dir, conflict, cancel, tx);
-        });
-        id
+        (id, cancel, tx)
     }
 
     /// 取消任务：工作线程在下一块/下一项停止并上报 Finished(cancelled)。
@@ -283,6 +307,7 @@ fn run_op(
     }
     let mut fatal = None;
     match kind {
+        OpKind::Compress => unreachable!("Compress 走 run_compress"),
         OpKind::Delete => {
             for (i, src) in sources.iter().enumerate() {
                 if ctx.halt() {
@@ -367,6 +392,55 @@ fn run_op(
     });
 }
 
+/// 压缩工作线程：调 parser 的 create_zip，ZipWriteProgress 经转发线程
+/// 桥接成 OpProgress 快照流；取消/致命错误按 create_zip 约定收尾
+/// （Err → fatal；cancel 置位 → cancelled；容错跳过项不逐项上报）。
+fn run_compress(
+    sources: Vec<PathBuf>,
+    dest_zip: PathBuf,
+    cancel: Arc<AtomicBool>,
+    tx: Sender<OpEvent>,
+) {
+    use openitgo_parser::archive::{create_zip, ZipWriteOptions, ZipWriteProgress};
+    let (ztx, zrx) = crossbeam_channel::unbounded();
+    let fwd_tx = tx.clone();
+    let forwarder = std::thread::spawn(move || {
+        let mut progress = OpProgress::default();
+        while let Ok(ev) = zrx.recv() {
+            match ev {
+                ZipWriteProgress::Started {
+                    total_files,
+                    total_bytes,
+                } => {
+                    progress.total_files = total_files as u64;
+                    progress.total_bytes = total_bytes;
+                }
+                ZipWriteProgress::EntryDone { name, bytes } => {
+                    progress.done_files += 1;
+                    progress.done_bytes += bytes;
+                    progress.current = PathBuf::from(name);
+                }
+                // 结束态由下方 create_zip 返回值统一收尾，不重复上报。
+                ZipWriteProgress::Finished { .. } | ZipWriteProgress::Failed(_) => {}
+            }
+            let _ = fwd_tx.send(OpEvent::Progress(progress.clone()));
+        }
+    });
+    let result = create_zip(
+        &sources,
+        &dest_zip,
+        &ZipWriteOptions::default(),
+        ztx,
+        cancel.clone(),
+    );
+    let _ = forwarder.join();
+    let _ = tx.send(OpEvent::Finished {
+        cancelled: cancel.load(Ordering::Relaxed),
+        fatal: result.err().map(|e| e.to_string()),
+        errors: Vec::new(),
+    });
+}
+
 struct OpCtx<'a> {
     cancel: &'a AtomicBool,
     tx: &'a Sender<OpEvent>,
@@ -446,7 +520,7 @@ fn resolve_conflict(dst: &Path, mode: ConflictMode) -> Option<PathBuf> {
 
 /// 自动改名：`name (1).ext`、`name (2).ext`…（同 parser extract 的
 /// uniquify 语义）；目录与无扩展名文件同样适用。
-fn resolve_conflict_name(path: &Path) -> PathBuf {
+pub fn resolve_conflict_name(path: &Path) -> PathBuf {
     if !verbatim_path(path).exists() {
         return path.to_path_buf();
     }
@@ -986,6 +1060,39 @@ mod tests {
         assert!(f.errors.is_empty());
         assert!(!mgr.poll().has_active);
         assert_eq!(std::fs::read(dest.join("x.txt")).unwrap(), b"data");
+    }
+
+    #[test]
+    fn manager_compress_lifecycle() {
+        let t = TempTree::new("compress");
+        let src_dir = t.path().join("src");
+        write_file(&src_dir.join("a.txt"), b"alpha");
+        write_file(&src_dir.join("sub/b.txt"), b"beta");
+        let dest_zip = t.path().join("out").join("src.zip");
+        std::fs::create_dir_all(dest_zip.parent().unwrap()).unwrap();
+
+        let mut mgr = FileOpManager::default();
+        mgr.start_compress(vec![src_dir], dest_zip.clone());
+        let mut finished = None;
+        for _ in 0..200 {
+            let summary = mgr.poll();
+            if let Some(f) = summary.finished.into_iter().next() {
+                finished = Some(f);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let f = finished.expect("op should finish");
+        assert_eq!(f.kind, OpKind::Compress);
+        assert!(!f.cancelled);
+        assert!(f.fatal.is_none());
+        assert!(f.errors.is_empty());
+        // dest_dir = zip 父目录，on_op_finished 的栏刷新匹配依赖这一点。
+        assert_eq!(f.dest_dir, dest_zip.parent().map(Path::to_path_buf));
+        assert!(!mgr.poll().has_active);
+        let entries = openitgo_parser::archive::list_entries(&dest_zip, None).unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["src/", "src/a.txt", "src/sub/", "src/sub/b.txt"]);
     }
 
     /// Windows 长路径：manifest 未声明 longPathAware，>260 字符的路径必须

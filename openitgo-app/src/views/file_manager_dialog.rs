@@ -4,7 +4,7 @@
 //! （确认或取消），由 FileManagerView 统一消费。全部 UI 文本中文。
 
 use crate::views::archive::human_size;
-use crate::views::file_ops::{validate_entry_name, ConflictMode, OpKind};
+use crate::views::file_ops::{resolve_conflict_name, validate_entry_name, ConflictMode, OpKind};
 use std::path::{Path, PathBuf};
 
 /// 对话框统一入口。
@@ -13,6 +13,7 @@ pub enum FmDialog {
     Delete(DeleteDialog),
     Rename(RenameDialog),
     NewDir(NewDirDialog),
+    Compress(CompressDialog),
 }
 
 /// 对话框关闭结果（确认携带全部执行参数；取消为 Cancelled）。
@@ -37,6 +38,10 @@ pub enum FmDialogOutcome {
         parent: PathBuf,
         name: String,
     },
+    ConfirmCompress {
+        sources: Vec<PathBuf>,
+        dest_zip: PathBuf,
+    },
 }
 
 impl FmDialog {
@@ -47,6 +52,7 @@ impl FmDialog {
             FmDialog::Delete(d) => d.ui(ctx),
             FmDialog::Rename(d) => d.ui(ctx),
             FmDialog::NewDir(d) => d.ui(ctx),
+            FmDialog::Compress(d) => d.ui(ctx),
         }
     }
 }
@@ -100,7 +106,7 @@ impl CopyMoveDialog {
         let title = match self.kind {
             OpKind::Copy => "复制到",
             OpKind::Move => "移动到",
-            OpKind::Delete => unreachable!("Delete 走 DeleteDialog"),
+            OpKind::Delete | OpKind::Compress => unreachable!("Delete/Compress 各有对话框"),
         };
         let mut outcome = None;
         let mut open = true;
@@ -115,7 +121,7 @@ impl CopyMoveDialog {
                     match self.kind {
                         OpKind::Copy => "复制",
                         OpKind::Move => "移动",
-                        OpKind::Delete => unreachable!(),
+                        OpKind::Delete | OpKind::Compress => unreachable!(),
                     }
                 ));
                 render_source_list(ui, &self.sources);
@@ -178,6 +184,108 @@ fn conflict_label(mode: ConflictMode) -> &'static str {
         ConflictMode::Overwrite => "覆盖",
         ConflictMode::Skip => "跳过",
         ConflictMode::Ask => "询问（执行期按跳过处理）",
+    }
+}
+
+/// 压缩为 zip：目标目录（默认非焦点栏目录）+ 文件名（默认首个 source
+/// basename.zip）；确认时目标已存在自动改名 "name (1).zip"。
+pub struct CompressDialog {
+    sources: Vec<PathBuf>,
+    dest_dir: String,
+    name: String,
+}
+
+impl CompressDialog {
+    pub fn new(sources: Vec<PathBuf>, dest_dir: &Path) -> Self {
+        let name = sources
+            .first()
+            .and_then(|p| p.file_name())
+            .map(|s| format!("{}.zip", s.to_string_lossy()))
+            .unwrap_or_else(|| "archive.zip".to_string());
+        Self {
+            sources,
+            dest_dir: dest_dir.display().to_string(),
+            name,
+        }
+    }
+
+    /// 目标 zip 完整路径：文件名缺 .zip 后缀时自动补上。
+    fn dest_zip(&self) -> PathBuf {
+        let name = self.name.trim();
+        let name = if name.to_ascii_lowercase().ends_with(".zip") {
+            name.to_string()
+        } else {
+            format!("{name}.zip")
+        };
+        PathBuf::from(self.dest_dir.trim()).join(name)
+    }
+
+    fn ui(&mut self, ctx: &egui::Context) -> Option<FmDialogOutcome> {
+        let mut outcome = None;
+        let mut open = true;
+        egui::Window::new("压缩为 zip")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("压缩以下内容：");
+                render_source_list(ui, &self.sources);
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("目标文件夹：");
+                    ui.add(egui::TextEdit::singleline(&mut self.dest_dir).desired_width(360.0));
+                    if ui.button("浏览…").clicked() {
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            self.dest_dir = dir.display().to_string();
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("文件名：");
+                    ui.add(egui::TextEdit::singleline(&mut self.name).desired_width(240.0));
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let dest_dir = PathBuf::from(self.dest_dir.trim());
+                    let dir_ok = !self.dest_dir.trim().is_empty() && dest_dir.is_dir();
+                    let name_err = validate_entry_name(self.name.trim()).err();
+                    if !self.dest_dir.trim().is_empty() && !dir_ok {
+                        ui.colored_label(ui.visuals().error_fg_color, "目标文件夹不存在");
+                    }
+                    if let Some(err) = &name_err {
+                        ui.colored_label(ui.visuals().error_fg_color, err);
+                    }
+                    let dest_zip = self.dest_zip();
+                    let dest_zip = resolve_conflict_name(&dest_zip);
+                    if dir_ok && name_err.is_none() && dest_zip != self.dest_zip() {
+                        let renamed = dest_zip
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        ui.label(
+                            egui::RichText::new(format!("已存在同名文件，将保存为「{renamed}」"))
+                                .weak(),
+                        );
+                    }
+                    if ui
+                        .add_enabled(dir_ok && name_err.is_none(), egui::Button::new("压缩"))
+                        .clicked()
+                    {
+                        outcome = Some(FmDialogOutcome::ConfirmCompress {
+                            sources: self.sources.clone(),
+                            dest_zip,
+                        });
+                    }
+                    if ui.button("取消").clicked() {
+                        outcome = Some(FmDialogOutcome::Cancelled);
+                    }
+                });
+            });
+        if !open {
+            outcome = Some(FmDialogOutcome::Cancelled);
+        }
+        outcome
     }
 }
 

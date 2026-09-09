@@ -12,7 +12,8 @@
 use crate::opener::{AsyncOpener, OpenStatus};
 use crate::views::archive::{format_mtime, human_size};
 use crate::views::file_manager_dialog::{
-    CopyMoveDialog, DeleteDialog, FmDialog, FmDialogOutcome, NewDirDialog, RenameDialog,
+    CompressDialog, CopyMoveDialog, DeleteDialog, FmDialog, FmDialogOutcome, NewDirDialog,
+    RenameDialog,
 };
 use crate::views::file_manager_panel::{
     fallback_existing_dir, list_drives, FocusMove, FsPanel, PanelLoadState, COL_RIGHT_PAD,
@@ -1300,6 +1301,13 @@ impl FileManagerView {
                     }
                     ui.close();
                 }
+                if ui.button((icons::PACKAGE, " 压缩为 zip…")).clicked() {
+                    let targets = self.op_targets(idx);
+                    if !targets.is_empty() {
+                        self.open_compress_dialog(targets, idx);
+                    }
+                    ui.close();
+                }
                 if ui.button((icons::FOLDER_PLUS, " 新建文件夹")).clicked() {
                     let parent = self.panels[idx].dir.clone();
                     let suggested = suggest_folder_name(&parent);
@@ -1385,6 +1393,15 @@ impl FileManagerView {
         self.dialog = Some(FmDialog::CopyMove(CopyMoveDialog::new(
             kind, sources, &dest,
         )));
+    }
+
+    /// 压缩确认框：目标目录默认值与复制/移动一致（非焦点栏/本栏目录）。
+    fn open_compress_dialog(&mut self, sources: Vec<PathBuf>, from_panel: usize) {
+        let dest = match self.layout {
+            PanelLayout::Dual { .. } => self.panels[1 - from_panel].dir.clone(),
+            PanelLayout::Single { .. } => self.panels[from_panel].dir.clone(),
+        };
+        self.dialog = Some(FmDialog::Compress(CompressDialog::new(sources, &dest)));
     }
 
     /// 栏间拖放复制（仅双栏接收）：行 payload 经 egui 全局 dnd 状态传递，
@@ -1480,8 +1497,11 @@ impl FileManagerView {
                 match kind {
                     OpKind::Copy => self.ops.start_copy(sources, dest, conflict),
                     OpKind::Move => self.ops.start_move(sources, dest, conflict),
-                    OpKind::Delete => unreachable!("Delete 走 DeleteDialog"),
+                    OpKind::Delete | OpKind::Compress => unreachable!("各有专用路径"),
                 };
+            }
+            FmDialogOutcome::ConfirmCompress { sources, dest_zip } => {
+                self.ops.start_compress(sources, dest_zip);
             }
             FmDialogOutcome::ConfirmDelete {
                 sources,

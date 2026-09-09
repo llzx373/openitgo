@@ -1,11 +1,13 @@
 //! 通用压缩包浏览：统一列出 ZIP/RAR/7z/TAR 的条目清单，
-//! 解压引擎见同目录 `extract.rs`。
+//! 解压引擎见同目录 `extract.rs`，zip 写出引擎见 `zip_write.rs`。
 
 mod encoding;
 mod extract;
+mod zip_write;
 
 pub use encoding::{decode_text_guess, decode_zip_entry_name};
 pub use extract::{extract_archive, ExtractOptions, ExtractProgress};
+pub use zip_write::{create_zip, ZipWriteOptions, ZipWriteProgress};
 
 use crate::traits::ParseError;
 use std::io::Read;

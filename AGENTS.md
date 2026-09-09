@@ -77,6 +77,10 @@ cargo clippy --workspace --all-targets -- -D warnings
   → 有序兜底），此后按名查条目只能索引扫描（`find_zip_index`）。`read_comment()`
   仅 zip 非 None；`needs_wrapper_dir()` 为智能解压目录判定；
   `ExtractProgress::Started.total_bytes` 为 `Option<u64>`（仅 ZIP Some）。
+  **zip 写出**：`archive/zip_write.rs` 的 `create_zip(sources, dest, opts, progress,
+  cancel)`（FM「压缩为 zip」用）——条目名 = 相对各 source 父目录（多 source 各自
+  basename 为根，'/' 分隔），目录写 `name/` 条目，文件流式 `io::copy`，符号链接
+  跳过，进度/取消/半成品删除约定与 extract 一致（`ZipWriteProgress`）。
 - **Archive 视图（app 侧）**：`View::Archive` + `views/archive.rs` 资源管理器式
   三栏（目录树 / 面包屑+明细列表 / 预览），操作手感对齐 Explorer/WinRAR；行模型与
   树逻辑在 `views/archive_tree.rs` 纯函数（`list_rows`/`build_dir_rows`/
@@ -124,8 +128,10 @@ cargo clippy --workspace --all-targets -- -D warnings
   （`FileManagerView`：单/双栏布局与分隔条、顶栏/状态栏、键盘与右键接线、
   选中即预览）；`file_manager_panel.rs` 单栏面板 `FsPanel`（导航历史/选择/排序/
   过滤/异步列举）；`file_manager_rows.rs` 纯函数行模型（`list_rows`/`natural_cmp`/
-  `SortKey`）；`file_ops.rs` 文件操作引擎；`file_manager_dialog.rs` 四种确认对话框
-  （复制/移动/删除/重命名/新建文件夹，对齐 `extract_dialog.rs` 模式）。
+  `SortKey`）；`file_ops.rs` 文件操作引擎（`OpKind::Compress` 桥接 parser
+  `create_zip`，dest_dir 记 zip 父目录使完成后栏刷新自动生效）；
+  `file_manager_dialog.rs` 确认对话框
+  （复制/移动/删除/重命名/新建文件夹/压缩为 zip，对齐 `extract_dialog.rs` 模式）。
   **选择模型与 Archive 的差异**：`selected: HashSet<PathBuf>` **含目录**
   （Archive 只存文件条目名、目录选中态派生自后代统计）；焦点是 UI 行索引
   usize（0 = 「..」上级行，盘符根禁用上级）。**file_ops 约定**：每任务一条后台
