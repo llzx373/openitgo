@@ -796,6 +796,7 @@ pub mod macos {
 
 #[cfg(target_os = "windows")]
 pub mod windows {
+    pub mod clipboard_files;
     pub mod drag_out;
     pub mod file_assoc;
     pub mod mpv_view;
@@ -927,6 +928,29 @@ pub mod drag_out {
 /// Unified drag-out API (`crate::platform::drag_out`)。
 #[cfg(target_os = "windows")]
 pub use windows::drag_out;
+
+/// 系统剪贴板文件列表 stub（非 Windows）：写返回 Err，读恒 None。
+#[cfg(not(target_os = "windows"))]
+pub mod clipboard_files {
+    use std::path::PathBuf;
+
+    /// 非 Windows 不支持系统剪贴板文件列表。
+    pub fn set_files(_paths: &[PathBuf], _cut: bool) -> Result<(), String> {
+        Err("系统剪贴板文件列表仅支持 Windows".to_string())
+    }
+
+    /// 非 Windows 不支持系统剪贴板文件列表。
+    pub fn get_files() -> Option<(Vec<PathBuf>, bool)> {
+        None
+    }
+
+    /// 非 Windows 无需清空。
+    pub fn clear() {}
+}
+
+/// Unified clipboard-files API (`crate::platform::clipboard_files`)。
+#[cfg(target_os = "windows")]
+pub use windows::clipboard_files;
 
 /// Unified video-view API used by views/media.rs (`PendingVideoView`
 /// two-phase construction + `MpvNativeView`).

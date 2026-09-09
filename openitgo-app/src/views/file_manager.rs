@@ -115,6 +115,9 @@ pub struct FileManagerView {
     /// 应用内剪贴板（Ctrl+C/X 复制/剪切，Ctrl+V 粘贴到焦点栏）。
     clipboard: Vec<PathBuf>,
     clipboard_cut: bool,
+    /// 本次粘贴来自系统剪贴板且带剪切标志：Move 确认后按 Explorer 惯例
+    /// 清空系统剪贴板（apply_dialog_outcome 消费并复位）。
+    sys_clipboard_cut_pending: bool,
     /// 盘符列表缓存与在途后台枚举（盘符下拉共用；慢速设备不卡 UI）。
     drives: Option<Vec<PathBuf>>,
     drives_rx: Option<std::sync::mpsc::Receiver<Vec<PathBuf>>>,
@@ -138,6 +141,8 @@ pub struct FileManagerView {
     /// 各栏网格上一帧可见范围（cols, 首网格行, 末网格行）：变化即 bump
     /// 缩略图请求代次，worker 丢弃过期请求（快速滚动不解码不可见 cell）。
     thumb_visible: [Option<(usize, usize, usize)>; 2],
+    /// 外部拖入的落点区域（render_panels 每帧记录；快览替换栏为 None）。
+    panel_drop_rects: [Option<egui::Rect>; 2],
 }
 
 /// 帧内意图：行内交互写入，帧尾统一触发回调（避免回调嵌套借用）。
@@ -195,6 +200,10 @@ fn column_layout(right: f32, shift: f32, size_w: f32, mtime_w: f32) -> ColumnLay
         content_right,
     }
 }
+
+/// 行拖出窗口的触发阈值（pt）：位移超过该值且指针出窗才交 OLE
+/// DoDragDrop，避免手滑即触发模态拖放（同 Archive 拖出阈值语义）。
+const DRAG_OUT_THRESHOLD: f32 = 40.0;
 
 /// 栏间拖放复制的 payload：行 drag source 设置，经 egui 全局 dnd 状态
 /// 跨栏传递（payload 与 widget Id 无关，栏间 push_id 隔离不影响）。
@@ -297,6 +306,7 @@ impl FileManagerView {
             dialog: None,
             clipboard: Vec::new(),
             clipboard_cut: false,
+            sys_clipboard_cut_pending: false,
             drives: None,
             drives_rx: None,
             confirm_delete: true,
@@ -307,6 +317,7 @@ impl FileManagerView {
             quickview_open: false,
             thumbs: ThumbCache::new(),
             thumb_visible: [None, None],
+            panel_drop_rects: [None, None],
         }
     }
 
@@ -618,6 +629,17 @@ impl FileManagerView {
         // 中央：双栏 + 可拖分隔条 / 单栏 + 预览占位。
         let panel_rects = self.render_panels(ui, &mut intents);
 
+        // 外部拖入的落点区域（app 侧 handle_dropped_files 经 panel_rect_at
+        // 查询；快览替换栏不算落点——此时该栏显示的是预览面板，同下方的
+        // 点击激活跳过逻辑）。
+        self.panel_drop_rects = [None, None];
+        for (idx, rect) in &panel_rects {
+            if self.quickview_open && *idx != self.active {
+                continue;
+            }
+            self.panel_drop_rects[*idx] = Some(*rect);
+        }
+
         // 鼠标点击某栏任意处即激活该栏（快览面板不产生栏切换：
         // 快览恒停在「对面」，点击它激活会把两栏语义搞乱）。
         let (pressed, pos) = ui.ctx().input(|i| {
@@ -641,6 +663,8 @@ impl FileManagerView {
 
         // 栏间拖放复制：悬停高亮落点栏 + 松开弹「复制到…」确认框 + 拖动徽标。
         self.poll_inter_panel_dnd(ui, &panel_rects);
+        // 行拖出窗口（Windows OLE；文件本就在盘上，直接 do_drag_drop）。
+        self.poll_drag_out_external(ui.ctx(), &mut intents);
 
         self.handle_keyboard(ui, &mut intents, confirm_delete);
         // 「选中即预览」跟随焦点行（键盘/鼠标改动焦点之后统一同步）。
@@ -2188,6 +2212,53 @@ impl FileManagerView {
         }
     }
 
+    /// 外部拖入的落点判定（app 侧 handle_dropped_files 用）：pos 命中某栏
+    /// 的落点区域返回栏索引；快览替换栏/顶栏/状态栏不命中。
+    pub fn panel_rect_at(&self, pos: egui::Pos2) -> Option<usize> {
+        self.panel_drop_rects
+            .iter()
+            .position(|r| r.is_some_and(|r| r.contains(pos)))
+    }
+
+    /// 外部文件拖入某栏：sources = 拖入路径，目标 = 该栏目录，走既有
+    /// 复制确认框（与栏间拖放同确认语义）。
+    pub fn drop_to_panel(&mut self, paths: Vec<PathBuf>, idx: usize) {
+        self.open_copy_move_dialog(OpKind::Copy, paths, idx);
+    }
+
+    /// FM 行拖出窗口（Windows OLE）：拖动中位移 >40pt 且指针出窗 → 清
+    /// egui payload 后 do_drag_drop（文件本就在盘上无需暂存，COPY-only
+    /// 同 drag_out 现状）。松开未出窗 = 栏间拖放现状（egui dnd 插件
+    /// 自行管理 payload，本函数不介入）；Esc 取消由 egui 内建处理。
+    fn poll_drag_out_external(&mut self, ctx: &egui::Context, intents: &mut FmIntents) {
+        if !crate::platform::drag_out::is_supported() {
+            return;
+        }
+        let Some(payload) = egui::DragAndDrop::payload::<FmDragPayload>(ctx) else {
+            return;
+        };
+        let (origin, pos, viewport) = ctx.input(|i| {
+            (
+                i.pointer.press_origin(),
+                i.pointer.latest_pos(),
+                i.viewport_rect(),
+            )
+        });
+        let moved_far = origin
+            .zip(pos)
+            .is_some_and(|(o, p)| o.distance(p) > DRAG_OUT_THRESHOLD);
+        let left_window = pos.is_none_or(|p| !viewport.contains(p));
+        if !(moved_far && left_window) {
+            return;
+        }
+        let sources = payload.sources.clone();
+        egui::DragAndDrop::clear_payload(ctx);
+        // 模态阻塞（自带消息循环）；DROP/CANCEL 返回后本次拖出都结束。
+        if let Err(e) = crate::platform::drag_out::do_drag_drop(&sources) {
+            intents.op_error = Some(e);
+        }
+    }
+
     /// 删除（确认框已把关或 fm_confirm_delete=false）：预览目标在被删项中
     /// 先清预览，然后起后台任务。
     fn start_delete(&mut self, sources: Vec<PathBuf>) {
@@ -2211,6 +2282,7 @@ impl FileManagerView {
     }
 
     fn apply_dialog_outcome(&mut self, outcome: FmDialogOutcome, intents: &mut FmIntents) {
+        let sys_cut_paste = std::mem::take(&mut self.sys_clipboard_cut_pending);
         match outcome {
             FmDialogOutcome::Cancelled => {}
             FmDialogOutcome::ConfirmCopyMove {
@@ -2220,8 +2292,17 @@ impl FileManagerView {
                 conflict,
             } => {
                 match kind {
-                    OpKind::Copy => self.ops.start_copy(sources, dest, conflict),
-                    OpKind::Move => self.ops.start_move(sources, dest, conflict),
+                    OpKind::Copy => {
+                        self.ops.start_copy(sources, dest, conflict);
+                    }
+                    OpKind::Move => {
+                        self.ops.start_move(sources, dest, conflict);
+                        if sys_cut_paste {
+                            // Explorer 惯例：剪切粘贴生效后清空系统剪贴板，
+                            // 防同一份「剪切」被重复粘贴。
+                            crate::platform::clipboard_files::clear();
+                        }
+                    }
                     OpKind::Delete | OpKind::Compress => unreachable!("各有专用路径"),
                 };
             }
@@ -2408,28 +2489,50 @@ impl FileManagerView {
         if ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Extra2)) {
             self.panels[active].go_forward();
         }
-        // 应用内剪贴板：Ctrl+C 复制 / Ctrl+X 剪切 / Ctrl+V 粘贴（经确认框）。
+        // 剪贴板：Ctrl+C 复制 / Ctrl+X 剪切 / Ctrl+V 粘贴（经确认框）。
+        // Windows 优先写/读系统剪贴板（CF_HDROP，与 Explorer 互通）；
+        // 非 Windows 或写失败回退应用内路径列表。
         if mods.command && ui.input(|i| i.key_pressed(egui::Key::C)) {
             let targets = self.op_targets(active);
             if !targets.is_empty() {
-                self.clipboard = targets;
-                self.clipboard_cut = false;
+                if crate::platform::clipboard_files::set_files(&targets, false).is_ok() {
+                    // 系统剪贴板接管：清掉应用内副本，防系统剪贴板被其他
+                    // 内容覆盖后 Ctrl+V 回退粘贴出陈旧文件列表。
+                    self.clipboard.clear();
+                    self.clipboard_cut = false;
+                } else {
+                    self.clipboard = targets;
+                    self.clipboard_cut = false;
+                }
             }
         }
         if mods.command && ui.input(|i| i.key_pressed(egui::Key::X)) {
             let targets = self.op_targets(active);
             if !targets.is_empty() {
-                self.clipboard = targets;
-                self.clipboard_cut = true;
+                if crate::platform::clipboard_files::set_files(&targets, true).is_ok() {
+                    self.clipboard.clear();
+                    self.clipboard_cut = false;
+                } else {
+                    self.clipboard = targets;
+                    self.clipboard_cut = true;
+                }
             }
         }
-        if mods.command && ui.input(|i| i.key_pressed(egui::Key::V)) && !self.clipboard.is_empty() {
-            let kind = if self.clipboard_cut {
-                OpKind::Move
-            } else {
-                OpKind::Copy
-            };
-            self.open_copy_move_dialog(kind, self.clipboard.clone(), active);
+        if mods.command && ui.input(|i| i.key_pressed(egui::Key::V)) {
+            if let Some((paths, is_cut)) = crate::platform::clipboard_files::get_files() {
+                // 系统剪贴板有文件（含 Explorer/其他程序复制的）：目标 =
+                // 焦点栏目录，剪切 → Move 否则 Copy，走既有确认框。
+                self.sys_clipboard_cut_pending = is_cut;
+                let kind = if is_cut { OpKind::Move } else { OpKind::Copy };
+                self.open_copy_move_dialog(kind, paths, active);
+            } else if !self.clipboard.is_empty() {
+                let kind = if self.clipboard_cut {
+                    OpKind::Move
+                } else {
+                    OpKind::Copy
+                };
+                self.open_copy_move_dialog(kind, self.clipboard.clone(), active);
+            }
         }
         // 文件操作：F2 重命名 / F5 复制 / F6 移动 / F7 新建文件夹 / F8(Del) 删除。
         if ui.input(|i| i.key_pressed(egui::Key::F2)) {

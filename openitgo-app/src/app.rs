@@ -4813,6 +4813,19 @@ impl ReaderApp {
             .into_iter()
             .filter_map(|f| f.path)
             .collect();
+        if paths.is_empty() {
+            return;
+        }
+        // 文件管理器视图：落点命中某栏 → 拖入路径作为 sources、目标 = 该栏
+        // 目录，走既有复制确认框链路（与栏间拖放同确认语义）；未命中
+        // （顶栏/状态栏/快览面板）走现有打开行为。
+        if self.current_view == View::FileManager {
+            let pos = ctx.input(|i| i.pointer.latest_pos());
+            if let Some(idx) = pos.and_then(|p| self.file_manager_view.panel_rect_at(p)) {
+                self.file_manager_view.drop_to_panel(paths, idx);
+                return;
+            }
+        }
         self.handle_open_paths(paths);
     }
 

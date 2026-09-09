@@ -59,7 +59,8 @@ unsafe fn drag_drop_inner(files: &[PathBuf]) -> Result<(), String> {
 }
 
 /// 把路径表编码为 HDROP 的宽字符负载：各路径 UTF-16 + NUL，末尾再补一个 NUL。
-fn wide_path_list(files: &[PathBuf]) -> Vec<u16> {
+/// （clipboard_files 的系统剪贴板 CF_HDROP 复用。）
+pub(crate) fn wide_path_list(files: &[PathBuf]) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     let mut out = Vec::new();
     for f in files {
@@ -71,7 +72,8 @@ fn wide_path_list(files: &[PathBuf]) -> Vec<u16> {
 }
 
 /// 构造 HDROP 全局内存块（DROPFILES 头 + 宽字符路径表）。调用方取得所有权。
-fn build_hdrop(files: &[PathBuf]) -> windows::core::Result<HGLOBAL> {
+/// （clipboard_files 写系统剪贴板复用；SetClipboardData 成功后所有权归系统。）
+pub(crate) fn build_hdrop(files: &[PathBuf]) -> windows::core::Result<HGLOBAL> {
     let wide = wide_path_list(files);
     let header = std::mem::size_of::<DROPFILES>();
     let total = header + wide.len() * std::mem::size_of::<u16>();
