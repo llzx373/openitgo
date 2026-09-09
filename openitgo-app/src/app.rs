@@ -420,6 +420,12 @@ pub struct ReaderApp {
     pub window_geometry_validated: bool,
     /// 启动最大化补救是否已发出（只发一次，失败不与用户对抗）。
     pub maximize_restore_sent: bool,
+    /// 窗口以隐藏方式启动（配合启动最大化），尚未到显示时机。
+    pub startup_reveal_pending: bool,
+    /// 隐藏启动后经过的帧数（显示时机判断与超时兜底）。
+    pub startup_reveal_frames: u32,
+    /// 显示瞬间开始的淡入动画起点。
+    pub startup_fade_started: Option<Instant>,
     /// 上次设置的窗口标题，避免每帧重复发 ViewportCommand。
     last_window_title: String,
 }
@@ -469,6 +475,7 @@ impl Default for ReaderApp {
             settings.fm_sort_asc,
             &settings.fm_bookmarks,
         );
+        let startup_hidden = settings.window_maximized;
         Self {
             current_view: View::Library,
             last_view: View::Library,
@@ -523,6 +530,9 @@ impl Default for ReaderApp {
             last_window_geometry_flush: None,
             window_geometry_validated: false,
             maximize_restore_sent: false,
+            startup_reveal_pending: startup_hidden,
+            startup_reveal_frames: 0,
+            startup_fade_started: None,
             last_window_title: String::new(),
         }
     }
@@ -647,9 +657,11 @@ impl eframe::App for ReaderApp {
         self.maybe_save_fm_state();
         self.tick_reading_stats();
         self.tick_persist_history_bookmarks();
+        self.tick_startup_reveal(&ctx);
         self.maybe_validate_window_geometry(&ctx);
         self.tick_persist_window_geometry(&ctx);
         self.sync_window_title(&ctx);
+        self.paint_startup_fade(&ctx);
     }
 }
 
@@ -3772,6 +3784,47 @@ impl ReaderApp {
         self.persist_history_bookmarks_if_due(Instant::now(), HISTORY_FLUSH_INTERVAL);
     }
 
+    /// 隐藏启动（配合启动最大化）的窗口：最大化生效且最终尺寸已渲染一帧后
+    /// 再显示，并启动淡入动画；帧数兜底防极端情况下窗口永不显示。
+    fn tick_startup_reveal(&mut self, ctx: &egui::Context) {
+        if !self.startup_reveal_pending {
+            return;
+        }
+        self.startup_reveal_frames += 1;
+        // tick 排在 maybe_validate 之前：validated 置位的下一帧才显示，
+        // 保证显示前最终尺寸的画面已经呈现过一次。
+        let settled = self.window_geometry_validated && self.startup_reveal_frames >= 2;
+        if settled || self.startup_reveal_frames > 60 {
+            self.startup_reveal_pending = false;
+            self.startup_fade_started = Some(Instant::now());
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+    }
+
+    /// 启动显示后的短暂淡入：从主题底色渐变到透明，替代最大化黑闪。
+    fn paint_startup_fade(&mut self, ctx: &egui::Context) {
+        const FADE_SECS: f32 = 0.2;
+        let Some(started) = self.startup_fade_started else {
+            return;
+        };
+        let t = started.elapsed().as_secs_f32();
+        if t >= FADE_SECS {
+            self.startup_fade_started = None;
+            return;
+        }
+        let base = ctx.global_style().visuals.window_fill();
+        let alpha = ((1.0 - t / FADE_SECS) * 255.0) as u8;
+        let color = egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), alpha);
+        let rect = ctx.viewport_rect();
+        ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("startup_fade"),
+        ))
+        .rect_filled(rect, 0.0, color);
+        ctx.request_repaint();
+    }
+
     /// 首帧（或 monitor 信息就绪后）：先按保存意图补启动最大化，再校验是否屏外。
     fn maybe_validate_window_geometry(&mut self, ctx: &egui::Context) {
         if self.window_geometry_validated {
@@ -5476,6 +5529,7 @@ mod tests {
                 settings.fm_sort_asc,
                 &settings.fm_bookmarks,
             );
+            let startup_hidden = settings.window_maximized;
             Self {
                 current_view: View::Library,
                 last_view: View::Library,
@@ -5530,6 +5584,9 @@ mod tests {
                 last_window_geometry_flush: None,
                 window_geometry_validated: false,
                 maximize_restore_sent: false,
+                startup_reveal_pending: startup_hidden,
+                startup_reveal_frames: 0,
+                startup_fade_started: None,
                 last_window_title: String::new(),
             }
         }

@@ -64,6 +64,12 @@ fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([w, h])
         .with_clamp_size_to_monitor_size(true);
+    // 启动最大化时先隐藏窗口：最大化过程中 wgpu surface 重配置会黑闪一帧，
+    // 隐藏创建 → 最大化生效并渲染好最终尺寸 → 再显示（ReaderApp 侧兜底），
+    // 显示出来即是最终状态，配淡入动画替代黑闪。
+    if settings.window_maximized {
+        viewport = viewport.with_visible(false);
+    }
     // Transparent backbuffer (macOS only): egui-wgpu then picks
     // CompositeAlphaMode::PreMultiplied and the CAMetalLayer becomes
     // non-opaque, so the video layer below the egui surface (Task 4)
