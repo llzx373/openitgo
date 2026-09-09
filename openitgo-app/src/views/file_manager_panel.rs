@@ -59,6 +59,32 @@ pub struct DirListing {
 /// 分支视图递归收集上限：超过即截断（防巨型目录树拖垮列举）。
 pub(crate) const BRANCH_MAX_ENTRIES: usize = 200_000;
 
+/// 面板视图模式：明细列表 / 缩略图网格（每栏独立；网格只是渲染层，
+/// 焦点/选中仍是线性 UI 行索引）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelViewMode {
+    List,
+    Thumbs,
+}
+
+impl PanelViewMode {
+    /// settings 字符串解析（非法值回 List，同 clamp 语义）。
+    pub fn from_setting(s: &str) -> Self {
+        match s {
+            "thumbs" => Self::Thumbs,
+            _ => Self::List,
+        }
+    }
+
+    /// settings 字符串表示。
+    pub fn as_setting(&self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Thumbs => "thumbs",
+        }
+    }
+}
+
 /// 键盘焦点移动模式（move_focus 共用核心，同 archive.rs 的 FocusMove）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusMove {
@@ -138,6 +164,12 @@ pub struct FsPanel {
     pub sort_key: SortKey,
     pub sort_asc: bool,
     pub filter: String,
+    /// 视图模式（明细列表/缩略图网格；每栏独立，不纳入标签快照——
+    /// 切标签保持当前模式）。
+    pub view_mode: PanelViewMode,
+    /// 网格模式当前列数（render_grid 每帧更新；键盘 ↑↓/PgUp/PgDn 线性
+    /// 步长换算用，列表模式恒 1）。
+    pub last_grid_cols: usize,
     /// 是否显示隐藏文件（settings.fm_show_hidden 经 ui() 每帧下发；
     /// 纳入 RowsKey，切换时 rows_cache 自动失效）。
     pub show_hidden: bool,
@@ -229,6 +261,8 @@ impl FsPanel {
             sort_key,
             sort_asc,
             filter: String::new(),
+            view_mode: PanelViewMode::List,
+            last_grid_cols: 1,
             show_hidden: true,
             branch_view: false,
             listing_truncated: false,

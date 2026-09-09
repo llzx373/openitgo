@@ -5,7 +5,7 @@ use crate::opener::{AsyncOpener, OpenStatus};
 use crate::shortcuts::is_shortcut_pressed;
 use crate::timing;
 use crate::views::file_manager::{FileManagerView, FmCallbacks, FmStateSnapshot};
-use crate::views::file_manager_panel::{fallback_existing_dir, PanelLoadState};
+use crate::views::file_manager_panel::{fallback_existing_dir, PanelLoadState, PanelViewMode};
 use crate::views::file_manager_rows::natural_cmp;
 use crate::views::settings::{SettingsTab, SettingsView};
 use crate::views::{
@@ -461,7 +461,7 @@ impl Default for ReaderApp {
         let password_book = store.load_password_book().unwrap_or_else(|_| PasswordBook {
             entries: PasswordBook::builtin_defaults(),
         });
-        let file_manager_view = FileManagerView::new(
+        let mut file_manager_view = FileManagerView::new(
             &settings.fm_layout,
             settings.fm_dual_ratio,
             settings.fm_preview_open,
@@ -469,6 +469,11 @@ impl Default for ReaderApp {
             settings.fm_sort_asc,
             &settings.fm_bookmarks,
         );
+        // 视图模式全局单值（同 fm_sort_key 先例），恢复时两栏同用。
+        let fm_view_mode = PanelViewMode::from_setting(&settings.fm_view_mode);
+        for panel in &mut file_manager_view.panels {
+            panel.view_mode = fm_view_mode;
+        }
         Self {
             current_view: View::Library,
             last_view: View::Library,
@@ -3714,6 +3719,7 @@ impl ReaderApp {
         self.settings.fm_preview_open = snapshot.preview_open;
         self.settings.fm_sort_key = snapshot.sort_key.clone();
         self.settings.fm_sort_asc = snapshot.sort_asc;
+        self.settings.fm_view_mode = snapshot.view_mode.clone();
         self.settings.fm_dir_left = snapshot.dir_left.clone();
         self.settings.fm_dir_right = snapshot.dir_right.clone();
         self.settings.fm_bookmarks = snapshot.bookmarks.clone();

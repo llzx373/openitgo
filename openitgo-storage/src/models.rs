@@ -76,6 +76,10 @@ pub struct Settings {
     /// 文件管理器排序键："name"|"size"|"mtime"。
     #[serde(default = "default_fm_sort_key")]
     pub fm_sort_key: String,
+    /// 文件管理器视图模式："list"|"thumbs"（全局单值，恢复时两栏同用；
+    /// 取舍同 fm_sort_key——持久化活动栏的模式）。
+    #[serde(default = "default_fm_view_mode")]
+    pub fm_view_mode: String,
     #[serde(default = "default_true")]
     pub fm_sort_asc: bool,
     /// 删除前确认（防误删）。
@@ -129,6 +133,10 @@ fn default_fm_sort_key() -> String {
     "name".to_string()
 }
 
+fn default_fm_view_mode() -> String {
+    "list".to_string()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -170,6 +178,7 @@ impl Default for Settings {
             fm_dual_ratio: default_fm_dual_ratio(),
             fm_preview_open: true,
             fm_sort_key: default_fm_sort_key(),
+            fm_view_mode: default_fm_view_mode(),
             fm_sort_asc: true,
             fm_confirm_delete: true,
             fm_show_hidden: true,
@@ -299,6 +308,12 @@ impl Settings {
                 self.fm_sort_key
             ));
         }
+        if !matches!(self.fm_view_mode.as_str(), "list" | "thumbs") {
+            return Err(format!(
+                "fm_view_mode must be list/thumbs, got {}",
+                self.fm_view_mode
+            ));
+        }
         if !self.fm_tabs_left.is_empty() && self.fm_active_tab_left >= self.fm_tabs_left.len() {
             return Err(format!(
                 "fm_active_tab_left {} out of range ({} tabs)",
@@ -346,6 +361,9 @@ impl Settings {
         }
         if !matches!(self.fm_sort_key.as_str(), "size" | "mtime" | "ext") {
             self.fm_sort_key = default_fm_sort_key();
+        }
+        if !matches!(self.fm_view_mode.as_str(), "list" | "thumbs") {
+            self.fm_view_mode = default_fm_view_mode();
         }
         let mut seen = std::collections::HashSet::new();
         self.fm_bookmarks

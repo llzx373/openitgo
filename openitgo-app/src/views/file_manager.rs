@@ -16,10 +16,14 @@ use crate::views::file_manager_dialog::{
     NewDirDialog, RenameDialog, SelectGroupDialog,
 };
 use crate::views::file_manager_panel::{
-    fallback_existing_dir, list_drives, FocusMove, FsPanel, PanelLoadState, COL_RIGHT_PAD,
-    ROW_HEIGHT,
+    fallback_existing_dir, list_drives, FocusMove, FsPanel, PanelLoadState, PanelViewMode,
+    COL_RIGHT_PAD, ROW_HEIGHT,
 };
 use crate::views::file_manager_rows::{FsEntry, SortKey};
+use crate::views::file_manager_thumbs::{
+    grid_cols, grid_row_count, grid_row_of, truncate_cell_name, ThumbCache, ThumbKey, ThumbLookup,
+    THUMB_CELL_H, THUMB_CELL_W, THUMB_MAX_DIM,
+};
 use crate::views::file_ops::{
     create_dir, format_eta, rename_entry, suggest_folder_name, FileOpManager, FinishedOp, OpKind,
     OpSpeedMeter,
@@ -61,6 +65,9 @@ pub struct FmStateSnapshot {
     /// settings 只有单值，持久化活动栏的排序）。
     pub sort_key: String,
     pub sort_asc: bool,
+    /// 视图模式 "list"|"thumbs"：同 sort_key 先例取活动栏（全局单值，
+    /// 双栏各自模式可能不同，持久化活动栏的）。
+    pub view_mode: String,
     /// 两栏当前目录（字符串；空 = 用户主目录，跟随 resolve_fm_dir 语义）。
     pub dir_left: String,
     pub dir_right: String,
@@ -125,6 +132,12 @@ pub struct FileManagerView {
     /// Ctrl+Q 对面栏快速预览（双栏；会话内状态，不落盘）：开启时非活动栏
     /// 整栏替换为预览面板，目标 = 活动栏焦点文件，焦点移动跟随。
     quickview_open: bool,
+    /// 缩略图缓存（两栏共享；FileManagerView 级持有——纹理与后台 worker
+    /// 不随栏/标签切换重建）。
+    thumbs: ThumbCache,
+    /// 各栏网格上一帧可见范围（cols, 首网格行, 末网格行）：变化即 bump
+    /// 缩略图请求代次，worker 丢弃过期请求（快速滚动不解码不可见 cell）。
+    thumb_visible: [Option<(usize, usize, usize)>; 2],
 }
 
 /// 帧内意图：行内交互写入，帧尾统一触发回调（避免回调嵌套借用）。
@@ -203,6 +216,29 @@ fn drag_sources(selected: &HashSet<PathBuf>, row_path: &Path) -> Vec<PathBuf> {
     }
 }
 
+/// 悬停信息提示（明细行与网格 cell 共用）：全路径 + 大小；
+/// 「..」= 上级目录 / 分支模式 = 退出分支视图提示。
+fn row_hover_tip(entry: Option<&FsEntry>, branch: bool) -> String {
+    match entry {
+        None => {
+            if branch {
+                "退出分支视图".to_string()
+            } else {
+                "上级目录".to_string()
+            }
+        }
+        Some(e) => {
+            let mut tip = e.path.display().to_string();
+            if !e.is_dir {
+                if let Some(size) = e.size {
+                    tip.push_str(&format!("\n大小: {}", human_size(size)));
+                }
+            }
+            tip
+        }
+    }
+}
+
 /// 标签条标题：目录 basename；根目录（如 `C:\`）无 basename 时显示完整
 /// 路径。超 20 字符截断 + 省略号（完整路径走悬停 tooltip）。
 fn tab_label(dir: &Path) -> String {
@@ -269,6 +305,8 @@ impl FileManagerView {
             history_menu_toggle: false,
             op_speed: None,
             quickview_open: false,
+            thumbs: ThumbCache::new(),
+            thumb_visible: [None, None],
         }
     }
 
@@ -292,6 +330,7 @@ impl FileManagerView {
             preview_open,
             sort_key: sort_key.to_string(),
             sort_asc: panel.sort_asc,
+            view_mode: panel.view_mode.as_setting().to_string(),
             dir_left: self.panels[0].dir.display().to_string(),
             dir_right: self.panels[1].dir.display().to_string(),
             bookmarks: self
@@ -410,6 +449,11 @@ impl FileManagerView {
             ui.ctx().request_repaint_after(Duration::from_millis(100));
         }
         self.poll_preview(ui.ctx());
+        // 缩略图：排空解码结果；在途期间主动重绘（对齐项目 loader 约定）。
+        self.thumbs.poll(ui.ctx());
+        if self.thumbs.has_pending() {
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
+        }
         // 文件操作：每帧排空进度/完成事件；活动任务期间主动重绘。
         let op_summary = self.ops.poll();
         if op_summary.has_active {
@@ -686,6 +730,26 @@ impl FileManagerView {
                     self.clear_preview();
                 }
             }
+            // 缩略图视图开关（焦点栏；选中/焦点是线性行索引天然保留，
+            // 滚动按焦点行重定位——last_scroll_offset 的行高单位变了，
+            // 置 MAX 让 min_scroll_to_reveal 把焦点行钉到视口顶）。
+            let thumbs_on = self.panels[self.active].view_mode == PanelViewMode::Thumbs;
+            if ui
+                .add(egui::Button::new((icons::SQUARES_FOUR, " 缩略图")).selected(thumbs_on))
+                .on_hover_text("缩略图视图（焦点栏）")
+                .clicked()
+            {
+                let panel = &mut self.panels[self.active];
+                panel.view_mode = if thumbs_on {
+                    PanelViewMode::List
+                } else {
+                    PanelViewMode::Thumbs
+                };
+                if panel.focus.is_some() {
+                    panel.focus_scroll_pending = true;
+                    panel.last_scroll_offset = f32::MAX;
+                }
+            }
             if let PanelLayout::Single { preview_open } = &mut self.layout {
                 ui.separator();
                 if ui
@@ -860,10 +924,15 @@ impl FileManagerView {
                     }
                 });
             }
-            Phase::Ready => {
-                self.render_column_header(ui, idx);
-                self.render_list(ui, idx, intents);
-            }
+            Phase::Ready => match self.panels[idx].view_mode {
+                PanelViewMode::List => {
+                    self.render_column_header(ui, idx);
+                    self.render_list(ui, idx, intents);
+                }
+                PanelViewMode::Thumbs => {
+                    self.render_grid(ui, idx, intents);
+                }
+            },
         }
     }
 
@@ -1569,148 +1638,405 @@ impl FileManagerView {
                 if !self.panels[idx].selected.contains(&e.path) {
                     self.panels[idx].click_row(row, false, false);
                 }
-                if ui.button((icons::ARROW_SQUARE_OUT, " 打开")).clicked() {
-                    self.open_ui_row(idx, rows, row, intents);
-                    ui.close();
-                }
-                let comic_openable = e.is_dir || archive_kind(&e.path).is_some();
-                if comic_openable && ui.button((icons::BOOK_OPEN, " 作为漫画打开")).clicked()
-                {
-                    intents.open_as_comic = Some(e.path.clone());
-                    ui.close();
-                }
-                let targets = self.op_targets(idx);
-                let extract_src = match targets.as_slice() {
-                    [p] if archive_kind(p).is_some() => Some(p.clone()),
-                    _ => None,
-                };
-                let other_dir = match self.layout {
-                    PanelLayout::Dual { .. } => Some(self.panels[1 - idx].dir.clone()),
-                    PanelLayout::Single { .. } => None,
-                };
-                let (extract_label, extract_dest) = match other_dir {
-                    Some(d) if d != self.panels[idx].dir => ("另一栏", d),
-                    _ => ("当前目录", self.panels[idx].dir.clone()),
-                };
-                if ui
-                    .add_enabled(
-                        extract_src.is_some(),
-                        egui::Button::new((icons::EXPORT, format!(" 解压到{extract_label}…"))),
-                    )
-                    .clicked()
-                {
-                    if let Some(src) = extract_src {
-                        intents.extract = Some((src, extract_dest));
-                    }
-                    ui.close();
-                }
-                ui.separator();
-                if ui.button((icons::COPY, " 复制路径")).clicked() {
-                    ui.ctx().copy_text(e.path.display().to_string());
-                    ui.close();
-                }
-                if ui.button((icons::ARROW_CLOCKWISE, " 刷新")).clicked() {
-                    self.panels[idx].refresh();
-                    ui.close();
-                }
-                let dir_targets: Vec<PathBuf> = self.panels[idx]
-                    .entries
-                    .iter()
-                    .filter(|e| e.is_dir && targets.contains(&e.path))
-                    .map(|e| e.path.clone())
-                    .collect();
-                if ui
-                    .add_enabled(
-                        !dir_targets.is_empty(),
-                        egui::Button::new((icons::GAUGE, " 计算大小")),
-                    )
-                    .clicked()
-                {
-                    self.panels[idx].request_dir_sizes(dir_targets);
-                    ui.close();
-                }
-                ui.separator();
-                if ui.button((icons::PENCIL_SIMPLE, " 重命名")).clicked() {
-                    self.dialog = Some(FmDialog::Rename(RenameDialog::new(e.path.clone())));
-                    ui.close();
-                }
-                if ui
-                    .button((icons::PENCIL_SIMPLE_LINE, " 批量重命名…"))
-                    .clicked()
-                {
-                    self.open_multi_rename_dialog(idx);
-                    ui.close();
-                }
-                let dual = matches!(self.layout, PanelLayout::Dual { .. });
-                let dest_label = if dual { "另一栏" } else { "当前目录" };
-                if ui
-                    .button((icons::COPY, format!(" 复制到{dest_label}…")))
-                    .clicked()
-                {
-                    let targets = self.op_targets(idx);
-                    if !targets.is_empty() {
-                        self.open_copy_move_dialog(OpKind::Copy, targets, idx);
-                    }
-                    ui.close();
-                }
-                if ui
-                    .button((icons::EXPORT, format!(" 移动到{dest_label}…")))
-                    .clicked()
-                {
-                    let targets = self.op_targets(idx);
-                    if !targets.is_empty() {
-                        self.open_copy_move_dialog(OpKind::Move, targets, idx);
-                    }
-                    ui.close();
-                }
-                if ui.button((icons::PACKAGE, " 压缩为 zip…")).clicked() {
-                    let targets = self.op_targets(idx);
-                    if !targets.is_empty() {
-                        self.open_compress_dialog(targets, idx);
-                    }
-                    ui.close();
-                }
-                if ui.button((icons::FOLDER_PLUS, " 新建文件夹")).clicked() {
-                    let parent = self.panels[idx].dir.clone();
-                    let suggested = suggest_folder_name(&parent);
-                    self.dialog = Some(FmDialog::NewDir(NewDirDialog::new(parent, suggested)));
-                    ui.close();
-                }
-                ui.separator();
-                if ui.button((icons::TRASH, " 删除")).clicked() {
-                    let targets = self.op_targets(idx);
-                    if !targets.is_empty() {
-                        if self.confirm_delete {
-                            self.dialog = Some(FmDialog::Delete(DeleteDialog::new(targets)));
-                        } else {
-                            self.start_delete(targets);
-                        }
-                    }
-                    ui.close();
-                }
+                self.entry_context_menu(ui, idx, rows, row, e, intents);
             });
         }
-        // 悬停信息提示（被截断名称的完整信息）：全路径 + 大小；
-        // 「..」= 上级目录 / 分支模式 = 退出分支视图提示。
-        let tip = match &entry {
-            None => {
-                if branch {
-                    "退出分支视图".to_string()
+        response.on_hover_text(row_hover_tip(entry.as_ref(), branch));
+    }
+
+    /// 条目右键菜单本体（明细行与网格 cell 共用；调用方负责「先单选」
+    /// 前奏与「..」行不弹菜单的门槛）。
+    fn entry_context_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        idx: usize,
+        rows: &[usize],
+        row: usize,
+        e: &FsEntry,
+        intents: &mut FmIntents,
+    ) {
+        if ui.button((icons::ARROW_SQUARE_OUT, " 打开")).clicked() {
+            self.open_ui_row(idx, rows, row, intents);
+            ui.close();
+        }
+        let comic_openable = e.is_dir || archive_kind(&e.path).is_some();
+        if comic_openable && ui.button((icons::BOOK_OPEN, " 作为漫画打开")).clicked() {
+            intents.open_as_comic = Some(e.path.clone());
+            ui.close();
+        }
+        let targets = self.op_targets(idx);
+        let extract_src = match targets.as_slice() {
+            [p] if archive_kind(p).is_some() => Some(p.clone()),
+            _ => None,
+        };
+        let other_dir = match self.layout {
+            PanelLayout::Dual { .. } => Some(self.panels[1 - idx].dir.clone()),
+            PanelLayout::Single { .. } => None,
+        };
+        let (extract_label, extract_dest) = match other_dir {
+            Some(d) if d != self.panels[idx].dir => ("另一栏", d),
+            _ => ("当前目录", self.panels[idx].dir.clone()),
+        };
+        if ui
+            .add_enabled(
+                extract_src.is_some(),
+                egui::Button::new((icons::EXPORT, format!(" 解压到{extract_label}…"))),
+            )
+            .clicked()
+        {
+            if let Some(src) = extract_src {
+                intents.extract = Some((src, extract_dest));
+            }
+            ui.close();
+        }
+        ui.separator();
+        if ui.button((icons::COPY, " 复制路径")).clicked() {
+            ui.ctx().copy_text(e.path.display().to_string());
+            ui.close();
+        }
+        if ui.button((icons::ARROW_CLOCKWISE, " 刷新")).clicked() {
+            self.panels[idx].refresh();
+            ui.close();
+        }
+        let dir_targets: Vec<PathBuf> = self.panels[idx]
+            .entries
+            .iter()
+            .filter(|e| e.is_dir && targets.contains(&e.path))
+            .map(|e| e.path.clone())
+            .collect();
+        if ui
+            .add_enabled(
+                !dir_targets.is_empty(),
+                egui::Button::new((icons::GAUGE, " 计算大小")),
+            )
+            .clicked()
+        {
+            self.panels[idx].request_dir_sizes(dir_targets);
+            ui.close();
+        }
+        ui.separator();
+        if ui.button((icons::PENCIL_SIMPLE, " 重命名")).clicked() {
+            self.dialog = Some(FmDialog::Rename(RenameDialog::new(e.path.clone())));
+            ui.close();
+        }
+        if ui
+            .button((icons::PENCIL_SIMPLE_LINE, " 批量重命名…"))
+            .clicked()
+        {
+            self.open_multi_rename_dialog(idx);
+            ui.close();
+        }
+        let dual = matches!(self.layout, PanelLayout::Dual { .. });
+        let dest_label = if dual { "另一栏" } else { "当前目录" };
+        if ui
+            .button((icons::COPY, format!(" 复制到{dest_label}…")))
+            .clicked()
+        {
+            let targets = self.op_targets(idx);
+            if !targets.is_empty() {
+                self.open_copy_move_dialog(OpKind::Copy, targets, idx);
+            }
+            ui.close();
+        }
+        if ui
+            .button((icons::EXPORT, format!(" 移动到{dest_label}…")))
+            .clicked()
+        {
+            let targets = self.op_targets(idx);
+            if !targets.is_empty() {
+                self.open_copy_move_dialog(OpKind::Move, targets, idx);
+            }
+            ui.close();
+        }
+        if ui.button((icons::PACKAGE, " 压缩为 zip…")).clicked() {
+            let targets = self.op_targets(idx);
+            if !targets.is_empty() {
+                self.open_compress_dialog(targets, idx);
+            }
+            ui.close();
+        }
+        if ui.button((icons::FOLDER_PLUS, " 新建文件夹")).clicked() {
+            let parent = self.panels[idx].dir.clone();
+            let suggested = suggest_folder_name(&parent);
+            self.dialog = Some(FmDialog::NewDir(NewDirDialog::new(parent, suggested)));
+            ui.close();
+        }
+        ui.separator();
+        if ui.button((icons::TRASH, " 删除")).clicked() {
+            let targets = self.op_targets(idx);
+            if !targets.is_empty() {
+                if self.confirm_delete {
+                    self.dialog = Some(FmDialog::Delete(DeleteDialog::new(targets)));
                 } else {
-                    "上级目录".to_string()
+                    self.start_delete(targets);
                 }
             }
-            Some(e) => {
-                let mut tip = e.path.display().to_string();
-                if !e.is_dir {
-                    if let Some(size) = e.size {
-                        tip.push_str(&format!("\n大小: {}", human_size(size)));
+            ui.close();
+        }
+    }
+
+    /// 缩略图网格：cell 176×200pt（160 缩略图区 + 两行名称）；列数 =
+    /// 栏宽 / cell 宽（≥1）；show_rows 按网格行虚拟化（一行 = 一排
+    /// cell）。焦点/选中仍是线性 UI 行索引（行 0 = 「..」cell），
+    /// 过滤/排序/type-ahead/分支视图全部不受影响（网格只是渲染层）。
+    fn render_grid(&mut self, ui: &mut egui::Ui, idx: usize, intents: &mut FmIntents) {
+        let rows = self.panels[idx].rows();
+        let item_count = rows.len() + 1;
+        let cols = grid_cols(ui.available_width());
+        let grid_rows = grid_row_count(item_count, cols);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let panel = &mut self.panels[idx];
+        panel.last_grid_cols = cols;
+        // PgUp/PgDn 步进换算基准：网格行高。
+        panel.last_row_pitch = THUMB_CELL_H;
+        let mut area = egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
+        // 标签切换的滚动恢复（同 render_list）。
+        if let Some(offset) = panel.take_pending_scroll_restore() {
+            if offset > 0.0 {
+                area = area.vertical_scroll_offset(offset);
+            }
+        }
+        // 焦点揭示：线性行号先换算所在网格行。
+        if panel.focus_scroll_pending {
+            panel.focus_scroll_pending = false;
+            if panel.last_viewport_height > 0.0 {
+                if let Some(focus) = panel.focus {
+                    if focus < item_count {
+                        let new_offset = min_scroll_to_reveal(
+                            panel.last_scroll_offset,
+                            panel.last_viewport_height,
+                            grid_row_of(focus, cols) as f32 * THUMB_CELL_H,
+                        );
+                        if (new_offset - panel.last_scroll_offset).abs() > 0.01 {
+                            area = area.vertical_scroll_offset(new_offset);
+                        }
                     }
                 }
-                tip
             }
+        }
+        let active = self.active == idx;
+        let output = area.show_rows(ui, THUMB_CELL_H, grid_rows, |ui, range| {
+            for grid_row in range {
+                // 同 render_list：行内交互（双击目录/「..」、右键「打开」）
+                // 可触发导航当场清空 entries，旧 rows 快照即刻失效，状态
+                // 离开 Ready 就停笔。
+                if !matches!(self.panels[idx].state, PanelLoadState::Ready) {
+                    break;
+                }
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for col in 0..cols {
+                        let row = grid_row * cols + col;
+                        if row >= item_count {
+                            break;
+                        }
+                        self.render_grid_cell(ui, idx, &rows, row, active, intents);
+                    }
+                });
+            }
+        });
+        let panel = &mut self.panels[idx];
+        panel.last_scroll_offset = output.state.offset.y;
+        panel.last_viewport_height = output.inner_rect.height();
+        // 可见范围变化：bump 缩略图请求代次——worker 解码前比对，快速
+        // 滚动时过期请求（已不可见 cell）直接丢弃不浪费解码。
+        let first = (output.state.offset.y / THUMB_CELL_H).floor().max(0.0) as usize;
+        let last =
+            ((output.state.offset.y + output.inner_rect.height()) / THUMB_CELL_H).ceil() as usize;
+        let visible = (cols, first, last);
+        if self.thumb_visible[idx] != Some(visible) {
+            self.thumb_visible[idx] = Some(visible);
+            self.thumbs.bump_generation();
+        }
+    }
+
+    /// 网格一个 cell：选中/悬停底色 + 焦点描边（同明细行视觉语言），
+    /// 居中缩略图/大字体图标 + 底部两行截断名称；单击/双击/右键/拖动
+    /// （栏间 dnd payload）语义与明细行一致。
+    fn render_grid_cell(
+        &mut self,
+        ui: &mut egui::Ui,
+        idx: usize,
+        rows: &[usize],
+        row: usize,
+        active: bool,
+        intents: &mut FmIntents,
+    ) {
+        let is_parent = row == 0;
+        // rows 可能是导航前的旧快照（同帧行内双击已清空 entries）：get 防御。
+        let entry: Option<FsEntry> = if is_parent {
+            None
+        } else {
+            rows.get(row - 1)
+                .and_then(|&i| self.panels[idx].entries.get(i).cloned())
         };
-        response.on_hover_text(tip);
+        let branch = self.panels[idx].branch_view;
+        // 分支模式下「..」cell = 退出分支视图（根目录也可用）。
+        let parent_enabled = branch || !self.panels[idx].is_root();
+        let selected = entry
+            .as_ref()
+            .is_some_and(|e| self.panels[idx].selected.contains(&e.path));
+        let focused = self.panels[idx].focus == Some(row);
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(THUMB_CELL_W, THUMB_CELL_H),
+            egui::Sense::click_and_drag(),
+        );
+        let painter = ui.painter();
+        if selected {
+            painter.rect_filled(rect, 4.0, ui.visuals().selection.bg_fill);
+        } else if response.hovered() {
+            painter.rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
+        }
+        if focused {
+            // 焦点描边：活动栏强色，非活动栏弱化（对齐明细行焦点语义）。
+            let stroke = if active {
+                ui.visuals().selection.stroke
+            } else {
+                egui::Stroke::new(1.0, ui.visuals().weak_text_color())
+            };
+            painter.rect_stroke(rect, 4.0, stroke, egui::StrokeKind::Inside);
+        }
+
+        // 160×160 缩略图区（水平居中）。
+        let thumb_side = THUMB_MAX_DIM as f32;
+        let thumb_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.center().x, rect.top() + 6.0 + thumb_side / 2.0),
+            egui::vec2(thumb_side, thumb_side),
+        );
+        let weak = ui.visuals().weak_text_color();
+        match &entry {
+            None => {
+                painter.text(
+                    thumb_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    icons::ARROW_UP.as_str(),
+                    egui::FontId::proportional(48.0),
+                    weak,
+                );
+            }
+            Some(e) if e.is_dir => {
+                painter.text(
+                    thumb_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    icons::FOLDER.as_str(),
+                    egui::FontId::proportional(72.0),
+                    weak,
+                );
+            }
+            Some(e) => {
+                // 图片扩展名判别用 is_comic_image_name（额外排除 macOS
+                // `._*` AppleDouble 垃圾文件，防无意义解码；
+                // is_previewable_name 含文本扩展名，不适用）。
+                let is_image = openitgo_parser::traits::is_comic_image_name(&e.name);
+                let mut drawn = false;
+                if is_image {
+                    let key: ThumbKey = (e.mtime, e.size.unwrap_or(0));
+                    match self.thumbs.lookup(&e.path, &key) {
+                        ThumbLookup::Ready(tex) => {
+                            let size = tex.size_vec2();
+                            let scale = (thumb_side / size.x).min(thumb_side / size.y).min(1.0);
+                            let fit =
+                                egui::Rect::from_center_size(thumb_rect.center(), size * scale);
+                            painter.image(
+                                tex.id(),
+                                fit,
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                egui::Color32::WHITE,
+                            );
+                            drawn = true;
+                        }
+                        // 未缓存：请求（可见 cell 才会渲染到这里）+ 占位图标。
+                        ThumbLookup::Miss => self.thumbs.request(e.path.clone(), key),
+                        // 解码失败/非图片：已记忆，回退大图标。
+                        ThumbLookup::Failed => {}
+                    }
+                }
+                if !drawn {
+                    let icon = if is_image {
+                        icons::FILE_IMAGE
+                    } else {
+                        entry_icon(e)
+                    };
+                    painter.text(
+                        thumb_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        icon.as_str(),
+                        egui::FontId::proportional(48.0),
+                        weak,
+                    );
+                }
+            }
+        }
+        // 名称：底部两行区，字符量按两行截断（truncate_cell_name），
+        // 像素折行交给 layout wrap；水平居中、超出区域裁剪。
+        let name_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + 4.0, thumb_rect.bottom() + 4.0),
+            egui::pos2(rect.right() - 4.0, rect.bottom() - 2.0),
+        );
+        let name = match &entry {
+            None => "..".to_string(),
+            Some(e) => truncate_cell_name(&e.name, 24),
+        };
+        let text_color = if is_parent && !parent_enabled {
+            ui.visuals().widgets.noninteractive.fg_stroke.color
+        } else {
+            ui.visuals().text_color()
+        };
+        let galley = painter.layout(
+            name,
+            egui::TextStyle::Body.resolve(ui.style()),
+            text_color,
+            name_rect.width(),
+        );
+        painter.with_clip_rect(name_rect).galley(
+            egui::pos2(
+                name_rect.center().x - galley.size().x / 2.0,
+                name_rect.top(),
+            ),
+            galley,
+            text_color,
+        );
+
+        // 交互与明细行一致：cell = 栏间拖放的 drag source（「..」不可拖）。
+        if let Some(e) = &entry {
+            let sources = drag_sources(&self.panels[idx].selected, &e.path);
+            response.dnd_set_drag_payload(FmDragPayload {
+                sources,
+                src_panel: idx,
+            });
+        }
+        let mods = ui.input(|i| i.modifiers);
+        if response.clicked() {
+            self.panels[idx].click_row(row, mods.command, mods.shift);
+        }
+        if response.double_clicked() {
+            if is_parent {
+                if branch {
+                    self.panels[idx].exit_branch_view();
+                } else if parent_enabled {
+                    self.panels[idx].parent_dir();
+                }
+            } else {
+                self.open_ui_row(idx, rows, row, intents);
+            }
+        }
+        // 「..」cell 无右键菜单。
+        if !is_parent {
+            response.context_menu(|ui| {
+                // Explorer 惯例：右键未选中的项先把它单选。
+                let Some(e) = &entry else { return };
+                if !self.panels[idx].selected.contains(&e.path) {
+                    self.panels[idx].click_row(row, false, false);
+                }
+                self.entry_context_menu(ui, idx, rows, row, e, intents);
+            });
+        }
+        response.on_hover_text(row_hover_tip(entry.as_ref(), branch));
     }
 
     /// 打开一行的默认动作（双击/Enter/右键「打开」共用）：「..」= 上级；
@@ -2007,7 +2333,8 @@ impl FileManagerView {
 
     /// 键盘导航（Explorer/TC 式）：Tab 切换焦点栏（纯 Tab；Shift+Tab 不拦）、
     /// Ctrl+Tab/Ctrl+Shift+Tab 标签循环、Ctrl+T 新建标签、Ctrl+W 关闭当前
-    /// 标签（剩 1 个忽略）、↑/↓ 移动焦点并单选、
+    /// 标签（剩 1 个忽略）、↑/↓ 移动焦点并单选（网格模式按列数步进，
+    /// 网格专属 ←→ 步进 1）、
     /// Shift+↑/↓ 从 anchor 扩选、Ctrl+↑/↓ 只移焦点、Home/End 跳首/末行、
     /// PgUp/PgDn 整页步进、Enter 打开焦点行、空格计算焦点目录大小、
     /// Backspace 上级、Ctrl+A 全选可见、Ctrl+R 刷新、Alt+←/→ 导航历史、
@@ -2254,11 +2581,26 @@ impl FileManagerView {
         if mods.command && ui.input(|i| i.key_pressed(egui::Key::R)) {
             self.panels[active].refresh();
         }
+        // 网格模式：↑↓ 按列数步进（线性行号换算，列数由 render_grid
+        // 每帧写入 last_grid_cols），←→ 步进 1（列表模式 ←→ 不绑定）；
+        // PgUp/PgDn = 可见网格行数 × 列数。
+        let thumbs_mode = self.panels[active].view_mode == PanelViewMode::Thumbs;
+        let vstep = self.panels[active].last_grid_cols.max(1) as isize;
         if !mods.alt && ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-            self.panels[active].move_focus(1, focus_mode);
+            let step = if thumbs_mode { vstep } else { 1 };
+            self.panels[active].move_focus(step, focus_mode);
         }
         if !mods.alt && ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-            self.panels[active].move_focus(-1, focus_mode);
+            let step = if thumbs_mode { vstep } else { 1 };
+            self.panels[active].move_focus(-step, focus_mode);
+        }
+        if thumbs_mode && !mods.command && !mods.alt {
+            if ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                self.panels[active].move_focus(1, focus_mode);
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                self.panels[active].move_focus(-1, focus_mode);
+            }
         }
         if ui.input(|i| i.key_pressed(egui::Key::Home)) {
             self.panels[active].move_focus_edge(false, focus_mode);
@@ -2267,11 +2609,21 @@ impl FileManagerView {
             self.panels[active].move_focus_edge(true, focus_mode);
         }
         if ui.input(|i| i.key_pressed(egui::Key::PageDown)) {
-            let step = self.panels[active].page_step();
+            let rows_step = self.panels[active].page_step();
+            let step = if thumbs_mode {
+                rows_step * vstep
+            } else {
+                rows_step
+            };
             self.panels[active].move_focus(step, focus_mode);
         }
         if ui.input(|i| i.key_pressed(egui::Key::PageUp)) {
-            let step = self.panels[active].page_step();
+            let rows_step = self.panels[active].page_step();
+            let step = if thumbs_mode {
+                rows_step * vstep
+            } else {
+                rows_step
+            };
             self.panels[active].move_focus(-step, focus_mode);
         }
         if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
