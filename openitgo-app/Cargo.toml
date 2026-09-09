@@ -31,6 +31,9 @@ unrar = "0.5"
 libwebp-sys = "0.14"
 # 解压完成后「删除压缩包」移入回收站。
 trash = "5"
+# FS watch 自动刷新（文件管理器，views/file_manager_panel.rs PanelWatch）；
+# 默认后端：Windows ReadDirectoryChanges / macOS FSEvents / Linux inotify。
+notify = "8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"

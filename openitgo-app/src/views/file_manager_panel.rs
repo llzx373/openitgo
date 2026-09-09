@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// 明细列表行高（pt），虚拟化滚动要求固定行高（同 archive.rs 约定）。
 pub(crate) const ROW_HEIGHT: f32 = 22.0;
@@ -27,6 +28,9 @@ pub(crate) const COL_MAX_WIDTH: f32 = 400.0;
 pub(crate) const NAME_COL_MIN: f32 = 80.0;
 /// 列内容右缘内边距（pt）：列锚点在右缘内 6pt 处，表头与行内容共用。
 pub(crate) const COL_RIGHT_PAD: f32 = 6.0;
+/// FS watch 事件去抖窗口：距最后一次事件满此时长才触发 refresh
+/// （批量外部改动合并为一次重列）。
+pub(crate) const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// 面板目录列举状态机：Idle（未初始化，等恢复目录）→ Loading → Ready/Failed。
 /// （`AsyncOpener` 的通道本身携带 `Result<T, String>`，无需再套一层。）
@@ -58,6 +62,47 @@ struct RowsKey {
     sort_key: SortKey,
     sort_asc: bool,
     show_hidden: bool,
+}
+
+/// 当前目录的 FS 变更监听（非递归）：事件经 channel 汇入 poll 去抖后
+/// 触发 refresh；watcher drop 即停止监听。
+struct PanelWatch {
+    /// 监听句柄（仅保活，drop 停止监听）。
+    _watcher: notify::RecommendedWatcher,
+    /// 已监听的目录（与 dir 相同则跳过重建）。
+    path: PathBuf,
+    rx: crossbeam_channel::Receiver<()>,
+    /// 最近一次事件时间（去抖基准；None = 无待刷新事件）。
+    last_event: Option<Instant>,
+}
+
+/// 去抖判定：距最后一次事件已满 WATCH_DEBOUNCE 窗口。
+fn watch_debounce_ready(last: Option<Instant>, now: Instant) -> bool {
+    match last {
+        Some(t) => now.duration_since(t) >= WATCH_DEBOUNCE,
+        None => false,
+    }
+}
+
+/// 为目录建立非递归 FS 监听：事件发 channel 信号并经 wake_ctx 唤醒 UI
+/// （egui 空闲不重绘）；建立失败（网络盘/权限/路径不存在）静默降级 None。
+fn try_watch(path: &Path, wake_ctx: Option<egui::Context>) -> Option<PanelWatch> {
+    use notify::{RecursiveMode, Watcher};
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let mut watcher = notify::recommended_watcher(move |_res: notify::Result<notify::Event>| {
+        let _ = tx.send(());
+        if let Some(ctx) = &wake_ctx {
+            ctx.request_repaint();
+        }
+    })
+    .ok()?;
+    watcher.watch(path, RecursiveMode::NonRecursive).ok()?;
+    Some(PanelWatch {
+        _watcher: watcher,
+        path: path.to_path_buf(),
+        rx,
+        last_event: None,
+    })
 }
 
 pub struct FsPanel {
@@ -108,6 +153,12 @@ pub struct FsPanel {
     dir_size_cancel: Option<Arc<AtomicBool>>,
     /// 已请求未回报的目录（去重 + 重启任务时并入新线程清单）。
     dir_size_pending: Vec<PathBuf>,
+    /// 当前目录的 FS 变更监听；navigate 时随 start_listing 丢弃，
+    /// 列举就绪（Ready）后按当前 dir 惰性建立。
+    watch: Option<PanelWatch>,
+    /// 监听回调唤醒 UI 用的 egui Context（视图首帧 ui() 注入；无头测试
+    /// 为 None，回调只发 channel 信号）。
+    wake_ctx: Option<egui::Context>,
 }
 
 impl FsPanel {
@@ -138,6 +189,8 @@ impl FsPanel {
             dir_size_rx: None,
             dir_size_cancel: None,
             dir_size_pending: Vec::new(),
+            watch: None,
+            wake_ctx: None,
         }
     }
 
@@ -154,6 +207,7 @@ impl FsPanel {
         self.last_scroll_offset = 0.0;
         self.last_viewport_height = 0.0;
         self.clear_dir_sizes();
+        self.watch = None;
         self.state = PanelLoadState::Loading(AsyncOpener::open(path, read_dir_entries));
     }
 
@@ -251,6 +305,7 @@ impl FsPanel {
     /// `request_repaint_after(100ms)`，遵循 egui 空闲不重绘约定）。
     pub fn poll(&mut self) -> bool {
         self.poll_dir_sizes();
+        self.poll_watch();
         // mem::take 会把 state 先换成 Default(Idle)，必须先确认 Loading 再
         // take——否则 Ready/Failed 会被静默打回 Idle，触发 app 侧「Idle =
         // 首次进入」恢复逻辑每帧重列目录（列表闪烁 + 选中/焦点被清）。
@@ -276,6 +331,7 @@ impl FsPanel {
                 self.focus = None;
                 self.anchor = None;
                 self.state = PanelLoadState::Ready;
+                self.ensure_watch();
                 false
             }
             OpenStatus::Ready(Err(e)) => {
@@ -283,6 +339,57 @@ impl FsPanel {
                 false
             }
         }
+    }
+
+    /// 视图首帧注入唤醒上下文（FS watch 回调 request_repaint 用）。
+    pub fn set_wake_ctx(&mut self, ctx: egui::Context) {
+        if self.wake_ctx.is_none() {
+            self.wake_ctx = Some(ctx);
+        }
+    }
+
+    /// 为当前目录建立 FS 监听；已监听同一路径则跳过（避免每帧重建）。
+    fn ensure_watch(&mut self) {
+        if self
+            .watch
+            .as_ref()
+            .map(|w| w.path == self.dir)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        self.watch = try_watch(&self.dir, self.wake_ctx.clone());
+    }
+
+    /// 排空 FS 监听事件：去抖 300ms 后触发 refresh（保留选中，同 Ctrl+R）。
+    /// Loading 期间到达的事件保留到列举完成后再判定。
+    fn poll_watch(&mut self) {
+        let should_refresh = {
+            let Some(watch) = &mut self.watch else {
+                return;
+            };
+            if watch.rx.try_iter().count() > 0 {
+                watch.last_event = Some(Instant::now());
+            }
+            let ready = watch_debounce_ready(watch.last_event, Instant::now())
+                && !matches!(self.state, PanelLoadState::Loading(_));
+            if ready {
+                watch.last_event = None;
+            }
+            ready
+        };
+        if should_refresh {
+            self.refresh();
+        }
+    }
+
+    /// 有待去抖的 FS 变更事件（调用方据此 request_repaint_after 推进
+    /// 去抖窗口，直到 refresh 触发）。
+    pub fn watch_refresh_pending(&self) -> bool {
+        self.watch
+            .as_ref()
+            .map(|w| w.last_event.is_some())
+            .unwrap_or(false)
     }
 
     /// 按需后台计算目录总大小：过滤掉已算出/已请求的目录；已有在途任务
@@ -866,5 +973,85 @@ mod tests {
         assert!(matches!(panel.state, PanelLoadState::Ready));
         assert!(!panel.poll());
         assert!(matches!(panel.state, PanelLoadState::Ready));
+    }
+
+    /// 去抖判定：无事件不就绪；距最后事件满 WATCH_DEBOUNCE 窗口才就绪。
+    #[test]
+    fn watch_debounce_ready_waits_quiet_window() {
+        let now = Instant::now();
+        assert!(!watch_debounce_ready(None, now));
+        assert!(!watch_debounce_ready(Some(now), now));
+        assert!(watch_debounce_ready(Some(now - WATCH_DEBOUNCE), now));
+        assert!(!watch_debounce_ready(
+            Some(now - WATCH_DEBOUNCE + Duration::from_millis(1)),
+            now
+        ));
+    }
+
+    /// watch 建立失败（路径不存在）静默降级为 None。macOS FSEvents 对
+    /// 不存在路径也可能建流成功，严格断言只限 Windows/Linux 后端。
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn watch_missing_dir_degrades_to_none() {
+        let missing = std::env::temp_dir().join(format!(
+            "openitgo-fm-watch-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(try_watch(&missing, None).is_none());
+    }
+
+    /// 集成：navigate 就绪后建立 watch；外部在目录里新建文件，事件经
+    /// channel 去抖后触发 refresh，新条目出现在 entries。navigate 到别的
+    /// 目录后旧 watcher 被替换（路径跟踪不串目录）。
+    #[test]
+    fn watch_event_triggers_refresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        panel.navigate_to(tmp.path().to_path_buf());
+        for _ in 0..200 {
+            if !panel.poll() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(matches!(panel.state, PanelLoadState::Ready));
+        assert!(panel.watch.is_some());
+
+        std::fs::write(tmp.path().join("watched-new-file.txt"), b"x").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            panel.poll();
+            if panel
+                .entries
+                .iter()
+                .any(|e| e.name == "watched-new-file.txt")
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "watch 事件未触发 refresh");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(matches!(panel.state, PanelLoadState::Ready));
+        // refresh 后 watch 仍在且路径不变（未每帧重建）。
+        let watch = panel.watch.as_ref().unwrap();
+        assert_eq!(watch.path, tmp.path());
+
+        // navigate 换目录：旧 watcher 丢弃，就绪后新 watcher 跟踪新目录。
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        panel.navigate_to(sub.clone());
+        assert!(panel.watch.is_none());
+        for _ in 0..200 {
+            if !panel.poll() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(matches!(panel.state, PanelLoadState::Ready));
+        assert_eq!(panel.watch.as_ref().map(|w| w.path.clone()), Some(sub));
     }
 }

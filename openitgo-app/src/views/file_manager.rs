@@ -314,6 +314,8 @@ impl FileManagerView {
         // RowsKey 自动失效，无需重新 read_dir。
         for panel in &mut self.panels {
             panel.show_hidden = show_hidden;
+            // FS watch 回调唤醒 UI 用（首帧注入，后续 no-op）。
+            panel.set_wake_ctx(ui.ctx().clone());
         }
         let FmCallbacks {
             on_back,
@@ -334,6 +336,8 @@ impl FileManagerView {
             loading |= panel.poll();
             // 目录大小计算在途：主动重绘排空结果（egui 空闲不重绘）。
             loading |= panel.dir_sizes_in_flight();
+            // FS watch 事件待去抖：主动重绘推进去抖窗口直到触发 refresh。
+            loading |= panel.watch_refresh_pending();
             // 列举完成（navigate/refresh）：预览目标属于该栏且已消失则清预览。
             if was_loading && !matches!(panel.state, PanelLoadState::Loading(_)) {
                 if let Some(target) = &self.preview_path {

@@ -174,6 +174,14 @@ cargo clippy --workspace --all-targets -- -D warnings
   （防环且链接不计）、单项失败跳过、cancel 提前返回已累加值、`verbatim_path`
   包长路径。目录行大小列命中 `dir_sizes` 时以比文件大小弱一档的颜色显示，
   未命中留空。
+  **FS watch 自动刷新**：列举就绪（Ready）后 `ensure_watch` 为当前目录
+  建非递归 `notify::RecommendedWatcher`（同路径已监听则跳过；失败静默
+  降级 None）；回调发 crossbeam 信号 + `wake_ctx.request_repaint()` 唤醒
+  UI（ctx 由 FileManagerView 首帧 ui() 经 `set_wake_ctx` 注入）。`poll()`
+  在 Loading 检查之前 `poll_watch` 排空事件，去抖 300ms
+  （`watch_debounce_ready` 纯函数）后调 `refresh()`（保留选中，同
+  Ctrl+R）；去抖窗口内 `watch_refresh_pending()` 并入 ui() 的在途重绘
+  判定。`start_listing` 丢弃旧 watcher，refresh 路径复用。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`
