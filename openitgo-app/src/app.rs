@@ -2493,6 +2493,7 @@ impl ReaderApp {
             let mut open_path: Option<PathBuf> = None;
             let mut open_archive: Option<PathBuf> = None;
             let mut open_as_comic: Option<PathBuf> = None;
+            let mut extract: Option<(PathBuf, PathBuf)> = None;
             let mut op_error: Option<String> = None;
             let mut confirm_change: Option<bool> = None;
             self.file_manager_view.ui(
@@ -2502,6 +2503,7 @@ impl ReaderApp {
                     on_open_path: &mut |p| open_path = Some(p),
                     on_open_archive: &mut |p| open_archive = Some(p),
                     on_open_as_comic: &mut |p| open_as_comic = Some(p),
+                    on_extract: &mut |a, d| extract = Some((a, d)),
                     on_op_error: &mut |msg| op_error = Some(msg),
                     on_confirm_delete_change: &mut |confirm| confirm_change = Some(confirm),
                 },
@@ -2523,6 +2525,12 @@ impl ReaderApp {
             if let Some(path) = open_as_comic {
                 // 显式「作为漫画打开」：跳过启发式分流，直接走漫画链路。
                 self.open_comic(path);
+            }
+            if let Some((archive, dest)) = extract {
+                // 「解压到另一栏/当前目录…」：复用全局解压对话框，目标预填落点栏目录。
+                let mut dialog = ExtractDialogState::new(archive, None, None, &self.settings);
+                dialog.dest = dest.display().to_string();
+                self.extract_dialog = Some(dialog);
             }
             // 打开动作真的让视图离开 FM 才记录回退落点；打开失败留在 FM 时不记。
             if opened_something && self.current_view != View::FileManager {
@@ -2663,6 +2671,12 @@ impl ReaderApp {
         }
         if !messages.is_empty() {
             self.error_message = Some(messages.join("；"));
+        }
+        // 文件管理器视图下刷新落点栏（输出目录或其父目录 == 栏目录时）。
+        if self.current_view == View::FileManager {
+            for (_, _, output_dir) in &summary.finished {
+                self.file_manager_view.refresh_extract_dest(output_dir);
+            }
         }
         if summary.has_active {
             ctx.request_repaint_after(Duration::from_millis(200));

@@ -109,6 +109,8 @@ struct FmIntents {
     open_path: Option<PathBuf>,
     open_archive: Option<PathBuf>,
     open_as_comic: Option<PathBuf>,
+    /// 右键「解压到另一栏/当前目录…」：(压缩包路径, 目标目录)。
+    extract: Option<(PathBuf, PathBuf)>,
     /// 文件操作汇总/错误（完成/取消/失败时上报给 app error_message）。
     op_error: Option<String>,
     /// 删除确认框「不再询问」勾选（false = 仍需确认）。
@@ -123,6 +125,8 @@ pub struct FmCallbacks<'a> {
     pub on_open_archive: &'a mut dyn FnMut(PathBuf),
     /// 右键「作为漫画打开」（目录与压缩包可用）。
     pub on_open_as_comic: &'a mut dyn FnMut(PathBuf),
+    /// 右键「解压到…」：(压缩包路径, 目标目录)；app 侧弹解压对话框。
+    pub on_extract: &'a mut dyn FnMut(PathBuf, PathBuf),
     /// 文件操作完成/取消/失败的汇总消息。
     pub on_op_error: &'a mut dyn FnMut(String),
     /// 删除确认框「不再询问」勾选变化（写回 settings.fm_confirm_delete）。
@@ -266,6 +270,7 @@ impl FileManagerView {
             on_open_path,
             on_open_archive,
             on_open_as_comic,
+            on_extract,
             on_op_error,
             on_confirm_delete_change,
         } = callbacks;
@@ -397,6 +402,9 @@ impl FileManagerView {
         }
         if let Some(path) = intents.open_as_comic {
             on_open_as_comic(path);
+        }
+        if let Some((archive, dest)) = intents.extract {
+            on_extract(archive, dest);
         }
         if let Some(msg) = intents.op_error {
             on_op_error(msg);
@@ -1074,6 +1082,31 @@ impl FileManagerView {
                     intents.open_as_comic = Some(e.path.clone());
                     ui.close();
                 }
+                let targets = self.op_targets(idx);
+                let extract_src = match targets.as_slice() {
+                    [p] if archive_kind(p).is_some() => Some(p.clone()),
+                    _ => None,
+                };
+                let other_dir = match self.layout {
+                    PanelLayout::Dual { .. } => Some(self.panels[1 - idx].dir.clone()),
+                    PanelLayout::Single { .. } => None,
+                };
+                let (extract_label, extract_dest) = match other_dir {
+                    Some(d) if d != self.panels[idx].dir => ("另一栏", d),
+                    _ => ("当前目录", self.panels[idx].dir.clone()),
+                };
+                if ui
+                    .add_enabled(
+                        extract_src.is_some(),
+                        egui::Button::new((icons::EXPORT, format!(" 解压到{extract_label}…"))),
+                    )
+                    .clicked()
+                {
+                    if let Some(src) = extract_src {
+                        intents.extract = Some((src, extract_dest));
+                    }
+                    ui.close();
+                }
                 ui.separator();
                 if ui.button((icons::COPY, " 复制路径")).clicked() {
                     ui.ctx().copy_text(e.path.display().to_string());
@@ -1262,6 +1295,16 @@ impl FileManagerView {
         for panel in &mut self.panels {
             if new_path.parent() == Some(panel.dir.as_path()) {
                 panel.selected.insert(new_path.to_path_buf());
+                panel.refresh();
+            }
+        }
+    }
+
+    /// 解压完成刷新落点栏：栏目录 == 输出目录（直接解压进目标文件夹）或
+    /// 输出目录的父目录（智能/强制建包名子目录）时刷新，保留选中。
+    pub fn refresh_extract_dest(&mut self, output_dir: &Path) {
+        for panel in &mut self.panels {
+            if panel.dir == output_dir || output_dir.parent() == Some(panel.dir.as_path()) {
                 panel.refresh();
             }
         }
@@ -1847,6 +1890,7 @@ mod tests {
                     on_open_path: &mut |_| {},
                     on_open_archive: &mut |_| {},
                     on_open_as_comic: &mut |_| {},
+                    on_extract: &mut |_, _| {},
                     on_op_error: &mut |_| {},
                     on_confirm_delete_change: &mut |_| {},
                 },
