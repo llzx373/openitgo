@@ -115,6 +115,9 @@ pub struct FileManagerView {
     history_menu_toggle: bool,
     /// 状态栏速度/ETA 估算器（任务 id + EMA 采样器；任务切换重置）。
     op_speed: Option<(u64, OpSpeedMeter)>,
+    /// Ctrl+Q 对面栏快速预览（双栏；会话内状态，不落盘）：开启时非活动栏
+    /// 整栏替换为预览面板，目标 = 活动栏焦点文件，焦点移动跟随。
+    quickview_open: bool,
 }
 
 /// 帧内意图：行内交互写入，帧尾统一触发回调（避免回调嵌套借用）。
@@ -241,6 +244,7 @@ impl FileManagerView {
             select_group_pattern: String::new(),
             history_menu_toggle: false,
             op_speed: None,
+            quickview_open: false,
         }
     }
 
@@ -305,6 +309,8 @@ impl FileManagerView {
                 self.active = 0;
             }
             self.preview_window_open = false;
+            // 单栏无对面栏概念，快览关闭。
+            self.quickview_open = false;
             self.layout = PanelLayout::Single {
                 preview_open: self.saved_preview_open,
             };
@@ -526,7 +532,8 @@ impl FileManagerView {
         // 中央：双栏 + 可拖分隔条 / 单栏 + 预览占位。
         let panel_rects = self.render_panels(ui, &mut intents);
 
-        // 鼠标点击某栏任意处即激活该栏。
+        // 鼠标点击某栏任意处即激活该栏（快览面板不产生栏切换：
+        // 快览恒停在「对面」，点击它激活会把两栏语义搞乱）。
         let (pressed, pos) = ui.ctx().input(|i| {
             (
                 i.pointer.primary_pressed() || i.pointer.secondary_pressed(),
@@ -536,6 +543,9 @@ impl FileManagerView {
         if pressed {
             if let Some(pos) = pos {
                 for (idx, rect) in &panel_rects {
+                    if self.quickview_open && *idx != self.active {
+                        continue;
+                    }
                     if rect.contains(pos) {
                         self.active = *idx;
                     }
@@ -616,9 +626,23 @@ impl FileManagerView {
                 }
                 self.active = 0;
                 self.preview_window_open = false;
+                // 单栏无对面栏概念，快览关闭。
+                self.quickview_open = false;
                 self.layout = PanelLayout::Single {
                     preview_open: self.saved_preview_open,
                 };
+            }
+            if matches!(self.layout, PanelLayout::Dual { .. })
+                && ui
+                    .add(egui::Button::new((icons::EYE, " 快览")).selected(self.quickview_open))
+                    .on_hover_text("对面栏快速预览（Ctrl+Q）")
+                    .clicked()
+            {
+                self.quickview_open = !self.quickview_open;
+                if !self.quickview_open {
+                    // 关闭即清预览目标，避免后台继续读取。
+                    self.clear_preview();
+                }
             }
             if let PanelLayout::Single { preview_open } = &mut self.layout {
                 ui.separator();
@@ -666,7 +690,9 @@ impl FileManagerView {
                         // auto-id 相同（ScrollArea 滚动状态、列宽拖拽、列头点击
                         // 的持久状态被跨栏共享，滚左栏右栏跟着动）。
                         |ui| {
-                            ui.push_id(("fm_panel", 0), |ui| self.render_panel(ui, 0, intents));
+                            ui.push_id(("fm_panel", 0), |ui| {
+                                self.render_panel_or_quickview(ui, 0, intents)
+                            });
                         },
                     );
                     rects.push((0, left.response.rect));
@@ -682,7 +708,9 @@ impl FileManagerView {
                         egui::vec2(right_w, height),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            ui.push_id(("fm_panel", 1), |ui| self.render_panel(ui, 1, intents));
+                            ui.push_id(("fm_panel", 1), |ui| {
+                                self.render_panel_or_quickview(ui, 1, intents)
+                            });
                         },
                     );
                     rects.push((1, right.response.rect));
@@ -733,6 +761,22 @@ impl FileManagerView {
                 }
                 rects
             }
+        }
+    }
+
+    /// 双栏一侧内容：Ctrl+Q 快览开启且本侧为非活动栏时整栏替换为预览面板
+    /// （被替换栏对象不列举不渲染，state/selected/滚动原样保留，关闭快览
+    /// 后原样恢复）；否则渲染常规栏。
+    fn render_panel_or_quickview(
+        &mut self,
+        ui: &mut egui::Ui,
+        idx: usize,
+        intents: &mut FmIntents,
+    ) {
+        if self.quickview_open && self.active != idx {
+            self.draw_preview_content(ui);
+        } else {
+            self.render_panel(ui, idx, intents);
         }
     }
 
@@ -1641,7 +1685,11 @@ impl FileManagerView {
         let layer = ui.layer_id();
         let mut drop_sources: Option<Vec<PathBuf>> = None;
         for &(idx, rect) in panel_rects {
-            if idx == payload.src_panel || !ctx.rect_contains_pointer(layer, rect) {
+            // 快览面板（被替换的非活动栏）不作为落点（不高亮、不响应 drop）。
+            if idx == payload.src_panel
+                || (self.quickview_open && idx != self.active)
+                || !ctx.rect_contains_pointer(layer, rect)
+            {
                 continue;
             }
             if self.panels[idx].dir == self.panels[payload.src_panel].dir {
@@ -1801,7 +1849,8 @@ impl FileManagerView {
     /// Backspace 上级、Ctrl+A 全选可见、Ctrl+R 刷新、Alt+←/→ 导航历史、
     /// Alt+↓ 历史下拉开关、可打印字符 type-ahead 定位、`*` 反选、
     /// `+`/`-` 弹「选择组」对话框、Ctrl+U 交换两栏、Ctrl+←/→ 栏间目录
-    /// 同步、Ctrl+\ 回根目录、Esc 分级清 type-ahead 缓冲→过滤→选中。
+    /// 同步、Ctrl+\ 回根目录、Ctrl+Q 对面栏快速预览（单栏 = 预览开关）、
+    /// Esc 分级清 type-ahead 缓冲→过滤→选中。
     /// 过滤框等文本输入占用键盘时不处理。
     /// 文件操作键：F2 重命名 / F5 复制 / F6 移动 / F7 新建文件夹 /
     /// F8(Delete) 删除（confirm_delete 时先弹确认框）；Ctrl+C/X/V 剪贴板。
@@ -1993,6 +2042,24 @@ impl FileManagerView {
                 }
             }
         }
+        // Ctrl+Q：双栏 = 开关对面栏快速预览（快览面板恒渲染非活动栏位置，
+        // 目标 = 活动栏焦点文件）；单栏 = 切换预览面板（同顶栏「预览」）。
+        // Q 是字母键，但 type-ahead 捕获有 !mods.command 门控，不会抢键。
+        if mods.command && ui.input(|i| i.key_pressed(egui::Key::Q)) {
+            match &mut self.layout {
+                PanelLayout::Dual { .. } => {
+                    self.quickview_open = !self.quickview_open;
+                    if !self.quickview_open {
+                        // 关闭即清预览目标，避免后台继续读取。
+                        self.clear_preview();
+                    }
+                }
+                PanelLayout::Single { preview_open } => {
+                    *preview_open = !*preview_open;
+                    self.saved_preview_open = *preview_open;
+                }
+            }
+        }
         if mods.command && ui.input(|i| i.key_pressed(egui::Key::R)) {
             self.panels[active].refresh();
         }
@@ -2065,11 +2132,13 @@ impl FileManagerView {
 
     /// 「选中即预览」：焦点栏焦点行落到文件时更新预览目标（可预览类型后台
     /// 加载，不可预览类型直接显示元信息占位，不读内容）；焦点不在文件上
-    /// （目录/「..」/无焦点）时清空预览——单栏预览面板恒在，内容切占位。
-    /// 仅单栏预览开 / F3 弹窗开时跟随焦点，双栏闲置时不发起后台读取。
+    /// （目录/「..」/无焦点）时清空预览——预览面板/快览恒在，内容切占位。
+    /// 仅单栏预览开 / F3 弹窗开 / 双栏快览开时跟随焦点，其余情况不发起
+    /// 后台读取。
     fn sync_preview_target(&mut self) {
         let follows = matches!(self.layout, PanelLayout::Single { preview_open: true })
-            || self.preview_window_open;
+            || self.preview_window_open
+            || (matches!(self.layout, PanelLayout::Dual { .. }) && self.quickview_open);
         if !follows {
             return;
         }
