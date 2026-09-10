@@ -171,7 +171,8 @@ cargo clippy --workspace --all-targets -- -D warnings
   `fm_drag_confirm`/`fm_archive_open`/`fm_esc_keep_selection`（行为设置包，
   见下「行为设置包（阶段 O）」段）/`fm_dblclick_blank_up`（双击空白回上级，
   见「键位补齐包（阶段 P）」段）/`fm_system_icons`（系统真实图标，
-  见「系统真实图标（阶段 S）」段）；`FileManagerView::snapshot()`
+  见「系统真实图标（阶段 S）」段）/`fm_saved_filters`/`fm_filter_bar_bottom`
+  （见「过滤增强（阶段 T）」段）；`FileManagerView::snapshot()`
   采集，`maybe_save_fm_state`（`App::update` 末尾）diff 快照后写回 settings——
   **不自行落盘**，退出时 `on_exit` 统一 `save_settings`（排序只持久化活动栏，
   取舍见 `FmStateSnapshot` 注释）；快照在离开 FileManager 视图时重置。设置页
@@ -372,6 +373,23 @@ cargo clippy --workspace --all-targets -- -D warnings
   is_dir 与文件 `!drawn` 分支 32pt 档（painter.image 居中于缩略图区），
   「..」行不动、图片缩略图优先不变；thumb_visible bump 处同 bump
   sys_icons 代次；Miss/Failed 回退字体图标（`entry_icon`）。
+  **过滤增强（阶段 T）**：`list_rows` 过滤经 `filter_matches` 纯函数
+  （file_manager_rows.rs）——过滤串含 `*`/`?` 走 `wildcard_match`
+  （`;` 分隔多模式），否则维持不区分大小写子串。过滤条渲染抽为
+  `render_filter_bar`（输入框固定 Id `fm_filter_edit` + FUNNEL 下拉：
+  保存方案点击应用 / 会话历史最近 8 条 / 「保存当前过滤」过滤非空可用），
+  两处调用点——默认顶栏右侧，`fm_filter_bar_bottom`（默认 false）时
+  render_panel 先给内容区留 28pt 再在焦点栏底部渲染（只作用于焦点栏，
+  切栏跟随）。`saved_filters` 视图持有、构造后 `set_saved_filters` 注入、
+  入 `FmStateSnapshot` 走快照写回 settings（同 bookmark_groups 模式）；
+  `filter_history` 会话内不落盘（`push_history_capped` 纯函数去重置顶
+  截断，记录点 = 菜单应用/失焦/Esc 清空）。**Ctrl+S** 置
+  `filter_focus_request` 一次性请求（必须在 handle_keyboard 的
+  egui_wants_keyboard_input 检查之前——过滤框聚焦时该检查恒 true，
+  「已聚焦则选中全文」经 TextEditState set_char_range 实现）。过滤框
+  聚焦时 Esc = 清空 + surrender_focus 并置 `filter_esc_handled`，
+  handle_keyboard 的 Esc 链见到标记跳过（渲染先于键盘处理，交还焦点后
+  wants_keyboard_input 变 false，无此标记会同帧双消费）。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

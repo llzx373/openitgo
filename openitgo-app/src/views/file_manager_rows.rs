@@ -183,10 +183,24 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
     }
 }
 
+/// 过滤匹配纯函数（阶段 T）：trim 后为空恒 true；含 `*` 或 `?` 时走
+/// `wildcard_match`（`;` 分隔多模式），否则不区分大小写子串。
+pub fn filter_matches(filter: &str, name: &str) -> bool {
+    let f = filter.trim();
+    if f.is_empty() {
+        return true;
+    }
+    if f.contains(['*', '?']) {
+        wildcard_match(f, name)
+    } else {
+        name.to_lowercase().contains(&f.to_lowercase())
+    }
+}
+
 /// 返回排序+过滤后的条目索引。dirs_first=true 时目录恒排在文件前
 /// （false = 目录文件混排、统一排序，fm_dirs_first 设置）；
-/// 过滤为不区分大小写的 name 子串匹配（trim 后为空则不过滤）；
-/// show_hidden=false 时隐藏条目直接排除。
+/// 过滤经 `filter_matches`（子串 / 通配符）；show_hidden=false 时
+/// 隐藏条目直接排除。
 #[allow(clippy::too_many_arguments)]
 pub fn list_rows(
     entries: &[FsEntry],
@@ -196,14 +210,14 @@ pub fn list_rows(
     show_hidden: bool,
     dirs_first: bool,
 ) -> Vec<usize> {
-    let needle = filter.trim().to_lowercase();
+    let filter = filter.trim();
     let mut dirs: Vec<usize> = Vec::new();
     let mut files: Vec<usize> = Vec::new();
     for (idx, e) in entries.iter().enumerate() {
         if !show_hidden && e.is_hidden {
             continue;
         }
-        if !needle.is_empty() && !e.name.to_lowercase().contains(&needle) {
+        if !filter_matches(filter, &e.name) {
             continue;
         }
         if e.is_dir && dirs_first {
@@ -407,6 +421,35 @@ mod tests {
         // 空白过滤串不过滤
         let rows = list_rows(&entries, "  ", SortKey::Name, true, true, true);
         assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn filter_matches_wildcard_branch() {
+        // 含 * / ? 走通配（; 多模式、不区分大小写）。
+        assert!(filter_matches("*.zip", "a.zip"));
+        assert!(filter_matches("*.ZIP; *.rar", "b.RAR"));
+        assert!(filter_matches("vol?.cbz", "Vol1.cbz"));
+        assert!(!filter_matches("*.zip", "a.zip.bak"));
+        assert!(!filter_matches("vol?.cbz", "vol10.cbz"));
+        // 无通配符维持子串语义（含「* 仅作为普通字符不存在于文件名」的边界：
+        // 子串串里含 * 必走通配分支）。
+        assert!(filter_matches("photo", "Photo1.JPG"));
+        assert!(!filter_matches("photo", "notes.txt"));
+        // trim 后为空恒匹配。
+        assert!(filter_matches("  ", "anything"));
+        assert!(filter_matches("", "anything"));
+        // list_rows 集成：通配过滤。
+        let entries = vec![
+            entry("a.zip", false, Some(1), None),
+            entry("b.rar", false, Some(1), None),
+            entry("c.txt", false, Some(1), None),
+            entry("zips", true, None, None),
+        ];
+        let rows = list_rows(&entries, "*.zip;*.rar", SortKey::Name, true, true, true);
+        assert_eq!(names(&entries, &rows), ["a.zip", "b.rar"]);
+        // 子串分支不受通配改造影响。
+        let rows = list_rows(&entries, "zip", SortKey::Name, true, true, true);
+        assert_eq!(names(&entries, &rows), ["zips", "a.zip"]);
     }
 
     #[test]

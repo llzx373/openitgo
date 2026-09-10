@@ -172,6 +172,8 @@ pub struct FmBehaviorOptions {
     /// 系统真实图标（fm_system_icons）：列表行 16pt / 网格非图片 cell
     /// 32pt 档经 SHGetFileInfoW 取 Shell 图标；false = 字体图标现状。
     pub system_icons: bool,
+    /// 过滤框渲染在焦点栏列表底部（fm_filter_bar_bottom）；false = 顶栏右侧。
+    pub filter_bar_bottom: bool,
 }
 
 impl Default for FmBehaviorOptions {
@@ -188,6 +190,7 @@ impl Default for FmBehaviorOptions {
             esc_keep_selection: false,
             dblclick_blank_up: true,
             system_icons: true,
+            filter_bar_bottom: false,
         }
     }
 }
@@ -213,6 +216,8 @@ pub struct FmStateSnapshot {
     pub dir_right: String,
     /// 常用目录书签分组（两栏共享；空分组保留）。
     pub bookmark_groups: Vec<FmBookmarkGroup>,
+    /// 保存的过滤方案（两栏共享；过滤框下拉「保存当前过滤」追加）。
+    pub saved_filters: Vec<String>,
     /// 两栏标签页目录（活动标签 = 实时目录；只存目录路径，选中/焦点/过滤/
     /// 滚动不持久化）与活动标签索引。旧 settings 无此数据时恢复端回退
     /// dir_left/dir_right 的单标签行为。
@@ -291,6 +296,17 @@ pub struct FileManagerView {
     archive_ask: Option<(PathBuf, egui::Pos2)>,
     /// 常用目录书签分组（两栏共享，权威走快照写回 settings.fm_bookmark_groups）。
     bookmark_groups: Vec<FmBookmarkGroup>,
+    /// 保存的过滤方案（两栏共享，权威走快照写回 settings.fm_saved_filters；
+    /// 构造后经 `set_saved_filters` 注入）。
+    saved_filters: Vec<String>,
+    /// 过滤会话历史（最近使用在前，去重，上限 8；不落盘）。
+    filter_history: Vec<String>,
+    /// Ctrl+S 的一次性请求：下一帧 render_filter_bar 聚焦过滤框
+    /// （已聚焦则选中全文）。
+    filter_focus_request: bool,
+    /// 过滤框 Esc（清空 + 交还焦点）已在本帧消费：handle_keyboard 的
+    /// Esc 链见到此标记跳过，防同帧双消费。
+    filter_esc_handled: bool,
     /// 「选择组」对话框上次使用的模式（会话内记忆，不落盘）。
     select_group_pattern: String,
     /// Alt+↓ 的一次性请求：下一帧焦点栏的历史下拉菜单开/关切换
@@ -426,6 +442,23 @@ fn column_layout(right: f32, shift: f32, size_w: f32, mtime_w: f32) -> ColumnLay
 /// DoDragDrop，避免手滑即触发模态拖放（同 Archive 拖出阈值语义）。
 const DRAG_OUT_THRESHOLD: f32 = 40.0;
 
+/// 过滤会话历史上限（最近 8 条）。
+const FILTER_HISTORY_CAP: usize = 8;
+
+/// 过滤会话历史维护（纯函数）：trim 后为空忽略；去重后置顶，超出 cap
+/// 截断尾部。
+fn push_history_capped(history: &mut Vec<String>, item: &str, cap: usize) {
+    let item = item.trim();
+    if item.is_empty() {
+        return;
+    }
+    if let Some(pos) = history.iter().position(|h| h == item) {
+        history.remove(pos);
+    }
+    history.insert(0, item.to_string());
+    history.truncate(cap);
+}
+
 /// 栏间拖放复制的 payload：行 drag source 设置，经 egui 全局 dnd 状态
 /// 跨栏传递（payload 与 widget Id 无关，栏间 push_id 隔离不影响）。
 #[derive(Debug, Clone)]
@@ -542,6 +575,10 @@ impl FileManagerView {
             options: FmBehaviorOptions::default(),
             archive_ask: None,
             bookmark_groups: bookmark_groups.to_vec(),
+            saved_filters: Vec::new(),
+            filter_history: Vec::new(),
+            filter_focus_request: false,
+            filter_esc_handled: false,
             select_group_pattern: String::new(),
             history_menu_toggle: false,
             bookmarks_menu_toggle: false,
@@ -586,6 +623,7 @@ impl FileManagerView {
             dir_left: self.panels[0].dir.display().to_string(),
             dir_right: self.panels[1].dir.display().to_string(),
             bookmark_groups: self.bookmark_groups.clone(),
+            saved_filters: self.saved_filters.clone(),
             tabs_left: self.panel_tab_dirs(0),
             tabs_right: self.panel_tab_dirs(1),
             active_tab_left: self.panels[0].active_tab(),
@@ -601,6 +639,16 @@ impl FileManagerView {
         (0..self.panels[idx].tab_count())
             .map(|i| self.panels[idx].tab_dir(i).display().to_string())
             .collect()
+    }
+
+    /// 注入保存的过滤方案（构造后由 app 从 settings 喂入）。
+    pub fn set_saved_filters(&mut self, filters: &[String]) {
+        self.saved_filters = filters.to_vec();
+    }
+
+    /// 记录过滤串进会话历史（trim 后为空忽略）。
+    fn record_filter_history(&mut self, filter: &str) {
+        push_history_capped(&mut self.filter_history, filter, FILTER_HISTORY_CAP);
     }
 
     /// 添加书签到指定分组（两栏共享）；组内已有时 no-op 返回 false。
@@ -1152,14 +1200,109 @@ impl FileManagerView {
             {
                 self.open_search_dialog();
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.panels[self.active].filter)
-                        .hint_text("过滤（焦点栏）")
-                        .desired_width(160.0),
-                );
-            });
+            // 过滤框（焦点栏）：默认顶栏右侧；fm_filter_bar_bottom 时改由
+            // render_panel 渲染在焦点栏底部。
+            if !self.options.filter_bar_bottom {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.render_filter_bar(ui);
+                });
+            }
         });
+    }
+
+    /// 过滤条（顶栏右侧 / 栏底部两处调用点共享，位置由
+    /// fm_filter_bar_bottom 决定）：输入框（作用于焦点栏）+ 方案/历史
+    /// 下拉。Ctrl+S 的一次性请求（filter_focus_request）在此消费：未聚焦
+    /// request_focus，已聚焦选中全文。过滤框聚焦时 Esc = 清空并交还焦点
+    /// （置 filter_esc_handled 防 handle_keyboard 的 Esc 链同帧双消费）；
+    /// 失焦/清空时把非空过滤串记入会话历史。
+    fn render_filter_bar(&mut self, ui: &mut egui::Ui) {
+        let edit_id = egui::Id::new("fm_filter_edit");
+        let active = self.active;
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut self.panels[active].filter)
+                .id(edit_id)
+                .hint_text("过滤（焦点栏，支持 *.zip）")
+                .desired_width(160.0),
+        );
+        let funnel = ui
+            .add(egui::Button::new(icons::FUNNEL.as_str()).frame(false))
+            .on_hover_text("过滤方案 / 最近使用");
+        // 菜单动作先收集、闭包后统一应用（闭包内 self 只读借用）。
+        let current = self.panels[active].filter.trim().to_string();
+        let mut apply: Option<String> = None;
+        let mut save_current = false;
+        egui::Popup::menu(&funnel)
+            .id(egui::Id::new("fm_filter_menu"))
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(200.0);
+                if ui
+                    .add_enabled(!current.is_empty(), egui::Button::new("保存当前过滤"))
+                    .clicked()
+                {
+                    save_current = true;
+                    ui.close();
+                }
+                ui.separator();
+                if self.saved_filters.is_empty() {
+                    ui.label(egui::RichText::new("（无保存的方案）").weak());
+                }
+                for f in &self.saved_filters {
+                    if ui.button(f).clicked() {
+                        apply = Some(f.clone());
+                        ui.close();
+                    }
+                }
+                if !self.filter_history.is_empty() {
+                    ui.separator();
+                    ui.label(egui::RichText::new("最近使用").weak());
+                    for h in &self.filter_history {
+                        if ui.button(h).clicked() {
+                            apply = Some(h.clone());
+                            ui.close();
+                        }
+                    }
+                }
+            });
+        if save_current && !current.is_empty() && !self.saved_filters.contains(&current) {
+            self.saved_filters.push(current);
+        }
+        if let Some(f) = apply {
+            self.record_filter_history(&f);
+            self.panels[active].filter = f;
+        }
+        // Ctrl+S：聚焦/选中全文。
+        if self.filter_focus_request {
+            self.filter_focus_request = false;
+            if response.has_focus() {
+                let mut state =
+                    egui::text_edit::TextEditState::load(ui.ctx(), edit_id).unwrap_or_default();
+                let len = self.panels[active].filter.chars().count();
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(len),
+                    )));
+                state.store(ui.ctx(), edit_id);
+            } else {
+                response.request_focus();
+            }
+        }
+        // 聚焦时 Esc：清空并交还焦点（FM 的 Esc 链本帧被
+        // egui_wants_keyboard_input 挡住；交还焦点后不再挡，故置
+        // filter_esc_handled 防 handle_keyboard 同帧再走 Esc 链）。
+        if response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            let f = self.panels[active].filter.clone();
+            self.record_filter_history(&f);
+            self.panels[active].filter.clear();
+            response.surrender_focus();
+            self.filter_esc_handled = true;
+        } else if response.lost_focus() {
+            let f = self.panels[active].filter.clone();
+            self.record_filter_history(&f);
+        }
     }
 
     /// 中央面板区；返回各栏的 rect（点击激活用）。
@@ -1281,6 +1424,29 @@ impl FileManagerView {
     fn render_panel(&mut self, ui: &mut egui::Ui, idx: usize, intents: &mut FmIntents) {
         self.render_tab_bar(ui, idx);
         self.render_breadcrumb(ui, idx);
+        // fm_filter_bar_bottom：过滤条渲染在焦点栏列表底部——先给内容区
+        // 留出高度，再在栏底画过滤条（只作用于焦点栏，切栏即跟随）。
+        let bottom_bar = self.options.filter_bar_bottom && idx == self.active;
+        if bottom_bar {
+            let bar_h = 28.0;
+            let content_h = (ui.available_height() - bar_h).max(60.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), content_h),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    self.render_panel_body(ui, idx, intents);
+                },
+            );
+            ui.separator();
+            self.render_filter_bar(ui);
+        } else {
+            self.render_panel_body(ui, idx, intents);
+        }
+    }
+
+    /// 栏内容主体（列表/网格/加载态），render_panel 抽出以配合底部过滤条
+    /// 的高度预留。
+    fn render_panel_body(&mut self, ui: &mut egui::Ui, idx: usize, intents: &mut FmIntents) {
         // 先抽出状态快照，避免 match 借用与臂内 &mut self 冲突。
         enum Phase {
             Idle,
@@ -3261,7 +3427,9 @@ impl FileManagerView {
     /// 同步、Ctrl+\ 回根目录、Ctrl+Q 对面栏快速预览（单栏 = 预览开关）、
     /// Ctrl+B 分支视图（「..」行/Esc 末级 = 退出分支）、
     /// Ctrl+M 批量重命名、Esc 分级清 type-ahead 缓冲→过滤→选中。
-    /// 过滤框等文本输入占用键盘时不处理。
+    /// Ctrl+S 聚焦过滤框（已聚焦则选中全文）——提前于
+    /// egui_wants_keyboard_input 检查，过滤框聚焦时也可再次触发；
+    /// 其余键在过滤框等文本输入占用键盘时不处理。
     /// 文件操作键：F2 重命名 / F5 复制 / F6 移动 / F7 新建文件夹 /
     /// F4 系统「编辑」动词（无关联回退「打开方式…」，目录忽略）/
     /// Shift+F4 新建文本文件 / F8(Delete) 删除（confirm_delete 时先弹确认框；
@@ -3274,6 +3442,17 @@ impl FileManagerView {
         // 对话框打开时屏蔽面板键盘（输入归对话框；冲突问答窗/分组小窗同此机制）。
         if self.dialog.is_some() || self.pending_conflict.is_some() || self.group_dialog.is_some() {
             return;
+        }
+        // Ctrl+S：聚焦过滤框（render_filter_bar 下一帧消费；已聚焦 = 选中
+        // 全文）。必须在 egui_wants_keyboard_input 检查之前——过滤框聚焦时
+        // 该检查恒 true，不放前面则「已聚焦选中全文」分支永远到不了。
+        if ui.input(|i| {
+            i.key_pressed(egui::Key::S)
+                && i.modifiers.command
+                && !i.modifiers.alt
+                && !i.modifiers.shift
+        }) {
+            self.filter_focus_request = true;
         }
         if ui.ctx().egui_wants_keyboard_input() {
             return;
@@ -3720,7 +3899,11 @@ impl FileManagerView {
             }
         }
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self.archive_ask.is_some() {
+            if self.filter_esc_handled {
+                // 过滤框 Esc（清空 + 交还焦点）已在 render_filter_bar 消费，
+                // 不再走 Esc 链（防同帧双消费）。
+                self.filter_esc_handled = false;
+            } else if self.archive_ask.is_some() {
                 // 压缩包 ask 小菜单优先关闭。
                 self.archive_ask = None;
             } else if self.preview_window_open {
@@ -4489,6 +4672,24 @@ fn dblclick_hits_blank(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_history_capped_dedupes_and_truncates() {
+        let mut h: Vec<String> = Vec::new();
+        push_history_capped(&mut h, "  *.zip ", 3);
+        push_history_capped(&mut h, "漫画", 3);
+        assert_eq!(h, ["漫画", "*.zip"]);
+        // 空串忽略。
+        push_history_capped(&mut h, "   ", 3);
+        assert_eq!(h, ["漫画", "*.zip"]);
+        // 重复置顶。
+        push_history_capped(&mut h, "*.zip", 3);
+        assert_eq!(h, ["*.zip", "漫画"]);
+        // 超 cap 截尾。
+        push_history_capped(&mut h, "a", 3);
+        push_history_capped(&mut h, "b", 3);
+        assert_eq!(h, ["b", "a", "*.zip"]);
+    }
 
     #[test]
     fn breadcrumb_segments_windows_style() {

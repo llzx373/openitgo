@@ -157,6 +157,12 @@ pub struct Settings {
     /// 文件管理器显示系统真实图标（SHGetFileInfoW；false = 字体图标）。
     #[serde(default = "default_true")]
     pub fm_system_icons: bool,
+    /// 保存的过滤方案（过滤框下拉列出；clamp 去空去重）。
+    #[serde(default)]
+    pub fm_saved_filters: Vec<String>,
+    /// 过滤框渲染在焦点栏列表底部（false = 顶栏右侧）。
+    #[serde(default)]
+    pub fm_filter_bar_bottom: bool,
 }
 
 fn default_chrome_opacity() -> f32 {
@@ -273,6 +279,8 @@ impl Default for Settings {
             fm_esc_keep_selection: false,
             fm_dblclick_blank_up: true,
             fm_system_icons: true,
+            fm_saved_filters: Vec::new(),
+            fm_filter_bar_bottom: false,
         }
     }
 }
@@ -500,6 +508,16 @@ impl Settings {
         if !matches!(self.fm_archive_open.as_str(), "comic" | "ask") {
             self.fm_archive_open = default_fm_archive_open();
         }
+        // 保存的过滤方案：trim、去空、保序去重。
+        let mut seen = std::collections::HashSet::new();
+        let mut filters = Vec::with_capacity(self.fm_saved_filters.len());
+        for f in std::mem::take(&mut self.fm_saved_filters) {
+            let f = f.trim();
+            if !f.is_empty() && seen.insert(f.to_string()) {
+                filters.push(f.to_string());
+            }
+        }
+        self.fm_saved_filters = filters;
     }
 }
 
@@ -1196,6 +1214,8 @@ mod tests {
         assert!(!loaded.fm_esc_keep_selection);
         assert!(loaded.fm_dblclick_blank_up);
         assert!(loaded.fm_system_icons);
+        assert!(loaded.fm_saved_filters.is_empty());
+        assert!(!loaded.fm_filter_bar_bottom);
 
         // 非默认值 roundtrip。
         let s = Settings {
@@ -1207,6 +1227,8 @@ mod tests {
             fm_esc_keep_selection: true,
             fm_dblclick_blank_up: false,
             fm_system_icons: false,
+            fm_saved_filters: vec!["*.zip".to_string(), "漫画".to_string()],
+            fm_filter_bar_bottom: true,
             ..Default::default()
         };
         let json = serde_json::to_string(&s).unwrap();
@@ -1224,6 +1246,19 @@ mod tests {
         assert_eq!(s.fm_delete_mode, "trash");
         assert_eq!(s.fm_space_action, "dir_size");
         assert_eq!(s.fm_archive_open, "archive");
+        // 保存的过滤方案：trim + 去空 + 保序去重。
+        let mut s = Settings {
+            fm_saved_filters: vec![
+                "  *.zip ".to_string(),
+                "".to_string(),
+                "*.zip".to_string(),
+                "漫画".to_string(),
+                "   ".to_string(),
+            ],
+            ..Default::default()
+        };
+        s.clamp();
+        assert_eq!(s.fm_saved_filters, ["*.zip", "漫画"]);
         // 合法非默认值保留。
         let mut s = Settings {
             fm_delete_mode: "permanent".to_string(),

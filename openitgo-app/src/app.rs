@@ -471,6 +471,7 @@ impl Default for ReaderApp {
             settings.fm_sort_asc,
             &settings.fm_bookmark_groups,
         );
+        file_manager_view.set_saved_filters(&settings.fm_saved_filters);
         // 视图模式全局单值（同 fm_sort_key 先例），恢复时两栏同用。
         let fm_view_mode = PanelViewMode::from_setting(&settings.fm_view_mode);
         for panel in &mut file_manager_view.panels {
@@ -764,6 +765,7 @@ fn fm_behavior_options(settings: &Settings) -> FmBehaviorOptions {
         esc_keep_selection: settings.fm_esc_keep_selection,
         dblclick_blank_up: settings.fm_dblclick_blank_up,
         system_icons: settings.fm_system_icons,
+        filter_bar_bottom: settings.fm_filter_bar_bottom,
     }
 }
 
@@ -3749,6 +3751,7 @@ impl ReaderApp {
         self.settings.fm_dir_left = snapshot.dir_left.clone();
         self.settings.fm_dir_right = snapshot.dir_right.clone();
         self.settings.fm_bookmark_groups = snapshot.bookmark_groups.clone();
+        self.settings.fm_saved_filters = snapshot.saved_filters.clone();
         self.settings.fm_tabs_left = snapshot.tabs_left.clone();
         self.settings.fm_tabs_right = snapshot.tabs_right.clone();
         self.settings.fm_active_tab_left = snapshot.active_tab_left;
@@ -5549,7 +5552,7 @@ mod tests {
             let password_book = store.load_password_book().unwrap_or_else(|_| PasswordBook {
                 entries: PasswordBook::builtin_defaults(),
             });
-            let file_manager_view = FileManagerView::new(
+            let mut file_manager_view = FileManagerView::new(
                 &settings.fm_layout,
                 settings.fm_dual_ratio,
                 settings.fm_preview_open,
@@ -5557,6 +5560,7 @@ mod tests {
                 settings.fm_sort_asc,
                 &settings.fm_bookmark_groups,
             );
+            file_manager_view.set_saved_filters(&settings.fm_saved_filters);
             Self {
                 current_view: View::Library,
                 last_view: View::Library,

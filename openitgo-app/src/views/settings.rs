@@ -448,6 +448,8 @@ impl SettingsView {
         hint(ui, "关闭后目录与文件混排、统一按排序键排序");
         ui.checkbox(&mut settings.fm_system_icons, "显示系统真实图标");
         hint(ui, "经系统 Shell 取文件/文件夹图标；关闭后使用内置字体图标");
+        ui.checkbox(&mut settings.fm_filter_bar_bottom, "过滤框显示在栏底部");
+        hint(ui, "开启后过滤框渲染在焦点栏列表底部，关闭则在顶栏右侧");
         ui.horizontal(|ui| {
             ui.label("默认布局");
             egui::ComboBox::from_id_salt("fm_layout")
