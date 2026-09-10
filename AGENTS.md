@@ -167,7 +167,9 @@ cargo clippy --workspace --all-targets -- -D warnings
   `fm_col_mtime_width`/`fm_col_shift`（大小/时间列宽与列块平移，全局单值
   取活动栏——同 fm_sort_key 先例；sanitize clamp 列宽 60..=400、shift
   ≤0 且 ≥ -(两列宽之和)，默认值同 panel.rs SIZE_COL_WIDTH/MTIME_COL_WIDTH/0
-  在 storage 侧硬编码同步）；`FileManagerView::snapshot()`
+  在 storage 侧硬编码同步）/`fm_delete_mode`/`fm_space_action`/`fm_dirs_first`/
+  `fm_drag_confirm`/`fm_archive_open`/`fm_esc_keep_selection`（行为设置包，
+  见下「行为设置包（阶段 O）」段）；`FileManagerView::snapshot()`
   采集，`maybe_save_fm_state`（`App::update` 末尾）diff 快照后写回 settings——
   **不自行落盘**，退出时 `on_exit` 统一 `save_settings`（排序只持久化活动栏，
   取舍见 `FmStateSnapshot` 注释）；快照在离开 FileManager 视图时重置。设置页
@@ -278,6 +280,25 @@ cargo clippy --workspace --all-targets -- -D warnings
   会话态，Enter/Esc 在编辑 UI 内自测——egui_wants_keyboard_input 会屏蔽
   面板全局键）；Enter 校验 `is_dir()` 后 `navigate_to(fallback_existing_dir)`
   兜底，无效红字「路径不存在」保持编辑（文本变化即清），Esc 还原。
+  **行为设置包（阶段 O）**：六个可选行为设置，默认值 = 一期现状——
+  `fm_delete_mode`（"trash"/"permanent"：Delete 执行路径分派 trash::delete /
+  `permanent_delete` 物理删除；DeleteDialog permanent 档红色「永久删除，
+  无法恢复」警示；**Shift+Del = 另一档快捷** = 设置档 XOR Shift）、
+  `fm_space_action`（"dir_size"/"toggle_select"：空格 TC 勾选下移经
+  `FsPanel::toggle_focused_selection_and_advance`；Insert 无条件同语义）、
+  `fm_dirs_first`（bool，`list_rows` 加 dirs_first 参数、false 目录文件混排；
+  RowsKey 同步——Archive 的 list_rows 是 archive_tree.rs 独立签名不受影响）、
+  `fm_drag_confirm`（false 栏间拖放直拷 AutoRename，Shift = 移动且徽标
+  「N 项 · 移动」；确认模式 Shift 不区分）、`fm_archive_open`（"archive"/
+  "comic"/"ask"：open_ui_row 压缩包分支分派，ask 经 FmIntents.archive_ask
+  帧尾转 `archive_ask` 状态、鼠标处 Area+Frame::popup 二选一，Esc 链首档/
+  点击外关闭）、`fm_esc_keep_selection`（true 时 Esc 链止于清过滤，选中
+  保留、分支不退出）。统一 `FmBehaviorOptions`（file_manager.rs，含
+  confirm_delete/show_hidden；`FmArchiveOpen` 枚举）由 app.rs
+  `fm_behavior_options(&settings)` 每帧构造经 `view.ui(ui, callbacks, options)`
+  下发（同 show_hidden 模式，不进 FmStateSnapshot）；面板级字段 show_hidden/
+  dirs_first 逐栏下发，RowsKey 自动失效。设置页「文件管理器」tab 分「删除/
+  显示与布局/交互行为」三子区块。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

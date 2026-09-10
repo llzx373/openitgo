@@ -183,15 +183,18 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
     }
 }
 
-/// 返回排序+过滤后的条目索引。目录恒排在文件前；
+/// 返回排序+过滤后的条目索引。dirs_first=true 时目录恒排在文件前
+/// （false = 目录文件混排、统一排序，fm_dirs_first 设置）；
 /// 过滤为不区分大小写的 name 子串匹配（trim 后为空则不过滤）；
 /// show_hidden=false 时隐藏条目直接排除。
+#[allow(clippy::too_many_arguments)]
 pub fn list_rows(
     entries: &[FsEntry],
     filter: &str,
     sort: SortKey,
     asc: bool,
     show_hidden: bool,
+    dirs_first: bool,
 ) -> Vec<usize> {
     let needle = filter.trim().to_lowercase();
     let mut dirs: Vec<usize> = Vec::new();
@@ -203,7 +206,7 @@ pub fn list_rows(
         if !needle.is_empty() && !e.name.to_lowercase().contains(&needle) {
             continue;
         }
-        if e.is_dir {
+        if e.is_dir && dirs_first {
             dirs.push(idx);
         } else {
             files.push(idx);
@@ -246,6 +249,7 @@ pub fn list_rows(
         dirs.reverse();
         files.reverse();
     }
+    // dirs_first=false 时目录已并入 files 桶统一排序，dirs 为空。
     dirs.extend(files);
     dirs
 }
@@ -323,11 +327,31 @@ mod tests {
             entry("aaa", true, None, None),
             entry("mmm.txt", false, Some(1), None),
         ];
-        let rows = list_rows(&entries, "", SortKey::Name, true, true);
+        let rows = list_rows(&entries, "", SortKey::Name, true, true, true);
         assert_eq!(names(&entries, &rows), ["aaa", "mmm.txt", "zzz.txt"]);
         // 降序目录仍在前
-        let rows = list_rows(&entries, "", SortKey::Name, false, true);
+        let rows = list_rows(&entries, "", SortKey::Name, false, true, true);
         assert_eq!(names(&entries, &rows), ["aaa", "zzz.txt", "mmm.txt"]);
+    }
+
+    /// fm_dirs_first=false：目录文件混排，统一按排序键排（目录不额外分组）。
+    #[test]
+    fn dirs_first_false_mixes_dirs_and_files() {
+        let entries = vec![
+            entry("zzz.txt", false, Some(1), None),
+            entry("aaa", true, None, None),
+            entry("mmm.txt", false, Some(5), None),
+            entry("bbb", true, None, None),
+        ];
+        // 名称升序混排
+        let rows = list_rows(&entries, "", SortKey::Name, true, true, false);
+        assert_eq!(names(&entries, &rows), ["aaa", "bbb", "mmm.txt", "zzz.txt"]);
+        // 名称降序混排
+        let rows = list_rows(&entries, "", SortKey::Name, false, true, false);
+        assert_eq!(names(&entries, &rows), ["zzz.txt", "mmm.txt", "bbb", "aaa"]);
+        // 大小升序混排（目录 size=None 按 0 参与）
+        let rows = list_rows(&entries, "", SortKey::Size, true, true, false);
+        assert_eq!(names(&entries, &rows), ["aaa", "bbb", "zzz.txt", "mmm.txt"]);
     }
 
     #[test]
@@ -337,9 +361,9 @@ mod tests {
             entry("vol2", false, Some(1), None),
             entry("vol1", false, Some(1), None),
         ];
-        let rows = list_rows(&entries, "", SortKey::Name, true, true);
+        let rows = list_rows(&entries, "", SortKey::Name, true, true, true);
         assert_eq!(names(&entries, &rows), ["vol1", "vol2", "vol10"]);
-        let rows = list_rows(&entries, "", SortKey::Name, false, true);
+        let rows = list_rows(&entries, "", SortKey::Name, false, true, true);
         assert_eq!(names(&entries, &rows), ["vol10", "vol2", "vol1"]);
     }
 
@@ -351,9 +375,9 @@ mod tests {
             entry("small", false, Some(10), None),
             entry("mid", false, Some(100), None),
         ];
-        let rows = list_rows(&entries, "", SortKey::Size, true, true);
+        let rows = list_rows(&entries, "", SortKey::Size, true, true, true);
         assert_eq!(names(&entries, &rows), ["dir", "small", "mid", "big"]);
-        let rows = list_rows(&entries, "", SortKey::Size, false, true);
+        let rows = list_rows(&entries, "", SortKey::Size, false, true, true);
         assert_eq!(names(&entries, &rows), ["dir", "big", "mid", "small"]);
     }
 
@@ -364,10 +388,10 @@ mod tests {
             entry("new", false, Some(1), Some(t(200))),
             entry("old", false, Some(1), Some(t(100))),
         ];
-        let rows = list_rows(&entries, "", SortKey::Mtime, true, true);
+        let rows = list_rows(&entries, "", SortKey::Mtime, true, true, true);
         assert_eq!(names(&entries, &rows), ["old", "new", "no_mtime"]);
         // 降序 None 仍垫底
-        let rows = list_rows(&entries, "", SortKey::Mtime, false, true);
+        let rows = list_rows(&entries, "", SortKey::Mtime, false, true, true);
         assert_eq!(names(&entries, &rows), ["new", "old", "no_mtime"]);
     }
 
@@ -378,10 +402,10 @@ mod tests {
             entry("photo1.jpg", false, Some(1), None),
             entry("notes.txt", false, Some(1), None),
         ];
-        let rows = list_rows(&entries, "PHOTO", SortKey::Name, true, true);
+        let rows = list_rows(&entries, "PHOTO", SortKey::Name, true, true, true);
         assert_eq!(names(&entries, &rows), ["Photos", "photo1.jpg"]);
         // 空白过滤串不过滤
-        let rows = list_rows(&entries, "  ", SortKey::Name, true, true);
+        let rows = list_rows(&entries, "  ", SortKey::Name, true, true, true);
         assert_eq!(rows.len(), 3);
     }
 
@@ -393,10 +417,10 @@ mod tests {
             entry(".env", false, Some(1), None),
             entry("notes.txt", false, Some(1), None),
         ];
-        let rows = list_rows(&entries, "", SortKey::Name, true, false);
+        let rows = list_rows(&entries, "", SortKey::Name, true, false, true);
         assert_eq!(names(&entries, &rows), ["docs", "notes.txt"]);
         // 默认（true）全量显示
-        let rows = list_rows(&entries, "", SortKey::Name, true, true);
+        let rows = list_rows(&entries, "", SortKey::Name, true, true, true);
         assert_eq!(
             names(&entries, &rows),
             [".config", "docs", ".env", "notes.txt"]
@@ -409,7 +433,7 @@ mod tests {
             entry(".photo", false, Some(1), None),
             entry("photo1.jpg", false, Some(1), None),
         ];
-        let rows = list_rows(&entries, "photo", SortKey::Name, true, false);
+        let rows = list_rows(&entries, "photo", SortKey::Name, true, false, true);
         assert_eq!(names(&entries, &rows), ["photo1.jpg"]);
     }
 
@@ -452,10 +476,10 @@ mod tests {
             entry("c.rar", false, Some(1), None),
         ];
         // 升序：按扩展名字典序，无扩展名垫底；同扩展名回退 natural_cmp。
-        let rows = list_rows(&entries, "", SortKey::Ext, true, true);
+        let rows = list_rows(&entries, "", SortKey::Ext, true, true, true);
         assert_eq!(names(&entries, &rows), ["c.rar", "b.TXT", "a.zip", "noext"]);
         // 降序：扩展名倒序，无扩展名仍垫底。
-        let rows = list_rows(&entries, "", SortKey::Ext, false, true);
+        let rows = list_rows(&entries, "", SortKey::Ext, false, true, true);
         assert_eq!(names(&entries, &rows), ["a.zip", "b.TXT", "c.rar", "noext"]);
     }
 
@@ -467,7 +491,7 @@ mod tests {
             entry(".env", false, Some(1), None),
             entry("trailing.", false, Some(1), None),
         ];
-        let rows = list_rows(&entries, "", SortKey::Ext, true, true);
+        let rows = list_rows(&entries, "", SortKey::Ext, true, true, true);
         // 同扩展名按 natural_cmp；`.env`（仅起始点）与 `trailing.`（点结尾）算无扩展名垫底，
         // 两者并列回退 natural_cmp。
         assert_eq!(
@@ -486,7 +510,7 @@ mod tests {
             entry("ep10.rar", false, Some(1), None),
         ];
         // 名称升序：docs, EP1, EP2.zip, ep10.rar, notes.txt
-        let rows = list_rows(&entries, "", SortKey::Name, true, true);
+        let rows = list_rows(&entries, "", SortKey::Name, true, true, true);
         assert_eq!(
             names(&entries, &rows),
             ["docs", "EP1", "EP2.zip", "ep10.rar", "notes.txt"]
@@ -514,7 +538,7 @@ mod tests {
             entry("notes.txt", false, Some(1), None),
         ];
         // 名称升序：docs(1), ep1(2), ep2(3), notes(4)
-        let rows = list_rows(&entries, "", SortKey::Name, true, true);
+        let rows = list_rows(&entries, "", SortKey::Name, true, true, true);
         assert_eq!(
             names(&entries, &rows),
             ["docs", "ep1.zip", "ep2.zip", "notes.txt"]

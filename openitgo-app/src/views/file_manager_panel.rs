@@ -104,6 +104,7 @@ struct RowsKey {
     sort_key: SortKey,
     sort_asc: bool,
     show_hidden: bool,
+    dirs_first: bool,
     /// 分支视图标志（分支/普通列举的 name 语义不同，缓存必须按此失效）。
     branch: bool,
 }
@@ -173,6 +174,9 @@ pub struct FsPanel {
     /// 是否显示隐藏文件（settings.fm_show_hidden 经 ui() 每帧下发；
     /// 纳入 RowsKey，切换时 rows_cache 自动失效）。
     pub show_hidden: bool,
+    /// 目录恒排在文件前（settings.fm_dirs_first 经 ui() 每帧下发；
+    /// false = 目录文件混排统一排序；纳入 RowsKey 同 show_hidden）。
+    pub dirs_first: bool,
     /// 分支视图（Ctrl+B）：当前目录 + 所有子目录的文件扁平列举（目录行
     /// 不列出）。navigate_to/refresh/「..」行/Esc 退出。已知取舍：FS watch
     /// 只监听顶层目录（非递归），分支模式下子目录变化不自动刷新。
@@ -266,6 +270,7 @@ impl FsPanel {
             view_mode: PanelViewMode::List,
             last_grid_cols: 1,
             show_hidden: true,
+            dirs_first: true,
             branch_view: false,
             listing_truncated: false,
             history: Vec::new(),
@@ -852,6 +857,7 @@ impl FsPanel {
             sort_key: self.sort_key,
             sort_asc: self.sort_asc,
             show_hidden: self.show_hidden,
+            dirs_first: self.dirs_first,
             branch: self.branch_view,
         };
         if let Some((k, rows)) = &self.rows_cache {
@@ -865,6 +871,7 @@ impl FsPanel {
             self.sort_key,
             self.sort_asc,
             self.show_hidden,
+            self.dirs_first,
         );
         self.rows_cache = Some((key, rows.clone()));
         rows
@@ -959,6 +966,22 @@ impl FsPanel {
                     self.selected.insert(path);
                 }
             }
+        }
+    }
+
+    /// TC 勾选语义（fm_space_action = "toggle_select" 的空格 / 无条件 Insert）：
+    /// 切换焦点行选中态并下移一行（FocusOnly 不动锚点）；「..」行/无焦点
+    /// 不勾选只下移。
+    pub fn toggle_focused_selection_and_advance(&mut self) {
+        if let Some(row) = self.focus {
+            if row > 0 {
+                if let Some(path) = self.row_path(row) {
+                    if !self.selected.remove(&path) {
+                        self.selected.insert(path);
+                    }
+                }
+            }
+            self.move_focus(1, FocusMove::FocusOnly);
         }
     }
 

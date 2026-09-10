@@ -35,6 +35,8 @@ pub enum FmDialogOutcome {
     },
     ConfirmDelete {
         sources: Vec<PathBuf>,
+        /// 永久删除（fm_delete_mode = "permanent" 或 Shift+Del 直删）。
+        permanent: bool,
         /// 「不再询问」勾选状态（阶段五写回 settings.fm_confirm_delete）。
         dont_ask_again: bool,
     },
@@ -412,16 +414,19 @@ impl CompressDialog {
     }
 }
 
-/// 删除确认（防误删）：待删项列表 + 回收站说明 + 「不再询问」。
+/// 删除确认（防误删）：待删项列表 + 回收站/永久删除说明 + 「不再询问」。
+/// permanent（fm_delete_mode = "permanent" 或 Shift+Del 直删）时显著警示。
 pub struct DeleteDialog {
     sources: Vec<PathBuf>,
+    permanent: bool,
     dont_ask_again: bool,
 }
 
 impl DeleteDialog {
-    pub fn new(sources: Vec<PathBuf>) -> Self {
+    pub fn new(sources: Vec<PathBuf>, permanent: bool) -> Self {
         Self {
             sources,
+            permanent,
             dont_ask_again: false,
         }
     }
@@ -441,17 +446,29 @@ impl DeleteDialog {
                 ));
                 render_source_list(ui, &self.sources);
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new("将移入回收站，可从系统回收站恢复。").weak());
+                if self.permanent {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        egui::RichText::new("永久删除，无法恢复").strong(),
+                    );
+                } else {
+                    ui.label(egui::RichText::new("将移入回收站，可从系统回收站恢复。").weak());
+                }
                 ui.checkbox(&mut self.dont_ask_again, "不再询问（设置中可改回）");
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    let confirm = egui::Button::new(
-                        egui::RichText::new("移入回收站").color(egui::Color32::WHITE),
-                    )
-                    .fill(ui.visuals().error_fg_color);
+                    let label = if self.permanent {
+                        "永久删除"
+                    } else {
+                        "移入回收站"
+                    };
+                    let confirm =
+                        egui::Button::new(egui::RichText::new(label).color(egui::Color32::WHITE))
+                            .fill(ui.visuals().error_fg_color);
                     if ui.add(confirm).clicked() {
                         outcome = Some(FmDialogOutcome::ConfirmDelete {
                             sources: self.sources.clone(),
+                            permanent: self.permanent,
                             dont_ask_again: self.dont_ask_again,
                         });
                     }

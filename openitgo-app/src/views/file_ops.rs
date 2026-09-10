@@ -20,7 +20,8 @@
 //!
 //! 移动：`fs::rename` 快速路径（同盘瞬间完成），失败（跨盘/占用）回退
 //! 递归复制 + 成功后 `trash::delete` 源。
-//! 删除：逐项 `trash::delete`（回收站），单项失败记 errors 继续。
+//! 删除：默认逐项 `trash::delete`（回收站）；`fm_delete_mode = "permanent"`
+//! 或 Shift+Del 直删时逐项物理删除（`permanent_delete`）。单项失败记 errors 继续。
 //! 符号链接：复制 = 复制链接目标内容（`fs::copy` 语义），删除 = 只删链接；
 //! 预扫描不跟进符号链接目录（防环），递归复制同样不跟进（符号链接目录
 //! 按文件处理，`File::open` 失败则记 errors 继续）。
@@ -216,9 +217,11 @@ impl FileOpManager {
         self.start_transfer(OpKind::Move, sources, dest_dir, conflict)
     }
 
-    /// 后台删除（逐项移入回收站）。
-    pub fn start_delete(&mut self, sources: Vec<PathBuf>) -> u64 {
-        self.spawn_task(OpKind::Delete, sources, None, ConflictMode::Skip)
+    /// 后台删除：permanent=false 逐项移入回收站（trash::delete）；
+    /// permanent=true（fm_delete_mode = "permanent" / Shift+Del 直删）
+    /// 逐项物理删除（remove_file/remove_dir_all），失败记 errors 继续。
+    pub fn start_delete(&mut self, sources: Vec<PathBuf>, permanent: bool) -> u64 {
+        self.spawn_task(OpKind::Delete, sources, None, ConflictMode::Skip, permanent)
     }
 
     /// 后台压缩 sources 为 dest_zip（zip 引擎在 parser 侧，逐项进度桥接进
@@ -240,7 +243,8 @@ impl FileOpManager {
         dest_dir: PathBuf,
         conflict: ConflictMode,
     ) -> u64 {
-        self.spawn_task(kind, sources, Some(dest_dir), conflict)
+        // 复制/移动不涉及永久删除（Move 回退路径的源清理恒走回收站）。
+        self.spawn_task(kind, sources, Some(dest_dir), conflict, false)
     }
 
     fn spawn_task(
@@ -249,13 +253,22 @@ impl FileOpManager {
         sources: Vec<PathBuf>,
         dest_dir: Option<PathBuf>,
         conflict: ConflictMode,
+        delete_permanent: bool,
     ) -> u64 {
         let (id, cancel, paused, tx, answer_rx) = self.push_task(kind, &sources, dest_dir.clone());
         // Ask 模式才需要问答通道（worker 阻塞等答）；其余模式不需要。
         let answer_rx = (conflict == ConflictMode::Ask).then_some(answer_rx);
         std::thread::spawn(move || {
             run_op(
-                kind, sources, dest_dir, conflict, cancel, paused, tx, answer_rx,
+                kind,
+                sources,
+                dest_dir,
+                conflict,
+                cancel,
+                paused,
+                tx,
+                answer_rx,
+                delete_permanent,
             );
         });
         id
@@ -396,6 +409,19 @@ impl FileOpManager {
     }
 }
 
+/// 永久删除（fm_delete_mode = "permanent" / Shift+Del 直删）：符号链接与文件
+/// remove_file、目录 remove_dir_all；错误交 errors 汇总（同 trash 路径语义）。
+fn permanent_delete(path: &Path) -> Result<(), String> {
+    let vp = verbatim_path(path);
+    let meta = std::fs::symlink_metadata(&vp).map_err(|e| e.to_string())?;
+    let r = if meta.is_dir() && !meta.file_type().is_symlink() {
+        std::fs::remove_dir_all(&vp)
+    } else {
+        std::fs::remove_file(&vp)
+    };
+    r.map_err(|e| e.to_string())
+}
+
 /// 工作线程入口：预扫描计数 → 逐项执行 → Finished 事件收尾。
 /// answer_rx 仅 Ask 模式 Some（冲突问答的回答接收端）。
 #[allow(clippy::too_many_arguments)]
@@ -408,6 +434,7 @@ fn run_op(
     paused: Arc<AtomicBool>,
     tx: Sender<OpEvent>,
     answer_rx: Option<Receiver<ConflictAnswer>>,
+    delete_permanent: bool,
 ) {
     let mut ctx = OpCtx {
         cancel: &cancel,
@@ -437,8 +464,13 @@ fn run_op(
                     break;
                 }
                 ctx.progress.current = src.clone();
-                if let Err(e) = trash::delete(src) {
-                    ctx.errors.push((src.clone(), e.to_string()));
+                let result = if delete_permanent {
+                    permanent_delete(src)
+                } else {
+                    trash::delete(src).map_err(|e| e.to_string())
+                };
+                if let Err(e) = result {
+                    ctx.errors.push((src.clone(), e));
                 }
                 let (items, bytes) = per_source[i];
                 ctx.progress.done_files += items;
@@ -1246,6 +1278,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             tx,
             None,
+            false,
         );
         let mut finished = None;
         while let Ok(ev) = rx.try_recv() {
@@ -1331,6 +1364,7 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
                 tx,
                 Some(arx),
+                false,
             );
         });
         let mut queries = Vec::new();
@@ -1534,6 +1568,7 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
                 tx,
                 Some(arx),
+                false,
             );
         });
         // 收到询问后不答，直接置 cancel。
@@ -1673,6 +1708,44 @@ mod tests {
         assert!(!f.exists());
     }
 
+    /// 永久删除分派（fm_delete_mode = "permanent"）：文件与目录物理删除。
+    #[test]
+    fn delete_permanent_removes_files_and_dirs() {
+        let t = TempTree::new("permanent-delete");
+        let f = t.path().join("victim.txt");
+        write_file(&f, b"bye");
+        write_file(&t.path().join("dir/sub.txt"), b"nested");
+        let dir = t.path().join("dir");
+        let mut mgr = FileOpManager::default();
+        mgr.start_delete(vec![f.clone(), dir.clone()], true);
+        let mut finished = None;
+        for _ in 0..200 {
+            let summary = mgr.poll();
+            if let Some(fin) = summary.finished.into_iter().next() {
+                finished = Some(fin);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let fin = finished.expect("op should finish");
+        assert!(fin.errors.is_empty(), "{:?}", fin.errors);
+        assert!(!f.exists());
+        assert!(!dir.exists());
+        // 单测语义：单项失败不中断整批（不存在的源记 errors）。
+        let mut mgr = FileOpManager::default();
+        mgr.start_delete(vec![t.path().join("nonexistent")], true);
+        let mut finished = None;
+        for _ in 0..200 {
+            let summary = mgr.poll();
+            if let Some(fin) = summary.finished.into_iter().next() {
+                finished = Some(fin);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(finished.expect("op should finish").errors.len(), 1);
+    }
+
     #[test]
     fn manager_poll_lifecycle() {
         let t = TempTree::new("manager");
@@ -1796,6 +1869,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             tx,
             None,
+            false,
         );
         let progresses: Vec<OpProgress> = rx
             .try_iter()
@@ -1833,6 +1907,7 @@ mod tests {
                 p2,
                 tx,
                 None,
+                false,
             );
         });
         // 暂停期间：不写目标、不发 Finished（暂停中不发新进度）。

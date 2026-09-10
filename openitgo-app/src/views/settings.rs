@@ -408,14 +408,44 @@ impl SettingsView {
         );
     }
 
-    /// 文件管理器 tab：删除确认 / 显示隐藏文件 / 默认布局 / 双栏比例。
+    /// 文件管理器 tab：删除 / 显示与布局 / 交互行为（阶段 O 可选行为包，
+    /// 默认值 = 一期现状行为）。
     fn file_manager_ui(ui: &mut egui::Ui, settings: &mut Settings) {
+        ui.label(egui::RichText::new("删除").strong());
+        ui.horizontal(|ui| {
+            ui.label("删除方式");
+            egui::ComboBox::from_id_salt("fm_delete_mode")
+                .selected_text(if settings.fm_delete_mode == "permanent" {
+                    "永久删除"
+                } else {
+                    "移入回收站"
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut settings.fm_delete_mode,
+                        "trash".to_string(),
+                        "移入回收站",
+                    );
+                    ui.selectable_value(
+                        &mut settings.fm_delete_mode,
+                        "permanent".to_string(),
+                        "永久删除（无法恢复）",
+                    );
+                });
+        });
+        hint(
+            ui,
+            "Shift+Del 为另一档快捷（回收站模式下直删，永久删除模式下进回收站）",
+        );
         ui.checkbox(&mut settings.fm_confirm_delete, "删除前确认");
-        hint(ui, "关闭后删除（移入回收站）不再弹确认框");
+        hint(ui, "关闭后删除不再弹确认框");
 
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("显示与布局").strong());
         ui.checkbox(&mut settings.fm_show_hidden, "显示隐藏文件");
         hint(ui, "隐藏文件指以 . 开头的文件及带系统隐藏属性的文件");
-
+        ui.checkbox(&mut settings.fm_dirs_first, "目录排在文件前");
+        hint(ui, "关闭后目录与文件混排、统一按排序键排序");
         ui.horizontal(|ui| {
             ui.label("默认布局");
             egui::ComboBox::from_id_salt("fm_layout")
@@ -434,10 +464,67 @@ impl SettingsView {
                 });
         });
         hint(ui, "改动立即同步到文件管理器视图，下次进入即生效");
-
         ui.horizontal(|ui| {
             ui.label("双栏比例（左栏宽度）:");
             ui.add(egui::Slider::new(&mut settings.fm_dual_ratio, 0.2..=0.8).step_by(0.01));
+        });
+
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("交互行为").strong());
+        ui.horizontal(|ui| {
+            ui.label("空格键");
+            egui::ComboBox::from_id_salt("fm_space_action")
+                .selected_text(if settings.fm_space_action == "toggle_select" {
+                    "勾选焦点项并下移"
+                } else {
+                    "计算目录大小"
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut settings.fm_space_action,
+                        "dir_size".to_string(),
+                        "计算目录大小",
+                    );
+                    ui.selectable_value(
+                        &mut settings.fm_space_action,
+                        "toggle_select".to_string(),
+                        "勾选焦点项并下移",
+                    );
+                });
+        });
+        hint(ui, "Insert 键无条件为「勾选并下移」，与此设置无关");
+        ui.checkbox(&mut settings.fm_drag_confirm, "栏间拖放复制前确认");
+        hint(
+            ui,
+            "关闭后松开直接复制（自动改名冲突策略），拖动时按住 Shift 为移动",
+        );
+        ui.checkbox(&mut settings.fm_esc_keep_selection, "Esc 保留选中");
+        hint(ui, "开启后 Esc 只关闭弹层、清字母定位与过滤，不再清除选中");
+        ui.horizontal(|ui| {
+            ui.label("双击压缩包");
+            egui::ComboBox::from_id_salt("fm_archive_open")
+                .selected_text(match settings.fm_archive_open.as_str() {
+                    "comic" => "作为漫画打开",
+                    "ask" => "每次询问",
+                    _ => "压缩包浏览视图",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut settings.fm_archive_open,
+                        "archive".to_string(),
+                        "压缩包浏览视图",
+                    );
+                    ui.selectable_value(
+                        &mut settings.fm_archive_open,
+                        "comic".to_string(),
+                        "作为漫画打开",
+                    );
+                    ui.selectable_value(
+                        &mut settings.fm_archive_open,
+                        "ask".to_string(),
+                        "每次询问",
+                    );
+                });
         });
     }
 

@@ -4,7 +4,9 @@ use crate::loader::PageLoader;
 use crate::opener::{AsyncOpener, OpenStatus};
 use crate::shortcuts::is_shortcut_pressed;
 use crate::timing;
-use crate::views::file_manager::{FileManagerView, FmCallbacks, FmStateSnapshot};
+use crate::views::file_manager::{
+    FileManagerView, FmArchiveOpen, FmBehaviorOptions, FmCallbacks, FmStateSnapshot,
+};
 use crate::views::file_manager_panel::{fallback_existing_dir, PanelLoadState, PanelViewMode};
 use crate::views::file_manager_rows::natural_cmp;
 use crate::views::settings::{SettingsTab, SettingsView};
@@ -746,6 +748,21 @@ fn resolve_fm_dir(saved: &str) -> PathBuf {
         return dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     }
     fallback_existing_dir(PathBuf::from(saved))
+}
+
+/// 文件管理器行为设置包（阶段 O）：每帧从 settings 构造下发给
+/// FileManagerView（同 fm_show_hidden 模式，不进快照）。
+fn fm_behavior_options(settings: &Settings) -> FmBehaviorOptions {
+    FmBehaviorOptions {
+        confirm_delete: settings.fm_confirm_delete,
+        show_hidden: settings.fm_show_hidden,
+        delete_permanent: settings.fm_delete_mode == "permanent",
+        space_toggle_select: settings.fm_space_action == "toggle_select",
+        dirs_first: settings.fm_dirs_first,
+        drag_confirm: settings.fm_drag_confirm,
+        archive_open: FmArchiveOpen::from_setting(&settings.fm_archive_open),
+        esc_keep_selection: settings.fm_esc_keep_selection,
+    }
 }
 
 impl ReaderApp {
@@ -2532,8 +2549,7 @@ impl ReaderApp {
                     on_op_error: &mut |msg| op_error = Some(msg),
                     on_confirm_delete_change: &mut |confirm| confirm_change = Some(confirm),
                 },
-                self.settings.fm_confirm_delete,
-                self.settings.fm_show_hidden,
+                fm_behavior_options(&self.settings),
             );
             if back {
                 self.current_view = View::Library;

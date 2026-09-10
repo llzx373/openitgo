@@ -27,7 +27,7 @@ use crate::views::file_manager_thumbs::{
 };
 use crate::views::file_ops::{
     create_dir, create_text_file, format_eta, rename_entry, suggest_folder_name,
-    suggest_text_file_name, FileOpManager, FinishedOp, OpKind, OpSpeedMeter,
+    suggest_text_file_name, ConflictMode, FileOpManager, FinishedOp, OpKind, OpSpeedMeter,
 };
 use crate::views::preview_bytes::{is_previewable_name, load_file_preview, PreviewData};
 use egui_phosphor_icons::{icons, Icon};
@@ -52,6 +52,69 @@ const NAME_HEADER_INDENT: f32 = 6.0 + 16.0 + 6.0;
 pub enum PanelLayout {
     Dual { ratio: f32 },
     Single { preview_open: bool },
+}
+
+/// 双击压缩包分发方式（settings.fm_archive_open）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FmArchiveOpen {
+    /// 进 Archive 视图（默认，设计决策 3）。
+    Archive,
+    /// 作为漫画打开（跳过启发式分流）。
+    Comic,
+    /// 鼠标处弹小菜单二选一。
+    Ask,
+}
+
+impl FmArchiveOpen {
+    pub fn from_setting(s: &str) -> Self {
+        match s {
+            "comic" => Self::Comic,
+            "ask" => Self::Ask,
+            _ => Self::Archive,
+        }
+    }
+}
+
+/// 行为设置包（阶段 O，settings.fm_* 可选行为）：默认值 = 一期现状行为。
+/// app 侧每帧从 settings 构造下发（同 fm_show_hidden 模式——行为设置不进
+/// FmStateSnapshot，不参与快照 diff）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FmBehaviorOptions {
+    /// 删除前确认（fm_confirm_delete）。
+    pub confirm_delete: bool,
+    /// 显示隐藏文件（fm_show_hidden）。
+    pub show_hidden: bool,
+    /// 永久删除（fm_delete_mode = "permanent"）；Shift+Del = 另一档快捷
+    /// （生效档位 = delete_permanent XOR shift）。
+    pub delete_permanent: bool,
+    /// 空格 TC 勾选语义（fm_space_action = "toggle_select"）：切换焦点项
+    /// 选中并下移；false = 现状「计算目录大小」。Insert 键无条件勾选下移。
+    pub space_toggle_select: bool,
+    /// 目录恒排在文件前（fm_dirs_first）。
+    pub dirs_first: bool,
+    /// 栏间拖放复制前弹确认框（fm_drag_confirm；false = 松开直拷自动改名，
+    /// 按住 Shift = 移动）。
+    pub drag_confirm: bool,
+    /// 双击压缩包分发（fm_archive_open）。
+    pub archive_open: FmArchiveOpen,
+    /// Esc 不清选中（fm_esc_keep_selection）：Esc 链止于清过滤。
+    pub esc_keep_selection: bool,
+}
+
+impl Default for FmBehaviorOptions {
+    /// 默认值 = 一期现状行为（与 settings 侧 serde default 一致）。
+    fn default() -> Self {
+        Self {
+            confirm_delete: true,
+            show_hidden: true,
+            delete_permanent: false,
+            space_toggle_select: false,
+            dirs_first: true,
+            drag_confirm: true,
+            archive_open: FmArchiveOpen::Archive,
+            esc_keep_selection: false,
+        }
+    }
 }
 
 /// 文件管理器持久化快照（app 侧 diff 后写回 settings.fm_*）。
@@ -129,8 +192,11 @@ pub struct FileManagerView {
     /// 盘符列表缓存与在途后台枚举（盘符下拉共用；慢速设备不卡 UI）。
     drives: Option<Vec<PathBuf>>,
     drives_rx: Option<std::sync::mpsc::Receiver<Vec<PathBuf>>>,
-    /// 删除前是否弹确认框（settings.fm_confirm_delete 快照，供右键菜单使用）。
-    confirm_delete: bool,
+    /// 行为设置包（阶段 O，含 confirm_delete/show_hidden/delete_permanent
+    /// 等；ui() 每帧下发，权威在 settings）。
+    options: FmBehaviorOptions,
+    /// 双击压缩包 fm_archive_open = "ask" 的待决小菜单（路径 + 弹出位置）。
+    archive_ask: Option<(PathBuf, egui::Pos2)>,
     /// 常用目录书签分组（两栏共享，权威走快照写回 settings.fm_bookmark_groups）。
     bookmark_groups: Vec<FmBookmarkGroup>,
     /// 「选择组」对话框上次使用的模式（会话内记忆，不落盘）。
@@ -204,6 +270,9 @@ struct FmIntents {
     open_path: Option<PathBuf>,
     open_archive: Option<PathBuf>,
     open_as_comic: Option<PathBuf>,
+    /// fm_archive_open = "ask"：双击压缩包待弹选择菜单（帧尾转为
+    /// self.archive_ask 状态，视图内部消费）。
+    archive_ask: Option<PathBuf>,
     /// 右键「解压到另一栏/当前目录…」：(压缩包路径, 目标目录)。
     extract: Option<(PathBuf, PathBuf)>,
     /// 文件操作汇总/错误（完成/取消/失败时上报给 app error_message）。
@@ -361,7 +430,8 @@ impl FileManagerView {
             sys_clipboard_cut_pending: false,
             drives: None,
             drives_rx: None,
-            confirm_delete: true,
+            options: FmBehaviorOptions::default(),
+            archive_ask: None,
             bookmark_groups: bookmark_groups.to_vec(),
             select_group_pattern: String::new(),
             history_menu_toggle: false,
@@ -513,15 +583,15 @@ impl FileManagerView {
         &mut self,
         ui: &mut egui::Ui,
         callbacks: FmCallbacks<'_>,
-        confirm_delete: bool,
-        show_hidden: bool,
+        options: FmBehaviorOptions,
     ) {
-        self.confirm_delete = confirm_delete;
-        // show_hidden 权威在 settings（同 confirm_delete），每帧下发；
+        self.options = options;
+        // show_hidden/dirs_first 权威在 settings（同 confirm_delete），每帧下发；
         // 休眠期间设置页改动在下次进入时经此同步，rows_cache 按
         // RowsKey 自动失效，无需重新 read_dir。
         for panel in &mut self.panels {
-            panel.show_hidden = show_hidden;
+            panel.show_hidden = options.show_hidden;
+            panel.dirs_first = options.dirs_first;
             // FS watch 回调唤醒 UI 用（首帧注入，后续 no-op）。
             panel.set_wake_ctx(ui.ctx().clone());
         }
@@ -789,7 +859,7 @@ impl FileManagerView {
         // 行拖出窗口（Windows OLE；文件本就在盘上，直接 do_drag_drop）。
         self.poll_drag_out_external(ui.ctx(), &mut intents);
 
-        self.handle_keyboard(ui, &mut intents, confirm_delete);
+        self.handle_keyboard(ui, &mut intents);
         // 「选中即预览」跟随焦点行（键盘/鼠标改动焦点之后统一同步）。
         self.sync_preview_target();
         // F3 临时预览弹窗（双栏模式）。
@@ -802,6 +872,17 @@ impl FileManagerView {
         self.render_search_dialog(ui.ctx());
         // 书签分组小对话框（新建/重命名；非模态 egui::Window）。
         self.render_group_dialog(ui.ctx());
+        // 压缩包 ask 小菜单（fm_archive_open = "ask"；鼠标处弹出二选一）。
+        self.render_archive_ask_menu(ui.ctx(), &mut intents);
+
+        // 双击压缩包 ask 意图 → 记录弹出位置转状态（菜单下一帧起渲染）。
+        if let Some(path) = intents.archive_ask.take() {
+            let pos = ui
+                .ctx()
+                .pointer_interact_pos()
+                .unwrap_or_else(|| ui.ctx().content_rect().center());
+            self.archive_ask = Some((path, pos));
+        }
 
         // 帧尾统一外抛回调。
         if intents.back {
@@ -1490,6 +1571,41 @@ impl FileManagerView {
             .on_hover_text("常用目录书签");
     }
 
+    /// 压缩包 ask 小菜单（fm_archive_open = "ask"）：双击处在鼠标位置弹出
+    /// 「Archive 视图打开 / 作为漫画打开」二选一；Esc（handle_keyboard 的
+    /// Esc 链首档）/ 点击菜单外关闭。
+    fn render_archive_ask_menu(&mut self, ctx: &egui::Context, intents: &mut FmIntents) {
+        let Some((path, pos)) = self.archive_ask.clone() else {
+            return;
+        };
+        let mut close = false;
+        let area = egui::Area::new(egui::Id::new("fm_archive_ask"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    if ui.button("Archive 视图打开").clicked() {
+                        intents.open_archive = Some(path.clone());
+                        close = true;
+                    }
+                    if ui.button("作为漫画打开").clicked() {
+                        intents.open_as_comic = Some(path.clone());
+                        close = true;
+                    }
+                });
+            });
+        // 点击菜单外关闭（按钮点击已置 close，不冲突）。
+        let outside_click = ctx.input(|i| {
+            (i.pointer.primary_pressed() || i.pointer.secondary_pressed())
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|p| !area.response.rect.contains(p))
+        });
+        if close || outside_click {
+            self.archive_ask = None;
+        }
+    }
+
     /// 渲染书签分组对话框（新建/重命名共用；非模态 egui::Window，
     /// 参照 SelectGroupDialog 的 focused/Enter 模式）。
     fn render_group_dialog(&mut self, ctx: &egui::Context) {
@@ -2131,10 +2247,12 @@ impl FileManagerView {
         if ui.button((icons::TRASH, " 删除")).clicked() {
             let targets = self.op_targets(idx);
             if !targets.is_empty() {
-                if self.confirm_delete {
-                    self.dialog = Some(FmDialog::Delete(DeleteDialog::new(targets)));
+                // 右键菜单无 Shift 语境，用设置基档。
+                let permanent = self.options.delete_permanent;
+                if self.options.confirm_delete {
+                    self.dialog = Some(FmDialog::Delete(DeleteDialog::new(targets, permanent)));
                 } else {
-                    self.start_delete(targets);
+                    self.start_delete(targets, permanent);
                 }
             }
             ui.close();
@@ -2442,7 +2560,13 @@ impl FileManagerView {
         if entry.is_dir {
             self.panels[idx].navigate_to(entry.path.clone());
         } else if archive_kind(&entry.path).is_some() {
-            intents.open_archive = Some(entry.path);
+            // 双击压缩包分发按 fm_archive_open：Archive 视图（默认）/
+            // 作为漫画打开 / 鼠标处弹小菜单二选一。
+            match self.options.archive_open {
+                FmArchiveOpen::Archive => intents.open_archive = Some(entry.path),
+                FmArchiveOpen::Comic => intents.open_as_comic = Some(entry.path),
+                FmArchiveOpen::Ask => intents.archive_ask = Some(entry.path),
+            }
         } else {
             intents.open_path = Some(entry.path);
         }
@@ -2518,7 +2642,9 @@ impl FileManagerView {
             return;
         };
         let pointer_down = ctx.input(|i| i.pointer.primary_down());
-        // 光标跟随徽标（「N 项」）；松开帧 payload 仍在但按键已抬，徽标消失。
+        // 免确认模式（fm_drag_confirm=false）下 Shift = 移动，徽标提示。
+        let shift_move = !self.options.drag_confirm && ctx.input(|i| i.modifiers.shift);
+        // 光标跟随徽标（「N 项」/「N 项 · 移动」）；松开帧 payload 仍在但按键已抬，徽标消失。
         if pointer_down {
             if let Some(pos) = ctx.pointer_interact_pos() {
                 egui::Area::new(egui::Id::new("fm-dnd-badge"))
@@ -2527,7 +2653,12 @@ impl FileManagerView {
                     .fixed_pos(pos + egui::vec2(14.0, 14.0))
                     .show(ctx, |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.label(format!("{} 项", payload.sources.len()));
+                            let label = if shift_move {
+                                format!("{} 项 · 移动", payload.sources.len())
+                            } else {
+                                format!("{} 项", payload.sources.len())
+                            };
+                            ui.label(label);
                         });
                     });
             }
@@ -2565,8 +2696,19 @@ impl FileManagerView {
         }
         if let Some(sources) = drop_sources {
             egui::DragAndDrop::clear_payload(ctx);
-            // 落点恒为 1-src_panel，dest 计算与 F5/菜单「复制到另一栏…」一致。
-            self.open_copy_move_dialog(OpKind::Copy, sources, payload.src_panel);
+            if self.options.drag_confirm {
+                // 落点恒为 1-src_panel，dest 计算与 F5/菜单「复制到另一栏…」一致。
+                self.open_copy_move_dialog(OpKind::Copy, sources, payload.src_panel);
+            } else {
+                // fm_drag_confirm=false：松开直拷（冲突策略默认自动改名）；
+                // 按住 Shift = 移动。确认模式下 Shift 不区分（维持现状）。
+                let dest = self.panels[1 - payload.src_panel].dir.clone();
+                if shift_move {
+                    self.ops.start_move(sources, dest, ConflictMode::AutoRename);
+                } else {
+                    self.ops.start_copy(sources, dest, ConflictMode::AutoRename);
+                }
+            }
         }
     }
 
@@ -2618,14 +2760,14 @@ impl FileManagerView {
     }
 
     /// 删除（确认框已把关或 fm_confirm_delete=false）：预览目标在被删项中
-    /// 先清预览，然后起后台任务。
-    fn start_delete(&mut self, sources: Vec<PathBuf>) {
+    /// 先清预览，然后起后台任务。permanent = 物理删除（否则移入回收站）。
+    fn start_delete(&mut self, sources: Vec<PathBuf>, permanent: bool) {
         if let Some(tp) = &self.preview_path {
             if sources.contains(tp) {
                 self.clear_preview();
             }
         }
-        self.ops.start_delete(sources);
+        self.ops.start_delete(sources, permanent);
     }
 
     /// 渲染操作确认对话框；Some(outcome) 时统一执行。
@@ -2714,12 +2856,13 @@ impl FileManagerView {
             }
             FmDialogOutcome::ConfirmDelete {
                 sources,
+                permanent,
                 dont_ask_again,
             } => {
                 if dont_ask_again {
                     intents.confirm_delete_change = Some(false);
                 }
-                self.start_delete(sources);
+                self.start_delete(sources, permanent);
             }
             FmDialogOutcome::ConfirmRename { path, new_name } => {
                 match rename_entry(&path, &new_name) {
@@ -2835,9 +2978,10 @@ impl FileManagerView {
     /// Ctrl+M 批量重命名、Esc 分级清 type-ahead 缓冲→过滤→选中。
     /// 过滤框等文本输入占用键盘时不处理。
     /// 文件操作键：F2 重命名 / F5 复制 / F6 移动 / F7 新建文件夹 /
-    /// Shift+F4 新建文本文件 / F8(Delete) 删除（confirm_delete 时先弹确认框）；
-    /// Alt+Enter 焦点项系统属性；Ctrl+C/X/V 剪贴板。
-    fn handle_keyboard(&mut self, ui: &egui::Ui, intents: &mut FmIntents, confirm_delete: bool) {
+    /// Shift+F4 新建文本文件 / F8(Delete) 删除（confirm_delete 时先弹确认框；
+    /// Shift+Del = 删除方式的另一档快捷）；Alt+Enter 焦点项系统属性；
+    /// Ctrl+C/X/V 剪贴板。行为开关由 self.options（每帧下发）提供。
+    fn handle_keyboard(&mut self, ui: &egui::Ui, intents: &mut FmIntents) {
         // 对话框打开时屏蔽面板键盘（输入归对话框；冲突问答窗/分组小窗同此机制）。
         if self.dialog.is_some() || self.pending_conflict.is_some() || self.group_dialog.is_some() {
             return;
@@ -2986,13 +3130,16 @@ impl FileManagerView {
         if mods.shift && ui.input(|i| i.key_pressed(egui::Key::F4)) {
             self.open_new_file_dialog(active);
         }
+        // F8/Del 删除；Shift+Del = 删除方式的另一档快捷（trash 模式下直删，
+        // permanent 模式下进回收站）：生效档位 = 设置档 XOR Shift。
         if ui.input(|i| i.key_pressed(egui::Key::F8) || i.key_pressed(egui::Key::Delete)) {
             let targets = self.op_targets(active);
             if !targets.is_empty() {
-                if confirm_delete {
-                    self.dialog = Some(FmDialog::Delete(DeleteDialog::new(targets)));
+                let permanent = self.options.delete_permanent != mods.shift;
+                if self.options.confirm_delete {
+                    self.dialog = Some(FmDialog::Delete(DeleteDialog::new(targets, permanent)));
                 } else {
-                    self.start_delete(targets);
+                    self.start_delete(targets, permanent);
                 }
             }
         }
@@ -3164,17 +3311,24 @@ impl FileManagerView {
                 self.open_ui_row(active, &rows, row, intents);
             }
         }
-        // 空格：计算焦点目录大小（文件/「..」/无焦点忽略）。
+        // 空格：默认计算焦点目录大小；fm_space_action = "toggle_select" 时
+        // 改 TC 勾选语义（切换焦点项选中并下移）。文件/「..」/无焦点忽略。
         if !mods.command
             && !mods.shift
             && !mods.alt
             && ui.input(|i| i.key_pressed(egui::Key::Space))
         {
-            if let Some(entry) = self.panels[active].focused_entry() {
+            if self.options.space_toggle_select {
+                self.panels[active].toggle_focused_selection_and_advance();
+            } else if let Some(entry) = self.panels[active].focused_entry() {
                 if entry.is_dir {
                     self.panels[active].request_dir_sizes(vec![entry.path]);
                 }
             }
+        }
+        // Insert：无条件 TC 勾选语义（与 fm_space_action 设置无关）。
+        if ui.input(|i| i.key_pressed(egui::Key::Insert)) {
+            self.panels[active].toggle_focused_selection_and_advance();
         }
         // F3：双栏模式对焦点文件弹临时预览窗（再按 F3 / Esc / 关闭按钮关窗）。
         if ui.input(|i| i.key_pressed(egui::Key::F3)) {
@@ -3190,7 +3344,10 @@ impl FileManagerView {
             }
         }
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self.preview_window_open {
+            if self.archive_ask.is_some() {
+                // 压缩包 ask 小菜单优先关闭。
+                self.archive_ask = None;
+            } else if self.preview_window_open {
                 self.preview_window_open = false;
             } else {
                 let panel = &mut self.panels[active];
@@ -3198,12 +3355,14 @@ impl FileManagerView {
                     panel.clear_type_ahead();
                 } else if !panel.filter.is_empty() {
                     panel.filter.clear();
-                } else if !panel.selected.is_empty() {
+                } else if !self.options.esc_keep_selection && !panel.selected.is_empty() {
                     panel.clear_selection();
-                } else if panel.branch_view {
+                } else if !self.options.esc_keep_selection && panel.branch_view {
                     // 分支模式且缓冲/过滤/选中均空：退出分支视图。
                     panel.exit_branch_view();
                 }
+                // fm_esc_keep_selection = true：Esc 链止于清过滤（选中保留、
+                // 分支视图不退出）。
             }
         }
     }
@@ -3691,8 +3850,11 @@ mod tests {
                     on_op_error: &mut |_| {},
                     on_confirm_delete_change: &mut |_| {},
                 },
-                false,
-                true,
+                // 测试基座：确认框关、其余默认（= 现状行为）。
+                FmBehaviorOptions {
+                    confirm_delete: false,
+                    ..Default::default()
+                },
             );
         });
     }

@@ -131,6 +131,26 @@ pub struct Settings {
     /// 列块平移量（≤0；0 = 列块贴右缘）。
     #[serde(default)]
     pub fm_col_shift: f32,
+    /// 删除方式："trash"（移入回收站，默认）| "permanent"（永久删除）。
+    #[serde(default = "default_fm_delete_mode")]
+    pub fm_delete_mode: String,
+    /// 空格行为："dir_size"（计算目录大小，默认）| "toggle_select"
+    /// （TC 勾选语义：切换焦点项选中并下移；Insert 键无条件同为勾选下移）。
+    #[serde(default = "default_fm_space_action")]
+    pub fm_space_action: String,
+    /// 目录恒排在文件前（false = 目录文件混排、统一排序）。
+    #[serde(default = "default_true")]
+    pub fm_dirs_first: bool,
+    /// 栏间拖放复制前弹确认框（false = 松开直拷自动改名，按住 Shift = 移动）。
+    #[serde(default = "default_true")]
+    pub fm_drag_confirm: bool,
+    /// 双击压缩包分发："archive"（Archive 视图，默认）| "comic"（作为漫画打开）
+    /// | "ask"（鼠标处弹小菜单二选一）。
+    #[serde(default = "default_fm_archive_open")]
+    pub fm_archive_open: String,
+    /// Esc 不清选中（true = Esc 链：关弹层 → 清 type-ahead → 清过滤，选中保留）。
+    #[serde(default)]
+    pub fm_esc_keep_selection: bool,
 }
 
 fn default_chrome_opacity() -> f32 {
@@ -159,6 +179,18 @@ fn default_fm_sort_key() -> String {
 
 fn default_fm_view_mode() -> String {
     "list".to_string()
+}
+
+fn default_fm_delete_mode() -> String {
+    "trash".to_string()
+}
+
+fn default_fm_space_action() -> String {
+    "dir_size".to_string()
+}
+
+fn default_fm_archive_open() -> String {
+    "archive".to_string()
 }
 
 /// 同 openitgo-app views/file_manager_panel.rs 的 SIZE_COL_WIDTH。
@@ -227,6 +259,12 @@ impl Default for Settings {
             fm_col_size_width: default_fm_col_size_width(),
             fm_col_mtime_width: default_fm_col_mtime_width(),
             fm_col_shift: 0.0,
+            fm_delete_mode: default_fm_delete_mode(),
+            fm_space_action: default_fm_space_action(),
+            fm_dirs_first: true,
+            fm_drag_confirm: true,
+            fm_archive_open: default_fm_archive_open(),
+            fm_esc_keep_selection: false,
         }
     }
 }
@@ -445,6 +483,15 @@ impl Settings {
         self.fm_col_mtime_width = self.fm_col_mtime_width.clamp(60.0, 400.0);
         let min_shift = -(self.fm_col_size_width + self.fm_col_mtime_width);
         self.fm_col_shift = self.fm_col_shift.clamp(min_shift, 0.0);
+        if self.fm_delete_mode != "permanent" {
+            self.fm_delete_mode = default_fm_delete_mode();
+        }
+        if self.fm_space_action != "toggle_select" {
+            self.fm_space_action = default_fm_space_action();
+        }
+        if !matches!(self.fm_archive_open.as_str(), "comic" | "ask") {
+            self.fm_archive_open = default_fm_archive_open();
+        }
     }
 }
 
@@ -1127,6 +1174,53 @@ mod tests {
         };
         s.clamp();
         assert_eq!(s.fm_col_shift, 0.0, "col_shift ≤ 0");
+    }
+
+    #[test]
+    fn test_fm_behavior_options_default_roundtrip_and_clamp() {
+        // 旧 settings 无字段：serde default = 现状行为。
+        let loaded: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(loaded.fm_delete_mode, "trash");
+        assert_eq!(loaded.fm_space_action, "dir_size");
+        assert!(loaded.fm_dirs_first);
+        assert!(loaded.fm_drag_confirm);
+        assert_eq!(loaded.fm_archive_open, "archive");
+        assert!(!loaded.fm_esc_keep_selection);
+
+        // 非默认值 roundtrip。
+        let s = Settings {
+            fm_delete_mode: "permanent".to_string(),
+            fm_space_action: "toggle_select".to_string(),
+            fm_dirs_first: false,
+            fm_drag_confirm: false,
+            fm_archive_open: "ask".to_string(),
+            fm_esc_keep_selection: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, loaded);
+
+        // 脏值 clamp 回默认。
+        let mut s = Settings {
+            fm_delete_mode: "shred".to_string(),
+            fm_space_action: "launch".to_string(),
+            fm_archive_open: "hack".to_string(),
+            ..Default::default()
+        };
+        s.clamp();
+        assert_eq!(s.fm_delete_mode, "trash");
+        assert_eq!(s.fm_space_action, "dir_size");
+        assert_eq!(s.fm_archive_open, "archive");
+        // 合法非默认值保留。
+        let mut s = Settings {
+            fm_delete_mode: "permanent".to_string(),
+            fm_archive_open: "comic".to_string(),
+            ..Default::default()
+        };
+        s.clamp();
+        assert_eq!(s.fm_delete_mode, "permanent");
+        assert_eq!(s.fm_archive_open, "comic");
     }
 
     #[test]
