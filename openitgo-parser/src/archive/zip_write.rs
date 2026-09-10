@@ -4,12 +4,15 @@
 //! 半成品 zip 删除。致命错误（dest 不可写、源文件写入期读取失败等）
 //! 发 `Failed(错误文本)`、删半成品并返回 Err。
 //! 符号链接一律跳过（不跟进目录、不按目标存文件），单项读取失败跳过不计。
+//! 暂停（阶段 AB）：`paused` = Some 时在条目/块边界 200ms 轮询等待
+//! （等待中仍查 cancel，cancel 优先收拢）；None 兼容旧行为。
 
 use crate::traits::ParseError;
 use crossbeam_channel::Sender;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use zip::write::SimpleFileOptions;
 
 #[derive(Debug, Clone, Copy)]
@@ -51,12 +54,14 @@ struct ZipItem {
 
 /// 把 sources 打包进 dest zip；条目名 = 相对各 source 父目录的路径
 /// （多 source 时各自 basename 为根）。进度经 channel 上报。
+/// `paused`（阶段 AB）：Some 时条目/块边界轮询等待（等待中仍查 cancel）。
 pub fn create_zip(
     sources: &[PathBuf],
     dest: &Path,
     opts: &ZipWriteOptions,
     progress: Sender<ZipWriteProgress>,
     cancel: Arc<AtomicBool>,
+    paused: Option<Arc<AtomicBool>>,
 ) -> Result<(), ParseError> {
     // 预扫描：先收集全部条目再创建 dest，避免 dest 落在 source 目录内
     // 时把自己打包进去。单项失败容错跳过。
@@ -98,6 +103,7 @@ pub fn create_zip(
         options,
         &progress,
         &cancel,
+        &paused,
         &mut written,
     );
     let finish = result.and_then(|()| {
@@ -137,25 +143,69 @@ impl From<ParseError> for WriteFail {
     }
 }
 
+/// 暂停等待（阶段 AB）：200ms 轮询，等待中仍查 cancel（cancel 优先收拢，
+/// 同 extract 约定删半成品）；None = 不暂停（仅做取消检查）。
+fn wait_if_paused(
+    paused: &Option<Arc<AtomicBool>>,
+    cancel: &Arc<AtomicBool>,
+) -> Result<(), WriteFail> {
+    if let Some(paused) = paused {
+        while paused.load(Ordering::Relaxed) {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(WriteFail::Cancelled);
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return Err(WriteFail::Cancelled);
+    }
+    Ok(())
+}
+
+/// 分块写文件内容（阶段 AB 前为 std::io::copy 整拷）：块间检查暂停/取消，
+/// 大文件也能在块边界响应。
+fn copy_entry_chunks(
+    src: &Path,
+    writer: &mut zip::ZipWriter<std::fs::File>,
+    paused: &Option<Arc<AtomicBool>>,
+    cancel: &Arc<AtomicBool>,
+) -> Result<u64, WriteFail> {
+    use std::io::{Read, Write};
+    let mut reader = std::fs::File::open(verbatim_path(src)).map_err(ParseError::Io)?;
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut total = 0u64;
+    loop {
+        wait_if_paused(paused, cancel)?;
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                writer.write_all(&buf[..n]).map_err(ParseError::Io)?;
+                total += n as u64;
+            }
+            Err(e) => return Err(ParseError::Io(e).into()),
+        }
+    }
+    Ok(total)
+}
+
 fn write_items(
     writer: &mut zip::ZipWriter<std::fs::File>,
     items: &[ZipItem],
     options: SimpleFileOptions,
     progress: &Sender<ZipWriteProgress>,
     cancel: &Arc<AtomicBool>,
+    paused: &Option<Arc<AtomicBool>>,
     written: &mut u64,
 ) -> Result<(), WriteFail> {
     for item in items {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(WriteFail::Cancelled);
-        }
+        wait_if_paused(paused, cancel)?;
         if item.is_dir {
             writer.add_directory(&item.name, options).map_err(zip_err)?;
             continue;
         }
         writer.start_file(&item.name, options).map_err(zip_err)?;
-        let mut src = std::fs::File::open(verbatim_path(&item.disk)).map_err(ParseError::Io)?;
-        let n = std::io::copy(&mut src, writer).map_err(ParseError::Io)?;
+        let n = copy_entry_chunks(&item.disk, writer, paused, cancel)?;
         *written += n;
         send_progress(
             progress,
@@ -319,7 +369,15 @@ mod tests {
 
     fn run_zip(sources: &[PathBuf], dest: &Path) -> Vec<ZipWriteProgress> {
         let (tx, rx) = crossbeam_channel::unbounded();
-        create_zip(sources, dest, &ZipWriteOptions::default(), tx, no_cancel()).unwrap();
+        create_zip(
+            sources,
+            dest,
+            &ZipWriteOptions::default(),
+            tx,
+            no_cancel(),
+            None,
+        )
+        .unwrap();
         rx.try_iter().collect()
     }
 
@@ -405,6 +463,7 @@ mod tests {
             &ZipWriteOptions::default(),
             tx,
             cancel,
+            None,
         )
         .unwrap();
         let events: Vec<_> = rx.try_iter().collect();
@@ -413,6 +472,80 @@ mod tests {
             Some(ZipWriteProgress::Failed(msg)) if msg == "已取消"
         ));
         assert!(!dest.exists());
+    }
+
+    /// 暂停（阶段 AB）：paused 置位起步 → 线程堵在条目边界（只有 Started
+    /// 事件）；解除后完成。暂停中 cancel 优先收拢（删半成品、Failed(已取消)）。
+    #[test]
+    fn pause_blocks_resume_and_cancel_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("a.txt");
+        write_file(&src, b"data");
+        let dest = tmp.path().join("out.zip");
+
+        let paused = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let handle = {
+            let src = src.clone();
+            let dest = dest.clone();
+            let paused = paused.clone();
+            std::thread::spawn(move || {
+                create_zip(
+                    &[src],
+                    &dest,
+                    &ZipWriteOptions::default(),
+                    tx,
+                    no_cancel(),
+                    Some(paused),
+                )
+            })
+        };
+        // 暂停中：只允许 Started 到达，EntryDone/Finished 不出现。
+        std::thread::sleep(Duration::from_millis(500));
+        let events: Vec<_> = rx.try_iter().collect();
+        assert_eq!(events.len(), 1, "暂停中不应有条目事件: {events:?}");
+        assert!(matches!(events[0], ZipWriteProgress::Started { .. }));
+        assert!(!handle.is_finished());
+        // 解除暂停 → 完成。
+        paused.store(false, Ordering::Relaxed);
+        handle.join().unwrap().unwrap();
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(matches!(
+            events.last(),
+            Some(ZipWriteProgress::Finished { .. })
+        ));
+        assert_eq!(read_entry(&dest, "a.txt", None).unwrap(), b"data");
+
+        // 暂停中 cancel 优先：收拢为「已取消」、删半成品。
+        let dest2 = tmp.path().join("out2.zip");
+        let paused = Arc::new(AtomicBool::new(true));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let handle = {
+            let src = src.clone();
+            let dest2 = dest2.clone();
+            let paused = paused.clone();
+            let cancel = cancel.clone();
+            std::thread::spawn(move || {
+                create_zip(
+                    &[src],
+                    &dest2,
+                    &ZipWriteOptions::default(),
+                    tx,
+                    cancel,
+                    Some(paused),
+                )
+            })
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        cancel.store(true, Ordering::Relaxed);
+        handle.join().unwrap().unwrap(); // 取消约定：Ok 返回
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(matches!(
+            events.last(),
+            Some(ZipWriteProgress::Failed(msg)) if msg == "已取消"
+        ));
+        assert!(!dest2.exists());
     }
 
     #[test]
@@ -437,6 +570,7 @@ mod tests {
             &ZipWriteOptions { compress: false },
             tx,
             no_cancel(),
+            None,
         )
         .unwrap();
         let e2 = &list_entries(&dest2, None).unwrap()[0];

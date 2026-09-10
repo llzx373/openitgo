@@ -8,7 +8,7 @@ use crate::views::archive::{format_mtime, human_size};
 use crate::views::file_manager_rename::{plan_renames, CounterRule, RenamePlan, RenameRule};
 use crate::views::file_ops::{
     resolve_conflict_name, validate_entry_name, verbatim_path, ConflictAction, ConflictAnswer,
-    ConflictMode, ConflictQuery, OpKind,
+    ConflictMode, ConflictQuery, CopyOptions, OpKind,
 };
 use std::path::{Path, PathBuf};
 
@@ -32,6 +32,8 @@ pub enum FmDialogOutcome {
         sources: Vec<PathBuf>,
         dest: PathBuf,
         conflict: ConflictMode,
+        /// 高级选项（阶段 AB：校验/过滤）。
+        opts: CopyOptions,
     },
     ConfirmDelete {
         sources: Vec<PathBuf>,
@@ -116,6 +118,12 @@ pub struct CopyMoveDialog {
     sources: Vec<PathBuf>,
     dest: String,
     conflict: ConflictMode,
+    /// 复制完成后校验（阶段 AB；默认关）。
+    verify: bool,
+    /// 高级：仅复制匹配（通配符；空 = 不过滤）。
+    filter_pattern: String,
+    /// 高级：仅复制最近 N 天修改（0 = 不过滤）。
+    filter_newer_days: u32,
 }
 
 impl CopyMoveDialog {
@@ -126,6 +134,9 @@ impl CopyMoveDialog {
             dest: dest.display().to_string(),
             // 默认「自动改名」（对齐 extract_overwrite=false 的语义）。
             conflict: ConflictMode::AutoRename,
+            verify: false,
+            filter_pattern: String::new(),
+            filter_newer_days: 0,
         }
     }
 
@@ -178,6 +189,35 @@ impl CopyMoveDialog {
                             }
                         });
                 });
+                // 阶段 AB：复制后校验 + 高级过滤（移动同样可用；过滤移动
+                // = 匹配项搬走、其余保留在源）。
+                ui.checkbox(&mut self.verify, "复制完成后校验")
+                    .on_hover_text("逐文件重读源与目标分块比对，不一致记入失败列表");
+                egui::CollapsingHeader::new("高级")
+                    .id_salt("fm_copymove_adv")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("仅复制匹配：");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.filter_pattern)
+                                    .desired_width(200.0)
+                                    .hint_text("*.jpg;*.png（空 = 不过滤）"),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("仅最近 N 天修改：");
+                            ui.add(
+                                egui::DragValue::new(&mut self.filter_newer_days).range(0..=3650),
+                            );
+                            ui.label(egui::RichText::new("0 = 不过滤").weak().small());
+                        });
+                        ui.label(
+                            egui::RichText::new("过滤只作用于文件，目录结构保留")
+                                .weak()
+                                .small(),
+                        );
+                    });
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     let dest = PathBuf::from(self.dest.trim());
@@ -191,6 +231,11 @@ impl CopyMoveDialog {
                             sources: self.sources.clone(),
                             dest,
                             conflict: self.conflict,
+                            opts: CopyOptions {
+                                verify: self.verify,
+                                filter_pattern: self.filter_pattern.trim().to_string(),
+                                filter_newer_days: self.filter_newer_days,
+                            },
                         });
                     }
                     if ui.button("取消").clicked() {

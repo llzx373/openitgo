@@ -5,7 +5,7 @@
 //! 单项失败记 `errors` 继续整批、结束汇总上报。
 //! 进度含当前文件内进度（cur_done/cur_total_bytes，分块复制维护，
 //! 节流 100ms）；暂停在块/项边界生效（200ms 轮询，期间可即时取消），
-//! Compress 不支持暂停。
+//! 压缩（阶段 AB 起）经 create_zip 的 paused 参数在条目/块边界生效。
 //!
 //! 任务队列（阶段 AA）：并发上限 `max_concurrent`（settings `fm_op_threads`，
 //! 默认 2，0 = 不限）——超限任务进 `queued` FIFO 队列（不起线程、无进度），
@@ -39,7 +39,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+
+use crate::views::file_manager_rows::wildcard_match;
 
 /// 复制块大小（B）：手动分块复制以便块间响应取消/暂停并上报文件内进度。
 const COPY_CHUNK: usize = 256 * 1024;
@@ -109,6 +111,71 @@ pub struct ConflictAnswer {
     pub apply_all: bool,
 }
 
+/// 复制/移动高级选项（阶段 AB，CopyMoveDialog「高级」折叠区 + 校验
+/// checkbox）：默认全关（= 阶段 AA 前行为）。
+#[derive(Debug, Clone, Default)]
+pub struct CopyOptions {
+    /// 复制完成后校验：逐文件重读源与目标分块字节比对（`files_identical`），
+    /// 不一致记 errors「校验失败」。Move 的同盘 rename 快速路径无复制动作，
+    /// 不校验（原子改名不引入损坏）。
+    pub verify: bool,
+    /// 仅复制匹配：通配符（复用 `wildcard_match` 的分号多模式语法），
+    /// 空 = 不过滤。只过滤文件，目录结构保留（目录本身不跳过）。
+    pub filter_pattern: String,
+    /// 仅复制最近 N 天修改：0 = 不过滤；mtime 缺失的文件放行（不丢数据）。
+    pub filter_newer_days: u32,
+}
+
+impl CopyOptions {
+    /// 过滤是否生效（Move 快速路径 rename 在过滤开启时必须禁用——
+    /// rename 会整树搬走，无法按文件过滤）。
+    pub fn filter_active(&self) -> bool {
+        !self.filter_pattern.trim().is_empty() || self.filter_newer_days > 0
+    }
+
+    /// 见 `copy_filter_matches`。
+    fn matches(&self, name: &str, is_dir: bool, mtime: Option<SystemTime>) -> bool {
+        copy_filter_matches(
+            name,
+            is_dir,
+            mtime,
+            &self.filter_pattern,
+            self.filter_newer_days,
+        )
+    }
+}
+
+/// 复制过滤判定（阶段 AB；预扫描 count_source 与执行 copy_recursive 共用，
+/// 保证进度 total 与实际复制集合一致）：目录恒 true（结构保留、只过滤
+/// 文件）；文件按通配符（空 = 过）与最近 N 天修改（0 = 过；mtime 缺失
+/// 放行）判定。
+pub fn copy_filter_matches(
+    name: &str,
+    is_dir: bool,
+    mtime: Option<SystemTime>,
+    pattern: &str,
+    newer_than_days: u32,
+) -> bool {
+    if is_dir {
+        return true;
+    }
+    let pat = pattern.trim();
+    if !pat.is_empty() && !wildcard_match(pat, name) {
+        return false;
+    }
+    if newer_than_days > 0 {
+        let Some(mtime) = mtime else { return true };
+        let cutoff =
+            SystemTime::now().checked_sub(Duration::from_secs(newer_than_days as u64 * 86400));
+        if let Some(cutoff) = cutoff {
+            if mtime < cutoff {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct OpProgress {
     pub done_files: u64,
@@ -170,7 +237,7 @@ pub struct FileOpTask {
     dest_dir: Option<PathBuf>,
     cancel: Arc<AtomicBool>,
     /// 暂停标志（与 cancel 同模式暴露给 UI；Copy/Move/Delete 在块/项边界
-    /// 生效，Compress 不支持暂停）。
+    /// 生效，Compress 经 create_zip 在条目/块边界生效，阶段 AB 起）。
     paused: Arc<AtomicBool>,
     rx: Receiver<OpEvent>,
     /// Ask 模式的回答回发端（worker 持 rx 阻塞等答；task 被移除时 drop，
@@ -188,6 +255,8 @@ struct QueuedTask {
     dest: Option<PathBuf>,
     conflict: ConflictMode,
     delete_permanent: bool,
+    /// 复制/移动高级选项（阶段 AB；Delete/Compress 为默认）。
+    opts: CopyOptions,
 }
 
 /// 任务面板行快照（阶段 AA；在途按提交序 + 排队按 FIFO 序）。
@@ -258,14 +327,25 @@ impl Default for FileOpManager {
 
 impl FileOpManager {
     /// 后台复制 sources 到 dest_dir（逐项应用 conflict 策略）。
+    /// 复制/移动不涉及永久删除（Move 回退路径的源清理恒走回收站）。
     pub fn start_copy(
         &mut self,
         sources: Vec<PathBuf>,
         dest_dir: PathBuf,
         conflict: ConflictMode,
     ) -> u64 {
-        // 复制/移动不涉及永久删除（Move 回退路径的源清理恒走回收站）。
-        self.submit(OpKind::Copy, sources, Some(dest_dir), conflict, false)
+        self.start_copy_opts(sources, dest_dir, conflict, CopyOptions::default())
+    }
+
+    /// 带高级选项的复制（阶段 AB：CopyMoveDialog 校验/过滤）。
+    pub fn start_copy_opts(
+        &mut self,
+        sources: Vec<PathBuf>,
+        dest_dir: PathBuf,
+        conflict: ConflictMode,
+        opts: CopyOptions,
+    ) -> u64 {
+        self.submit(OpKind::Copy, sources, Some(dest_dir), conflict, false, opts)
     }
 
     /// 后台移动：同盘 `fs::rename` 快速路径，失败回退复制 + trash 源。
@@ -275,14 +355,32 @@ impl FileOpManager {
         dest_dir: PathBuf,
         conflict: ConflictMode,
     ) -> u64 {
-        self.submit(OpKind::Move, sources, Some(dest_dir), conflict, false)
+        self.start_move_opts(sources, dest_dir, conflict, CopyOptions::default())
+    }
+
+    /// 带高级选项的移动（阶段 AB；过滤开启时 rename 快速路径自动禁用）。
+    pub fn start_move_opts(
+        &mut self,
+        sources: Vec<PathBuf>,
+        dest_dir: PathBuf,
+        conflict: ConflictMode,
+        opts: CopyOptions,
+    ) -> u64 {
+        self.submit(OpKind::Move, sources, Some(dest_dir), conflict, false, opts)
     }
 
     /// 后台删除：permanent=false 逐项移入回收站（trash::delete）；
     /// permanent=true（fm_delete_mode = "permanent" / Shift+Del 直删）
     /// 逐项物理删除（remove_file/remove_dir_all），失败记 errors 继续。
     pub fn start_delete(&mut self, sources: Vec<PathBuf>, permanent: bool) -> u64 {
-        self.submit(OpKind::Delete, sources, None, ConflictMode::Skip, permanent)
+        self.submit(
+            OpKind::Delete,
+            sources,
+            None,
+            ConflictMode::Skip,
+            permanent,
+            CopyOptions::default(),
+        )
     }
 
     /// 后台压缩 sources 为 dest_zip（zip 引擎在 parser 侧，逐项进度桥接进
@@ -294,10 +392,12 @@ impl FileOpManager {
             Some(dest_zip),
             ConflictMode::Skip,
             false,
+            CopyOptions::default(),
         )
     }
 
     /// 提交任务：有空位立即起线程，否则进 FIFO 队列（阶段 AA）。
+    #[allow(clippy::too_many_arguments)]
     fn submit(
         &mut self,
         kind: OpKind,
@@ -305,6 +405,7 @@ impl FileOpManager {
         dest: Option<PathBuf>,
         conflict: ConflictMode,
         delete_permanent: bool,
+        opts: CopyOptions,
     ) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
@@ -316,9 +417,10 @@ impl FileOpManager {
                 dest,
                 conflict,
                 delete_permanent,
+                opts,
             });
         } else {
-            self.launch(id, kind, sources, dest, conflict, delete_permanent);
+            self.launch(id, kind, sources, dest, conflict, delete_permanent, opts);
         }
         id
     }
@@ -329,6 +431,7 @@ impl FileOpManager {
     }
 
     /// 起线程跑一个任务（submit 直放 / pump_queue 放行共用）。
+    #[allow(clippy::too_many_arguments)]
     fn launch(
         &mut self,
         id: u64,
@@ -337,6 +440,7 @@ impl FileOpManager {
         dest: Option<PathBuf>,
         conflict: ConflictMode,
         delete_permanent: bool,
+        opts: CopyOptions,
     ) {
         let cancel = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
@@ -377,7 +481,7 @@ impl FileOpManager {
             OpKind::Compress => {
                 let dest_zip = dest.expect("Compress 必有 dest_zip");
                 std::thread::spawn(move || {
-                    run_compress(sources, dest_zip, cancel, tx);
+                    run_compress(sources, dest_zip, cancel, paused, tx);
                 });
             }
             _ => {
@@ -394,6 +498,7 @@ impl FileOpManager {
                         tx,
                         answer_rx,
                         delete_permanent,
+                        opts,
                     );
                 });
             }
@@ -413,6 +518,7 @@ impl FileOpManager {
                 q.dest,
                 q.conflict,
                 q.delete_permanent,
+                q.opts,
             );
         }
     }
@@ -511,7 +617,8 @@ impl FileOpManager {
         self.tasks.iter().any(|t| t.id == id)
     }
 
-    /// 暂停/继续任务（Copy/Move/Delete 在块/项边界生效；Compress 不响应）。
+    /// 暂停/继续任务（Copy/Move/Delete 在块/项边界生效；Compress 在
+    /// 条目/块边界生效，阶段 AB 起；排队任务无旗标可置）。
     pub fn set_paused(&mut self, id: u64, paused: bool) {
         if let Some(task) = self.tasks.iter().find(|t| t.id == id) {
             task.paused.store(paused, Ordering::Relaxed);
@@ -604,6 +711,8 @@ pub fn retry_sources(errors: &[(PathBuf, String)]) -> Vec<PathBuf> {
 
 /// 工作线程入口：预扫描计数 → 逐项执行 → Finished 事件收尾。
 /// answer_rx 仅 Ask 模式 Some（冲突问答的回答接收端）。
+/// opts 仅 Copy/Move 有意义（阶段 AB 校验/过滤；预扫描与执行共用同一
+/// 过滤判定，进度 total 按过滤后集合计算）。
 #[allow(clippy::too_many_arguments)]
 fn run_op(
     kind: OpKind,
@@ -615,22 +724,27 @@ fn run_op(
     tx: Sender<OpEvent>,
     answer_rx: Option<Receiver<ConflictAnswer>>,
     delete_permanent: bool,
+    opts: CopyOptions,
 ) {
     let mut ctx = OpCtx {
         cancel: &cancel,
         paused: &paused,
         tx: &tx,
         answer_rx: answer_rx.as_ref(),
+        opts: &opts,
+        drop_source_unsafe: false,
+        move_prune: kind == OpKind::Move && opts.filter_active(),
         remembered_file: None,
         remembered_dir: None,
         progress: OpProgress::default(),
         errors: Vec::new(),
         cancelled: false,
     };
-    // 预扫描：递归计数（文件+目录项数、文件字节）；符号链接不跟进目录。
+    // 预扫描：递归计数（文件+目录项数、文件字节，过滤后集合）；符号链接
+    // 不跟进目录。
     let mut per_source = Vec::with_capacity(sources.len());
     for src in &sources {
-        let (items, bytes) = count_source(src);
+        let (items, bytes) = count_source(src, &opts);
         ctx.progress.total_files += items;
         ctx.progress.total_bytes += bytes;
         per_source.push((items, bytes));
@@ -676,9 +790,10 @@ fn run_op(
                 }
                 ctx.progress.current = src.clone();
                 let (items, bytes) = per_source[i];
-                if kind == OpKind::Move {
+                if kind == OpKind::Move && !opts.filter_active() {
                     // 快速路径：同盘 rename 瞬间完成（目标存在时 rename 在
                     // Windows 上会失败，落入回退路径由冲突策略处理）。
+                    // 过滤开启时禁用——rename 整树搬走无法按文件过滤。
                     if !verbatim_path(&dst).exists()
                         && std::fs::rename(verbatim_path(src), verbatim_path(&dst)).is_ok()
                     {
@@ -703,12 +818,31 @@ fn run_op(
                     Resolve::Cancelled => break,
                 };
                 if let Some(dst) = dst {
+                    ctx.drop_source_unsafe = false;
                     if copy_recursive(src, &dst, conflict, &mut ctx).is_ok()
                         && kind == OpKind::Move
                         && !ctx.cancelled
                     {
-                        // 跨盘/占用回退：复制成功后源移入回收站。
-                        if let Err(e) = trash::delete(src) {
+                        // 跨盘/占用回退：复制成功后清理源。过滤移动
+                        // （move_prune）已逐文件 trash + 清空空目录，此处
+                        // 只除根并说明残留；非过滤且发生过校验失败时不整删。
+                        if ctx.drop_source_unsafe {
+                            if ctx.move_prune {
+                                let _ = std::fs::remove_dir(verbatim_path(src));
+                                ctx.errors.push((
+                                    src.clone(),
+                                    "含被过滤/失败项：匹配项已搬走，其余保留在源".to_string(),
+                                ));
+                            } else {
+                                ctx.errors.push((
+                                    src.clone(),
+                                    "存在未成功复制的项：源未删除（已搬走部分保留在目标）"
+                                        .to_string(),
+                                ));
+                            }
+                        } else if ctx.move_prune {
+                            let _ = std::fs::remove_dir(verbatim_path(src));
+                        } else if let Err(e) = trash::delete(src) {
                             ctx.errors
                                 .push((src.clone(), format!("源移入回收站失败: {e}")));
                         }
@@ -727,10 +861,12 @@ fn run_op(
 /// 压缩工作线程：调 parser 的 create_zip，ZipWriteProgress 经转发线程
 /// 桥接成 OpProgress 快照流；取消/致命错误按 create_zip 约定收尾
 /// （Err → fatal；cancel 置位 → cancelled；容错跳过项不逐项上报）。
+/// 暂停（阶段 AB）：paused 透传 create_zip（条目/块边界 200ms 轮询）。
 fn run_compress(
     sources: Vec<PathBuf>,
     dest_zip: PathBuf,
     cancel: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     tx: Sender<OpEvent>,
 ) {
     use openitgo_parser::archive::{create_zip, ZipWriteOptions, ZipWriteProgress};
@@ -764,6 +900,7 @@ fn run_compress(
         &ZipWriteOptions::default(),
         ztx,
         cancel.clone(),
+        Some(paused),
     );
     let _ = forwarder.join();
     let _ = tx.send(OpEvent::Finished {
@@ -779,6 +916,16 @@ struct OpCtx<'a> {
     tx: &'a Sender<OpEvent>,
     /// Ask 模式的回答接收端（非 Ask 为 None）。
     answer_rx: Option<&'a Receiver<ConflictAnswer>>,
+    /// 复制/移动高级选项（阶段 AB 校验/过滤；Delete 为默认）。
+    opts: &'a CopyOptions,
+    /// 本 source 内发生过过滤跳过或校验失败（阶段 AB）：Move 回退路径
+    /// 据此放弃 trash 源（防部分搬运时整删源丢数据）。每 source 处理前
+    /// 由 run_op 重置。
+    drop_source_unsafe: bool,
+    /// 过滤移动（阶段 AB，kind==Move 且过滤开启）：copy_recursive 内逐
+    /// 文件 trash 已拷源文件、remove_dir 清空的源目录（TC 式部分搬运）；
+    /// false = 回退路径成功后整源 trash（现状）。
+    move_prune: bool,
     /// Ask 模式 apply_all 记忆：后续同级冲突的生效策略（文件级/目录级
     /// 各自独立——目录级「全部应用」不预决文件级策略）。
     remembered_file: Option<ConflictAction>,
@@ -930,11 +1077,24 @@ impl OpCtx<'_> {
 
 /// 预扫描单个 source：返回 (项数[文件+目录], 文件字节数)；
 /// 符号链接按单项计（不跟进目录防环）；读取失败按 1 项 0 字节计。
-fn count_source(path: &Path) -> (u64, u64) {
+/// 阶段 AB 过滤（Copy/Move；Delete 传默认不过滤）：不匹配的文件不计
+/// （目录恒计入，结构保留）——与 copy_recursive 共用同一判定，进度
+/// total 即过滤后集合。
+fn count_source(path: &Path, opts: &CopyOptions) -> (u64, u64) {
     let Ok(meta) = std::fs::symlink_metadata(verbatim_path(path)) else {
         return (1, 0);
     };
     if meta.is_symlink() || !meta.is_dir() {
+        // 顶层文件源同样参与过滤（与递归层一致，计数/执行不脱节）。
+        if meta.is_file() {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if !opts.matches(&name, false, meta.modified().ok()) {
+                return (0, 0);
+            }
+        }
         let bytes = if meta.is_file() { meta.len() } else { 0 };
         return (1, bytes);
     }
@@ -949,12 +1109,24 @@ fn count_source(path: &Path) -> (u64, u64) {
             let p = item.path();
             match item.file_type() {
                 Ok(ft) if ft.is_symlink() || !ft.is_dir() => {
-                    items += 1;
-                    if let Ok(m) = item.metadata() {
+                    if ft.is_file() {
+                        let meta = item.metadata().ok();
+                        let name = item.file_name().to_string_lossy().to_string();
+                        if !opts.matches(
+                            &name,
+                            false,
+                            meta.as_ref().and_then(|m| m.modified().ok()),
+                        ) {
+                            continue; // 不匹配的文件：不计项数/字节
+                        }
+                        bytes += meta.map(|m| m.len()).unwrap_or(0);
+                    } else if let Ok(m) = item.metadata() {
+                        // 符号链接到文件等：沿用原语义计入目标大小。
                         if m.is_file() {
                             bytes += m.len();
                         }
                     }
+                    items += 1;
                 }
                 Ok(_) => {
                     items += 1;
@@ -1050,12 +1222,16 @@ pub(crate) fn verbatim_path(p: &Path) -> PathBuf {
 
 /// 递归复制 src → dst（dst 已按顶层冲突策略消解）：目录建目录并合并进入，
 /// 文件分块复制（块间响应取消/暂停，取消时删除半成品目标文件）。
+/// 阶段 AB：文件先过 opts 过滤（不匹配跳过并置 drop_source_unsafe，目录
+/// 恒保留）；opts.verify 时写完后重读双端分块比对（verify_copied_file）。
 /// 返回 Err 仅表示已取消（errors 里已记单项失败）。
 fn copy_recursive(src: &Path, dst: &Path, mode: ConflictMode, ctx: &mut OpCtx) -> Result<(), ()> {
     if ctx.wait_if_paused() {
         return Err(());
     }
-    let is_dir = std::fs::symlink_metadata(verbatim_path(src))
+    let meta = std::fs::symlink_metadata(verbatim_path(src)).ok();
+    let is_dir = meta
+        .as_ref()
         .map(|m| m.is_dir() && !m.is_symlink())
         .unwrap_or(false);
     if is_dir {
@@ -1088,17 +1264,57 @@ fn copy_recursive(src: &Path, dst: &Path, mode: ConflictMode, ctx: &mut OpCtx) -
             };
             copy_recursive(&child_src, &child_dst, mode, ctx)?;
         }
+        // 过滤移动（阶段 AB）：移除已清空的源目录（非空 = 有残留，保留）。
+        if ctx.move_prune {
+            let _ = std::fs::remove_dir(verbatim_path(src));
+        }
         Ok(())
     } else {
+        // 阶段 AB 过滤：不匹配的文件跳过（与 count_source 同一判定，进度
+        // total 即过滤后集合——跳过即完成，不动进度）；目录结构保留。
+        let name = src
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mtime = meta.as_ref().and_then(|m| m.modified().ok());
+        if !ctx.opts.matches(&name, false, mtime) {
+            ctx.drop_source_unsafe = true; // Move：源不可整删
+            return Ok(());
+        }
         match copy_file_chunks(src, dst, ctx) {
             Ok(bytes) => {
+                // 复制后校验（阶段 AB）：重读双端分块比对，不一致记 errors
+                // 并标 drop_source_unsafe（Move 不删源）。
+                let mut unsafe_to_prune = false;
+                if ctx.opts.verify {
+                    match verify_copied_file(src, dst, ctx) {
+                        Ok(()) => {}
+                        Err(CopyFail::Cancelled) => return Err(()),
+                        Err(CopyFail::Io(e)) => {
+                            ctx.errors.push((src.to_path_buf(), e));
+                            ctx.drop_source_unsafe = true;
+                            unsafe_to_prune = true;
+                        }
+                    }
+                }
                 ctx.progress.done_files += 1;
                 ctx.progress.done_bytes += bytes;
                 ctx.send_progress();
+                // 过滤移动（阶段 AB）：逐文件 trash 已拷源文件；校验失败/
+                // 删源失败的保留在源。
+                if ctx.move_prune && !unsafe_to_prune {
+                    if let Err(e) = trash::delete(src) {
+                        ctx.errors
+                            .push((src.to_path_buf(), format!("源文件删除失败: {e}")));
+                        ctx.drop_source_unsafe = true;
+                    }
+                }
             }
             Err(CopyFail::Cancelled) => return Err(()),
             Err(CopyFail::Io(e)) => {
                 ctx.errors.push((src.to_path_buf(), e));
+                // 移动语义：复制失败的源文件保留 → 源不可整删。
+                ctx.drop_source_unsafe = true;
             }
         }
         Ok(())
@@ -1157,6 +1373,91 @@ fn copy_file_chunks(src: &Path, dst: &Path, ctx: &mut OpCtx) -> Result<u64, Copy
         }
     }
     Ok(written)
+}
+
+enum VerifyFail {
+    Cancelled,
+    Io(String),
+}
+
+/// 分块字节比对（复制后校验核心）：长度快查 + 256KB 分块读双端比较；
+/// 每块后查 cancel（校验不删目标——文件已写完，取消只中止校验）；
+/// on_chunk 回调已校验字节数（驱动 cur_done_bytes 第二轮进度）。
+fn files_identical(
+    a: &Path,
+    b: &Path,
+    cancel: &AtomicBool,
+    on_chunk: &mut dyn FnMut(u64),
+) -> Result<(), VerifyFail> {
+    use std::io::Read;
+    let len_a = std::fs::metadata(verbatim_path(a))
+        .map_err(|e| VerifyFail::Io(format!("无法读取源: {e}")))?
+        .len();
+    let len_b = std::fs::metadata(verbatim_path(b))
+        .map_err(|e| VerifyFail::Io(format!("无法读取目标: {e}")))?
+        .len();
+    if len_a != len_b {
+        return Err(VerifyFail::Io(format!("长度不一致（{len_a} ≠ {len_b}）")));
+    }
+    let mut ra = std::fs::File::open(verbatim_path(a))
+        .map_err(|e| VerifyFail::Io(format!("无法读取源: {e}")))?;
+    let mut rb = std::fs::File::open(verbatim_path(b))
+        .map_err(|e| VerifyFail::Io(format!("无法读取目标: {e}")))?;
+    let mut buf_a = vec![0u8; COPY_CHUNK];
+    let mut buf_b = vec![0u8; COPY_CHUNK];
+    let mut done = 0u64;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(VerifyFail::Cancelled);
+        }
+        let na = ra
+            .read(&mut buf_a)
+            .map_err(|e| VerifyFail::Io(format!("读取源失败: {e}")))?;
+        let nb = rb
+            .read(&mut buf_b)
+            .map_err(|e| VerifyFail::Io(format!("读取目标失败: {e}")))?;
+        if na == 0 && nb == 0 {
+            break;
+        }
+        if na != nb || buf_a[..na] != buf_b[..nb] {
+            return Err(VerifyFail::Io(format!("内容不一致（偏移 {done} 附近）")));
+        }
+        done += na as u64;
+        on_chunk(done);
+    }
+    Ok(())
+}
+
+/// 复制后校验（阶段 AB）：文件内进度归零走第二轮（cur_total 不变 =
+/// 文件大小，不新增字段）；不一致/读取失败 → CopyFail::Io（「校验失败」
+/// 前缀由调用方记 errors 时带出）；校验期暂停/取消在块边界生效。
+fn verify_copied_file(src: &Path, dst: &Path, ctx: &mut OpCtx) -> Result<(), CopyFail> {
+    ctx.progress.cur_done_bytes = 0;
+    ctx.send_progress();
+    if ctx.wait_if_paused() {
+        return Err(CopyFail::Cancelled);
+    }
+    let mut cancelled = false;
+    let mut last_send = Instant::now();
+    let cancel = ctx.cancel;
+    let result = files_identical(src, dst, cancel, &mut |done| {
+        ctx.progress.cur_done_bytes = done;
+        if ctx.wait_if_paused() {
+            cancelled = true;
+        }
+        if last_send.elapsed() >= PROGRESS_INTERVAL {
+            ctx.send_progress();
+            last_send = Instant::now();
+        }
+    });
+    if cancelled {
+        return Err(CopyFail::Cancelled);
+    }
+    match result {
+        Ok(()) => Ok(()),
+        Err(VerifyFail::Cancelled) => Err(CopyFail::Cancelled),
+        Err(VerifyFail::Io(e)) => Err(CopyFail::Io(format!("校验失败: {e}"))),
+    }
 }
 
 /// 条目名校验（重命名/新建文件夹共用）：非空、非 . 或 ..、不含 Windows
@@ -1371,7 +1672,7 @@ mod tests {
         write_file(&t.path().join("a.txt"), b"1234");
         write_file(&t.path().join("sub/b.txt"), b"123456");
         write_file(&t.path().join("sub/deep/c.txt"), b"12");
-        let (items, bytes) = count_source(&t.path().join("sub"));
+        let (items, bytes) = count_source(&t.path().join("sub"), &CopyOptions::default());
         // sub + deep + b.txt + c.txt
         assert_eq!(items, 4);
         assert_eq!(bytes, 8);
@@ -1448,6 +1749,18 @@ mod tests {
         mode: ConflictMode,
         cancel: Arc<AtomicBool>,
     ) -> FinishedLike {
+        run_op_sync_opts(kind, sources, dest, mode, cancel, CopyOptions::default())
+    }
+
+    /// 带高级选项的同步驱动（阶段 AB 校验/过滤测试用）。
+    fn run_op_sync_opts(
+        kind: OpKind,
+        sources: Vec<PathBuf>,
+        dest: Option<PathBuf>,
+        mode: ConflictMode,
+        cancel: Arc<AtomicBool>,
+        opts: CopyOptions,
+    ) -> FinishedLike {
         let (tx, rx) = channel();
         run_op(
             kind,
@@ -1459,6 +1772,7 @@ mod tests {
             tx,
             None,
             false,
+            opts,
         );
         let mut finished = None;
         while let Ok(ev) = rx.try_recv() {
@@ -1545,6 +1859,7 @@ mod tests {
                 tx,
                 Some(arx),
                 false,
+                CopyOptions::default(),
             );
         });
         let mut queries = Vec::new();
@@ -1749,6 +2064,7 @@ mod tests {
                 tx,
                 Some(arx),
                 false,
+                CopyOptions::default(),
             );
         });
         // 收到询问后不答，直接置 cancel。
@@ -1817,11 +2133,15 @@ mod tests {
         let cancel = AtomicBool::new(true);
         let paused = AtomicBool::new(false);
         let (tx, _rx) = channel();
+        let opts = CopyOptions::default();
         let mut ctx = OpCtx {
             cancel: &cancel,
             paused: &paused,
             tx: &tx,
             answer_rx: None,
+            opts: &opts,
+            drop_source_unsafe: false,
+            move_prune: false,
             remembered_file: None,
             remembered_dir: None,
             progress: OpProgress::default(),
@@ -2050,6 +2370,7 @@ mod tests {
             tx,
             None,
             false,
+            CopyOptions::default(),
         );
         let progresses: Vec<OpProgress> = rx
             .try_iter()
@@ -2088,6 +2409,7 @@ mod tests {
                 tx,
                 None,
                 false,
+                CopyOptions::default(),
             );
         });
         // 暂停期间：不写目标、不发 Finished（暂停中不发新进度）。
@@ -2237,5 +2559,158 @@ mod tests {
         ];
         assert_eq!(retry_sources(&errors), vec![keep]);
         assert!(retry_sources(&[]).is_empty());
+    }
+
+    // ---- 阶段 AB：复制后校验 / 高级过滤 ----
+
+    /// 分块字节比对：一致 / 内容不一致 / 长度不一致。
+    #[test]
+    fn files_identical_compares_content_and_length() {
+        let t = TempTree::new("verify");
+        let a = t.path().join("a.bin");
+        let b = t.path().join("b.bin");
+        let c = t.path().join("c.bin");
+        write_file(&a, b"same-content-123");
+        write_file(&b, b"same-content-123");
+        write_file(&c, b"same-content-124"); // 尾字节不同
+        let cancel = AtomicBool::new(false);
+        assert!(files_identical(&a, &b, &cancel, &mut |_| {}).is_ok());
+        assert!(matches!(
+            files_identical(&a, &c, &cancel, &mut |_| {}),
+            Err(VerifyFail::Io(_))
+        ));
+        // 长度不一致（快查路径）。
+        write_file(&c, b"shorter");
+        assert!(matches!(
+            files_identical(&a, &c, &cancel, &mut |_| {}),
+            Err(VerifyFail::Io(_))
+        ));
+        // cancel 置位 → Cancelled。
+        let cancel = AtomicBool::new(true);
+        assert!(matches!(
+            files_identical(&a, &b, &cancel, &mut |_| {}),
+            Err(VerifyFail::Cancelled)
+        ));
+    }
+
+    /// 过滤判定：目录恒过；通配符；最近 N 天；mtime 缺失放行。
+    #[test]
+    fn copy_filter_matches_rules() {
+        let now = SystemTime::now();
+        let old = now - Duration::from_secs(10 * 86400);
+        // 目录恒 true（结构保留）。
+        assert!(copy_filter_matches("anything", true, Some(old), "*.txt", 3));
+        // 通配符（空 = 不过滤；复用分号多模式）。
+        assert!(copy_filter_matches("a.txt", false, None, "", 0));
+        assert!(copy_filter_matches("a.txt", false, None, "*.txt", 0));
+        assert!(!copy_filter_matches("a.png", false, None, "*.txt", 0));
+        assert!(copy_filter_matches("a.png", false, None, "*.txt;*.png", 0));
+        // 最近 N 天（0 = 不过滤；旧文件被滤掉；mtime 缺失放行）。
+        assert!(copy_filter_matches("a.txt", false, Some(now), "", 3));
+        assert!(!copy_filter_matches("a.txt", false, Some(old), "", 3));
+        assert!(copy_filter_matches("a.txt", false, Some(old), "", 0));
+        assert!(copy_filter_matches("a.txt", false, None, "", 3));
+        // 双条件 AND。
+        assert!(copy_filter_matches("a.txt", false, Some(now), "*.txt", 3));
+        assert!(!copy_filter_matches("a.txt", false, Some(old), "*.txt", 3));
+        assert!(!copy_filter_matches("a.png", false, Some(now), "*.txt", 3));
+    }
+
+    /// 过滤集成：目录结构保留、只拷匹配文件、进度 total 即过滤后集合；
+    /// Move + 过滤不整删源。
+    #[test]
+    fn copy_with_filter_keeps_dirs_and_skips_files() {
+        let t = TempTree::new("filter");
+        let src = t.path().join("src");
+        write_file(&src.join("keep.txt"), b"aaa");
+        write_file(&src.join("skip.png"), b"png");
+        write_file(&src.join("sub/inner.txt"), b"bbb");
+        write_file(&src.join("sub/inner.log"), b"log");
+        let dest = t.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let opts = CopyOptions {
+            filter_pattern: "*.txt".to_string(),
+            ..Default::default()
+        };
+        let r = run_op_sync_opts(
+            OpKind::Copy,
+            vec![src.clone()],
+            Some(dest.clone()),
+            ConflictMode::AutoRename,
+            Arc::new(AtomicBool::new(false)),
+            opts,
+        );
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(dest.join("src/keep.txt").exists());
+        assert!(dest.join("src/sub/inner.txt").exists());
+        assert!(!dest.join("src/skip.png").exists(), "不匹配文件应跳过");
+        assert!(!dest.join("src/sub/inner.log").exists());
+        assert!(dest.join("src/sub").is_dir(), "目录结构应保留");
+
+        // Move + 过滤：匹配项搬走，源不整删（errors 带说明）。
+        let dest2 = t.path().join("dest2");
+        std::fs::create_dir_all(&dest2).unwrap();
+        let opts = CopyOptions {
+            filter_pattern: "*.txt".to_string(),
+            ..Default::default()
+        };
+        let r = run_op_sync_opts(
+            OpKind::Move,
+            vec![src.clone()],
+            Some(dest2.clone()),
+            ConflictMode::AutoRename,
+            Arc::new(AtomicBool::new(false)),
+            opts,
+        );
+        assert_eq!(r.errors.len(), 1, "源未删除应有说明: {:?}", r.errors);
+        assert!(dest2.join("src/keep.txt").exists());
+        assert!(src.join("skip.png").exists(), "被过滤项应留在源");
+        assert!(src.join("sub/inner.log").exists());
+        assert!(!src.join("keep.txt").exists(), "匹配项已搬走");
+
+        // 顶层文件源被过滤：什么都不拷（且无错误）。
+        let lone = t.path().join("lone.png");
+        write_file(&lone, b"x");
+        let r = run_op_sync_opts(
+            OpKind::Copy,
+            vec![lone],
+            Some(dest.clone()),
+            ConflictMode::AutoRename,
+            Arc::new(AtomicBool::new(false)),
+            CopyOptions {
+                filter_pattern: "*.txt".to_string(),
+                ..Default::default()
+            },
+        );
+        assert!(r.errors.is_empty());
+        assert!(!dest.join("lone.png").exists());
+    }
+
+    /// 校验集成：verify = true 的复制正常通过（内容一致无 errors）。
+    #[test]
+    fn copy_with_verify_passes() {
+        let t = TempTree::new("verify-copy");
+        let src = t.path().join("src");
+        write_file(&src.join("a.txt"), b"verify me");
+        write_file(&src.join("sub/b.txt"), b"nested verify");
+        let dest = t.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let r = run_op_sync_opts(
+            OpKind::Copy,
+            vec![src],
+            Some(dest.clone()),
+            ConflictMode::AutoRename,
+            Arc::new(AtomicBool::new(false)),
+            CopyOptions {
+                verify: true,
+                ..Default::default()
+            },
+        );
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(std::fs::read(dest.join("src/a.txt")).unwrap(), b"verify me");
+        assert_eq!(
+            std::fs::read(dest.join("src/sub/b.txt")).unwrap(),
+            b"nested verify"
+        );
     }
 }

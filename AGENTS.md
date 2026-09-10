@@ -78,8 +78,9 @@ cargo clippy --workspace --all-targets -- -D warnings
   仅 zip 非 None；`needs_wrapper_dir()` 为智能解压目录判定；
   `ExtractProgress::Started.total_bytes` 为 `Option<u64>`（仅 ZIP Some）。
   **zip 写出**：`archive/zip_write.rs` 的 `create_zip(sources, dest, opts, progress,
-  cancel)`（FM「压缩为 zip」用）——条目名 = 相对各 source 父目录（多 source 各自
-  basename 为根，'/' 分隔），目录写 `name/` 条目，文件流式 `io::copy`，符号链接
+  cancel, paused)`（FM「压缩为 zip」用）——条目名 = 相对各 source 父目录（多 source 各自
+  basename 为根，'/' 分隔），目录写 `name/` 条目，文件 256KB 分块写入（块间查
+  暂停/取消，阶段 AB 起支持暂停），符号链接
   跳过，进度/取消/半成品删除约定与 extract 一致（`ZipWriteProgress`）。
 - **Archive 视图（app 侧）**：`View::Archive` + `views/archive.rs` 资源管理器式
   三栏（目录树 / 面包屑+明细列表 / 预览），操作手感对齐 Explorer/WinRAR；行模型与
@@ -553,7 +554,8 @@ cargo clippy --workspace --all-targets -- -D warnings
   `interact(Sense::click())`）开关非模态窗口 `render_task_panel`：行 =
   动词图标（Copy/Move/Delete/Compress → COPY/ARROW_RIGHT/TRASH/FILE_ZIP）
   + 源→目标摘要（首项 + 共 N 项）+ 进度条（排队任务显示「排队中」）+
-  暂停/继续（排队/压缩禁用）+ 取消（排队任务经 `ops.cancel` 直接出队）。
+  暂停/继续（排队禁用；压缩自阶段 AB 起支持）+ 取消（排队任务经
+  `ops.cancel` 直接出队）。
   状态栏进度区仍只显示第一个在途任务，其余经后缀 `（+N 在途 +M 排队）`
   提示。**错误汇总窗**——`on_op_finished` 见 errors 非空即留存
   `OpErrorReport`（kind/dest/dest_dir/conflict/delete_permanent/errors
@@ -561,8 +563,28 @@ cargo clippy --workspace --all-targets -- -D warnings
   （`show_rows`）列出全部失败项（路径 + 原因），toast 前 3 项不变；
   「重试失败项」经 `retry_sources` 重建同参数任务（Copy/Move 用原
   dest_dir 与冲突策略、Delete 用原 permanent 档、Compress 兜底原
-  dest_zip；源全消失则无可重试直接关窗）。两窗无文本输入，不进
+  dest_zip；源全消失则无可重试直接关窗；重试**不带** verify/filter
+  高级选项，代码注释已注明）。两窗无文本输入，不进
   handle_keyboard 对话框屏蔽列表。
+  **复制校验/过滤/压缩暂停（阶段 AB）**：`CopyOptions{verify,
+  filter_pattern, filter_newer_days}` 随 CopyMoveDialog 下发（「复制完成后
+  校验」checkbox 默认关 +「高级」折叠区两项过滤；`FmDialogOutcome::
+  ConfirmCopyMove` 增带 opts，重试失败项用默认 opts）。过滤经纯函数
+  `copy_filter_matches`（通配符 + 仅最近 N 天，预扫描 `count_source` 与
+  执行共用同一判定——目录恒保留只过滤文件，total 按过滤后集合）。
+  verify 在复制完成后经 `files_identical`（长度快查 + 分块比对 + cancel，
+  第二轮进度）逐文件比对，不一致记 errors「校验失败」。
+  **过滤 + Move 语义**（spec 未覆盖，自定）：filter 开启时 rename 快速
+  路径禁用；`ctx.move_prune`（kind==Move && filter_active）在
+  copy_recursive 内逐文件 trash 已拷源文件 + remove_dir 清空空目录（TC 式
+  部分搬运）；`ctx.drop_source_unsafe`（过滤跳过/校验失败/复制 IO 失败/
+  删源失败时置位）阻止整删源、改记 errors——顺带修了预存 bug：非过滤
+  Move 回退路径在逐文件复制失败时原本仍会整删源。**压缩暂停**：
+  parser `create_zip` 增 `paused: Option<Arc<AtomicBool>>`（None 兼容；
+  `copy_entry_chunks` 256KB 分块取代 io::copy，块/条目边界 200ms 轮询
+  paused、等待中仍查 cancel），FM 侧 run_compress 传 Some(paused)，
+  状态栏/任务面板的压缩暂停禁用随之解除。**删除字节进度**：Delete 循环
+  早已按 source 粒度累加 done_bytes（trash::delete 无法更细），无需改动。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

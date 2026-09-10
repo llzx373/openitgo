@@ -1336,20 +1336,10 @@ impl FileManagerView {
                         ui.label(egui::RichText::new(current).weak())
                             .on_hover_text(op.progress.current.display().to_string());
                     }
-                    // 暂停/继续（压缩不支持暂停，禁用并说明）。
+                    // 暂停/继续（阶段 AB 起压缩也支持暂停——parser
+                    // create_zip 块边界轮询）。
                     let pause_label = if op.paused { "继续" } else { "暂停" };
-                    if ui
-                        .add_enabled(
-                            op.kind != OpKind::Compress,
-                            egui::Button::new(pause_label).small(),
-                        )
-                        .on_hover_text(if op.kind == OpKind::Compress {
-                            "压缩不支持暂停"
-                        } else {
-                            ""
-                        })
-                        .clicked()
-                    {
+                    if ui.add(egui::Button::new(pause_label).small()).clicked() {
                         toggle_pause = Some((op.id, !op.paused));
                     }
                     if ui.small_button("取消").clicked() {
@@ -2701,20 +2691,9 @@ impl FileManagerView {
                                         .desired_width(160.0)
                                         .text(bar_text),
                                 );
-                                // 暂停/继续（压缩不支持暂停，禁用并说明）。
+                                // 暂停/继续（阶段 AB 起压缩也支持暂停）。
                                 let pause_label = if s.paused { "继续" } else { "暂停" };
-                                if ui
-                                    .add_enabled(
-                                        s.kind != OpKind::Compress,
-                                        egui::Button::new(pause_label).small(),
-                                    )
-                                    .on_hover_text(if s.kind == OpKind::Compress {
-                                        "压缩不支持暂停"
-                                    } else {
-                                        ""
-                                    })
-                                    .clicked()
-                                {
+                                if ui.add(egui::Button::new(pause_label).small()).clicked() {
                                     toggle_pause = Some((s.id, !s.paused));
                                 }
                             }
@@ -4943,13 +4922,14 @@ impl FileManagerView {
                 sources,
                 dest,
                 conflict,
+                opts,
             } => {
                 match kind {
                     OpKind::Copy => {
-                        self.ops.start_copy(sources, dest, conflict);
+                        self.ops.start_copy_opts(sources, dest, conflict, opts);
                     }
                     OpKind::Move => {
-                        self.ops.start_move(sources, dest, conflict);
+                        self.ops.start_move_opts(sources, dest, conflict, opts);
                         if sys_cut_paste {
                             // Explorer 惯例：剪切粘贴生效后清空系统剪贴板，
                             // 防同一份「剪切」被重复粘贴。
