@@ -99,6 +99,8 @@ pub struct FmBehaviorOptions {
     pub archive_open: FmArchiveOpen,
     /// Esc 不清选中（fm_esc_keep_selection）：Esc 链止于清过滤。
     pub esc_keep_selection: bool,
+    /// 列表/网格空白区双击 = 回上级目录（fm_dblclick_blank_up）。
+    pub dblclick_blank_up: bool,
 }
 
 impl Default for FmBehaviorOptions {
@@ -113,6 +115,7 @@ impl Default for FmBehaviorOptions {
             drag_confirm: true,
             archive_open: FmArchiveOpen::Archive,
             esc_keep_selection: false,
+            dblclick_blank_up: true,
         }
     }
 }
@@ -204,6 +207,9 @@ pub struct FileManagerView {
     /// Alt+↓ 的一次性请求：下一帧焦点栏的历史下拉菜单开/关切换
     /// （弹层开关状态在 egui memory，键盘段无法直接触达）。
     history_menu_toggle: bool,
+    /// Ctrl+D 的一次性请求：下一帧焦点栏的书签菜单开/关切换（同
+    /// history_menu_toggle 机制）。
+    bookmarks_menu_toggle: bool,
     /// 状态栏速度/ETA 估算器（任务 id + EMA 采样器；任务切换重置）。
     op_speed: Option<(u64, OpSpeedMeter)>,
     /// Ctrl+Q 对面栏快速预览（双栏；会话内状态，不落盘）：开启时非活动栏
@@ -435,6 +441,7 @@ impl FileManagerView {
             bookmark_groups: bookmark_groups.to_vec(),
             select_group_pattern: String::new(),
             history_menu_toggle: false,
+            bookmarks_menu_toggle: false,
             op_speed: None,
             quickview_open: false,
             thumbs: ThumbCache::new(),
@@ -1457,13 +1464,22 @@ impl FileManagerView {
     /// 已在组内打勾禁用）+「新建分组…」，下方各分组子菜单（书签点击跳转经
     /// fallback_existing_dir、✕ 移除不收起菜单；组尾重命名/删除分组）。
     /// 动作先收集、闭包内统一应用（迭代分组时 self 只能只读借用）。
+    /// Ctrl+D 经 bookmarks_menu_toggle 一次性请求切换焦点栏菜单开/关（与点击
+    /// 共用同一 memory 弹层状态，同历史下拉的 Alt+↓ 模式）。
     fn render_bookmarks_button(&mut self, ui: &mut egui::Ui, idx: usize) {
-        let button = egui::Button::new(icons::STAR.as_str()).frame(false);
-        let config = egui::containers::menu::MenuConfig::new()
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-        egui::containers::menu::MenuButton::from_button(button)
-            .config(config)
-            .ui(ui, |ui| {
+        let response = ui
+            .add(egui::Button::new(icons::STAR.as_str()).frame(false))
+            .on_hover_text("常用目录书签（Ctrl+D）");
+        let kb_toggle = self.bookmarks_menu_toggle && self.active == idx;
+        if kb_toggle {
+            self.bookmarks_menu_toggle = false;
+        }
+        let set = (response.clicked() || kb_toggle).then_some(egui::SetOpenCommand::Toggle);
+        egui::Popup::menu(&response)
+            .id(egui::Id::new(("fm_bookmarks_menu", idx)))
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .open_memory(set)
+            .show(|ui| {
                 ui.set_min_width(280.0);
                 let dir = self.panels[idx].dir.clone();
                 let mut add_to: Option<usize> = None;
@@ -1566,9 +1582,7 @@ impl FileManagerView {
                     self.remove_group(gi);
                     ui.close();
                 }
-            })
-            .0
-            .on_hover_text("常用目录书签");
+            });
     }
 
     /// 压缩包 ask 小菜单（fm_archive_open = "ask"）：双击处在鼠标位置弹出
@@ -1907,6 +1921,9 @@ impl FileManagerView {
         let panel = &mut self.panels[idx];
         panel.last_scroll_offset = output.state.offset.y;
         panel.last_viewport_height = output.inner_rect.height();
+        // 双击空白处回上级（fm_dblclick_blank_up）：明细行整行占满宽度，
+        // 空白 = 内容底以下的视口区域。
+        self.blank_dblclick_up(ui, idx, &output, row_count as f32 * row_pitch, None);
     }
 
     /// 明细列表一行：整行 allocate 交互 + 斑马纹/高亮/焦点描边 + 列分隔竖线，
@@ -2343,6 +2360,62 @@ impl FileManagerView {
         if self.thumb_visible[idx] != Some(visible) {
             self.thumb_visible[idx] = Some(visible);
             self.thumbs.bump_generation();
+        }
+        // 双击空白处回上级（fm_dblclick_blank_up）：cell 定宽左排，每行右侧
+        // 余量与末行未排满部分都算空白（几何见 GridBlankGeom）。
+        let full_rows = item_count / cols;
+        let partial = item_count % cols;
+        let geom = GridBlankGeom {
+            row_pitch: THUMB_CELL_H,
+            full_rows,
+            full_width: cols as f32 * THUMB_CELL_W,
+            last_width: if partial == 0 {
+                cols as f32 * THUMB_CELL_W
+            } else {
+                partial as f32 * THUMB_CELL_W
+            },
+        };
+        self.blank_dblclick_up(
+            ui,
+            idx,
+            &output,
+            grid_rows as f32 * THUMB_CELL_H,
+            Some(geom),
+        );
+    }
+
+    /// 双击空白处回上级（fm_dblclick_blank_up）：本帧主键双击命中空白区
+    /// （判定见 dblclick_hits_blank）即 parent_dir()；命中行/cell 的双击
+    /// 由各自行响应消费，几何上不落在空白区，互不冲突。
+    fn blank_dblclick_up(
+        &mut self,
+        ui: &egui::Ui,
+        idx: usize,
+        output: &egui::scroll_area::ScrollAreaOutput<()>,
+        content_height: f32,
+        grid: Option<GridBlankGeom>,
+    ) {
+        if !self.options.dblclick_blank_up {
+            return;
+        }
+        let dbl = ui.input(|i| {
+            i.pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+        });
+        if !dbl {
+            return;
+        }
+        let Some(pos) = ui.input(|i| i.pointer.latest_pos()) else {
+            return;
+        };
+        if dblclick_hits_blank(
+            output.inner_rect,
+            output.state.offset.y,
+            content_height,
+            grid,
+            pos,
+        ) {
+            self.panels[idx].parent_dir();
         }
     }
 
@@ -2971,16 +3044,21 @@ impl FileManagerView {
     /// Shift+↑/↓ 从 anchor 扩选、Ctrl+↑/↓ 只移焦点、Home/End 跳首/末行、
     /// PgUp/PgDn 整页步进、Enter 打开焦点行、空格计算焦点目录大小、
     /// Backspace 上级、Ctrl+A 全选可见、Ctrl+R 刷新、Alt+←/→ 导航历史、
-    /// Alt+↓ 历史下拉开关、可打印字符 type-ahead 定位、`*` 反选、
+    /// Alt+↓ 历史下拉开关、Ctrl+D 书签菜单开关、Ctrl+L 选中集目录批量
+    /// 计算大小（无选中回退焦点目录）、可打印字符 type-ahead 定位、`*` 反选、
     /// `+`/`-` 弹「选择组」对话框、Ctrl+U 交换两栏、Ctrl+←/→ 栏间目录
     /// 同步、Ctrl+\ 回根目录、Ctrl+Q 对面栏快速预览（单栏 = 预览开关）、
     /// Ctrl+B 分支视图（「..」行/Esc 末级 = 退出分支）、
     /// Ctrl+M 批量重命名、Esc 分级清 type-ahead 缓冲→过滤→选中。
     /// 过滤框等文本输入占用键盘时不处理。
     /// 文件操作键：F2 重命名 / F5 复制 / F6 移动 / F7 新建文件夹 /
+    /// F4 系统「编辑」动词（无关联回退「打开方式…」，目录忽略）/
     /// Shift+F4 新建文本文件 / F8(Delete) 删除（confirm_delete 时先弹确认框；
-    /// Shift+Del = 删除方式的另一档快捷）；Alt+Enter 焦点项系统属性；
+    /// Shift+Del = 删除方式的另一档快捷）；Alt+F5 压缩为 zip、
+    /// Alt+F9 解压对话框（单压缩包选中集）、Alt+F7 文件搜索；
+    /// Alt+Enter 焦点项系统属性、Ctrl+Shift+Enter 以管理员身份运行（runas）；
     /// Ctrl+C/X/V 剪贴板。行为开关由 self.options（每帧下发）提供。
+    /// （纯功能键分支需排 Alt——key_pressed 不认修饰键，Alt+F4 系统关窗不拦。）
     fn handle_keyboard(&mut self, ui: &egui::Ui, intents: &mut FmIntents) {
         // 对话框打开时屏蔽面板键盘（输入归对话框；冲突问答窗/分组小窗同此机制）。
         if self.dialog.is_some() || self.pending_conflict.is_some() || self.group_dialog.is_some() {
@@ -3034,6 +3112,31 @@ impl FileManagerView {
         // Alt+↓：开/关焦点栏的目录历史下拉（一次性请求，面包屑渲染时消费）。
         if mods.alt && ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
             self.history_menu_toggle = true;
+        }
+        // Ctrl+D：开/关焦点栏的书签菜单（一次性请求，同 Alt+↓ 机制）。
+        if mods.command && ui.input(|i| i.key_pressed(egui::Key::D)) {
+            self.bookmarks_menu_toggle = true;
+        }
+        // Ctrl+L：对选中集内所有目录批量计算大小；选中集无目录时回退焦点目录
+        // （同右键「计算大小」入口 request_dir_sizes）。
+        if mods.command && ui.input(|i| i.key_pressed(egui::Key::L)) {
+            let panel = &mut self.panels[active];
+            let mut dirs: Vec<PathBuf> = panel
+                .entries
+                .iter()
+                .filter(|e| e.is_dir && panel.selected.contains(&e.path))
+                .map(|e| e.path.clone())
+                .collect();
+            if dirs.is_empty() {
+                if let Some(e) = panel.focused_entry() {
+                    if e.is_dir {
+                        dirs.push(e.path);
+                    }
+                }
+            }
+            if !dirs.is_empty() {
+                panel.request_dir_sizes(dirs);
+            }
         }
         // Alt+Enter：焦点项系统「属性」对话框（同 Explorer；非 Windows 无此键位）。
         if mods.alt
@@ -3100,16 +3203,47 @@ impl FileManagerView {
             }
         }
         // 文件操作：F2 重命名 / F5 复制 / F6 移动 / F7 新建文件夹 / F8(Del) 删除。
-        // Alt+F7 = 文件搜索（TC 语义；纯 F7 需排 Alt，否则同键双触发）。
+        // Alt+F7 = 文件搜索、Alt+F5 = 压缩为 zip、Alt+F9 = 解压对话框
+        // （TC 语义；纯功能键需排 Alt，否则同键双触发。Alt+F4 是系统关窗，不拦）。
         if mods.alt && ui.input(|i| i.key_pressed(egui::Key::F7)) {
             self.open_search_dialog();
+        }
+        // Alt+F5：压缩为 zip 对话框（同右键「压缩为 zip…」）。
+        if mods.alt && ui.input(|i| i.key_pressed(egui::Key::F5)) {
+            let targets = self.op_targets(active);
+            if !targets.is_empty() {
+                self.open_compress_dialog(targets, active);
+            }
+        }
+        // Alt+F9：解压对话框（同右键「解压到…」；选中集恰为单个压缩包时可用，
+        // 目标目录 = 另一栏（异目录双栏）否则当前目录）。
+        if mods.alt && ui.input(|i| i.key_pressed(egui::Key::F9)) {
+            let targets = self.op_targets(active);
+            let src = match targets.as_slice() {
+                [p] if archive_kind(p).is_some() => Some(p.clone()),
+                _ => None,
+            };
+            if let Some(src) = src {
+                let dest = match self.layout {
+                    PanelLayout::Dual { .. } => {
+                        let other = self.panels[1 - active].dir.clone();
+                        if other != self.panels[active].dir {
+                            other
+                        } else {
+                            self.panels[active].dir.clone()
+                        }
+                    }
+                    PanelLayout::Single { .. } => self.panels[active].dir.clone(),
+                };
+                intents.extract = Some((src, dest));
+            }
         }
         if ui.input(|i| i.key_pressed(egui::Key::F2)) {
             if let Some(entry) = self.panels[active].focused_entry() {
                 self.dialog = Some(FmDialog::Rename(RenameDialog::new(entry.path)));
             }
         }
-        if ui.input(|i| i.key_pressed(egui::Key::F5)) {
+        if !mods.alt && ui.input(|i| i.key_pressed(egui::Key::F5)) {
             let targets = self.op_targets(active);
             if !targets.is_empty() {
                 self.open_copy_move_dialog(OpKind::Copy, targets, active);
@@ -3126,9 +3260,25 @@ impl FileManagerView {
             let suggested = suggest_folder_name(&parent);
             self.dialog = Some(FmDialog::NewDir(NewDirDialog::new(parent, suggested)));
         }
-        // Shift+F4：新建文本文件（TC 语义；F4 本身未绑定）。
+        // Shift+F4：新建文本文件（TC 语义）。
         if mods.shift && ui.input(|i| i.key_pressed(egui::Key::F4)) {
             self.open_new_file_dialog(active);
+        }
+        // F4：焦点文件系统「编辑」动词（无 edit 关联时回退「打开方式…」；
+        // 目录忽略；非 Windows 无此键位）。
+        if !mods.shift
+            && !mods.alt
+            && !mods.command
+            && crate::platform::shell_verbs::is_supported()
+            && ui.input(|i| i.key_pressed(egui::Key::F4))
+        {
+            if let Some(entry) = self.panels[active].focused_entry() {
+                if !entry.is_dir {
+                    if let Err(e) = crate::platform::shell_verbs::edit_file(&entry.path) {
+                        intents.op_error = Some(e);
+                    }
+                }
+            }
         }
         // F8/Del 删除；Shift+Del = 删除方式的另一档快捷（trash 模式下直删，
         // permanent 模式下进回收站）：生效档位 = 设置档 XOR Shift。
@@ -3305,10 +3455,25 @@ impl FileManagerView {
             };
             self.panels[active].move_focus(-step, focus_mode);
         }
-        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        // Enter 打开焦点行；排修饰键——key_pressed 不认修饰键，不排则
+        // Alt+Enter（属性）/Ctrl+Shift+Enter（runas）会同帧双触发。
+        if !mods.command && !mods.alt && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             let rows = self.panels[active].rows();
             if let Some(row) = self.panels[active].focus {
                 self.open_ui_row(active, &rows, row, intents);
+            }
+        }
+        // Ctrl+Shift+Enter：以管理员身份运行焦点文件/目录（verb "runas"，
+        // 触发 UAC；非 Windows 无此键位）。
+        if mods.command
+            && mods.shift
+            && crate::platform::shell_verbs::is_supported()
+            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+        {
+            if let Some(entry) = self.panels[active].focused_entry() {
+                if let Err(e) = crate::platform::shell_verbs::run_as_admin(&entry.path) {
+                    intents.op_error = Some(e);
+                }
             }
         }
         // 空格：默认计算焦点目录大小；fm_space_action = "toggle_select" 时
@@ -3725,6 +3890,52 @@ fn system_time_to_unix(t: Option<std::time::SystemTime>) -> Option<i64> {
         .map(|d| d.as_secs() as i64)
 }
 
+/// 网格空白区几何（双击回上级判定用）：cell 定宽左排，每行右侧余量与
+/// 末行未排满部分都算空白。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GridBlankGeom {
+    /// 网格行高（cell 高）。
+    row_pitch: f32,
+    /// 排满的完整网格行数。
+    full_rows: usize,
+    /// 完整行的内容宽度（cols × cell 宽）。
+    full_width: f32,
+    /// 末行实际占用宽度（末行排满时 = full_width）。
+    last_width: f32,
+}
+
+/// 空白区双击命中判定（纯函数）：指针在视口内且落在内容区之外——内容底
+/// 以下任意位置；网格模式（grid = Some）还包括每行右侧未占用部分。
+/// 内容坐标 = 指针位置 - 视口左上 + 竖向滚动偏移。
+fn dblclick_hits_blank(
+    viewport: egui::Rect,
+    scroll_y: f32,
+    content_height: f32,
+    grid: Option<GridBlankGeom>,
+    pos: egui::Pos2,
+) -> bool {
+    if !viewport.contains(pos) {
+        return false;
+    }
+    let content_y = pos.y - viewport.min.y + scroll_y;
+    if content_y >= content_height {
+        return true;
+    }
+    if let Some(g) = grid {
+        let row = (content_y / g.row_pitch).floor().max(0.0) as usize;
+        let filled = if row < g.full_rows {
+            g.full_width
+        } else {
+            g.last_width
+        };
+        let content_x = pos.x - viewport.min.x;
+        if content_x >= filled {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3767,6 +3978,126 @@ mod tests {
         assert_eq!(drag_sources(&selected, &a), vec![a.clone(), b.clone()]);
         // 拖未选中行 → 仅该行自身。
         assert_eq!(drag_sources(&selected, &c), vec![c.clone()]);
+    }
+
+    #[test]
+    fn dblclick_blank_hit_detection() {
+        let viewport = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(500.0, 400.0));
+        // 列表模式（grid = None）：内容底以下 = 空白，其余不是。
+        assert!(dblclick_hits_blank(
+            viewport,
+            0.0,
+            300.0,
+            None,
+            egui::pos2(250.0, 350.0)
+        ));
+        assert!(!dblclick_hits_blank(
+            viewport,
+            0.0,
+            300.0,
+            None,
+            egui::pos2(250.0, 100.0)
+        ));
+        // 视口外不命中。
+        assert!(!dblclick_hits_blank(
+            viewport,
+            0.0,
+            300.0,
+            None,
+            egui::pos2(600.0, 350.0)
+        ));
+        // 滚动偏移参与内容坐标换算：内容高 600，scroll 0 时 y=350 仍在内容内；
+        // 滚下 300 后同一屏幕位置对应内容 y=650，越过内容底 = 空白。
+        assert!(!dblclick_hits_blank(
+            viewport,
+            0.0,
+            600.0,
+            None,
+            egui::pos2(250.0, 350.0)
+        ));
+        assert!(dblclick_hits_blank(
+            viewport,
+            300.0,
+            600.0,
+            None,
+            egui::pos2(250.0, 350.0)
+        ));
+        // 内容高于视口（滚到底后无空白区）。
+        assert!(!dblclick_hits_blank(
+            viewport,
+            200.0,
+            600.0,
+            None,
+            egui::pos2(250.0, 399.0)
+        ));
+
+        // 网格模式：3 列 × 176 宽，7 项 → 末行 1 格（宽 176）。
+        let geom = GridBlankGeom {
+            row_pitch: 200.0,
+            full_rows: 2,
+            full_width: 528.0,
+            last_width: 176.0,
+        };
+        let h = 3.0 * 200.0;
+        // 完整行右侧余量 = 空白（视口宽 500 < full_width 528 时该分支按几何仍判；
+        // 用宽视口验证典型形态）。
+        let wide = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 700.0));
+        assert!(dblclick_hits_blank(
+            wide,
+            0.0,
+            h,
+            Some(geom),
+            egui::pos2(600.0, 50.0)
+        ));
+        assert!(!dblclick_hits_blank(
+            wide,
+            0.0,
+            h,
+            Some(geom),
+            egui::pos2(100.0, 50.0)
+        ));
+        // 末行：未排满部分（x ≥ 176）= 空白，已占用格不是。
+        assert!(dblclick_hits_blank(
+            wide,
+            0.0,
+            h,
+            Some(geom),
+            egui::pos2(200.0, 450.0)
+        ));
+        assert!(!dblclick_hits_blank(
+            wide,
+            0.0,
+            h,
+            Some(geom),
+            egui::pos2(100.0, 450.0)
+        ));
+        // 末行以下 = 空白。
+        assert!(dblclick_hits_blank(
+            wide,
+            0.0,
+            h,
+            Some(geom),
+            egui::pos2(100.0, 650.0)
+        ));
+        // 末行排满（partial == 0 → last_width = full_width）：行内右余量仍空白。
+        let full = GridBlankGeom {
+            last_width: 528.0,
+            ..geom
+        };
+        assert!(!dblclick_hits_blank(
+            wide,
+            0.0,
+            h,
+            Some(full),
+            egui::pos2(400.0, 450.0)
+        ));
+        assert!(dblclick_hits_blank(
+            wide,
+            0.0,
+            h,
+            Some(full),
+            egui::pos2(600.0, 450.0)
+        ));
     }
 
     #[test]

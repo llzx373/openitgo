@@ -26,6 +26,17 @@ pub fn show_open_with(path: &Path) -> Result<(), String> {
     shell_verb(path, "openas")
 }
 
+/// 系统「编辑」动词（Explorer 右键「编辑」/ F4 同款）：无 edit 关联或
+/// 动词失败时回退「打开方式…」对话框。
+pub fn edit_file(path: &Path) -> Result<(), String> {
+    shell_verb(path, "edit").or_else(|_| shell_verb(path, "openas"))
+}
+
+/// 以管理员身份运行（verb `"runas"`，触发 UAC 提权）。
+pub fn run_as_admin(path: &Path) -> Result<(), String> {
+    shell_verb(path, "runas")
+}
+
 fn shell_verb(path: &Path, verb: &str) -> Result<(), String> {
     let file: Vec<u16> = path
         .as_os_str()

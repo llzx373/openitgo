@@ -500,6 +500,8 @@ impl SettingsView {
         );
         ui.checkbox(&mut settings.fm_esc_keep_selection, "Esc 保留选中");
         hint(ui, "开启后 Esc 只关闭弹层、清字母定位与过滤，不再清除选中");
+        ui.checkbox(&mut settings.fm_dblclick_blank_up, "双击空白处回上级目录");
+        hint(ui, "列表/网格视图中双击未占用区域 = 回上级（同 Backspace）");
         ui.horizontal(|ui| {
             ui.label("双击压缩包");
             egui::ComboBox::from_id_salt("fm_archive_open")

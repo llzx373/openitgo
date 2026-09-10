@@ -169,7 +169,8 @@ cargo clippy --workspace --all-targets -- -D warnings
   ≤0 且 ≥ -(两列宽之和)，默认值同 panel.rs SIZE_COL_WIDTH/MTIME_COL_WIDTH/0
   在 storage 侧硬编码同步）/`fm_delete_mode`/`fm_space_action`/`fm_dirs_first`/
   `fm_drag_confirm`/`fm_archive_open`/`fm_esc_keep_selection`（行为设置包，
-  见下「行为设置包（阶段 O）」段）；`FileManagerView::snapshot()`
+  见下「行为设置包（阶段 O）」段）/`fm_dblclick_blank_up`（双击空白回上级，
+  见「键位补齐包（阶段 P）」段）；`FileManagerView::snapshot()`
   采集，`maybe_save_fm_state`（`App::update` 末尾）diff 快照后写回 settings——
   **不自行落盘**，退出时 `on_exit` 统一 `save_settings`（排序只持久化活动栏，
   取舍见 `FmStateSnapshot` 注释）；快照在离开 FileManager 视图时重置。设置页
@@ -274,7 +275,9 @@ cargo clippy --workspace --all-targets -- -D warnings
   **Shell 动词（Windows only）**：`platform::shell_verbs`（非 Windows stub
   `is_supported()` false，菜单项隐藏）——`ShellExecuteExW` +
   `SEE_MASK_INVOKEIDLIST` 调 `properties`/`openas` 动词（Explorer 右键同款
-  系统对话框，Shell 自管无需父窗口）；入口 = Alt+Enter（焦点项属性）+
+  系统对话框，Shell 自管无需父窗口）；`edit_file` = `edit` 动词失败回退
+  `openas`（F4）；`run_as_admin` = `runas` 动词触发 UAC（Ctrl+Shift+Enter）。
+  入口 = Alt+Enter（焦点项属性）+
   右键「打开方式…」（仅文件行，「打开」下方）/ 菜单末尾「属性」(INFO)。
   **面包屑路径编辑**：铅笔按钮 → TextEdit 替换分段（`breadcrumb_edit`
   会话态，Enter/Esc 在编辑 UI 内自测——egui_wants_keyboard_input 会屏蔽
@@ -299,6 +302,23 @@ cargo clippy --workspace --all-targets -- -D warnings
   下发（同 show_hidden 模式，不进 FmStateSnapshot）；面板级字段 show_hidden/
   dirs_first 逐栏下发，RowsKey 自动失效。设置页「文件管理器」tab 分「删除/
   显示与布局/交互行为」三子区块。
+  **键位补齐包（阶段 P）**：F4 = 焦点文件系统「编辑」动词（`edit_file`，
+  无 edit 关联回退「打开方式…」，目录忽略，非 Windows 无此键位）；
+  Ctrl+D = 开/关焦点栏书签菜单（`bookmarks_menu_toggle` 一次性请求，
+  同 Alt+↓ 历史菜单机制——书签菜单已从 MenuButton 重构为 Button +
+  `Popup::menu` + `open_memory(SetOpenCommand::Toggle)` 模式以支持键盘开关，
+  弹层 Id = ("fm_bookmarks_menu", idx)）；Ctrl+L = 选中集内目录批量
+  `request_dir_sizes`（选中集无目录回退焦点目录）；Alt+F5 = 压缩为 zip
+  对话框、Alt+F9 = 解压对话框（选中集恰为单个压缩包时，目标 = 异目录另一栏
+  否则当前目录，同右键链路）；Ctrl+Shift+Enter = `run_as_admin`（焦点
+  文件/目录，verb "runas"）。**egui `key_pressed` 不认修饰键**——纯 Enter
+  打开分支已排 command/alt（否则 Alt+Enter/Ctrl+Shift+Enter 同帧双触发），
+  纯 F5 排 Alt（Alt+F5 压缩）；Alt+F4 系统关窗不拦。**双击空白处回上级**
+  （`fm_dblclick_blank_up` 默认 true）：列表/网格 ScrollArea 视口内、
+  内容区之外的双击 → `parent_dir()`；判定纯函数 `dblclick_hits_blank`
+  （内容坐标 = 指针 - 视口左上 + 滚动偏移；网格经 `GridBlankGeom` 把每行
+  右侧余量与末行未排满部分也算空白），接线在 render_list/render_grid 帧尾
+  `blank_dblclick_up`——行/cell 双击几何上不落在空白区，互不冲突。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

@@ -750,7 +750,7 @@ fn resolve_fm_dir(saved: &str) -> PathBuf {
     fallback_existing_dir(PathBuf::from(saved))
 }
 
-/// 文件管理器行为设置包（阶段 O）：每帧从 settings 构造下发给
+/// 文件管理器行为设置包（阶段 O/P）：每帧从 settings 构造下发给
 /// FileManagerView（同 fm_show_hidden 模式，不进快照）。
 fn fm_behavior_options(settings: &Settings) -> FmBehaviorOptions {
     FmBehaviorOptions {
@@ -762,6 +762,7 @@ fn fm_behavior_options(settings: &Settings) -> FmBehaviorOptions {
         drag_confirm: settings.fm_drag_confirm,
         archive_open: FmArchiveOpen::from_setting(&settings.fm_archive_open),
         esc_keep_selection: settings.fm_esc_keep_selection,
+        dblclick_blank_up: settings.fm_dblclick_blank_up,
     }
 }
 

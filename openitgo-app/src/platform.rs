@@ -972,6 +972,16 @@ pub mod shell_verbs {
     pub fn show_open_with(_path: &Path) -> Result<(), String> {
         Err("系统「打开方式」对话框仅支持 Windows".to_string())
     }
+
+    /// 非 Windows 不支持。
+    pub fn edit_file(_path: &Path) -> Result<(), String> {
+        Err("系统「编辑」动词仅支持 Windows".to_string())
+    }
+
+    /// 非 Windows 不支持。
+    pub fn run_as_admin(_path: &Path) -> Result<(), String> {
+        Err("以管理员身份运行仅支持 Windows".to_string())
+    }
 }
 
 /// Unified shell-verbs API (`crate::platform::shell_verbs`)。

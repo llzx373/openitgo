@@ -151,6 +151,9 @@ pub struct Settings {
     /// Esc 不清选中（true = Esc 链：关弹层 → 清 type-ahead → 清过滤，选中保留）。
     #[serde(default)]
     pub fm_esc_keep_selection: bool,
+    /// 列表/网格空白区双击 = 回上级目录（默认 true，TC 可配惯例）。
+    #[serde(default = "default_true")]
+    pub fm_dblclick_blank_up: bool,
 }
 
 fn default_chrome_opacity() -> f32 {
@@ -265,6 +268,7 @@ impl Default for Settings {
             fm_drag_confirm: true,
             fm_archive_open: default_fm_archive_open(),
             fm_esc_keep_selection: false,
+            fm_dblclick_blank_up: true,
         }
     }
 }
@@ -1186,6 +1190,7 @@ mod tests {
         assert!(loaded.fm_drag_confirm);
         assert_eq!(loaded.fm_archive_open, "archive");
         assert!(!loaded.fm_esc_keep_selection);
+        assert!(loaded.fm_dblclick_blank_up);
 
         // 非默认值 roundtrip。
         let s = Settings {
@@ -1195,6 +1200,7 @@ mod tests {
             fm_drag_confirm: false,
             fm_archive_open: "ask".to_string(),
             fm_esc_keep_selection: true,
+            fm_dblclick_blank_up: false,
             ..Default::default()
         };
         let json = serde_json::to_string(&s).unwrap();
