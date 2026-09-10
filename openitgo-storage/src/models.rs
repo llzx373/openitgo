@@ -173,6 +173,9 @@ pub struct Settings {
     /// | "off"。
     #[serde(default = "default_fm_rubber_band")]
     pub fm_rubber_band: String,
+    /// 底部命令行输入条（阶段 X；false = 隐藏）。
+    #[serde(default = "default_true")]
+    pub fm_command_bar: bool,
 }
 
 fn default_fm_rubber_band() -> String {
@@ -297,6 +300,7 @@ impl Default for Settings {
             fm_saved_filters: Vec::new(),
             fm_filter_bar_bottom: false,
             fm_rubber_band: default_fm_rubber_band(),
+            fm_command_bar: true,
         }
     }
 }

@@ -175,7 +175,7 @@ cargo clippy --workspace --all-targets -- -D warnings
   见「系统真实图标（阶段 S）」段）/`fm_saved_filters`/`fm_filter_bar_bottom`
   （见「过滤增强（阶段 T）」段）/`fm_rubber_band`（见「选择增强（阶段 U）」
   段）/`fm_columns`（明细列表列配置，见「显示模式与自定义列（阶段 V）」
-  段）；`FileManagerView::snapshot()`
+  段）/`fm_command_bar`（命令行输入条，见「命令行输入条（阶段 X）」段）；`FileManagerView::snapshot()`
   采集，`maybe_save_fm_state`（`App::update` 末尾）diff 快照后写回 settings——
   **不自行落盘**，退出时 `on_exit` 统一 `save_settings`（排序只持久化活动栏，
   取舍见 `FmStateSnapshot` 注释）；快照在离开 FileManager 视图时重置。设置页
@@ -464,6 +464,36 @@ cargo clippy --workspace --all-targets -- -D warnings
   Ctrl+Shift+Z（**Ctrl+Z 预留阶段 AG 撤销，勿占**）；`CommentDialog`
   非模态 egui::Window（同 SaveSelectionDialog 模式），多行输入预填、
   Ctrl+Enter/确定写回（空 = 删除），失败保持打开显示错误。
+  **命令行输入条（阶段 X）**：`fm_command_bar`（默认开，设置页「文件管理器」
+  tab 开关）——FM 底部、状态栏上方（`egui::Panel::bottom("fm_command_bar")`
+  在状态栏 panel 之后注册故叠在其上），弱色 `{dir}>` 前缀 + 单行
+  TextEdit。Enter 执行：`spawn_shell_command`（Windows `cmd /c` / 其余
+  `sh -c`，current_dir = 焦点栏目录，后台 spawn 不等待不捕获输出），失败
+  → `intents.op_error`，成功清空并 `push_history_capped` 入会话内历史
+  （去重置顶，`COMMAND_HISTORY_CAP` = 32，不落盘）；聚焦时 ↑/↓ 回填历史
+  （↓ 越过最新回空白），Esc 清空并交还焦点。快捷键（`handle_keyboard` 内、
+  `egui_wants_keyboard_input` 检查**之前**，同 Ctrl+S 先例；均以
+  `options.command_bar` 门控）：Ctrl+P 追加焦点栏当前路径、Ctrl+Enter 追加
+  焦点项文件名（Ctrl+Shift+Enter 已是 runas，纯 Ctrl+Enter 空闲）。
+  **egui 0.35 焦点锁滤波三坑**（命令行 TextEdit 全踩过）：① 单行框默认
+  `return_key = Some(Enter)` 会在 Enter 时 surrender 焦点——必须
+  `.return_key(None)` 由命令行自处理 Enter；② 焦点锁滤波
+  （`set_focus_lock_filter`，TextEdit 聚焦后自设方向键归输入框）只在
+  「上帧与本帧都聚焦」时生效，而 `request_focus` 会重建 FocusWidget 把
+  滤波重置回默认——已聚焦时**不得**重复 request_focus，否则下一帧
+  ↑/↓ 被 egui 当焦点漫游键把焦点移走（`Focus::begin_pass` 对未匹配滤波的
+  裸方向键置 focus_direction，end_pass 移焦）；③ Esc 在帧首
+  （begin_pass）就按滤波（TextEdit 的 `EventFilter.escape = false`）收走
+  焦点——渲染期 `has_focus()` 已为 false，Esc 分支必须认
+  `lost_focus() || has_focus()`（过滤框的 Esc 分支同此问题，其清空语义
+  实际由 lost_focus 记录历史兜底，留意勿按旧注释理解）。执行分支还须排
+  修饰键（`!command && !alt && !shift`）：Ctrl+Enter 粘贴文件名与执行同帧，
+  handle_keyboard 在命令行渲染之后跑，不排则边粘贴边执行。
+  `command_esc_handled` 帧内标记（同 filter_esc_handled 模式，当帧被
+  handle_keyboard 的 Esc 链消费清零）。**顺带修复**：`comment_dialog`
+  补进 handle_keyboard 的对话框屏蔽列表（阶段 W 遗漏）；测试基座
+  `headless_frame` 现在从注入的 Key 事件回填 `RawInput.modifiers`
+  （egui 不从事件推导修饰键状态，不带修饰键的快捷键测试此前无法模拟）。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

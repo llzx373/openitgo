@@ -198,6 +198,8 @@ pub struct FmBehaviorOptions {
     pub filter_bar_bottom: bool,
     /// 鼠标框选模式（fm_rubber_band）。
     pub rubber_band: RubberBandMode,
+    /// 底部命令行输入条（fm_command_bar，阶段 X）。
+    pub command_bar: bool,
 }
 
 impl Default for FmBehaviorOptions {
@@ -216,6 +218,7 @@ impl Default for FmBehaviorOptions {
             system_icons: true,
             filter_bar_bottom: false,
             rubber_band: RubberBandMode::Right,
+            command_bar: true,
         }
     }
 }
@@ -336,6 +339,9 @@ pub struct FileManagerView {
     /// 过滤框 Esc（清空 + 交还焦点）已在本帧消费：handle_keyboard 的
     /// Esc 链见到此标记跳过，防同帧双消费。
     filter_esc_handled: bool,
+    /// 命令行 Esc（清空 + 交还焦点）已在本帧消费：handle_keyboard 的
+    /// Esc 链见此跳过（同 filter_esc_handled 模式）。
+    command_esc_handled: bool,
     /// 鼠标框选（阶段 U）进行中的状态（起点/按钮/所属栏/是否已超阈值）；
     /// 当前指针位置每帧从 input 现读。
     band: Option<RubberBand>,
@@ -355,6 +361,15 @@ pub struct FileManagerView {
     /// Ctrl+D 的一次性请求：下一帧焦点栏的书签菜单开/关切换（同
     /// history_menu_toggle 机制）。
     bookmarks_menu_toggle: bool,
+    /// 命令行输入条（阶段 X）：输入文本 + 会话内历史（去重置顶，上限
+    /// `COMMAND_HISTORY_CAP`）。
+    command_input: String,
+    command_history: Vec<String>,
+    /// ↑↓ 历史导航位置（None = 未在导航；0 = 最新一条）。
+    command_history_pos: Option<usize>,
+    /// Ctrl+P / Ctrl+Enter 的一次性聚焦请求（命令行未聚焦时置位，下一帧
+    /// render_command_bar 消费 request_focus）。
+    command_focus_request: bool,
     /// 状态栏速度/ETA 估算器（任务 id + EMA 采样器；任务切换重置）。
     op_speed: Option<(u64, OpSpeedMeter)>,
     /// 状态栏驱动器剩余空间缓存（卷 key + 字节 + 查询时刻；30s TTL，
@@ -538,6 +553,9 @@ const DRAG_OUT_THRESHOLD: f32 = 40.0;
 
 /// 过滤会话历史上限（最近 8 条）。
 const FILTER_HISTORY_CAP: usize = 8;
+
+/// 命令行会话历史上限（去重置顶，阶段 X）。
+const COMMAND_HISTORY_CAP: usize = 32;
 
 /// 过滤会话历史维护（纯函数）：trim 后为空忽略；去重后置顶，超出 cap
 /// 截断尾部。
@@ -793,6 +811,7 @@ impl FileManagerView {
             filter_history: Vec::new(),
             filter_focus_request: false,
             filter_esc_handled: false,
+            command_esc_handled: false,
             band: None,
             saved_selections: Vec::new(),
             selection_dialog: None,
@@ -800,6 +819,10 @@ impl FileManagerView {
             select_group_pattern: String::new(),
             history_menu_toggle: false,
             bookmarks_menu_toggle: false,
+            command_input: String::new(),
+            command_history: Vec::new(),
+            command_history_pos: None,
+            command_focus_request: false,
             op_speed: None,
             drive_free: None,
             quickview_open: false,
@@ -1228,6 +1251,8 @@ impl FileManagerView {
             });
             ui.add_space(4.0);
         });
+        // 命令行输入条（阶段 X，fm_command_bar）：状态栏上方。
+        self.render_command_bar(ui, &mut intents);
         if let Some(id) = cancel_op {
             self.ops.cancel(id);
         }
@@ -1553,6 +1578,123 @@ impl FileManagerView {
             let f = self.panels[active].filter.clone();
             self.record_filter_history(&f);
         }
+    }
+
+    /// 命令行输入条（阶段 X，fm_command_bar）：FM 底部、状态栏上方（bottom
+    /// panel 后注册者叠在上）。左侧弱色显示焦点栏当前目录作提示前缀，右侧
+    /// 单行输入。Enter 执行（shell 后台 spawn，见 spawn_shell_command；
+    /// 失败经 intents.op_error 上报）并清空 + 入历史（去重置顶，上限
+    /// COMMAND_HISTORY_CAP）；聚焦时 ↑/↓ 逐条回填历史（TC 手感，↓ 越过
+    /// 最新回到空白输入），Esc 清空并交还焦点（置 command_esc_handled 防
+    /// handle_keyboard 的 Esc 链同帧双消费，同 filter_esc_handled 模式）。
+    /// 命令行聚焦期间 FM 面板快捷键由 egui_wants_keyboard_input 统一屏蔽。
+    fn render_command_bar(&mut self, ui: &mut egui::Ui, intents: &mut FmIntents) {
+        if !self.options.command_bar {
+            return;
+        }
+        egui::Panel::bottom("fm_command_bar").show(ui, |ui| {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                let edit_id = egui::Id::new("fm_command_edit");
+                let dir = self.panels[self.active].dir.display().to_string();
+                ui.label(egui::RichText::new(format!("{dir}>")).weak());
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.command_input)
+                        .id(edit_id)
+                        // Enter 不交还焦点（默认 return_key 会 surrender，焦点
+                        // 锁滤波被重置，下一帧 ↑/↓ 会被 egui 当成焦点漫游键
+                        // 把焦点移走）——Enter 由下面自行处理，执行后焦点保留。
+                        .return_key(None)
+                        .desired_width(f32::INFINITY),
+                );
+                // Ctrl+P / Ctrl+Enter 的一次性聚焦请求。已聚焦时不再
+                // request_focus——那会重建 FocusWidget、把 TextEdit 刚设置的
+                // 焦点锁滤波（方向键归输入框）重置回默认，下一帧 ↑/↓ 就被
+                // egui 当成焦点漫游键把焦点移走。
+                if self.command_focus_request {
+                    self.command_focus_request = false;
+                    if !response.has_focus() {
+                        response.request_focus();
+                    }
+                }
+                // Esc：清空并交还焦点。egui 在帧首就按焦点锁滤波（TextEdit
+                // 的 EventFilter.escape=false）收走了焦点，故须认 lost_focus。
+                if ui.input(|i| i.key_pressed(egui::Key::Escape))
+                    && (response.has_focus() || response.lost_focus())
+                {
+                    self.command_input.clear();
+                    self.command_history_pos = None;
+                    if response.has_focus() {
+                        response.surrender_focus();
+                    }
+                    self.command_esc_handled = true;
+                    return;
+                }
+                if !response.has_focus() {
+                    return;
+                }
+                // Enter 执行。带修饰键的 Enter 不算——Ctrl+Enter = 送焦点项
+                // 文件名（本帧由 handle_keyboard 在命令行之后处理，不拦会
+                // 边粘贴边执行）。
+                if ui.input(|i| {
+                    i.key_pressed(egui::Key::Enter)
+                        && !i.modifiers.command
+                        && !i.modifiers.alt
+                        && !i.modifiers.shift
+                }) {
+                    let cmd = self.command_input.trim().to_string();
+                    if !cmd.is_empty() {
+                        let dir = self.panels[self.active].dir.clone();
+                        match spawn_shell_command(&dir, &cmd) {
+                            Ok(()) => {
+                                push_history_capped(
+                                    &mut self.command_history,
+                                    &cmd,
+                                    COMMAND_HISTORY_CAP,
+                                );
+                            }
+                            Err(e) => intents.op_error = Some(e),
+                        }
+                    }
+                    self.command_input.clear();
+                    self.command_history_pos = None;
+                    return;
+                }
+                // ↑/↓ 历史导航（回填后光标移到末尾——TextEditState 模式同
+                // 过滤框 Ctrl+S 选中全文）。
+                let len = self.command_history.len();
+                let target = if len > 0 && ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                    Some(Some(
+                        self.command_history_pos.map_or(0, |p| (p + 1).min(len - 1)),
+                    ))
+                } else if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                    match self.command_history_pos {
+                        Some(0) => Some(None),
+                        Some(p) => Some(Some(p - 1)),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                let Some(target) = target else { return };
+                self.command_history_pos = target;
+                self.command_input = match target {
+                    Some(p) => self.command_history[p].clone(),
+                    None => String::new(),
+                };
+                let mut state =
+                    egui::text_edit::TextEditState::load(ui.ctx(), edit_id).unwrap_or_default();
+                let end = self.command_input.chars().count();
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(end),
+                        egui::text::CCursor::new(end),
+                    )));
+                state.store(ui.ctx(), edit_id);
+            });
+            ui.add_space(2.0);
+        });
     }
 
     /// 中央面板区；返回各栏的 rect（点击激活用）。
@@ -4401,6 +4543,7 @@ impl FileManagerView {
             || self.pending_conflict.is_some()
             || self.group_dialog.is_some()
             || self.selection_dialog.is_some()
+            || self.comment_dialog.is_some()
         {
             return;
         }
@@ -4414,6 +4557,36 @@ impl FileManagerView {
                 && !i.modifiers.shift
         }) {
             self.filter_focus_request = true;
+        }
+        // Ctrl+P / Ctrl+Enter（阶段 X 命令行，TC 手感）：同样在
+        // egui_wants_keyboard_input 检查之前——命令行聚焦时该检查恒 true，
+        // 且 TextEdit 不为带 Ctrl 的按键产文本，两键不与输入冲突。
+        // Ctrl+P = 焦点栏当前路径追加到输入末尾；Ctrl+Enter = 焦点项文件名
+        // 追加（Ctrl+Shift+Enter 已是 runas，纯 Ctrl+Enter 空闲）。
+        if self.options.command_bar
+            && ui.input(|i| {
+                i.key_pressed(egui::Key::P)
+                    && i.modifiers.command
+                    && !i.modifiers.alt
+                    && !i.modifiers.shift
+            })
+        {
+            let dir = self.panels[self.active].dir.display().to_string();
+            self.command_input.push_str(&dir);
+            self.command_focus_request = true;
+        }
+        if self.options.command_bar
+            && ui.input(|i| {
+                i.key_pressed(egui::Key::Enter)
+                    && i.modifiers.command
+                    && !i.modifiers.alt
+                    && !i.modifiers.shift
+            })
+        {
+            if let Some(entry) = self.panels[self.active].focused_entry() {
+                self.command_input.push_str(&entry.name);
+                self.command_focus_request = true;
+            }
         }
         if ui.ctx().egui_wants_keyboard_input() {
             return;
@@ -4876,10 +5049,11 @@ impl FileManagerView {
             }
         }
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self.filter_esc_handled {
-                // 过滤框 Esc（清空 + 交还焦点）已在 render_filter_bar 消费，
+            if self.filter_esc_handled || self.command_esc_handled {
+                // 过滤框/命令行 Esc（清空 + 交还焦点）已在各自渲染处消费，
                 // 不再走 Esc 链（防同帧双消费）。
                 self.filter_esc_handled = false;
+                self.command_esc_handled = false;
             } else if self.archive_ask.is_some() {
                 // 压缩包 ask 小菜单优先关闭。
                 self.archive_ask = None;
@@ -5600,6 +5774,25 @@ fn system_time_to_unix(t: Option<std::time::SystemTime>) -> Option<i64> {
         .map(|d| d.as_secs() as i64)
 }
 
+/// 命令行执行（阶段 X）：Windows `cmd /c` / 其余 `sh -c`，工作目录 =
+/// 焦点栏目录；后台 spawn——不捕获输出（命令自己的控制台/终端可见）、
+/// 不阻塞 UI、不等待退出。
+fn spawn_shell_command(dir: &Path, input: &str) -> Result<(), String> {
+    let mut cmd = if cfg!(windows) {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/c");
+        c
+    } else {
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c");
+        c
+    };
+    cmd.arg(input).current_dir(dir);
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("命令启动失败: {e}"))
+}
+
 /// 网格空白区几何（双击回上级判定用）：cell 定宽左排，每行右侧余量与
 /// 末行未排满部分都算空白。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -5939,12 +6132,23 @@ mod tests {
         time: f64,
         events: Vec<egui::Event>,
     ) {
+        // InputState.modifiers 取自 RawInput.modifiers（不从 Key 事件推导），
+        // 这里从注入事件回填，使带修饰键的快捷键测试生效。
+        let modifiers = events
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                egui::Event::Key { modifiers, .. } => Some(*modifiers),
+                _ => None,
+            })
+            .unwrap_or_default();
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
                 egui::vec2(1280.0, 800.0),
             )),
             time: Some(time),
+            modifiers,
             events,
             ..Default::default()
         };
@@ -6172,7 +6376,10 @@ mod tests {
     // ---- 预览链路回归（查看预览崩溃）----
 
     fn key_events(key: egui::Key) -> Vec<egui::Event> {
-        let mods = egui::Modifiers::NONE;
+        key_events_mod(key, egui::Modifiers::NONE)
+    }
+
+    fn key_events_mod(key: egui::Key, mods: egui::Modifiers) -> Vec<egui::Event> {
         vec![
             egui::Event::Key {
                 key,
@@ -6508,5 +6715,83 @@ mod tests {
             headless_frame(&ctx, &mut view, t, vec![]);
         }
         assert!(view.comment_dialog.is_some(), "未确认/取消时对话框应保持");
+    }
+
+    /// 命令行输入条（阶段 X）无头冒烟：Ctrl+P 送当前路径、Ctrl+Enter 送
+    /// 焦点项文件名、Enter 执行清空入历史、↑/↓ 历史回填、Esc 清空交还焦点。
+    #[test]
+    fn command_bar_headless() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), b"x").unwrap();
+        let mut view = FileManagerView::new("single", 0.5, false, "name", true, &[]);
+        navigate_ready(&mut view.panels[0], tmp.path());
+        let ctx = egui::Context::default();
+        setup_test_fonts(&ctx);
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        let mut t = 0.0;
+        headless_frame(&ctx, &mut view, t, vec![]);
+
+        // Ctrl+P：焦点栏当前路径追加到输入末尾（下一帧命令行获得焦点）。
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, key_events_mod(egui::Key::P, ctrl));
+        let dir_str = tmp.path().display().to_string();
+        assert_eq!(view.command_input, dir_str);
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, vec![]);
+
+        // 焦点落到文件行后 Ctrl+Enter：追加文件名。
+        view.panels[0].focus = Some(1);
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, key_events_mod(egui::Key::Enter, ctrl));
+        assert_eq!(view.command_input, format!("{dir_str}a.txt"));
+
+        // Enter 执行（无害命令）：清空输入 + 入历史，执行后仍留在命令行。
+        view.command_input = if cfg!(windows) {
+            "exit 0".to_string()
+        } else {
+            "true".to_string()
+        };
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, key_events(egui::Key::Enter));
+        assert!(view.command_input.is_empty());
+        assert_eq!(view.command_history.len(), 1);
+        assert_eq!(view.command_history_pos, None);
+
+        // ↑ 回填最新历史；↓ 越过最新回空白。
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, key_events(egui::Key::ArrowUp));
+        assert_eq!(view.command_input, view.command_history[0]);
+        assert_eq!(view.command_history_pos, Some(0));
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, key_events(egui::Key::ArrowDown));
+        assert!(view.command_input.is_empty());
+        assert_eq!(view.command_history_pos, None);
+
+        // Esc：清空并交还焦点。command_esc_handled 是帧内标记（当帧即被
+        // handle_keyboard 的 Esc 链消费清零），故改验语义结果：焦点已交还、
+        // 且 Esc 链未双消费（预置的选中集不被清空）。
+        let sel = tmp.path().join("a.txt");
+        view.panels[0].selected.insert(sel.clone());
+        view.command_input = "abc".to_string();
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, key_events(egui::Key::Escape));
+        assert!(view.command_input.is_empty());
+        assert!(ctx.memory(|m| m.focused()).is_none(), "Esc 应交还焦点");
+        assert!(
+            view.panels[0].selected.contains(&sel),
+            "Esc 被命令行消费后不应再走 Esc 链清空选中集"
+        );
+    }
+
+    /// spawn_shell_command：无害命令可后台启动（不等待退出）。
+    #[test]
+    fn spawn_shell_command_starts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = if cfg!(windows) { "exit 0" } else { "true" };
+        spawn_shell_command(tmp.path(), input).unwrap();
     }
 }

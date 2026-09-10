@@ -774,6 +774,7 @@ fn fm_behavior_options(settings: &Settings) -> FmBehaviorOptions {
         system_icons: settings.fm_system_icons,
         filter_bar_bottom: settings.fm_filter_bar_bottom,
         rubber_band: RubberBandMode::from_setting(&settings.fm_rubber_band),
+        command_bar: settings.fm_command_bar,
     }
 }
 
