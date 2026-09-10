@@ -154,6 +154,9 @@ pub struct Settings {
     /// 列表/网格空白区双击 = 回上级目录（默认 true，TC 可配惯例）。
     #[serde(default = "default_true")]
     pub fm_dblclick_blank_up: bool,
+    /// 文件管理器显示系统真实图标（SHGetFileInfoW；false = 字体图标）。
+    #[serde(default = "default_true")]
+    pub fm_system_icons: bool,
 }
 
 fn default_chrome_opacity() -> f32 {
@@ -269,6 +272,7 @@ impl Default for Settings {
             fm_archive_open: default_fm_archive_open(),
             fm_esc_keep_selection: false,
             fm_dblclick_blank_up: true,
+            fm_system_icons: true,
         }
     }
 }
@@ -1191,6 +1195,7 @@ mod tests {
         assert_eq!(loaded.fm_archive_open, "archive");
         assert!(!loaded.fm_esc_keep_selection);
         assert!(loaded.fm_dblclick_blank_up);
+        assert!(loaded.fm_system_icons);
 
         // 非默认值 roundtrip。
         let s = Settings {
@@ -1201,6 +1206,7 @@ mod tests {
             fm_archive_open: "ask".to_string(),
             fm_esc_keep_selection: true,
             fm_dblclick_blank_up: false,
+            fm_system_icons: false,
             ..Default::default()
         };
         let json = serde_json::to_string(&s).unwrap();

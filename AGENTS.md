@@ -170,7 +170,8 @@ cargo clippy --workspace --all-targets -- -D warnings
   在 storage 侧硬编码同步）/`fm_delete_mode`/`fm_space_action`/`fm_dirs_first`/
   `fm_drag_confirm`/`fm_archive_open`/`fm_esc_keep_selection`（行为设置包，
   见下「行为设置包（阶段 O）」段）/`fm_dblclick_blank_up`（双击空白回上级，
-  见「键位补齐包（阶段 P）」段）；`FileManagerView::snapshot()`
+  见「键位补齐包（阶段 P）」段）/`fm_system_icons`（系统真实图标，
+  见「系统真实图标（阶段 S）」段）；`FileManagerView::snapshot()`
   采集，`maybe_save_fm_state`（`App::update` 末尾）diff 快照后写回 settings——
   **不自行落盘**，退出时 `on_exit` 统一 `save_settings`（排序只持久化活动栏，
   取舍见 `FmStateSnapshot` 注释）；快照在离开 FileManager 视图时重置。设置页
@@ -352,6 +353,25 @@ cargo clippy --workspace --all-targets -- -D warnings
   F3 弹窗最大化：egui Window 不支持自定义标题栏按钮——「最大化」按钮在
   内容头部（in_popup=true 时），最大化态走全屏 Area（Order::Foreground +
   content_rect）自绘标题行（还原/关闭），不经 Window 内存避免位置串扰。
+  **系统真实图标（阶段 S，Windows only）**：`platform/windows/file_icons.rs`
+  `extract_icon(path, is_dir, large) -> Option<ColorImage>`——
+  `SHGetFileInfoW` 取 Shell 图标（目录/普通扩展名用
+  `SHGFI_USEFILEATTRIBUTES` 伪属性免读盘，exe/lnk/ico 图标内嵌于文件
+  自身走实路径）；HICON→RGBA 经 `GetIconInfo`+`GetDIBits`（32bpp、
+  biHeight 取负值得 top-down 免翻转；BGRA 交换、全零 alpha 兜底不透明、
+  预乘转直通并钳位；hbmColor 为空的单色图标返回 None；DestroyIcon/
+  DeleteObject 经 guard 清理）。非 Windows stub 恒 None（platform.rs
+  内联）。缓存 `views/file_manager_icons.rs`（`SysIconCache`，仿
+  ThumbCache 单 worker + channel + generation 丢弃）：key =
+  `SysIconKind`（目录 = Dir 单一键；exe/lnk/ico = 完整路径；其他 =
+  小写扩展名、无扩展名为空串，`sys_icon_kind` 纯函数）+ 尺寸档
+  （large bool），容量 256 按插入序逐出（stamp 防重插序项误删），
+  无有效性维度（图标不随 mtime 变化）。接线：`fm_system_icons`
+  （默认 true，设置页「显示与布局」区块）经 `FmBehaviorOptions.
+  system_icons` 下发；列表行 16pt（`egui::Image` widget）、网格
+  is_dir 与文件 `!drawn` 分支 32pt 档（painter.image 居中于缩略图区），
+  「..」行不动、图片缩略图优先不变；thumb_visible bump 处同 bump
+  sys_icons 代次；Miss/Failed 回退字体图标（`entry_icon`）。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

@@ -800,6 +800,7 @@ pub mod windows {
     pub mod drag_out;
     pub mod drive_info;
     pub mod file_assoc;
+    pub mod file_icons;
     pub mod mpv_view;
     pub mod restore_rect;
     pub mod shell_verbs;
@@ -1030,6 +1031,21 @@ pub mod drive_info {
 /// Unified drive-info API (`crate::platform::drive_info`)。
 #[cfg(target_os = "windows")]
 pub use windows::drive_info;
+
+/// 系统文件图标 stub（非 Windows）：恒 None，调用方回退字体图标。
+#[cfg(not(target_os = "windows"))]
+pub mod file_icons {
+    use std::path::Path;
+
+    /// 非 Windows 不支持系统图标提取。
+    pub fn extract_icon(_path: &Path, _is_dir: bool, _large: bool) -> Option<egui::ColorImage> {
+        None
+    }
+}
+
+/// Unified file-icons API (`crate::platform::file_icons`)。
+#[cfg(target_os = "windows")]
+pub use windows::file_icons;
 
 /// Unified video-view API used by views/media.rs (`PendingVideoView`
 /// two-phase construction + `MpvNativeView`).

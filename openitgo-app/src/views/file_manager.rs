@@ -15,6 +15,7 @@ use crate::views::file_manager_dialog::{
     CompressDialog, ConflictDialog, CopyMoveDialog, DeleteDialog, FmDialog, FmDialogOutcome,
     MultiRenameDialog, NewDirDialog, NewFileDialog, RenameDialog, SelectGroupDialog,
 };
+use crate::views::file_manager_icons::{sys_icon_kind, SysIconCache, SysIconLookup};
 use crate::views::file_manager_panel::{
     fallback_existing_dir, list_drives, FocusMove, FsPanel, PanelLoadState, PanelViewMode,
     COL_RIGHT_PAD, ROW_HEIGHT,
@@ -168,6 +169,9 @@ pub struct FmBehaviorOptions {
     pub esc_keep_selection: bool,
     /// 列表/网格空白区双击 = 回上级目录（fm_dblclick_blank_up）。
     pub dblclick_blank_up: bool,
+    /// 系统真实图标（fm_system_icons）：列表行 16pt / 网格非图片 cell
+    /// 32pt 档经 SHGetFileInfoW 取 Shell 图标；false = 字体图标现状。
+    pub system_icons: bool,
 }
 
 impl Default for FmBehaviorOptions {
@@ -183,6 +187,7 @@ impl Default for FmBehaviorOptions {
             archive_open: FmArchiveOpen::Archive,
             esc_keep_selection: false,
             dblclick_blank_up: true,
+            system_icons: true,
         }
     }
 }
@@ -308,6 +313,8 @@ pub struct FileManagerView {
     /// 各栏网格上一帧可见范围（cols, 首网格行, 末网格行）：变化即 bump
     /// 缩略图请求代次，worker 丢弃过期请求（快速滚动不解码不可见 cell）。
     thumb_visible: [Option<(usize, usize, usize)>; 2],
+    /// 系统真实图标缓存（两栏共享，与 thumbs 同生命周期/同代次模型）。
+    sys_icons: SysIconCache,
     /// 外部拖入的落点区域（render_panels 每帧记录；快览替换栏为 None）。
     panel_drop_rects: [Option<egui::Rect>; 2],
     /// 文件搜索对话框（Alt+F7；非模态 egui::Window，worker 关闭即取消）。
@@ -543,6 +550,7 @@ impl FileManagerView {
             quickview_open: false,
             thumbs: ThumbCache::new(),
             thumb_visible: [None, None],
+            sys_icons: SysIconCache::new(),
             panel_drop_rects: [None, None],
             search: SearchDialog::default(),
             group_dialog: None,
@@ -741,6 +749,11 @@ impl FileManagerView {
         // 缩略图：排空解码结果；在途期间主动重绘（对齐项目 loader 约定）。
         self.thumbs.poll(ui.ctx());
         if self.thumbs.has_pending() {
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
+        }
+        // 系统图标：同缩略图排空/重绘约定。
+        self.sys_icons.poll(ui.ctx());
+        if self.sys_icons.has_pending() {
             ui.ctx().request_repaint_after(Duration::from_millis(100));
         }
         // 文件操作：每帧排空进度/完成事件；活动任务期间主动重绘。
@@ -2161,10 +2174,31 @@ impl FileManagerView {
                         );
                     }
                     Some(e) => {
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(entry_icon(e).as_str()).weak())
+                        let mut icon_drawn = false;
+                        if self.options.system_icons {
+                            let kind = sys_icon_kind(&e.path, e.is_dir);
+                            match self.sys_icons.lookup(&kind, false) {
+                                SysIconLookup::Ready(tex) => {
+                                    ui.add(
+                                        egui::Image::new(&tex)
+                                            .fit_to_exact_size(egui::vec2(16.0, 16.0)),
+                                    );
+                                    icon_drawn = true;
+                                }
+                                SysIconLookup::Miss => {
+                                    self.sys_icons.request(&e.path, e.is_dir, false);
+                                }
+                                SysIconLookup::Failed => {}
+                            }
+                        }
+                        if !icon_drawn {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(entry_icon(e).as_str()).weak(),
+                                )
                                 .selectable(false),
-                        );
+                            );
+                        }
                         // 语义着色（目录 accent / 链接斜体弱档 / 隐藏弱色 /
                         // 选中行回退强对比色，见 entry_name_rich_text）。
                         let name = entry_name_rich_text(&e.name, e, ui.visuals(), selected);
@@ -2489,6 +2523,7 @@ impl FileManagerView {
         if self.thumb_visible[idx] != Some(visible) {
             self.thumb_visible[idx] = Some(visible);
             self.thumbs.bump_generation();
+            self.sys_icons.bump_generation();
         }
         // 双击空白处回上级（fm_dblclick_blank_up）：cell 定宽左排，每行右侧
         // 余量与末行未排满部分都算空白（几何见 GridBlankGeom）。
@@ -2613,13 +2648,38 @@ impl FileManagerView {
                 );
             }
             Some(e) if e.is_dir => {
-                painter.text(
-                    thumb_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    icons::FOLDER.as_str(),
-                    egui::FontId::proportional(72.0),
-                    weak,
-                );
+                let mut drawn = false;
+                if self.options.system_icons {
+                    let kind = sys_icon_kind(&e.path, true);
+                    match self.sys_icons.lookup(&kind, true) {
+                        SysIconLookup::Ready(tex) => {
+                            painter.image(
+                                tex.id(),
+                                egui::Rect::from_center_size(
+                                    thumb_rect.center(),
+                                    egui::vec2(32.0, 32.0),
+                                ),
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                egui::Color32::WHITE,
+                            );
+                            drawn = true;
+                        }
+                        SysIconLookup::Miss => self.sys_icons.request(&e.path, true, true),
+                        SysIconLookup::Failed => {}
+                    }
+                }
+                if !drawn {
+                    painter.text(
+                        thumb_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        icons::FOLDER.as_str(),
+                        egui::FontId::proportional(72.0),
+                        weak,
+                    );
+                }
             }
             Some(e) => {
                 // 图片扩展名判别用 is_comic_image_name（额外排除 macOS
@@ -2650,6 +2710,28 @@ impl FileManagerView {
                         ThumbLookup::Miss => self.thumbs.request(e.path.clone(), key),
                         // 解码失败/非图片：已记忆，回退大图标。
                         ThumbLookup::Failed => {}
+                    }
+                }
+                if !drawn && self.options.system_icons {
+                    let kind = sys_icon_kind(&e.path, false);
+                    match self.sys_icons.lookup(&kind, true) {
+                        SysIconLookup::Ready(tex) => {
+                            painter.image(
+                                tex.id(),
+                                egui::Rect::from_center_size(
+                                    thumb_rect.center(),
+                                    egui::vec2(32.0, 32.0),
+                                ),
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                egui::Color32::WHITE,
+                            );
+                            drawn = true;
+                        }
+                        SysIconLookup::Miss => self.sys_icons.request(&e.path, false, true),
+                        SysIconLookup::Failed => {}
                     }
                 }
                 if !drawn {

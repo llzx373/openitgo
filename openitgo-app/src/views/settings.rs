@@ -446,6 +446,8 @@ impl SettingsView {
         hint(ui, "隐藏文件指以 . 开头的文件及带系统隐藏属性的文件");
         ui.checkbox(&mut settings.fm_dirs_first, "目录排在文件前");
         hint(ui, "关闭后目录与文件混排、统一按排序键排序");
+        ui.checkbox(&mut settings.fm_system_icons, "显示系统真实图标");
+        hint(ui, "经系统 Shell 取文件/文件夹图标；关闭后使用内置字体图标");
         ui.horizontal(|ui| {
             ui.label("默认布局");
             egui::ComboBox::from_id_salt("fm_layout")

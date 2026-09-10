@@ -763,6 +763,7 @@ fn fm_behavior_options(settings: &Settings) -> FmBehaviorOptions {
         archive_open: FmArchiveOpen::from_setting(&settings.fm_archive_open),
         esc_keep_selection: settings.fm_esc_keep_selection,
         dblclick_blank_up: settings.fm_dblclick_blank_up,
+        system_icons: settings.fm_system_icons,
     }
 }
 
