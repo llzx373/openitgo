@@ -143,6 +143,27 @@ impl FmArchiveOpen {
     }
 }
 
+/// 鼠标框选模式（settings.fm_rubber_band，阶段 U）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RubberBandMode {
+    /// 右键拖动框选（默认；右键单击未超阈值仍弹上下文菜单）。
+    Right,
+    /// 左键从空白区起拖框选（行/cell 上的左键拖动维持拖放 payload）。
+    Left,
+    /// 关闭。
+    Off,
+}
+
+impl RubberBandMode {
+    pub fn from_setting(s: &str) -> Self {
+        match s {
+            "left" => Self::Left,
+            "off" => Self::Off,
+            _ => Self::Right,
+        }
+    }
+}
+
 /// 行为设置包（阶段 O，settings.fm_* 可选行为）：默认值 = 一期现状行为。
 /// app 侧每帧从 settings 构造下发（同 fm_show_hidden 模式——行为设置不进
 /// FmStateSnapshot，不参与快照 diff）。
@@ -174,6 +195,8 @@ pub struct FmBehaviorOptions {
     pub system_icons: bool,
     /// 过滤框渲染在焦点栏列表底部（fm_filter_bar_bottom）；false = 顶栏右侧。
     pub filter_bar_bottom: bool,
+    /// 鼠标框选模式（fm_rubber_band）。
+    pub rubber_band: RubberBandMode,
 }
 
 impl Default for FmBehaviorOptions {
@@ -191,6 +214,7 @@ impl Default for FmBehaviorOptions {
             dblclick_blank_up: true,
             system_icons: true,
             filter_bar_bottom: false,
+            rubber_band: RubberBandMode::Right,
         }
     }
 }
@@ -307,6 +331,14 @@ pub struct FileManagerView {
     /// 过滤框 Esc（清空 + 交还焦点）已在本帧消费：handle_keyboard 的
     /// Esc 链见到此标记跳过，防同帧双消费。
     filter_esc_handled: bool,
+    /// 鼠标框选（阶段 U）进行中的状态（起点/按钮/所属栏/是否已超阈值）；
+    /// 当前指针位置每帧从 input 现读。
+    band: Option<RubberBand>,
+    /// 保存的选择集（会话内，不落盘）：(名称, 路径集)。
+    saved_selections: Vec<(String, Vec<PathBuf>)>,
+    /// 「保存当前选择…」小对话框（非模态 egui::Window，同 BookmarkGroupDialog
+    /// 模式）。
+    selection_dialog: Option<SaveSelectionDialog>,
     /// 「选择组」对话框上次使用的模式（会话内记忆，不落盘）。
     select_group_pattern: String,
     /// Alt+↓ 的一次性请求：下一帧焦点栏的历史下拉菜单开/关切换
@@ -353,6 +385,26 @@ pub struct FileManagerView {
 
 /// 书签分组小对话框状态（新建/重命名共用；非模态 egui::Window——菜单内联
 /// 输入与 CloseOnClickOutside 焦点冲突，故走独立窗口）。
+/// 「保存当前选择…」小对话框（阶段 U；复用 BookmarkGroupDialog 的单输入
+/// 模式）：打开时捕获选择集快照，确认时以输入名存入 saved_selections。
+struct SaveSelectionDialog {
+    name: String,
+    /// 首帧 request_focus 一次性标志（同 BookmarkGroupDialog 模式）。
+    focused: bool,
+    /// 打开时的选择集快照（对话框存续期间选择可能变化）。
+    paths: Vec<PathBuf>,
+}
+
+impl SaveSelectionDialog {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self {
+            name: String::new(),
+            focused: false,
+            paths,
+        }
+    }
+}
+
 struct BookmarkGroupDialog {
     /// None = 新建分组；Some(i) = 重命名第 i 组。
     rename: Option<usize>,
@@ -457,6 +509,83 @@ fn push_history_capped(history: &mut Vec<String>, item: &str, cap: usize) {
     }
     history.insert(0, item.to_string());
     history.truncate(cap);
+}
+
+/// 框选开始阈值（pt）：按下后位移超过该值才进入框选（未超 = 单击语义，
+/// 右键维持弹上下文菜单）。
+const BAND_THRESHOLD: f32 = 6.0;
+
+/// 鼠标框选进行中状态（阶段 U）。
+struct RubberBand {
+    /// 所属栏。
+    panel: usize,
+    /// 触发按钮：Secondary（"right" 模式）/ Primary（"left" 模式，空白起拖）。
+    button: egui::PointerButton,
+    /// 起点（屏幕坐标）。
+    origin: egui::Pos2,
+    /// 位移已超 BAND_THRESHOLD（false = 仍是候选，松开不产生框选）。
+    active: bool,
+}
+
+/// 列表框选命中（纯函数）：rect 为内容坐标（content_y = 指针 y - 视口顶 +
+/// 滚动偏移；x 忽略——明细行整行占满宽度）；返回与矩形竖向重叠的 UI 行
+/// 索引（含 0 = 「..」行，调用方自行跳过）。
+fn rows_in_rect(row_count: usize, pitch: f32, rect: egui::Rect) -> Vec<usize> {
+    if row_count == 0 || pitch <= 0.0 {
+        return Vec::new();
+    }
+    let top = rect.min.y.max(0.0);
+    // 底边恰好压在行界上时不算命中下一行（减 eps）。
+    let bottom = (rect.max.y - 0.01).max(top);
+    let content_bottom = row_count as f32 * pitch;
+    if top >= content_bottom {
+        return Vec::new();
+    }
+    let first = (top / pitch).floor() as usize;
+    let last = ((bottom / pitch).floor() as usize).min(row_count - 1);
+    if last < first {
+        return Vec::new();
+    }
+    (first..=last).collect()
+}
+
+/// 网格框选命中（纯函数）：rect 内容坐标；返回线性 item 索引（含 0 =
+/// 「..」cell），末行未排满与行右空白自动丢弃（i ≥ item_count 或
+/// 列 ≥ cols 不进结果）。
+fn cells_in_rect(
+    item_count: usize,
+    cols: usize,
+    cell_w: f32,
+    cell_h: f32,
+    rect: egui::Rect,
+) -> Vec<usize> {
+    let mut out = Vec::new();
+    let cols = cols.max(1);
+    if item_count == 0 || cell_w <= 0.0 || cell_h <= 0.0 {
+        return out;
+    }
+    let r0 = (rect.min.y / cell_h).floor().max(0.0) as usize;
+    // 底/右边恰好压界时不算命中下一行/列（减 eps）。
+    let r1 = ((rect.max.y - 0.01).max(rect.min.y) / cell_h)
+        .floor()
+        .max(0.0) as usize;
+    let c0 = (rect.min.x / cell_w).floor().max(0.0) as usize;
+    let c1 = (((rect.max.x - 0.01).max(rect.min.x) / cell_w)
+        .floor()
+        .max(0.0) as usize)
+        .min(cols - 1);
+    if c0 >= cols {
+        return out;
+    }
+    for gr in r0..=r1 {
+        for c in c0..=c1 {
+            let i = gr * cols + c;
+            if i < item_count {
+                out.push(i);
+            }
+        }
+    }
+    out
 }
 
 /// 栏间拖放复制的 payload：行 drag source 设置，经 egui 全局 dnd 状态
@@ -579,6 +708,9 @@ impl FileManagerView {
             filter_history: Vec::new(),
             filter_focus_request: false,
             filter_esc_handled: false,
+            band: None,
+            saved_selections: Vec::new(),
+            selection_dialog: None,
             select_group_pattern: String::new(),
             history_menu_toggle: false,
             bookmarks_menu_toggle: false,
@@ -1051,6 +1183,7 @@ impl FileManagerView {
         self.render_search_dialog(ui.ctx());
         // 书签分组小对话框（新建/重命名；非模态 egui::Window）。
         self.render_group_dialog(ui.ctx());
+        self.render_selection_dialog(ui.ctx());
         // 压缩包 ask 小菜单（fm_archive_open = "ask"；鼠标处弹出二选一）。
         self.render_archive_ask_menu(ui.ctx(), &mut intents);
 
@@ -2005,6 +2138,68 @@ impl FileManagerView {
         }
     }
 
+    /// 「保存当前选择…」小对话框（阶段 U；同 BookmarkGroupDialog 单输入
+    /// 模式）：命名后存入 saved_selections（重名拒绝）。
+    fn render_selection_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.selection_dialog.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancelled = false;
+        egui::Window::new("保存当前选择")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!("已捕获 {} 个选中项", dialog.paths.len()));
+                ui.horizontal(|ui| {
+                    ui.label("名称：");
+                    let response =
+                        ui.add(egui::TextEdit::singleline(&mut dialog.name).desired_width(220.0));
+                    if !dialog.focused {
+                        response.request_focus();
+                        dialog.focused = true;
+                    }
+                    // 单行输入框 Enter 自动失焦。
+                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        confirm = true;
+                    }
+                });
+                let name = dialog.name.trim().to_string();
+                let dup = !name.is_empty() && self.saved_selections.iter().any(|(n, _)| n == &name);
+                let error = if name.is_empty() {
+                    Some("名称不能为空")
+                } else if dup {
+                    Some("已存在同名选择集")
+                } else {
+                    None
+                };
+                if let Some(err) = error {
+                    ui.colored_label(ui.visuals().error_fg_color, err);
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(error.is_none(), egui::Button::new("确定"))
+                        .clicked()
+                    {
+                        confirm = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        cancelled = true;
+                    }
+                });
+            });
+        if confirm {
+            let name = dialog.name.trim().to_string();
+            self.saved_selections.push((name, dialog.paths));
+        } else if !cancelled && open {
+            self.selection_dialog = Some(dialog);
+        }
+    }
+
     /// 列头：名称 / 大小 / 修改时间，整列格可点击切换排序键与升降序，
     /// 当前键显示 ▲/▼。列坐标取自 column_layout（与行内容/竖线同一来源）。
     /// 两条分隔竖线各带 6pt 拖拽热区（后注册于列点击格，拖拽优先）。
@@ -2232,6 +2427,17 @@ impl FileManagerView {
         // 双击空白处回上级（fm_dblclick_blank_up）：明细行整行占满宽度，
         // 空白 = 内容底以下的视口区域。
         self.blank_dblclick_up(ui, idx, &output, row_count as f32 * row_pitch, None);
+        // 鼠标框选（fm_rubber_band）。
+        self.rubber_band(
+            ui,
+            idx,
+            output.inner_rect,
+            output.state.offset.y,
+            row_count as f32 * row_pitch,
+            None,
+            row_pitch,
+            row_count,
+        );
     }
 
     /// 明细列表一行：整行 allocate 交互 + 斑马纹/高亮/焦点描边 + 列分隔竖线，
@@ -2440,8 +2646,13 @@ impl FileManagerView {
                 self.open_ui_row(idx, rows, row, intents);
             }
         }
-        // 「..」行无右键菜单。
-        if !is_parent {
+        // 「..」行无右键菜单；右键框选已超阈值（band.active）时不弹
+        // （egui click 判定自带位移阈值，此门是阈值不一致时的保险）。
+        let band_active = self
+            .band
+            .as_ref()
+            .is_some_and(|b| b.panel == idx && b.active);
+        if !is_parent && !band_active {
             response.context_menu(|ui| {
                 // Explorer 惯例：右键未选中的行先把它单选。
                 let Some(e) = &entry else { return };
@@ -2603,6 +2814,50 @@ impl FileManagerView {
             }
             ui.close();
         }
+        // 「选择」子菜单（阶段 U）：保存/恢复选择集（会话内，不落盘）。
+        ui.separator();
+        egui::containers::menu::SubMenuButton::new((icons::SELECTION, " 选择")).ui(ui, |ui| {
+            ui.set_min_width(200.0);
+            let selected: Vec<PathBuf> = self.panels[idx].selected.iter().cloned().collect();
+            if ui
+                .add_enabled(!selected.is_empty(), egui::Button::new("保存当前选择…"))
+                .clicked()
+            {
+                self.selection_dialog = Some(SaveSelectionDialog::new(selected));
+                ui.close();
+            }
+            ui.separator();
+            if self.saved_selections.is_empty() {
+                ui.label(egui::RichText::new("（无已存选择集）").weak());
+            }
+            let mut restore: Option<usize> = None;
+            let mut delete: Option<usize> = None;
+            for (i, (name, paths)) in self.saved_selections.iter().enumerate() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // ✕ 删除不收起菜单（同书签菜单先例）。
+                    if ui
+                        .add(egui::Button::new(icons::X.as_str()).frame(false))
+                        .clicked()
+                    {
+                        delete = Some(i);
+                    }
+                    if ui.button(format!("{name}（{} 项）", paths.len())).clicked() {
+                        restore = Some(i);
+                        ui.close();
+                    }
+                });
+            }
+            if let Some(i) = delete {
+                self.saved_selections.remove(i);
+            }
+            if let Some(i) = restore {
+                let paths = self.saved_selections[i].1.clone();
+                if let Some(msg) = self.restore_selection(idx, &paths) {
+                    intents.op_error = Some(msg);
+                }
+                ui.close();
+            }
+        });
         // 「属性」：末尾（Explorer 惯例；非 Windows 隐藏）。
         if crate::platform::shell_verbs::is_supported() {
             ui.separator();
@@ -2712,6 +2967,17 @@ impl FileManagerView {
             grid_rows as f32 * THUMB_CELL_H,
             Some(geom),
         );
+        // 鼠标框选（fm_rubber_band）。
+        self.rubber_band(
+            ui,
+            idx,
+            output.inner_rect,
+            output.state.offset.y,
+            grid_rows as f32 * THUMB_CELL_H,
+            Some((geom, cols)),
+            THUMB_CELL_H,
+            item_count,
+        );
     }
 
     /// 双击空白处回上级（fm_dblclick_blank_up）：本帧主键双击命中空白区
@@ -2747,6 +3013,162 @@ impl FileManagerView {
         ) {
             self.panels[idx].parent_dir();
         }
+    }
+
+    /// 鼠标框选（fm_rubber_band，阶段 U）：render_list/render_grid 帧尾
+    /// 调用。启动判定——"right" = 右键视口内按下（单击未超阈值仍弹上下文
+    /// 菜单，行渲染处另有 band.active 门控保险）；"left" = 左键空白区按下
+    /// （行/cell 上左键起拖维持拖放 payload，靠 dblclick_hits_blank 同一
+    /// 几何判定排除）。拖动中只画半透明矩形（从简：不实时改选中）；松开
+    /// 时按命中行/cell 应用选中：无修饰 = 替换、Shift = 追加、Ctrl = 切换，
+    /// **不更新 anchor/focus**（框选是区域语义，不参与 Shift+点击锚点
+    /// 区间）。「..」行/cell（索引 0）不进选中。
+    #[allow(clippy::too_many_arguments)]
+    fn rubber_band(
+        &mut self,
+        ui: &egui::Ui,
+        idx: usize,
+        viewport: egui::Rect,
+        scroll_y: f32,
+        content_height: f32,
+        grid: Option<(GridBlankGeom, usize)>,
+        pitch: f32,
+        item_count: usize,
+    ) {
+        let mode = self.options.rubber_band;
+        if self.band.is_none() && mode != RubberBandMode::Off {
+            let secondary = mode == RubberBandMode::Right
+                && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary));
+            let primary = mode == RubberBandMode::Left
+                && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
+            if secondary || primary {
+                if let Some(origin) = ui.input(|i| i.pointer.press_origin()) {
+                    let blank_ok = secondary
+                        || dblclick_hits_blank(
+                            viewport,
+                            scroll_y,
+                            content_height,
+                            grid.map(|(g, _)| g),
+                            origin,
+                        );
+                    if viewport.contains(origin) && blank_ok {
+                        self.band = Some(RubberBand {
+                            panel: idx,
+                            button: if secondary {
+                                egui::PointerButton::Secondary
+                            } else {
+                                egui::PointerButton::Primary
+                            },
+                            origin,
+                            active: false,
+                        });
+                    }
+                }
+            }
+        }
+        let Some(band) = &mut self.band else {
+            return;
+        };
+        if band.panel != idx {
+            return;
+        }
+        let button = band.button;
+        let (down, released, pos) = ui.input(|i| {
+            (
+                i.pointer.button_down(button),
+                i.pointer.button_released(button),
+                i.pointer.latest_pos(),
+            )
+        });
+        // 丢失的松开（拖到窗口外释放等）：清状态防滞留。
+        if !down && !released {
+            self.band = None;
+            return;
+        }
+        if let Some(p) = pos {
+            if !band.active && (p - band.origin).length() > BAND_THRESHOLD {
+                band.active = true;
+            }
+            if band.active && !released {
+                let rect = egui::Rect::from_two_pos(band.origin, p);
+                let painter = ui.painter().with_clip_rect(viewport);
+                let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.25);
+                painter.rect_filled(rect, 2.0, fill);
+                painter.rect_stroke(
+                    rect,
+                    2.0,
+                    ui.visuals().selection.stroke,
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+        if released {
+            let Some(band) = self.band.take() else { return };
+            if !band.active {
+                return;
+            }
+            let Some(p) = pos else { return };
+            let to_content =
+                |q: egui::Pos2| egui::pos2(q.x - viewport.min.x, q.y - viewport.min.y + scroll_y);
+            let rect = egui::Rect::from_two_pos(to_content(band.origin), to_content(p));
+            let hits = match grid {
+                None => rows_in_rect(item_count, pitch, rect),
+                Some((g, cols)) => cells_in_rect(item_count, cols, THUMB_CELL_W, g.row_pitch, rect),
+            };
+            self.apply_band(idx, hits, ui.input(|i| i.modifiers));
+        }
+    }
+
+    /// 框选命中应用选中：无修饰 = 替换、Shift = 追加、Ctrl = 切换；
+    /// 「..」行（0）跳过；anchor/focus 不动（见 rubber_band 注释）。
+    fn apply_band(&mut self, idx: usize, hits: Vec<usize>, mods: egui::Modifiers) {
+        let panel = &mut self.panels[idx];
+        if !mods.shift && !mods.command {
+            panel.selected.clear();
+        }
+        for r in hits {
+            if r == 0 {
+                continue;
+            }
+            if let Some(path) = panel.row_path(r) {
+                if mods.command {
+                    if !panel.selected.insert(path.clone()) {
+                        panel.selected.remove(&path);
+                    }
+                } else {
+                    panel.selected.insert(path);
+                }
+            }
+        }
+    }
+
+    /// 恢复选择集到栏 idx（阶段 U）：替换式选中——按路径匹配当前栏可见
+    /// 项（已不存在/不在当前目录的忽略，返回提示消息）；焦点设到首个
+    /// 命中行并请求滚动揭示。anchor 不动（同框选语义）。
+    fn restore_selection(&mut self, idx: usize, paths: &[PathBuf]) -> Option<String> {
+        let panel = &mut self.panels[idx];
+        panel.selected.clear();
+        let rows = panel.rows();
+        let mut hits = 0usize;
+        let mut first_row = None;
+        for (off, &ei) in rows.iter().enumerate() {
+            let Some(e) = panel.entries.get(ei) else {
+                continue;
+            };
+            if paths.iter().any(|p| p == &e.path) {
+                panel.selected.insert(e.path.clone());
+                hits += 1;
+                if first_row.is_none() {
+                    first_row = Some(off + 1);
+                }
+            }
+        }
+        if let Some(r) = first_row {
+            panel.focus = Some(r);
+            panel.focus_scroll_pending = true;
+        }
+        let missing = paths.len() - hits;
+        (missing > 0).then(|| format!("{missing} 项不在当前目录，已忽略"))
     }
 
     /// 网格一个 cell：选中/悬停底色 + 焦点描边（同明细行视觉语言），
@@ -2975,8 +3397,12 @@ impl FileManagerView {
                 self.open_ui_row(idx, rows, row, intents);
             }
         }
-        // 「..」cell 无右键菜单。
-        if !is_parent {
+        // 「..」cell 无右键菜单；右键框选已超阈值时不弹（同明细行门控）。
+        let band_active = self
+            .band
+            .as_ref()
+            .is_some_and(|b| b.panel == idx && b.active);
+        if !is_parent && !band_active {
             response.context_menu(|ui| {
                 // Explorer 惯例：右键未选中的项先把它单选。
                 let Some(e) = &entry else { return };
@@ -3440,7 +3866,11 @@ impl FileManagerView {
     /// （纯功能键分支需排 Alt——key_pressed 不认修饰键，Alt+F4 系统关窗不拦。）
     fn handle_keyboard(&mut self, ui: &egui::Ui, intents: &mut FmIntents) {
         // 对话框打开时屏蔽面板键盘（输入归对话框；冲突问答窗/分组小窗同此机制）。
-        if self.dialog.is_some() || self.pending_conflict.is_some() || self.group_dialog.is_some() {
+        if self.dialog.is_some()
+            || self.pending_conflict.is_some()
+            || self.group_dialog.is_some()
+            || self.selection_dialog.is_some()
+        {
             return;
         }
         // Ctrl+S：聚焦过滤框（render_filter_bar 下一帧消费；已聚焦 = 选中
@@ -4689,6 +5119,46 @@ mod tests {
         push_history_capped(&mut h, "a", 3);
         push_history_capped(&mut h, "b", 3);
         assert_eq!(h, ["b", "a", "*.zip"]);
+    }
+
+    #[test]
+    fn rows_in_rect_hits_vertical_overlap() {
+        let pitch = 22.0;
+        // 覆盖行 1..=2（内容坐标 y 22..66）。
+        let r = egui::Rect::from_min_max(egui::pos2(0.0, 22.5), egui::pos2(100.0, 60.0));
+        assert_eq!(rows_in_rect(5, pitch, r), vec![1, 2]);
+        // 底边恰好压行界（y=66 = 行 3 顶）不命中行 3。
+        let r = egui::Rect::from_min_max(egui::pos2(0.0, 22.5), egui::pos2(100.0, 66.0));
+        assert_eq!(rows_in_rect(5, pitch, r), vec![1, 2]);
+        // 顶边压行界（y=22 = 行 1 顶）命中行 1。
+        let r = egui::Rect::from_min_max(egui::pos2(0.0, 22.0), egui::pos2(100.0, 23.0));
+        assert_eq!(rows_in_rect(5, pitch, r), vec![1]);
+        // 完全在内容之下 = 空；越界底自动钳到末行。
+        let r = egui::Rect::from_min_max(egui::pos2(0.0, 200.0), egui::pos2(100.0, 300.0));
+        assert!(rows_in_rect(5, pitch, r).is_empty());
+        let r = egui::Rect::from_min_max(egui::pos2(0.0, 90.0), egui::pos2(100.0, 500.0));
+        assert_eq!(rows_in_rect(5, pitch, r), vec![4]);
+        // 反拖（min>max 已由 from_two_pos 规范化，这里直接验证退化矩形）。
+        assert!(rows_in_rect(0, pitch, r).is_empty());
+        assert!(rows_in_rect(5, 0.0, r).is_empty());
+    }
+
+    #[test]
+    fn cells_in_rect_hits_grid_region() {
+        // 3 列 × 176×200，7 项（末行 1 格）。
+        let (cols, w, h, n) = (3, 176.0, 200.0, 7);
+        // 左上角 2×2。
+        let r = egui::Rect::from_min_max(egui::pos2(10.0, 10.0), egui::pos2(200.0, 210.0));
+        assert_eq!(cells_in_rect(n, cols, w, h, r), vec![0, 1, 3, 4]);
+        // 末行未排满：item 6 存在、item 7/8 丢弃。
+        let r = egui::Rect::from_min_max(egui::pos2(0.0, 400.0), egui::pos2(528.0, 600.0));
+        assert_eq!(cells_in_rect(n, cols, w, h, r), vec![6]);
+        // 行右空白（x ≥ 528）不命中任何 cell。
+        let r = egui::Rect::from_min_max(egui::pos2(530.0, 10.0), egui::pos2(700.0, 190.0));
+        assert!(cells_in_rect(n, cols, w, h, r).is_empty());
+        // 右边压界（x=352 = 列 2 左缘）不命中列 2。
+        let r = egui::Rect::from_min_max(egui::pos2(180.0, 10.0), egui::pos2(352.0, 190.0));
+        assert_eq!(cells_in_rect(n, cols, w, h, r), vec![1]);
     }
 
     #[test]

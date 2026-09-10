@@ -163,6 +163,14 @@ pub struct Settings {
     /// 过滤框渲染在焦点栏列表底部（false = 顶栏右侧）。
     #[serde(default)]
     pub fm_filter_bar_bottom: bool,
+    /// 鼠标框选："right"（右键拖动，默认）| "left"（左键从空白区起拖）
+    /// | "off"。
+    #[serde(default = "default_fm_rubber_band")]
+    pub fm_rubber_band: String,
+}
+
+fn default_fm_rubber_band() -> String {
+    "right".to_string()
 }
 
 fn default_chrome_opacity() -> f32 {
@@ -281,6 +289,7 @@ impl Default for Settings {
             fm_system_icons: true,
             fm_saved_filters: Vec::new(),
             fm_filter_bar_bottom: false,
+            fm_rubber_band: default_fm_rubber_band(),
         }
     }
 }
@@ -507,6 +516,9 @@ impl Settings {
         }
         if !matches!(self.fm_archive_open.as_str(), "comic" | "ask") {
             self.fm_archive_open = default_fm_archive_open();
+        }
+        if !matches!(self.fm_rubber_band.as_str(), "left" | "off") {
+            self.fm_rubber_band = default_fm_rubber_band();
         }
         // 保存的过滤方案：trim、去空、保序去重。
         let mut seen = std::collections::HashSet::new();
@@ -1216,6 +1228,7 @@ mod tests {
         assert!(loaded.fm_system_icons);
         assert!(loaded.fm_saved_filters.is_empty());
         assert!(!loaded.fm_filter_bar_bottom);
+        assert_eq!(loaded.fm_rubber_band, "right");
 
         // 非默认值 roundtrip。
         let s = Settings {
@@ -1229,6 +1242,7 @@ mod tests {
             fm_system_icons: false,
             fm_saved_filters: vec!["*.zip".to_string(), "漫画".to_string()],
             fm_filter_bar_bottom: true,
+            fm_rubber_band: "left".to_string(),
             ..Default::default()
         };
         let json = serde_json::to_string(&s).unwrap();
@@ -1240,12 +1254,14 @@ mod tests {
             fm_delete_mode: "shred".to_string(),
             fm_space_action: "launch".to_string(),
             fm_archive_open: "hack".to_string(),
+            fm_rubber_band: "middle".to_string(),
             ..Default::default()
         };
         s.clamp();
         assert_eq!(s.fm_delete_mode, "trash");
         assert_eq!(s.fm_space_action, "dir_size");
         assert_eq!(s.fm_archive_open, "archive");
+        assert_eq!(s.fm_rubber_band, "right");
         // 保存的过滤方案：trim + 去空 + 保序去重。
         let mut s = Settings {
             fm_saved_filters: vec![

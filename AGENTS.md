@@ -172,7 +172,8 @@ cargo clippy --workspace --all-targets -- -D warnings
   见下「行为设置包（阶段 O）」段）/`fm_dblclick_blank_up`（双击空白回上级，
   见「键位补齐包（阶段 P）」段）/`fm_system_icons`（系统真实图标，
   见「系统真实图标（阶段 S）」段）/`fm_saved_filters`/`fm_filter_bar_bottom`
-  （见「过滤增强（阶段 T）」段）；`FileManagerView::snapshot()`
+  （见「过滤增强（阶段 T）」段）/`fm_rubber_band`（见「选择增强（阶段 U）」
+  段）；`FileManagerView::snapshot()`
   采集，`maybe_save_fm_state`（`App::update` 末尾）diff 快照后写回 settings——
   **不自行落盘**，退出时 `on_exit` 统一 `save_settings`（排序只持久化活动栏，
   取舍见 `FmStateSnapshot` 注释）；快照在离开 FileManager 视图时重置。设置页
@@ -390,6 +391,26 @@ cargo clippy --workspace --all-targets -- -D warnings
   聚焦时 Esc = 清空 + surrender_focus 并置 `filter_esc_handled`，
   handle_keyboard 的 Esc 链见到标记跳过（渲染先于键盘处理，交还焦点后
   wants_keyboard_input 变 false，无此标记会同帧双消费）。
+  **选择增强（阶段 U）**：**鼠标框选**（`fm_rubber_band` = "right"（默认）
+  /"left"/"off"，设置页「交互行为」）：视图级 `band: Option<RubberBand>`
+  状态机（起点/按钮/所属栏/active），render_list/render_grid 帧尾
+  `rubber_band()` 处理——"right" = 右键视口内按下（egui click 判定自带
+  位移阈值，行/cell 渲染处另有 `band.active` 门控保险防弹菜单）；
+  "left" = 左键空白区按下（行/cell 上左键起拖维持拖放 payload，空白判定
+  复用 `dblclick_hits_blank` 几何）。位移超 `BAND_THRESHOLD`(6pt) 才
+  active；拖动中只画半透明矩形（painter.with_clip_rect(viewport)，不
+  实时改选中）；松开按命中应用：**无修饰 = 替换、Shift = 追加、Ctrl =
+  切换，anchor/focus 不动**（框选是区域语义，不参与锚点区间）；「..」
+  行（索引 0）跳过；丢失的松开（拖出窗释放）清状态防滞留。命中纯函数
+  `rows_in_rect`（竖向重叠，内容坐标 = 指针 - 视口左上 + 滚动偏移）/
+  `cells_in_rect`（末行未排满与行右空白自动丢弃），底/右边压界减 eps
+  不命中下一行/列。**保存/恢复选择集**：`saved_selections:
+  Vec<(String, Vec<PathBuf>)>`（会话内不落盘）；右键菜单「选择」子菜单
+  ——「保存当前选择…」（`SaveSelectionDialog` 复用 BookmarkGroupDialog
+  单输入模式，打开时捕获选择集快照，重名拒绝）+ 各已存项（点击 =
+  `restore_selection` 替换式恢复到该栏：按路径匹配当前栏可见项，不在
+  当前目录的忽略并经 op_error 提示「N 项不在当前目录」，焦点设到首个
+  命中行 + 滚动揭示）+ ✕ 删除不收起菜单。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

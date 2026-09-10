@@ -5,7 +5,7 @@ use crate::opener::{AsyncOpener, OpenStatus};
 use crate::shortcuts::is_shortcut_pressed;
 use crate::timing;
 use crate::views::file_manager::{
-    FileManagerView, FmArchiveOpen, FmBehaviorOptions, FmCallbacks, FmStateSnapshot,
+    FileManagerView, FmArchiveOpen, FmBehaviorOptions, FmCallbacks, FmStateSnapshot, RubberBandMode,
 };
 use crate::views::file_manager_panel::{fallback_existing_dir, PanelLoadState, PanelViewMode};
 use crate::views::file_manager_rows::natural_cmp;
@@ -766,6 +766,7 @@ fn fm_behavior_options(settings: &Settings) -> FmBehaviorOptions {
         dblclick_blank_up: settings.fm_dblclick_blank_up,
         system_icons: settings.fm_system_icons,
         filter_bar_bottom: settings.fm_filter_bar_bottom,
+        rubber_band: RubberBandMode::from_setting(&settings.fm_rubber_band),
     }
 }
 

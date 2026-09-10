@@ -507,6 +507,32 @@ impl SettingsView {
         ui.checkbox(&mut settings.fm_dblclick_blank_up, "双击空白处回上级目录");
         hint(ui, "列表/网格视图中双击未占用区域 = 回上级（同 Backspace）");
         ui.horizontal(|ui| {
+            ui.label("鼠标框选");
+            egui::ComboBox::from_id_salt("fm_rubber_band")
+                .selected_text(match settings.fm_rubber_band.as_str() {
+                    "left" => "左键（空白区起拖）",
+                    "off" => "关闭",
+                    _ => "右键拖动",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut settings.fm_rubber_band,
+                        "right".to_string(),
+                        "右键拖动",
+                    );
+                    ui.selectable_value(
+                        &mut settings.fm_rubber_band,
+                        "left".to_string(),
+                        "左键（空白区起拖）",
+                    );
+                    ui.selectable_value(&mut settings.fm_rubber_band, "off".to_string(), "关闭");
+                });
+        });
+        hint(
+            ui,
+            "框选松开时应用选中：无修饰替换 / Shift 追加 / Ctrl 切换",
+        );
+        ui.horizontal(|ui| {
             ui.label("双击压缩包");
             egui::ComboBox::from_id_salt("fm_archive_open")
                 .selected_text(match settings.fm_archive_open.as_str() {
