@@ -153,7 +153,7 @@ cargo clippy --workspace --all-targets -- -D warnings
   `fm_dir_left`/`fm_dir_right`/`fm_confirm_delete`/`fm_show_hidden`（隐藏 =
   `.` 开头或 Windows FILE_ATTRIBUTE_HIDDEN，行模型过滤不进快照，权威在
   settings，与 confirm_delete 同走 ui() 每帧下发）/`fm_view_mode`（"list"|
-  "thumbs"，取活动栏）/`fm_tabs_left`/`fm_tabs_right`/`fm_active_tab_left`/
+  "brief"|"thumbs"，取活动栏）/`fm_tabs_left`/`fm_tabs_right`/`fm_active_tab_left`/
   `fm_active_tab_right`（标签页目录列表与活动索引，活动标签 = 实时目录，
   越界 clamp）/`fm_bookmark_groups`
   （常用目录书签分组 `FmBookmarkGroup{name, items}`，两栏共享；旧扁平
@@ -164,8 +164,9 @@ cargo clippy --workspace --all-targets -- -D warnings
   冲突故走独立窗口）+ 各分组 SubMenuButton 子菜单（书签点击跳转经
   `fallback_existing_dir` 逐级回退最近存在祖先、与启动恢复 fm_dir_* 共用；
   ✕ 移除、组尾重命名/删除分组——删除从简无确认））/`fm_col_size_width`/
-  `fm_col_mtime_width`/`fm_col_shift`（大小/时间列宽与列块平移，全局单值
-  取活动栏——同 fm_sort_key 先例；sanitize clamp 列宽 60..=400、shift
+  `fm_col_mtime_width`/`fm_col_shift`（列宽与列块平移，全局单值
+  取活动栏——同 fm_sort_key 先例；阶段 V 起列宽两字段为 `fm_columns`
+  的兼容回写（权威在后者）；sanitize clamp 列宽 60..=400、shift
   ≤0 且 ≥ -(两列宽之和)，默认值同 panel.rs SIZE_COL_WIDTH/MTIME_COL_WIDTH/0
   在 storage 侧硬编码同步）/`fm_delete_mode`/`fm_space_action`/`fm_dirs_first`/
   `fm_drag_confirm`/`fm_archive_open`/`fm_esc_keep_selection`（行为设置包，
@@ -173,6 +174,7 @@ cargo clippy --workspace --all-targets -- -D warnings
   见「键位补齐包（阶段 P）」段）/`fm_system_icons`（系统真实图标，
   见「系统真实图标（阶段 S）」段）/`fm_saved_filters`/`fm_filter_bar_bottom`
   （见「过滤增强（阶段 T）」段）/`fm_rubber_band`（见「选择增强（阶段 U）」
+  段）/`fm_columns`（明细列表列配置，见「显示模式与自定义列（阶段 V）」
   段）；`FileManagerView::snapshot()`
   采集，`maybe_save_fm_state`（`App::update` 末尾）diff 快照后写回 settings——
   **不自行落盘**，退出时 `on_exit` 统一 `save_settings`（排序只持久化活动栏，
@@ -411,6 +413,40 @@ cargo clippy --workspace --all-targets -- -D warnings
   `restore_selection` 替换式恢复到该栏：按路径匹配当前栏可见项，不在
   当前目录的忽略并经 op_error 提示「N 项不在当前目录」，焦点设到首个
   命中行 + 滚动揭示）+ ✕ 删除不收起菜单。
+  **显示模式与自定义列（阶段 V）**：**三态视图**——`PanelViewMode` 加
+  `Brief`（简表），顶栏「视图」按钮按当前模式显示并经 `Popup::menu`
+  三选（列表/简表/缩略图）；简表 = 多列排布的紧凑名称行（16pt 图标 +
+  单行截断名称，行高 = ROW_HEIGHT，**行主序**），列宽 =
+  `brief_col_width(最长名称 char-unit)`（×7pt + 28 clamp 120..=300），
+  与网格共用线性行号/`last_grid_cols` 键盘步进（`is_grid_like()` =
+  非 List）/`GridBlankGeom` 空白双击/`rubber_band` 框选（grid 参数加
+  cell 宽）。**自定义列**：`ColumnKind{Name, Ext, Size, Mtime, Attr,
+  Comment}`（panel.rs；`as_str`/`from_setting`/`label`/`sort_key`/
+  `default_width`，Comment 为占位空列不可排序）；`FsPanel::columns:
+  Vec<(ColumnKind, f32)>` 不变式 **columns[0] 恒为 Name 且弹性宽度**
+  （宽度值忽略）、固定列 ≥1（`toggle_column` 维持，列头右键勾选增删，
+  唯一固定列置灰）；`column_layout(right, shift, columns)` 从右往左排
+  固定列（文字右锚点 = 列右缘，最右列 = 行右缘内 COL_RIGHT_PAD +
+  col_shift），默认三列下与旧硬编码公式逐项等价（有单测锚定）；
+  `drag_column_sep` 泛化（sep i = columns[i]|columns[i+1] 分隔线，sep0
+  只动 shift，i≥1 调 columns[i] 宽 + shift 吸收，min_shift 按固定列宽
+  合计）；列头每格都可右键（排序菜单含「不排序」「属性」+ 升降序 +
+  列勾选）；行直绘按 layout.fixed 遍历（Size 目录弱档/Ext 目录留空/
+  Attr = `attr_string`(R/H/S，空留空）/Comment 恒空）。**排序键**：
+  `SortKey::Unsorted`（list_rows 入口早退：read_dir 物理序，不做目录/
+  文件分组，asc=false 整体反向）与 `SortKey::Attr`（属性串字典序，
+  空垫底同 Ext 约定）；FsEntry 加 `is_readonly`/`is_system`（Windows
+  FILE_ATTRIBUTE_SYSTEM 经 `windows_attr_system`，非 Windows 恒 false）。
+  **持久化**：`fm_columns: Vec<String>`（"kind" 或 "kind:width"，Name
+  恒首位不带宽；`parse_columns` 规范化：未知丢弃/宽度 clamp/去重/补
+  Name/固定列不足补默认；空 = 旧档，`restore_columns` 用 legacy
+  fm_col_size_width/mtime 播种默认三列；`serialize_columns` 写回，同时
+  回写 fm_col_size_width/mtime 兼容旧读者）；`fm_sort_key` 白名单加
+  "unsorted"/"attr"、`fm_view_mode` 加 "brief"。**标签快照**：
+  `PanelTabSnapshot` 加 `sort_key`/`sort_asc`/`view_mode`/`columns`
+  （仅会话内——标签持久化仍只存目录；`restore_tabs` 的标签继承面板
+  当前值防重置，空 columns = restore_tab 不覆盖）；`new_tab` 继承当前
+  排序/列/模式（选中/过滤/焦点仍不带入）。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

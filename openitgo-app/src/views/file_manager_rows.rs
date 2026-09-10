@@ -20,6 +20,10 @@ pub struct FsEntry {
     pub is_symlink: bool,
     /// 隐藏文件（`.` 开头或 Windows FILE_ATTRIBUTE_HIDDEN）。
     pub is_hidden: bool,
+    /// 只读（metadata.permissions().readonly()）。
+    pub is_readonly: bool,
+    /// Windows FILE_ATTRIBUTE_SYSTEM（非 Windows 恒 false）。
+    pub is_system: bool,
     /// 相对当前目录的子目录路径（`/` 分隔；普通列举与分支顶层为空串）。
     pub rel_dir: String,
 }
@@ -30,17 +34,39 @@ pub fn is_hidden_name(name: &str) -> bool {
 }
 
 /// 排序键。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortKey {
+    #[default]
     Name,
     Size,
     Mtime,
     /// 按小写扩展名（无扩展名恒垫底，同 Mtime 的 None 约定），回退 natural_cmp。
     Ext,
+    /// 不排序：保持 read_dir 物理序（过滤仍生效），asc=false 整体反向；
+    /// dirs_first 分组不适用（物理序本来就交错）。
+    Unsorted,
+    /// 按属性串（R/H/S，见 attr_string）字典序，无属性恒垫底（同 Ext 约定）。
+    Attr,
+}
+
+/// 属性列文本（TC 风格属性字母）：R = 只读、H = 隐藏、S = 系统，按此序
+/// 拼接；无属性返回空串。排序与列显示共用同一来源。
+pub fn attr_string(readonly: bool, hidden: bool, system: bool) -> String {
+    let mut s = String::with_capacity(3);
+    if readonly {
+        s.push('R');
+    }
+    if hidden {
+        s.push('H');
+    }
+    if system {
+        s.push('S');
+    }
+    s
 }
 
 /// 小写扩展名：无 `.`、仅起始 `.`（如 `.env`）或 `.` 结尾 → None。
-fn lower_ext(name: &str) -> Option<String> {
+pub(crate) fn lower_ext(name: &str) -> Option<String> {
     let pos = name.rfind('.')?;
     if pos == 0 {
         return None;
@@ -211,6 +237,20 @@ pub fn list_rows(
     dirs_first: bool,
 ) -> Vec<usize> {
     let filter = filter.trim();
+    // 不排序：read_dir 物理序（过滤/隐藏筛选仍生效），asc=false 整体反向；
+    // 不做目录/文件分组（物理序本来就交错，分组反而违背「不排序」语义）。
+    if sort == SortKey::Unsorted {
+        let mut rows: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| (show_hidden || !e.is_hidden) && filter_matches(filter, &e.name))
+            .map(|(i, _)| i)
+            .collect();
+        if !asc {
+            rows.reverse();
+        }
+        return rows;
+    }
     let mut dirs: Vec<usize> = Vec::new();
     let mut files: Vec<usize> = Vec::new();
     for (idx, e) in entries.iter().enumerate() {
@@ -253,13 +293,30 @@ pub fn list_rows(
                 let core = if asc { core } else { core.reverse() };
                 return core.then_with(|| natural_cmp(&ea.name, &eb.name));
             }
+            SortKey::Attr => {
+                // 无属性（空串）恒垫底（同 Ext 约定）：升降序在键内吸收。
+                let (sa, sb) = (
+                    attr_string(ea.is_readonly, ea.is_hidden, ea.is_system),
+                    attr_string(eb.is_readonly, eb.is_hidden, eb.is_system),
+                );
+                let core = match (sa.is_empty(), sb.is_empty()) {
+                    (false, false) => sa.cmp(&sb),
+                    (true, false) => return Ordering::Greater,
+                    (false, true) => return Ordering::Less,
+                    (true, true) => Ordering::Equal,
+                };
+                let core = if asc { core } else { core.reverse() };
+                return core.then_with(|| natural_cmp(&ea.name, &eb.name));
+            }
+            SortKey::Unsorted => unreachable!("Unsorted 在 list_rows 入口早退"),
         };
         ord.then_with(|| natural_cmp(&ea.name, &eb.name))
     };
     dirs.sort_by(|&a, &b| cmp(a, b));
     files.sort_by(|&a, &b| cmp(a, b));
-    // Mtime/Ext 的升降序已在排序键内处理（None/无扩展名恒垫底），不再整体反转。
-    if !asc && !matches!(sort, SortKey::Mtime | SortKey::Ext) {
+    // Mtime/Ext/Attr 的升降序已在排序键内处理（None/无扩展名/无属性恒垫底），
+    // 不再整体反转。
+    if !asc && !matches!(sort, SortKey::Mtime | SortKey::Ext | SortKey::Attr) {
         dirs.reverse();
         files.reverse();
     }
@@ -282,6 +339,8 @@ mod tests {
             mtime,
             is_symlink: false,
             is_hidden: is_hidden_name(name),
+            is_readonly: false,
+            is_system: false,
             rel_dir: String::new(),
         }
     }
@@ -602,5 +661,57 @@ mod tests {
         assert_eq!(type_ahead_match(&entries, &rows, "", None), None);
         // 前缀匹配不是子串匹配
         assert_eq!(type_ahead_match(&entries, &rows, "p1", None), None);
+    }
+
+    #[test]
+    fn attr_string_letters_in_rhs_order() {
+        assert_eq!(attr_string(false, false, false), "");
+        assert_eq!(attr_string(true, false, false), "R");
+        assert_eq!(attr_string(false, true, false), "H");
+        assert_eq!(attr_string(false, false, true), "S");
+        assert_eq!(attr_string(true, true, true), "RHS");
+        assert_eq!(attr_string(false, true, true), "HS");
+    }
+
+    #[test]
+    fn list_rows_unsorted_keeps_physical_order() {
+        let entries = vec![
+            entry("zebra.txt", false, Some(1), None),
+            entry("docs", true, None, None),
+            entry("alpha.txt", false, Some(1), None),
+        ];
+        // 物理序：不分组、不按名称排序。
+        let rows = list_rows(&entries, "", SortKey::Unsorted, true, true, true);
+        assert_eq!(names(&entries, &rows), ["zebra.txt", "docs", "alpha.txt"]);
+        // asc=false：整体反向。
+        let rows = list_rows(&entries, "", SortKey::Unsorted, false, true, true);
+        assert_eq!(names(&entries, &rows), ["alpha.txt", "docs", "zebra.txt"]);
+        // 过滤仍生效。
+        let rows = list_rows(&entries, "*.txt", SortKey::Unsorted, true, true, true);
+        assert_eq!(names(&entries, &rows), ["zebra.txt", "alpha.txt"]);
+        // 隐藏筛选仍生效。
+        let entries = vec![
+            entry(".hidden", false, Some(1), None),
+            entry("a.txt", false, Some(1), None),
+        ];
+        let rows = list_rows(&entries, "", SortKey::Unsorted, true, false, true);
+        assert_eq!(names(&entries, &rows), ["a.txt"]);
+    }
+
+    #[test]
+    fn list_rows_attr_sorts_with_empty_last() {
+        let mut readonly = entry("b.txt", false, Some(1), None);
+        readonly.is_readonly = true;
+        let mut system = entry("c.txt", false, Some(1), None);
+        system.is_system = true;
+        let mut both = entry("d.txt", false, Some(1), None);
+        both.is_readonly = true;
+        both.is_system = true;
+        let entries = vec![entry("a.txt", false, Some(1), None), readonly, system, both];
+        // 属性串字典序：R < RS < S，无属性垫底；不随升降序移位。
+        let rows = list_rows(&entries, "", SortKey::Attr, true, true, true);
+        assert_eq!(names(&entries, &rows), ["b.txt", "d.txt", "c.txt", "a.txt"]);
+        let rows = list_rows(&entries, "", SortKey::Attr, false, true, true);
+        assert_eq!(names(&entries, &rows), ["c.txt", "d.txt", "b.txt", "a.txt"]);
     }
 }

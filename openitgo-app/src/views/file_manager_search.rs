@@ -152,6 +152,8 @@ impl SearchHit {
             mtime: self.mtime,
             is_symlink: false,
             is_hidden: crate::views::file_manager_rows::is_hidden_name(&self.name),
+            is_readonly: false,
+            is_system: false,
             rel_dir: self.rel_dir.clone(),
         }
     }

@@ -131,6 +131,12 @@ pub struct Settings {
     /// 列块平移量（≤0；0 = 列块贴右缘）。
     #[serde(default)]
     pub fm_col_shift: f32,
+    /// 文件管理器明细列表列配置（阶段 V）：每项 "kind" 或 "kind:width"
+    /// （kind ∈ name/ext/size/mtime/attr/comment，name 恒首位不带宽）。
+    /// 空（旧 settings 无此字段）= 运行时由 fm_col_size_width/mtime 播种
+    /// 默认三列。权威字段；fm_col_size_width/mtime 为旧读者兼容回写。
+    #[serde(default)]
+    pub fm_columns: Vec<String>,
     /// 删除方式："trash"（移入回收站，默认）| "permanent"（永久删除）。
     #[serde(default = "default_fm_delete_mode")]
     pub fm_delete_mode: String,
@@ -279,6 +285,7 @@ impl Default for Settings {
             fm_col_size_width: default_fm_col_size_width(),
             fm_col_mtime_width: default_fm_col_mtime_width(),
             fm_col_shift: 0.0,
+            fm_columns: Vec::new(),
             fm_delete_mode: default_fm_delete_mode(),
             fm_space_action: default_fm_space_action(),
             fm_dirs_first: true,
@@ -403,17 +410,26 @@ impl Settings {
                 self.fm_layout
             ));
         }
-        if !matches!(self.fm_sort_key.as_str(), "name" | "size" | "mtime" | "ext") {
+        if !matches!(
+            self.fm_sort_key.as_str(),
+            "name" | "size" | "mtime" | "ext" | "unsorted" | "attr"
+        ) {
             return Err(format!(
-                "fm_sort_key must be name/size/mtime/ext, got {}",
+                "fm_sort_key must be name/size/mtime/ext/unsorted/attr, got {}",
                 self.fm_sort_key
             ));
         }
-        if !matches!(self.fm_view_mode.as_str(), "list" | "thumbs") {
+        if !matches!(self.fm_view_mode.as_str(), "list" | "brief" | "thumbs") {
             return Err(format!(
-                "fm_view_mode must be list/thumbs, got {}",
+                "fm_view_mode must be list/brief/thumbs, got {}",
                 self.fm_view_mode
             ));
+        }
+        for item in &self.fm_columns {
+            let kind = item.split(':').next().unwrap_or("");
+            if !matches!(kind, "name" | "ext" | "size" | "mtime" | "attr" | "comment") {
+                return Err(format!("fm_columns has unknown column kind: {item}"));
+            }
         }
         if !self.fm_tabs_left.is_empty() && self.fm_active_tab_left >= self.fm_tabs_left.len() {
             return Err(format!(
@@ -460,12 +476,34 @@ impl Settings {
         if self.fm_layout != "single" {
             self.fm_layout = default_fm_layout();
         }
-        if !matches!(self.fm_sort_key.as_str(), "size" | "mtime" | "ext") {
+        if !matches!(
+            self.fm_sort_key.as_str(),
+            "size" | "mtime" | "ext" | "unsorted" | "attr"
+        ) {
             self.fm_sort_key = default_fm_sort_key();
         }
-        if !matches!(self.fm_view_mode.as_str(), "list" | "thumbs") {
+        if !matches!(self.fm_view_mode.as_str(), "list" | "brief" | "thumbs") {
             self.fm_view_mode = default_fm_view_mode();
         }
+        // fm_columns 修复：丢弃未知 kind 项、宽度取整并 clamp、去重、
+        // Name 归首位（规范化与 app 侧 parse_columns 同步；这里只做存储
+        // 级消毒，不补默认列——空/全废时清为空走 legacy 播种）。
+        let mut seen: Vec<String> = Vec::new();
+        for item in std::mem::take(&mut self.fm_columns) {
+            let (kind, width) = item.split_once(':').unwrap_or((item.as_str(), ""));
+            if !matches!(kind, "name" | "ext" | "size" | "mtime" | "attr" | "comment") {
+                continue;
+            }
+            if kind == "name" || seen.iter().any(|s| s.split(':').next() == Some(kind)) {
+                continue;
+            }
+            let width = width.parse::<f32>().unwrap_or(0.0).clamp(60.0, 400.0) as u32;
+            seen.push(format!("{kind}:{width}"));
+        }
+        if !seen.is_empty() {
+            seen.insert(0, "name".to_string());
+        }
+        self.fm_columns = seen;
         // 旧版扁平书签 → 分组迁移：非空即并入「常用」组（无此组则新建——
         // 组为空时即「迁移为单个分组」），迁移后清空旧字段（保存时
         // skip_serializing_if 空 Vec，不再写出）。
@@ -1212,6 +1250,55 @@ mod tests {
         };
         s.clamp();
         assert_eq!(s.fm_col_shift, 0.0, "col_shift ≤ 0");
+    }
+
+    /// fm_columns（阶段 V）：旧档无字段 = 空（运行时 legacy 播种）；
+    /// validate 拒绝未知 kind；clamp 丢弃未知项、宽度取整 clamp、去重、
+    /// Name 归首位；全废时清空（回 legacy 播种）。
+    #[test]
+    fn test_fm_columns_default_validate_and_clamp() {
+        let loaded: Settings = serde_json::from_str("{}").unwrap();
+        assert!(loaded.fm_columns.is_empty());
+        assert!(loaded.validate().is_ok());
+
+        let mut s = Settings {
+            fm_columns: vec!["size:120".into(), "bogus".into(), "name".into()],
+            ..Default::default()
+        };
+        assert!(s.validate().is_err(), "未知 kind 应被拒");
+        s.clamp();
+        assert_eq!(s.fm_columns, ["name", "size:120"]);
+
+        let mut s = Settings {
+            fm_columns: vec!["mtime:9999".into(), "ext:30".into(), "mtime:100".into()],
+            ..Default::default()
+        };
+        s.clamp();
+        assert_eq!(s.fm_columns, ["name", "mtime:400", "ext:60"]);
+
+        let mut s = Settings {
+            fm_columns: vec!["bogus".into(), "name".into()],
+            ..Default::default()
+        };
+        s.clamp();
+        assert!(s.fm_columns.is_empty(), "无固定列 = 清空走 legacy 播种");
+
+        // 新排序键/视图模式白名单。
+        let loaded: Settings =
+            serde_json::from_str(r#"{"fm_sort_key":"unsorted","fm_view_mode":"brief"}"#).unwrap();
+        assert!(loaded.validate().is_ok());
+        let mut s = Settings {
+            fm_sort_key: "attr".into(),
+            ..Default::default()
+        };
+        s.clamp();
+        assert_eq!(s.fm_sort_key, "attr");
+        let mut s = Settings {
+            fm_view_mode: "grid".into(),
+            ..Default::default()
+        };
+        s.clamp();
+        assert_eq!(s.fm_view_mode, "list");
     }
 
     #[test]

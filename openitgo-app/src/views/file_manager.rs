@@ -7,7 +7,8 @@
 //! 行渲染严格遵循 AGENTS.md 的列布局约定（与 archive.rs 明细列表同范式）：
 //! 固定行高 + show_rows 虚拟化、item_spacing.y 归零、行内容 scope 内
 //! interact_size.y 压回 ROW_HEIGHT-4、scope 后 advance_cursor_after_rect
-//! 钉回行底、右两列 painter.text 右对齐直绘（禁止 RTL 嵌套）。
+//! 钉回行底、右侧固定列（FsPanel::columns 驱动）painter.text 右对齐直绘
+//! （禁止 RTL 嵌套）。
 
 use crate::opener::{AsyncOpener, OpenStatus};
 use crate::views::archive::{format_mtime, human_size};
@@ -17,10 +18,10 @@ use crate::views::file_manager_dialog::{
 };
 use crate::views::file_manager_icons::{sys_icon_kind, SysIconCache, SysIconLookup};
 use crate::views::file_manager_panel::{
-    fallback_existing_dir, list_drives, FocusMove, FsPanel, PanelLoadState, PanelViewMode,
-    COL_RIGHT_PAD, ROW_HEIGHT,
+    fallback_existing_dir, list_drives, ColumnKind, FocusMove, FsPanel, PanelLoadState,
+    PanelViewMode, COL_RIGHT_PAD, ROW_HEIGHT,
 };
-use crate::views::file_manager_rows::{FsEntry, SortKey};
+use crate::views::file_manager_rows::{attr_string, lower_ext, FsEntry, SortKey};
 use crate::views::file_manager_search::{SearchDialog, SearchUiAction};
 use crate::views::file_manager_thumbs::{
     grid_cols, grid_row_count, grid_row_of, truncate_cell_name, ThumbCache, ThumbKey, ThumbLookup,
@@ -228,11 +229,11 @@ pub struct FmStateSnapshot {
     pub ratio: f32,
     /// 单栏预览面板开关（Dual 期间取切双栏前保存的开关）。
     pub preview_open: bool,
-    /// 排序键 "name"|"size"|"mtime"|"ext"：取活动栏（取舍：双栏各自排序可能不同，
-    /// settings 只有单值，持久化活动栏的排序）。
+    /// 排序键 "name"|"size"|"mtime"|"ext"|"unsorted"|"attr"：取活动栏
+    /// （取舍：双栏各自排序可能不同，settings 只有单值，持久化活动栏的排序）。
     pub sort_key: String,
     pub sort_asc: bool,
-    /// 视图模式 "list"|"thumbs"：同 sort_key 先例取活动栏（全局单值，
+    /// 视图模式 "list"|"brief"|"thumbs"：同 sort_key 先例取活动栏（全局单值，
     /// 双栏各自模式可能不同，持久化活动栏的）。
     pub view_mode: String,
     /// 两栏当前目录（字符串；空 = 用户主目录，跟随 resolve_fm_dir 语义）。
@@ -251,10 +252,14 @@ pub struct FmStateSnapshot {
     pub active_tab_right: usize,
     /// 大小/时间列宽与列块平移量（≤0，0 = 列块贴右缘）：全局单值取活动栏
     /// （取舍同 sort_key——双栏各自拖过会不同，持久化活动栏的，恢复时
-    /// 两栏同用）。
+    /// 两栏同用）。阶段 V 起为旧字段兼容层：权威列配置在 `columns`，
+    /// Size/Mtime 列存在时取其宽，否则保留旧值。
     pub col_size_width: f32,
     pub col_mtime_width: f32,
     pub col_shift: f32,
+    /// 明细列表列配置（阶段 V）：取活动栏（取舍同 sort_key），app 侧序列化
+    /// 为 settings.fm_columns，恢复时两栏同用。
+    pub columns: Vec<(ColumnKind, f32)>,
 }
 
 pub struct FileManagerView {
@@ -465,28 +470,35 @@ pub struct FmCallbacks<'a> {
     pub on_confirm_delete_change: &'a mut dyn FnMut(bool),
 }
 
-/// 名称/大小/修改时间三列的 x 坐标单一来源（表头 paint、行列分隔竖线、
-/// 列宽拖拽共用），消除各自手算的漂移。名称列宽 = 剩余弹性。
-#[derive(Debug, Clone, Copy)]
+/// 明细列表各列的 x 坐标单一来源（表头 paint、行列分隔竖线、列宽拖拽
+/// 共用），消除各自手算的漂移。名称列（恒首列）宽 = 剩余弹性；固定列
+/// 从行右缘往左依次排列（阶段 V：列集合由 FsPanel::columns 驱动）。
+#[derive(Debug, Clone, PartialEq)]
 struct ColumnLayout {
-    /// 名称列右缘（= 名称|大小分隔竖线 x、大小列左缘）。
-    size_left: f32,
-    /// 大小列右缘（= 大小|时间分隔竖线 x、时间列左缘），大小文字右锚点。
-    mtime_left: f32,
-    /// 时间文字右锚点（行右缘内 COL_RIGHT_PAD 处）。
-    content_right: f32,
+    /// 名称列右缘（= 名称|首个固定列分隔竖线 x、最左固定列左缘）。
+    name_right: f32,
+    /// 固定列（从左到右）：(列类型, 列左缘, 文字右锚点)；文字右锚点 =
+    /// 列右缘（最右列 = 行右缘内 COL_RIGHT_PAD 处，含 col_shift）。
+    fixed: Vec<(ColumnKind, f32, f32)>,
 }
 
-/// 由行/表头 rect 的右缘、列块平移量与两列宽度算出各列坐标。
+/// 由行/表头 rect 的右缘、列块平移量与列配置算出各列坐标。
 /// shift ≤ 0：0 = 列块贴右缘（名称列吃满剩余宽度）；<0 = 列块整体左移。
-fn column_layout(right: f32, shift: f32, size_w: f32, mtime_w: f32) -> ColumnLayout {
-    let content_right = right - COL_RIGHT_PAD + shift;
-    let mtime_left = content_right - mtime_w;
-    let size_left = mtime_left - size_w;
+/// columns[0]（Name）的宽度忽略；columns[1..] 从右往左排——最右列锚定
+/// `right - COL_RIGHT_PAD + shift`，每列文字右锚点 = 列右缘。
+fn column_layout(right: f32, shift: f32, columns: &[(ColumnKind, f32)]) -> ColumnLayout {
+    let mut r = right - COL_RIGHT_PAD + shift;
+    let mut fixed: Vec<(ColumnKind, f32, f32)> = Vec::with_capacity(columns.len().max(1) - 1);
+    for (kind, w) in columns.iter().skip(1).rev() {
+        let text_right = r;
+        let left = r - w;
+        fixed.push((*kind, left, text_right));
+        r = left;
+    }
+    fixed.reverse();
     ColumnLayout {
-        size_left,
-        mtime_left,
-        content_right,
+        name_right: r,
+        fixed,
     }
 }
 
@@ -588,6 +600,41 @@ fn cells_in_rect(
     out
 }
 
+/// 名称显示宽度估算（char-unit：ASCII = 1，其余 = 2；与
+/// truncate_cell_name 同一口径）。简表列宽估算用。
+fn name_units(name: &str) -> usize {
+    name.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
+}
+
+/// 简表列宽（pt，阶段 V）：最长名称估算宽度（7pt/unit）+ 28pt
+/// （6pt 缩进 + 16pt 图标 + 6pt 间距），clamp 120..=300。
+fn brief_col_width(max_units: usize) -> f32 {
+    (max_units as f32 * 7.0 + 28.0).clamp(120.0, 300.0)
+}
+
+/// 简表列数：栏宽 / 列宽，至少 1 列。
+fn brief_cols(available_width: f32, cell_w: f32) -> usize {
+    (available_width / cell_w).floor().max(1.0) as usize
+}
+
+/// 简表 cell 名称单行截断：char-unit 预算 = (cell_w - 30) / 7（30pt =
+/// 缩进+图标+间距+右留白），超预算尾部替换为「…」（同
+/// truncate_cell_name 的截断风格）。
+fn brief_cell_name(name: &str, cell_w: f32) -> String {
+    let budget = ((cell_w - 30.0) / 7.0).floor().max(4.0) as usize;
+    let mut units = 0;
+    for (i, c) in name.chars().enumerate() {
+        let w = if c.is_ascii() { 1 } else { 2 };
+        if units + w > budget {
+            let mut s: String = name.chars().take(i.saturating_sub(1)).collect();
+            s.push('…');
+            return s;
+        }
+        units += w;
+    }
+    name.to_string()
+}
+
 /// 栏间拖放复制的 payload：行 drag source 设置，经 egui 全局 dnd 状态
 /// 跨栏传递（payload 与 widget Id 无关，栏间 push_id 隔离不影响）。
 #[derive(Debug, Clone)]
@@ -667,6 +714,8 @@ impl FileManagerView {
             "size" => SortKey::Size,
             "mtime" => SortKey::Mtime,
             "ext" => SortKey::Ext,
+            "unsorted" => SortKey::Unsorted,
+            "attr" => SortKey::Attr,
             _ => SortKey::Name,
         };
         Self {
@@ -744,7 +793,17 @@ impl FileManagerView {
             SortKey::Size => "size",
             SortKey::Mtime => "mtime",
             SortKey::Ext => "ext",
+            SortKey::Unsorted => "unsorted",
+            SortKey::Attr => "attr",
         };
+        // 旧字段兼容层：Size/Mtime 列存在时取其宽（列被删除则回退默认
+        // 宽度，不影响新权威字段 columns）。
+        let col_size_width = panel
+            .column_width(ColumnKind::Size)
+            .unwrap_or_else(|| ColumnKind::Size.default_width());
+        let col_mtime_width = panel
+            .column_width(ColumnKind::Mtime)
+            .unwrap_or_else(|| ColumnKind::Mtime.default_width());
         FmStateSnapshot {
             layout: layout.to_string(),
             ratio,
@@ -760,9 +819,10 @@ impl FileManagerView {
             tabs_right: self.panel_tab_dirs(1),
             active_tab_left: self.panels[0].active_tab(),
             active_tab_right: self.panels[1].active_tab(),
-            col_size_width: panel.col_width_size,
-            col_mtime_width: panel.col_width_mtime,
+            col_size_width,
+            col_mtime_width,
             col_shift: panel.col_shift,
+            columns: panel.columns.clone(),
         }
     }
 
@@ -776,6 +836,14 @@ impl FileManagerView {
     /// 注入保存的过滤方案（构造后由 app 从 settings 喂入）。
     pub fn set_saved_filters(&mut self, filters: &[String]) {
         self.saved_filters = filters.to_vec();
+    }
+
+    /// 恢复列配置（阶段 V）：全局单值，两栏同用（同 fm_sort_key 先例）。
+    /// 调用方负责解析/规范化（panel.rs parse_columns 或 legacy 播种）。
+    pub fn set_columns(&mut self, columns: &[(ColumnKind, f32)]) {
+        for panel in &mut self.panels {
+            panel.columns = columns.to_vec();
+        }
     }
 
     /// 记录过滤串进会话历史（trim 后为空忽略）。
@@ -1294,26 +1362,37 @@ impl FileManagerView {
                     self.clear_preview();
                 }
             }
-            // 缩略图视图开关（焦点栏；选中/焦点是线性行索引天然保留，
+            // 视图模式三态切换（焦点栏；选中/焦点是线性行索引天然保留，
             // 滚动按焦点行重定位——last_scroll_offset 的行高单位变了，
             // 置 MAX 让 min_scroll_to_reveal 把焦点行钉到视口顶）。
-            let thumbs_on = self.panels[self.active].view_mode == PanelViewMode::Thumbs;
-            if ui
-                .add(egui::Button::new((icons::SQUARES_FOUR, " 缩略图")).selected(thumbs_on))
-                .on_hover_text("缩略图视图（焦点栏）")
-                .clicked()
-            {
-                let panel = &mut self.panels[self.active];
-                panel.view_mode = if thumbs_on {
-                    PanelViewMode::List
-                } else {
-                    PanelViewMode::Thumbs
-                };
-                if panel.focus.is_some() {
-                    panel.focus_scroll_pending = true;
-                    panel.last_scroll_offset = f32::MAX;
-                }
-            }
+            let mode = self.panels[self.active].view_mode;
+            let mode_icon = match mode {
+                PanelViewMode::List => icons::LIST,
+                PanelViewMode::Brief => icons::ROWS,
+                PanelViewMode::Thumbs => icons::SQUARES_FOUR,
+            };
+            let mode_response = ui
+                .add(egui::Button::new((mode_icon, format!(" {}", mode.label()))))
+                .on_hover_text("视图模式（焦点栏）：列表 / 简表 / 缩略图");
+            egui::Popup::menu(&mode_response)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                    for m in [
+                        PanelViewMode::List,
+                        PanelViewMode::Brief,
+                        PanelViewMode::Thumbs,
+                    ] {
+                        if ui.selectable_label(mode == m, m.label()).clicked() {
+                            let panel = &mut self.panels[self.active];
+                            panel.view_mode = m;
+                            if panel.focus.is_some() {
+                                panel.focus_scroll_pending = true;
+                                panel.last_scroll_offset = f32::MAX;
+                            }
+                            ui.close();
+                        }
+                    }
+                });
             if let PanelLayout::Single { preview_open } = &mut self.layout {
                 ui.separator();
                 if ui
@@ -1618,6 +1697,9 @@ impl FileManagerView {
                 PanelViewMode::List => {
                     self.render_column_header(ui, idx);
                     self.render_list(ui, idx, intents);
+                }
+                PanelViewMode::Brief => {
+                    self.render_brief(ui, idx, intents);
                 }
                 PanelViewMode::Thumbs => {
                     self.render_grid(ui, idx, intents);
@@ -2200,9 +2282,11 @@ impl FileManagerView {
         }
     }
 
-    /// 列头：名称 / 大小 / 修改时间，整列格可点击切换排序键与升降序，
-    /// 当前键显示 ▲/▼。列坐标取自 column_layout（与行内容/竖线同一来源）。
-    /// 两条分隔竖线各带 6pt 拖拽热区（后注册于列点击格，拖拽优先）。
+    /// 列头：名称 + 固定列（FsPanel::columns 驱动，阶段 V），整列格可点击
+    /// 切换排序键与升降序（Comment 列无数据来源不可排序），当前键显示
+    /// ▲/▼。列坐标取自 column_layout（与行内容/竖线同一来源）。每个列头
+    /// 格都可右键：排序键/升降序菜单 + 列勾选（增删固定列，至少保留 1 个）。
+    /// 每条分隔竖线各带 6pt 拖拽热区（后注册于列点击格，拖拽优先）。
     fn render_column_header(&mut self, ui: &mut egui::Ui, idx: usize) {
         let (header_rect, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), ROW_HEIGHT),
@@ -2215,101 +2299,117 @@ impl FileManagerView {
             ui.visuals().widgets.noninteractive.bg_fill,
         );
         let panel = &mut self.panels[idx];
-        let layout = column_layout(
-            header_rect.right(),
-            panel.col_shift,
-            panel.col_width_size,
-            panel.col_width_mtime,
-        );
+        let layout = column_layout(header_rect.right(), panel.col_shift, &panel.columns);
         let cy = header_rect.center().y;
         let font_id = egui::TextStyle::Body.resolve(ui.style());
+        // 扩展名排序时名称列头显示「扩展名」——仅当扩展名没有独立列时
+        // （有独立列则箭头与标题都落在扩展名列上）。
+        let has_ext_col = panel.columns.iter().any(|(k, _)| *k == ColumnKind::Ext);
+        // (列 rect, 列类型, 标题, 文字锚点 x, 对齐方式)
+        let mut cols: Vec<(egui::Rect, ColumnKind, String, f32, egui::Align2)> =
+            Vec::with_capacity(panel.columns.len());
         let name_rect = egui::Rect::from_min_max(
             header_rect.min,
-            egui::pos2(layout.size_left, header_rect.max.y),
+            egui::pos2(layout.name_right, header_rect.max.y),
         );
-        let size_rect = egui::Rect::from_min_max(
-            egui::pos2(layout.size_left, header_rect.min.y),
-            egui::pos2(layout.mtime_left, header_rect.max.y),
-        );
-        let mtime_rect = egui::Rect::from_min_max(
-            egui::pos2(layout.mtime_left, header_rect.min.y),
-            header_rect.max,
-        );
-        // (列 rect, 排序键, 标题, 文字锚点 x, 对齐方式)
-        // 扩展名排序时名称列头显示「扩展名」（扩展名没有独立列，TC 同款约定）。
-        let name_label = if panel.sort_key == SortKey::Ext {
+        let name_label = if panel.sort_key == SortKey::Ext && !has_ext_col {
             "扩展名"
         } else {
             "名称"
         };
-        let cols: [(egui::Rect, SortKey, &str, f32, egui::Align2); 3] = [
-            (
-                name_rect,
-                SortKey::Name,
-                name_label,
-                header_rect.left() + NAME_HEADER_INDENT,
-                egui::Align2::LEFT_CENTER,
-            ),
-            (
-                size_rect,
-                SortKey::Size,
-                "大小",
-                layout.mtime_left,
+        cols.push((
+            name_rect,
+            ColumnKind::Name,
+            name_label.to_string(),
+            header_rect.left() + NAME_HEADER_INDENT,
+            egui::Align2::LEFT_CENTER,
+        ));
+        for (i, (kind, left, text_right)) in layout.fixed.iter().enumerate() {
+            let right = layout
+                .fixed
+                .get(i + 1)
+                .map(|(_, l, _)| *l)
+                .unwrap_or(header_rect.right());
+            let rect = egui::Rect::from_min_max(
+                egui::pos2(*left, header_rect.min.y),
+                egui::pos2(right, header_rect.max.y),
+            );
+            cols.push((
+                rect,
+                *kind,
+                kind.label().to_string(),
+                *text_right,
                 egui::Align2::RIGHT_CENTER,
-            ),
-            (
-                mtime_rect,
-                SortKey::Mtime,
-                "修改时间",
-                layout.content_right,
-                egui::Align2::RIGHT_CENTER,
-            ),
-        ];
-        let mut clicked: Option<SortKey> = None;
-        let mut texts: Vec<(egui::Pos2, egui::Align2, String)> = Vec::with_capacity(3);
-        for (rect, key, label, anchor_x, align) in cols {
+            ));
+        }
+        let mut clicked: Option<ColumnKind> = None;
+        let mut texts: Vec<(egui::Pos2, egui::Align2, String)> = Vec::with_capacity(cols.len());
+        for (rect, kind, label, anchor_x, align) in cols {
             let response = ui.interact(
                 rect,
-                ui.id().with(("fm-header", label)),
+                ui.id().with(("fm-header", kind.as_str())),
                 egui::Sense::click(),
             );
-            if response.clicked() {
-                clicked = Some(key);
+            if response.clicked() && kind.sort_key().is_some() {
+                clicked = Some(kind);
             }
-            // 名称列头右键：排序键/升降序菜单（整格左击逻辑不变）。
-            if key == SortKey::Name {
-                response.context_menu(|ui| {
-                    for (k, menu_label) in [
-                        (SortKey::Name, "名称"),
-                        (SortKey::Ext, "扩展名"),
-                        (SortKey::Size, "大小"),
-                        (SortKey::Mtime, "修改时间"),
-                    ] {
-                        if ui
-                            .selectable_label(panel.sort_key == k, menu_label)
-                            .clicked()
-                        {
-                            panel.toggle_sort(k);
+            // 列头右键：排序键/升降序菜单 + 列勾选（整格左击逻辑不变）。
+            response.context_menu(|ui| {
+                for (k, menu_label) in [
+                    (SortKey::Name, "名称"),
+                    (SortKey::Ext, "扩展名"),
+                    (SortKey::Size, "大小"),
+                    (SortKey::Mtime, "修改时间"),
+                    (SortKey::Attr, "属性"),
+                    (SortKey::Unsorted, "不排序"),
+                ] {
+                    if ui
+                        .selectable_label(panel.sort_key == k, menu_label)
+                        .clicked()
+                    {
+                        panel.toggle_sort(k);
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui.selectable_label(panel.sort_asc, "升序").clicked() {
+                    panel.sort_asc = true;
+                    ui.close();
+                }
+                if ui.selectable_label(!panel.sort_asc, "降序").clicked() {
+                    panel.sort_asc = false;
+                    ui.close();
+                }
+                ui.separator();
+                // 列勾选：Name 恒在（置灰展示）；固定列至少保留 1 个
+                // （唯一固定列的取消勾选置灰）。
+                let fixed_count = panel.columns.len() - 1;
+                ui.add_enabled_ui(false, |ui| {
+                    let _ = ui.selectable_label(true, ColumnKind::Name.label());
+                });
+                for kind in [
+                    ColumnKind::Ext,
+                    ColumnKind::Size,
+                    ColumnKind::Mtime,
+                    ColumnKind::Attr,
+                    ColumnKind::Comment,
+                ] {
+                    let present = panel.columns.iter().any(|(k, _)| *k == kind);
+                    let removable = present && fixed_count > 1;
+                    ui.add_enabled_ui(!present || removable, |ui| {
+                        if ui.selectable_label(present, kind.label()).clicked() {
+                            panel.toggle_column(kind);
                             ui.close();
                         }
-                    }
-                    ui.separator();
-                    if ui.selectable_label(panel.sort_asc, "升序").clicked() {
-                        panel.sort_asc = true;
-                        ui.close();
-                    }
-                    if ui.selectable_label(!panel.sort_asc, "降序").clicked() {
-                        panel.sort_asc = false;
-                        ui.close();
-                    }
-                });
-            }
+                    });
+                }
+            });
             if response.hovered() {
                 painter.rect_filled(rect, 0.0, ui.visuals().widgets.hovered.bg_fill);
             }
-            // 扩展名排序的箭头画在名称列（扩展名借用名称列头，见 name_label）。
-            let arrow = if panel.sort_key == key
-                || (key == SortKey::Name && panel.sort_key == SortKey::Ext)
+            // 扩展名排序的箭头画在名称列——仅当扩展名没有独立列（见上）。
+            let arrow = if kind.sort_key() == Some(panel.sort_key)
+                || (kind == ColumnKind::Name && panel.sort_key == SortKey::Ext && !has_ext_col)
             {
                 if panel.sort_asc {
                     " ▲"
@@ -2321,8 +2421,9 @@ impl FileManagerView {
             };
             texts.push((egui::pos2(anchor_x, cy), align, format!("{label}{arrow}")));
         }
-        // 列宽拖拽热区：两条分隔竖线各 ±3pt，后注册于列点击格使拖拽优先。
-        let sep_xs = [layout.size_left, layout.mtime_left];
+        // 列宽拖拽热区：每条分隔竖线各 ±3pt，后注册于列点击格使拖拽优先。
+        // sep i = columns[i]|columns[i+1] 分隔线 = fixed[i] 的列左缘。
+        let sep_xs: Vec<f32> = layout.fixed.iter().map(|(_, left, _)| *left).collect();
         let mut hovered_sep: Option<usize> = None;
         for (i, &x) in sep_xs.iter().enumerate() {
             let drag_rect = egui::Rect::from_min_max(
@@ -2363,8 +2464,10 @@ impl FileManagerView {
         for (pos, align, text) in texts {
             painter.text(pos, align, text, font_id.clone(), ui.visuals().text_color());
         }
-        if let Some(key) = clicked {
-            panel.toggle_sort(key);
+        if let Some(kind) = clicked {
+            if let Some(key) = kind.sort_key() {
+                panel.toggle_sort(key);
+            }
         }
     }
 
@@ -2499,12 +2602,7 @@ impl FileManagerView {
             ui.painter()
                 .rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
         }
-        let layout = column_layout(
-            rect.right(),
-            panel.col_shift,
-            panel.col_width_size,
-            panel.col_width_mtime,
-        );
+        let layout = column_layout(rect.right(), panel.col_shift, &panel.columns);
         paint_column_separators(
             ui.painter(),
             rect,
@@ -2512,11 +2610,11 @@ impl FileManagerView {
             &layout,
         );
 
-        // 行内容：图标 + 名称；右侧固定宽的大小/修改时间列
-        // （目录行大小列仅在「计算大小」已算出时显示，未命中留空）。
+        // 行内容：图标 + 名称；右侧固定宽列（FsPanel::columns 驱动，阶段 V；
+        // 目录行大小列仅在「计算大小」已算出时显示，未命中留空）。
         let content = rect.shrink2(egui::vec2(6.0, 2.0));
-        // 名称列在列块左缘前截断（跟随 col_shift），不与大小列文字叠字。
-        let name_right = (layout.size_left - 6.0).max(content.min.x + 20.0);
+        // 名称列在列块左缘前截断（跟随 col_shift），不与固定列文字叠字。
+        let name_right = (layout.name_right - 6.0).max(content.min.x + 20.0);
         let name_rect =
             egui::Rect::from_min_max(content.min, egui::pos2(name_right, content.max.y));
         ui.scope_builder(egui::UiBuilder::new().max_rect(name_rect), |ui| {
@@ -2577,41 +2675,52 @@ impl FileManagerView {
                         ui.add(egui::Label::new(name).truncate().selectable(false));
                     }
                 }
-                // 右对齐列：与表头/竖线共用 column_layout 锚点直接绘制，天然跟随
-                // col_shift（拖分隔线时一起动）且无间距误差。不走 right_to_left
-                // 布局——egui 0.35 RTL 嵌套会把文字画到格子右缘之外且不读 col_shift。
+                // 右对齐固定列：与表头/竖线共用 column_layout 锚点直接绘制，
+                // 天然跟随 col_shift（拖分隔线时一起动）且无间距误差。不走
+                // right_to_left 布局——egui 0.35 RTL 嵌套会把文字画到格子
+                // 右缘之外且不读 col_shift。
                 if let Some(e) = &entry {
                     let painter = ui.painter();
                     let font_id = egui::TextStyle::Body.resolve(ui.style());
                     let col = ui.visuals().weak_text_color();
                     let cy = rect.center().y;
-                    if !e.is_dir {
-                        if let Some(size) = e.size {
+                    for (kind, _, text_right) in &layout.fixed {
+                        // 各列文本（None = 该单元格留空，如目录的大小列未算
+                        // 出/文件的 Attr 无属性；Comment 列占位恒空）。
+                        let (text, color) = match kind {
+                            ColumnKind::Name | ColumnKind::Comment => (None, col),
+                            ColumnKind::Ext => {
+                                // 扩展名列：目录与无扩展名文件留空。
+                                let text = if e.is_dir { None } else { lower_ext(&e.name) };
+                                (text, col)
+                            }
+                            ColumnKind::Size => {
+                                if !e.is_dir {
+                                    (e.size.map(human_size), col)
+                                } else {
+                                    // 目录大小比文件大小再弱一档，与精确文件
+                                    // 大小区分。
+                                    (dir_size.map(human_size), col.gamma_multiply(0.6))
+                                }
+                            }
+                            ColumnKind::Mtime => {
+                                (Some(format_mtime(system_time_to_unix(e.mtime))), col)
+                            }
+                            ColumnKind::Attr => {
+                                let s = attr_string(e.is_readonly, e.is_hidden, e.is_system);
+                                ((!s.is_empty()).then_some(s), col)
+                            }
+                        };
+                        if let Some(text) = text {
                             painter.text(
-                                egui::pos2(layout.mtime_left, cy),
+                                egui::pos2(*text_right, cy),
                                 egui::Align2::RIGHT_CENTER,
-                                human_size(size),
+                                text,
                                 font_id.clone(),
-                                col,
+                                color,
                             );
                         }
-                    } else if let Some(size) = dir_size {
-                        // 目录大小比文件大小再弱一档，与精确文件大小区分。
-                        painter.text(
-                            egui::pos2(layout.mtime_left, cy),
-                            egui::Align2::RIGHT_CENTER,
-                            human_size(size),
-                            font_id.clone(),
-                            col.gamma_multiply(0.6),
-                        );
                     }
-                    painter.text(
-                        egui::pos2(layout.content_right, cy),
-                        egui::Align2::RIGHT_CENTER,
-                        format_mtime(system_time_to_unix(e.mtime)),
-                        font_id,
-                        col,
-                    );
                 }
             });
         });
@@ -2974,10 +3083,284 @@ impl FileManagerView {
             output.inner_rect,
             output.state.offset.y,
             grid_rows as f32 * THUMB_CELL_H,
-            Some((geom, cols)),
+            Some((geom, cols, THUMB_CELL_W)),
             THUMB_CELL_H,
             item_count,
         );
+    }
+
+    /// 简表（Brief，阶段 V）：多列排布的紧凑名称行（图标 + 单行截断
+    /// 名称，行高 = ROW_HEIGHT），行主序——与缩略图网格同一套线性行号/
+    /// 键盘步进/框选/空白双击机制（last_grid_cols/GridBlankGeom），仅
+    /// cell 几何不同。列宽由可见条目的最长名称字符量估算
+    /// （brief_col_width），列数 = 栏宽 / 列宽（brief_cols）。
+    fn render_brief(&mut self, ui: &mut egui::Ui, idx: usize, intents: &mut FmIntents) {
+        let rows = self.panels[idx].rows();
+        let item_count = rows.len() + 1;
+        let max_units = rows
+            .iter()
+            .filter_map(|&i| self.panels[idx].entries.get(i))
+            .map(|e| name_units(&e.name))
+            .max()
+            .unwrap_or(4);
+        let cell_w = brief_col_width(max_units);
+        let cols = brief_cols(ui.available_width(), cell_w);
+        let grid_rows = grid_row_count(item_count, cols);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let panel = &mut self.panels[idx];
+        panel.last_grid_cols = cols;
+        // PgUp/PgDn 步进与焦点滚动定位基准：简表行高。
+        panel.last_row_pitch = ROW_HEIGHT;
+        let mut area = egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
+        // 标签切换的滚动恢复（同 render_list/render_grid）。
+        if let Some(offset) = panel.take_pending_scroll_restore() {
+            if offset > 0.0 {
+                area = area.vertical_scroll_offset(offset);
+            }
+        }
+        // 焦点揭示：线性行号先换算所在行（同网格）。
+        if panel.focus_scroll_pending {
+            panel.focus_scroll_pending = false;
+            if panel.last_viewport_height > 0.0 {
+                if let Some(focus) = panel.focus {
+                    if focus < item_count {
+                        let new_offset = min_scroll_to_reveal(
+                            panel.last_scroll_offset,
+                            panel.last_viewport_height,
+                            grid_row_of(focus, cols) as f32 * ROW_HEIGHT,
+                        );
+                        if (new_offset - panel.last_scroll_offset).abs() > 0.01 {
+                            area = area.vertical_scroll_offset(new_offset);
+                        }
+                    }
+                }
+            }
+        }
+        let active = self.active == idx;
+        let output = area.show_rows(ui, ROW_HEIGHT, grid_rows, |ui, range| {
+            for grid_row in range {
+                // 同 render_list：行内交互可触发导航当场清空 entries，旧
+                // rows 快照即刻失效，状态离开 Ready 就停笔。
+                if !matches!(self.panels[idx].state, PanelLoadState::Ready) {
+                    break;
+                }
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for col in 0..cols {
+                        let row = grid_row * cols + col;
+                        if row >= item_count {
+                            break;
+                        }
+                        self.render_brief_cell(ui, idx, &rows, row, cell_w, active, intents);
+                    }
+                });
+            }
+        });
+        let panel = &mut self.panels[idx];
+        panel.last_scroll_offset = output.state.offset.y;
+        panel.last_viewport_height = output.inner_rect.height();
+        // 双击空白处回上级与框选：cell 定宽左排，几何同网格（仅 cell
+        // 宽/高不同）。
+        let full_rows = item_count / cols;
+        let partial = item_count % cols;
+        let geom = GridBlankGeom {
+            row_pitch: ROW_HEIGHT,
+            full_rows,
+            full_width: cols as f32 * cell_w,
+            last_width: if partial == 0 {
+                cols as f32 * cell_w
+            } else {
+                partial as f32 * cell_w
+            },
+        };
+        self.blank_dblclick_up(ui, idx, &output, grid_rows as f32 * ROW_HEIGHT, Some(geom));
+        self.rubber_band(
+            ui,
+            idx,
+            output.inner_rect,
+            output.state.offset.y,
+            grid_rows as f32 * ROW_HEIGHT,
+            Some((geom, cols, cell_w)),
+            ROW_HEIGHT,
+            item_count,
+        );
+    }
+
+    /// 简表一个 cell：图标（16pt 系统图标或字体图标）+ 单行截断名称；
+    /// 选中/悬停/焦点视觉与单击/双击/右键/拖动语义同网格 cell、明细行。
+    #[allow(clippy::too_many_arguments)]
+    fn render_brief_cell(
+        &mut self,
+        ui: &mut egui::Ui,
+        idx: usize,
+        rows: &[usize],
+        row: usize,
+        cell_w: f32,
+        active: bool,
+        intents: &mut FmIntents,
+    ) {
+        let is_parent = row == 0;
+        // rows 可能是导航前的旧快照（同帧行内双击已清空 entries）：get 防御。
+        let entry: Option<FsEntry> = if is_parent {
+            None
+        } else {
+            rows.get(row - 1)
+                .and_then(|&i| self.panels[idx].entries.get(i).cloned())
+        };
+        let branch = self.panels[idx].branch_view;
+        let parent_enabled = branch || !self.panels[idx].is_root();
+        let selected = entry
+            .as_ref()
+            .is_some_and(|e| self.panels[idx].selected.contains(&e.path));
+        let focused = self.panels[idx].focus == Some(row);
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(cell_w, ROW_HEIGHT),
+            egui::Sense::click_and_drag(),
+        );
+        let painter = ui.painter().clone();
+        if selected {
+            painter.rect_filled(rect, 2.0, ui.visuals().selection.bg_fill);
+        } else if response.hovered() {
+            painter.rect_filled(rect, 2.0, ui.visuals().widgets.hovered.bg_fill);
+        }
+        if focused {
+            let stroke = if active {
+                ui.visuals().selection.stroke
+            } else {
+                egui::Stroke::new(1.0, ui.visuals().weak_text_color())
+            };
+            painter.rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
+        }
+
+        let cy = rect.center().y;
+        let weak = ui.visuals().weak_text_color();
+        // 图标：16pt（同明细行），「..」cell 用 ARROW_UP。
+        let icon_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 6.0 + 8.0, cy),
+            egui::vec2(16.0, 16.0),
+        );
+        match &entry {
+            None => {
+                let color = if parent_enabled {
+                    weak
+                } else {
+                    ui.visuals().widgets.noninteractive.fg_stroke.color
+                };
+                painter.text(
+                    icon_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    icons::ARROW_UP.as_str(),
+                    egui::FontId::proportional(13.0),
+                    color,
+                );
+            }
+            Some(e) => {
+                let mut icon_drawn = false;
+                if self.options.system_icons {
+                    let kind = sys_icon_kind(&e.path, e.is_dir);
+                    match self.sys_icons.lookup(&kind, false) {
+                        SysIconLookup::Ready(tex) => {
+                            painter.image(
+                                tex.id(),
+                                icon_rect,
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                egui::Color32::WHITE,
+                            );
+                            icon_drawn = true;
+                        }
+                        SysIconLookup::Miss => {
+                            self.sys_icons.request(&e.path, e.is_dir, false);
+                        }
+                        SysIconLookup::Failed => {}
+                    }
+                }
+                if !icon_drawn {
+                    painter.text(
+                        icon_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        entry_icon(e).as_str(),
+                        egui::FontId::proportional(13.0),
+                        weak,
+                    );
+                }
+            }
+        }
+        // 名称：单行截断（brief_cell_name），语义着色与明细行共用
+        // entry_name_rich_text；超出 cell 右缘裁剪。
+        let name_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + 6.0 + 16.0 + 4.0, rect.top()),
+            egui::pos2(rect.right() - 4.0, rect.bottom()),
+        );
+        let name_text = match &entry {
+            None => {
+                let color = if parent_enabled {
+                    ui.visuals().text_color()
+                } else {
+                    ui.visuals().widgets.noninteractive.fg_stroke.color
+                };
+                egui::RichText::new("..").color(color)
+            }
+            Some(e) => {
+                let truncated = brief_cell_name(&e.name, cell_w);
+                entry_name_rich_text(&truncated, e, ui.visuals(), selected)
+            }
+        };
+        let galley = egui::WidgetText::RichText(std::sync::Arc::new(name_text)).into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            name_rect.width(),
+            egui::FontSelection::Default,
+        );
+        painter.with_clip_rect(name_rect).galley(
+            egui::pos2(name_rect.left(), cy - galley.size().y / 2.0),
+            galley,
+            ui.visuals().text_color(),
+        );
+
+        // 交互与网格 cell/明细行一致：cell = 栏间拖放的 drag source。
+        if let Some(e) = &entry {
+            let sources = drag_sources(&self.panels[idx].selected, &e.path);
+            response.dnd_set_drag_payload(FmDragPayload {
+                sources,
+                src_panel: idx,
+            });
+        }
+        let mods = ui.input(|i| i.modifiers);
+        if response.clicked() {
+            self.panels[idx].click_row(row, mods.command, mods.shift);
+        }
+        if response.double_clicked() {
+            if is_parent {
+                if branch {
+                    self.panels[idx].exit_branch_view();
+                } else if parent_enabled {
+                    self.panels[idx].parent_dir();
+                }
+            } else {
+                self.open_ui_row(idx, rows, row, intents);
+            }
+        }
+        // 「..」cell 无右键菜单；右键框选已超阈值时不弹（同明细行门控）。
+        let band_active = self
+            .band
+            .as_ref()
+            .is_some_and(|b| b.panel == idx && b.active);
+        if !is_parent && !band_active {
+            response.context_menu(|ui| {
+                // Explorer 惯例：右键未选中的项先把它单选。
+                let Some(e) = &entry else { return };
+                if !self.panels[idx].selected.contains(&e.path) {
+                    self.panels[idx].click_row(row, false, false);
+                }
+                self.entry_context_menu(ui, idx, rows, row, e, intents);
+            });
+        }
+        response.on_hover_text(row_hover_tip(entry.as_ref(), branch));
     }
 
     /// 双击空白处回上级（fm_dblclick_blank_up）：本帧主键双击命中空白区
@@ -3015,14 +3398,16 @@ impl FileManagerView {
         }
     }
 
-    /// 鼠标框选（fm_rubber_band，阶段 U）：render_list/render_grid 帧尾
-    /// 调用。启动判定——"right" = 右键视口内按下（单击未超阈值仍弹上下文
-    /// 菜单，行渲染处另有 band.active 门控保险）；"left" = 左键空白区按下
-    /// （行/cell 上左键起拖维持拖放 payload，靠 dblclick_hits_blank 同一
-    /// 几何判定排除）。拖动中只画半透明矩形（从简：不实时改选中）；松开
-    /// 时按命中行/cell 应用选中：无修饰 = 替换、Shift = 追加、Ctrl = 切换，
-    /// **不更新 anchor/focus**（框选是区域语义，不参与 Shift+点击锚点
-    /// 区间）。「..」行/cell（索引 0）不进选中。
+    /// 鼠标框选（fm_rubber_band，阶段 U）：render_list/render_brief/
+    /// render_grid 帧尾调用。启动判定——"right" = 右键视口内按下（单击
+    /// 未超阈值仍弹上下文菜单，行渲染处另有 band.active 门控保险）；
+    /// "left" = 左键空白区按下（行/cell 上左键起拖维持拖放 payload，靠
+    /// dblclick_hits_blank 同一几何判定排除）。拖动中只画半透明矩形
+    /// （从简：不实时改选中）；松开时按命中行/cell 应用选中：无修饰 =
+    /// 替换、Shift = 追加、Ctrl = 切换，**不更新 anchor/focus**（框选是
+    /// 区域语义，不参与 Shift+点击锚点区间）。「..」行/cell（索引 0）
+    /// 不进选中。grid = Some((几何, 列数, cell 宽)) 时按 cell 命中
+    /// （简表/缩略图），None 按整行命中（明细列表）。
     #[allow(clippy::too_many_arguments)]
     fn rubber_band(
         &mut self,
@@ -3031,7 +3416,7 @@ impl FileManagerView {
         viewport: egui::Rect,
         scroll_y: f32,
         content_height: f32,
-        grid: Option<(GridBlankGeom, usize)>,
+        grid: Option<(GridBlankGeom, usize, f32)>,
         pitch: f32,
         item_count: usize,
     ) {
@@ -3048,7 +3433,7 @@ impl FileManagerView {
                             viewport,
                             scroll_y,
                             content_height,
-                            grid.map(|(g, _)| g),
+                            grid.map(|(g, _, _)| g),
                             origin,
                         );
                     if viewport.contains(origin) && blank_ok {
@@ -3113,7 +3498,9 @@ impl FileManagerView {
             let rect = egui::Rect::from_two_pos(to_content(band.origin), to_content(p));
             let hits = match grid {
                 None => rows_in_rect(item_count, pitch, rect),
-                Some((g, cols)) => cells_in_rect(item_count, cols, THUMB_CELL_W, g.row_pitch, rect),
+                Some((g, cols, cell_w)) => {
+                    cells_in_rect(item_count, cols, cell_w, g.row_pitch, rect)
+                }
             };
             self.apply_band(idx, hits, ui.input(|i| i.modifiers));
         }
@@ -4230,20 +4617,20 @@ impl FileManagerView {
         if mods.command && ui.input(|i| i.key_pressed(egui::Key::R)) {
             self.panels[active].refresh();
         }
-        // 网格模式：↑↓ 按列数步进（线性行号换算，列数由 render_grid
-        // 每帧写入 last_grid_cols），←→ 步进 1（列表模式 ←→ 不绑定）；
-        // PgUp/PgDn = 可见网格行数 × 列数。
-        let thumbs_mode = self.panels[active].view_mode == PanelViewMode::Thumbs;
+        // 网格状模式（简表/缩略图）：↑↓ 按列数步进（线性行号换算，列数由
+        // render_brief/render_grid 每帧写入 last_grid_cols），←→ 步进 1
+        // （列表模式 ←→ 不绑定）；PgUp/PgDn = 可见行数 × 列数。
+        let grid_like = self.panels[active].view_mode.is_grid_like();
         let vstep = self.panels[active].last_grid_cols.max(1) as isize;
         if !mods.alt && ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-            let step = if thumbs_mode { vstep } else { 1 };
+            let step = if grid_like { vstep } else { 1 };
             self.panels[active].move_focus(step, focus_mode);
         }
         if !mods.alt && ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-            let step = if thumbs_mode { vstep } else { 1 };
+            let step = if grid_like { vstep } else { 1 };
             self.panels[active].move_focus(-step, focus_mode);
         }
-        if thumbs_mode && !mods.command && !mods.alt {
+        if grid_like && !mods.command && !mods.alt {
             if ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
                 self.panels[active].move_focus(1, focus_mode);
             }
@@ -4259,7 +4646,7 @@ impl FileManagerView {
         }
         if ui.input(|i| i.key_pressed(egui::Key::PageDown)) {
             let rows_step = self.panels[active].page_step();
-            let step = if thumbs_mode {
+            let step = if grid_like {
                 rows_step * vstep
             } else {
                 rows_step
@@ -4268,7 +4655,7 @@ impl FileManagerView {
         }
         if ui.input(|i| i.key_pressed(egui::Key::PageUp)) {
             let rows_step = self.panels[active].page_step();
-            let step = if thumbs_mode {
+            let step = if grid_like {
                 rows_step * vstep
             } else {
                 rows_step
@@ -5029,8 +5416,8 @@ fn paint_column_separators(
     layout: &ColumnLayout,
 ) {
     let stroke = egui::Stroke::new(1.0, color);
-    for x in [layout.size_left, layout.mtime_left] {
-        painter.vline(x, rect.y_range(), stroke);
+    for (_, left, _) in &layout.fixed {
+        painter.vline(*left, rect.y_range(), stroke);
     }
 }
 
@@ -5809,5 +6196,117 @@ mod tests {
             t += 1.0;
             headless_frame(&ctx, &mut view, t, vec![]);
         }
+    }
+
+    /// 列布局泛化回归（阶段 V）：默认三列（Name+Size:90+Mtime:110）的
+    /// 坐标必须与旧硬编码公式逐项等价——content_right = right-6+shift；
+    /// Mtime (mtime_left, content_right)；Size (size_left, mtime_left)；
+    /// name_right = size_left。
+    #[test]
+    fn column_layout_default_matches_legacy_formula() {
+        let columns = [
+            (ColumnKind::Name, 0.0),
+            (ColumnKind::Size, 90.0),
+            (ColumnKind::Mtime, 110.0),
+        ];
+        let layout = column_layout(800.0, 0.0, &columns);
+        assert_eq!(layout.name_right, 594.0);
+        assert_eq!(
+            layout.fixed,
+            vec![
+                (ColumnKind::Size, 594.0, 684.0),
+                (ColumnKind::Mtime, 684.0, 794.0)
+            ]
+        );
+        let layout = column_layout(800.0, -30.0, &columns);
+        assert_eq!(layout.name_right, 564.0);
+        assert_eq!(
+            layout.fixed,
+            vec![
+                (ColumnKind::Size, 564.0, 654.0),
+                (ColumnKind::Mtime, 654.0, 764.0)
+            ]
+        );
+        // 多列：从右往左排，最右列锚定行右缘内 COL_RIGHT_PAD。
+        let columns = [
+            (ColumnKind::Name, 0.0),
+            (ColumnKind::Ext, 70.0),
+            (ColumnKind::Size, 90.0),
+            (ColumnKind::Mtime, 110.0),
+        ];
+        let layout = column_layout(800.0, 0.0, &columns);
+        assert_eq!(layout.name_right, 524.0);
+        assert_eq!(
+            layout.fixed,
+            vec![
+                (ColumnKind::Ext, 524.0, 594.0),
+                (ColumnKind::Size, 594.0, 684.0),
+                (ColumnKind::Mtime, 684.0, 794.0),
+            ]
+        );
+    }
+
+    /// 简表几何（阶段 V）：列宽 = 最长名称 char-unit × 7 + 28，
+    /// clamp 120..=300；列数 = 栏宽/列宽 ≥1；名称按 char-unit 预算截断。
+    #[test]
+    fn brief_geometry_and_name_truncation() {
+        assert_eq!(brief_col_width(0), 120.0);
+        assert_eq!(brief_col_width(13), 120.0, "13*7+28=119 → 下限 120");
+        assert_eq!(brief_col_width(20), 168.0);
+        assert_eq!(brief_col_width(100), 300.0, "上限 300");
+        assert_eq!(brief_cols(500.0, 120.0), 4);
+        assert_eq!(brief_cols(100.0, 120.0), 1);
+        // 截断：cell_w=120 → 预算 (120-30)/7 = 12 units。
+        assert_eq!(brief_cell_name("abcdefghij", 120.0), "abcdefghij");
+        assert_eq!(brief_cell_name("abcdefghijklmnop", 120.0), "abcdefghijk…");
+        // 中文 = 2 units：6 字 = 12 恰好放下；7 字截断（超预算时退一格）。
+        assert_eq!(brief_cell_name("简表测试名称", 120.0), "简表测试名称");
+        assert_eq!(brief_cell_name("简表测试名称啊", 120.0), "简表测试名…");
+        assert_eq!(name_units("ab简"), 4);
+    }
+
+    /// Brief 模式 + 自定义列的无头渲染冒烟（阶段 V）：简表渲染若干帧不
+    /// panic、last_grid_cols 落位、↓ 按列数步进；列勾选加 Ext/Attr/
+    /// Comment 后列表模式（列头 + 行直绘）渲染不 panic，快照携带列配置。
+    #[test]
+    fn brief_mode_and_custom_columns_render_headless() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..20 {
+            std::fs::write(tmp.path().join(format!("file-{i:02}.txt")), b"x").unwrap();
+        }
+        let mut view = FileManagerView::new("single", 0.5, false, "name", true, &[]);
+        navigate_ready(&mut view.panels[0], tmp.path());
+        let ctx = egui::Context::default();
+        setup_test_fonts(&ctx);
+        let mut t = 0.0;
+        // 简表渲染：多列排布，列数写回 last_grid_cols。
+        view.panels[0].view_mode = PanelViewMode::Brief;
+        for _ in 0..3 {
+            t += 1.0;
+            headless_frame(&ctx, &mut view, t, vec![]);
+        }
+        let cols = view.panels[0].last_grid_cols;
+        assert!(cols > 1, "简表应多列排布，got {cols}");
+        // ↓ 按列数步进（网格状模式键盘语义）。
+        view.panels[0].focus = Some(0);
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, key_events(egui::Key::ArrowDown));
+        assert_eq!(view.panels[0].focus, Some(cols.min(20)));
+        // 自定义列：加 Ext/Attr/Comment，列表模式渲染（列头 + 行直绘）。
+        view.panels[0].view_mode = PanelViewMode::List;
+        for k in [ColumnKind::Ext, ColumnKind::Attr, ColumnKind::Comment] {
+            view.panels[0].toggle_column(k);
+        }
+        for _ in 0..3 {
+            t += 1.0;
+            headless_frame(&ctx, &mut view, t, vec![]);
+        }
+        assert_eq!(view.panels[0].columns.len(), 6);
+        assert_eq!(view.snapshot().columns.len(), 6);
+        // 删列后再渲染。
+        view.panels[0].toggle_column(ColumnKind::Comment);
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, vec![]);
+        assert_eq!(view.panels[0].columns.len(), 5);
     }
 }

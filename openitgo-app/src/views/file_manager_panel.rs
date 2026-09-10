@@ -59,11 +59,14 @@ pub struct DirListing {
 /// 分支视图递归收集上限：超过即截断（防巨型目录树拖垮列举）。
 pub(crate) const BRANCH_MAX_ENTRIES: usize = 200_000;
 
-/// 面板视图模式：明细列表 / 缩略图网格（每栏独立；网格只是渲染层，
-/// 焦点/选中仍是线性 UI 行索引）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 面板视图模式：明细列表 / 简表（多列名称行）/ 缩略图网格（每栏独立；
+/// 简表与网格只是渲染层，焦点/选中仍是线性 UI 行索引）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PanelViewMode {
+    #[default]
     List,
+    /// 简表（Brief）：多列排布的紧凑名称行（图标 + 截断名称），行主序。
+    Brief,
     Thumbs,
 }
 
@@ -71,6 +74,7 @@ impl PanelViewMode {
     /// settings 字符串解析（非法值回 List，同 clamp 语义）。
     pub fn from_setting(s: &str) -> Self {
         match s {
+            "brief" => Self::Brief,
             "thumbs" => Self::Thumbs,
             _ => Self::List,
         }
@@ -80,9 +84,179 @@ impl PanelViewMode {
     pub fn as_setting(&self) -> &'static str {
         match self {
             Self::List => "list",
+            Self::Brief => "brief",
             Self::Thumbs => "thumbs",
         }
     }
+
+    /// 顶栏三态切换的显示名。
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::List => "列表",
+            Self::Brief => "简表",
+            Self::Thumbs => "缩略图",
+        }
+    }
+
+    /// 简表/缩略图同为网格状布局：键盘 ↑↓ 按列数步进、←→ 步进 1
+    /// （列数由渲染侧每帧写入 last_grid_cols）。
+    pub fn is_grid_like(&self) -> bool {
+        !matches!(self, Self::List)
+    }
+}
+
+/// 明细列表的可配置列（阶段 V）：`FsPanel::columns` 的元素类型。
+/// 不变式：columns[0] 恒为 Name 且弹性宽度（其宽度值忽略），其余为
+/// 固定宽右对齐列，从行右缘往左依次排列（整体平移量 col_shift）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnKind {
+    Name,
+    Ext,
+    Size,
+    Mtime,
+    Attr,
+    /// 注释列（占位：无 descript.ion 类数据来源，内容恒空）。
+    Comment,
+}
+
+impl ColumnKind {
+    /// fm_columns 持久化字符串。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Ext => "ext",
+            Self::Size => "size",
+            Self::Mtime => "mtime",
+            Self::Attr => "attr",
+            Self::Comment => "comment",
+        }
+    }
+
+    /// fm_columns 解析（未知串 → None，由调用方丢弃）。
+    pub fn from_setting(s: &str) -> Option<Self> {
+        match s {
+            "name" => Some(Self::Name),
+            "ext" => Some(Self::Ext),
+            "size" => Some(Self::Size),
+            "mtime" => Some(Self::Mtime),
+            "attr" => Some(Self::Attr),
+            "comment" => Some(Self::Comment),
+            _ => None,
+        }
+    }
+
+    /// 列头标题。
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Name => "名称",
+            Self::Ext => "扩展名",
+            Self::Size => "大小",
+            Self::Mtime => "修改时间",
+            Self::Attr => "属性",
+            Self::Comment => "注释",
+        }
+    }
+
+    /// 该列对应的排序键（Comment 无数据来源，不可排序）。
+    pub fn sort_key(&self) -> Option<SortKey> {
+        match self {
+            Self::Name => Some(SortKey::Name),
+            Self::Ext => Some(SortKey::Ext),
+            Self::Size => Some(SortKey::Size),
+            Self::Mtime => Some(SortKey::Mtime),
+            Self::Attr => Some(SortKey::Attr),
+            Self::Comment => None,
+        }
+    }
+
+    /// 新增列的默认宽度（pt；Name 弹性宽度不用此值）。
+    pub fn default_width(&self) -> f32 {
+        match self {
+            Self::Name => 0.0,
+            Self::Ext => 70.0,
+            Self::Size => SIZE_COL_WIDTH,
+            Self::Mtime => MTIME_COL_WIDTH,
+            Self::Attr => 60.0,
+            Self::Comment => 120.0,
+        }
+    }
+}
+
+/// 默认列配置（Name + 大小 + 修改时间，与阶段 V 前的硬编码三列一致）。
+pub fn default_columns() -> Vec<(ColumnKind, f32)> {
+    vec![
+        (ColumnKind::Name, 0.0),
+        (ColumnKind::Size, SIZE_COL_WIDTH),
+        (ColumnKind::Mtime, MTIME_COL_WIDTH),
+    ]
+}
+
+/// fm_columns 持久化格式：每项 "kind" 或 "kind:width"（Name 恒首位、
+/// 不带宽度）。
+pub fn serialize_columns(columns: &[(ColumnKind, f32)]) -> Vec<String> {
+    columns
+        .iter()
+        .map(|(kind, w)| {
+            if *kind == ColumnKind::Name {
+                kind.as_str().to_string()
+            } else {
+                format!("{}:{}", kind.as_str(), *w as u32)
+            }
+        })
+        .collect()
+}
+
+/// fm_columns 解析 + 规范化：未知 kind 丢弃、宽度 clamp 到列宽范围、
+/// 去重、Name 强制补到首位、固定列不足 1 个时补默认大小/时间列。
+/// 空输入（旧 settings 无此字段）返回 None——由调用方用 legacy
+/// fm_col_size_width/mtime 播种默认列。
+pub fn parse_columns(items: &[String]) -> Option<Vec<(ColumnKind, f32)>> {
+    if items.is_empty() {
+        return None;
+    }
+    let mut columns: Vec<(ColumnKind, f32)> = Vec::new();
+    for item in items {
+        let (kind_s, width_s) = item.split_once(':').unwrap_or((item.as_str(), ""));
+        let Some(kind) = ColumnKind::from_setting(kind_s) else {
+            continue;
+        };
+        if kind == ColumnKind::Name || columns.iter().any(|(k, _)| *k == kind) {
+            continue;
+        }
+        let width = width_s
+            .parse::<f32>()
+            .unwrap_or_else(|_| kind.default_width())
+            .clamp(COL_MIN_WIDTH, COL_MAX_WIDTH);
+        columns.push((kind, width));
+    }
+    if columns.is_empty() {
+        columns.push((ColumnKind::Size, SIZE_COL_WIDTH));
+        columns.push((ColumnKind::Mtime, MTIME_COL_WIDTH));
+    }
+    columns.insert(0, (ColumnKind::Name, 0.0));
+    Some(columns)
+}
+
+/// 启动恢复的列配置：fm_columns 解析（parse_columns 规范化）；空（旧
+/// settings 无此字段）→ 用 legacy fm_col_size_width/mtime 播种默认三列。
+pub fn restore_columns(
+    items: &[String],
+    legacy_size_width: f32,
+    legacy_mtime_width: f32,
+) -> Vec<(ColumnKind, f32)> {
+    parse_columns(items).unwrap_or_else(|| {
+        vec![
+            (ColumnKind::Name, 0.0),
+            (
+                ColumnKind::Size,
+                legacy_size_width.clamp(COL_MIN_WIDTH, COL_MAX_WIDTH),
+            ),
+            (
+                ColumnKind::Mtime,
+                legacy_mtime_width.clamp(COL_MIN_WIDTH, COL_MAX_WIDTH),
+            ),
+        ]
+    })
 }
 
 /// 键盘焦点移动模式（move_focus 共用核心，同 archive.rs 的 FocusMove）。
@@ -165,11 +339,11 @@ pub struct FsPanel {
     pub sort_key: SortKey,
     pub sort_asc: bool,
     pub filter: String,
-    /// 视图模式（明细列表/缩略图网格；每栏独立，不纳入标签快照——
-    /// 切标签保持当前模式）。
+    /// 视图模式（明细列表/简表/缩略图网格；每栏独立）。阶段 V 起纳入
+    /// 标签快照（切标签恢复该标签的模式）。
     pub view_mode: PanelViewMode,
-    /// 网格模式当前列数（render_grid 每帧更新；键盘 ↑↓/PgUp/PgDn 线性
-    /// 步长换算用，列表模式恒 1）。
+    /// 网格状模式（简表/缩略图）当前列数（render_brief/render_grid 每帧
+    /// 更新；键盘 ↑↓/PgUp/PgDn 线性步长换算用，列表模式恒 1）。
     pub last_grid_cols: usize,
     /// 是否显示隐藏文件（settings.fm_show_hidden 经 ui() 每帧下发；
     /// 纳入 RowsKey，切换时 rows_cache 自动失效）。
@@ -191,11 +365,13 @@ pub struct FsPanel {
     rows_cache: Option<(RowsKey, Vec<usize>)>,
     /// 条目版本号：entries 变更时 +1，rows_cache 的失效依据。
     entries_version: u64,
-    /// 大小/时间列宽（pt，分隔竖线拖拽可调，clamp 60..=400）；会话内有效。
-    pub col_width_size: f32,
-    pub col_width_mtime: f32,
-    /// 右侧两列的整体平移（pt，≤0）：拖分隔线时其右侧列保持宽度随鼠标
-    /// 平移（Explorer 手感）；0 = 列块贴右缘。
+    /// 明细列表列配置（阶段 V）：首列恒为 Name（弹性宽度，宽度值忽略），
+    /// 其余为固定宽右对齐列（从行右缘往左排，clamp 60..=400）；会话内有效，
+    /// 经 FmStateSnapshot 持久化为 settings.fm_columns。不变式：首列 Name
+    /// 且固定列 ≥1（toggle_column 与 parse_columns 维持）。
+    pub columns: Vec<(ColumnKind, f32)>,
+    /// 右侧固定列块的整体平移（pt，≤0）：拖分隔线时其右侧列保持宽度随
+    /// 鼠标平移（Explorer 手感）；0 = 列块贴右缘。
     pub col_shift: f32,
     /// 键盘移动焦点后置位，下一帧按 Explorer 最小滚动语义揭示焦点行。
     pub focus_scroll_pending: bool,
@@ -239,6 +415,8 @@ pub struct FsPanel {
 /// 栏内标签页的可恢复快照（快照式标签：标签里不塞活面板，切换 =
 /// 快照当前状态 → 恢复目标快照 → 重新列举，避免 watcher/channel 悬挂）。
 /// focus 存文件名而非行索引——列举后按名定位（目录内容可能已变）。
+/// 排序/列/视图模式（阶段 V）仅会话内随标签切换恢复；标签持久化仍
+/// 只存目录（restore_tabs 时这些字段继承面板当前值）。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PanelTabSnapshot {
     pub dir: PathBuf,
@@ -246,6 +424,11 @@ pub struct PanelTabSnapshot {
     pub focus_name: Option<String>,
     pub filter: String,
     pub scroll_offset: f32,
+    pub sort_key: SortKey,
+    pub sort_asc: bool,
+    pub view_mode: PanelViewMode,
+    /// 列配置；空 = restore_tab 不覆盖（兼容 Default 快照的「不动」语义）。
+    pub columns: Vec<(ColumnKind, f32)>,
 }
 
 /// restore_tab 后待应用的选中/焦点（选中按路径恢复，焦点按文件名定位）。
@@ -277,8 +460,7 @@ impl FsPanel {
             history_pos: 0,
             rows_cache: None,
             entries_version: 0,
-            col_width_size: SIZE_COL_WIDTH,
-            col_width_mtime: MTIME_COL_WIDTH,
+            columns: default_columns(),
             col_shift: 0.0,
             focus_scroll_pending: false,
             last_scroll_offset: 0.0,
@@ -539,6 +721,10 @@ impl FsPanel {
             focus_name,
             filter: self.filter.clone(),
             scroll_offset: self.last_scroll_offset,
+            sort_key: self.sort_key,
+            sort_asc: self.sort_asc,
+            view_mode: self.view_mode,
+            columns: self.columns.clone(),
         }
     }
 
@@ -549,6 +735,14 @@ impl FsPanel {
     pub fn restore_tab(&mut self, snap: &PanelTabSnapshot) {
         self.start_listing(snap.dir.clone());
         self.filter = snap.filter.clone();
+        self.sort_key = snap.sort_key;
+        self.sort_asc = snap.sort_asc;
+        self.view_mode = snap.view_mode;
+        // 空列配置 = Default 快照（restore_tabs 已把面板当前值填入，正常
+        // 不会走到），防御性保留现有列。
+        if !snap.columns.is_empty() {
+            self.columns = snap.columns.clone();
+        }
         self.pending_tab_restore = Some(PendingTabRestore {
             selected: snap.selected.iter().cloned().collect(),
             focus_name: snap.focus_name.clone(),
@@ -575,15 +769,17 @@ impl FsPanel {
         }
     }
 
-    /// Ctrl+T / 「+」：新建标签（复制当前目录；选中/过滤/焦点不带入新
-    /// 标签），追加到末尾并切过去。
+    /// Ctrl+T / 「+」：新建标签（复制当前目录与排序/列/视图模式；选中/
+    /// 过滤/焦点/滚动不带入新标签），追加到末尾并切过去。
     pub fn new_tab(&mut self) {
         let current = self.snapshot_tab();
+        let mut fresh = current.clone();
+        fresh.selected = Vec::new();
+        fresh.focus_name = None;
+        fresh.filter = String::new();
+        fresh.scroll_offset = 0.0;
         self.tabs[self.active_tab] = current;
-        self.tabs.push(PanelTabSnapshot {
-            dir: self.dir.clone(),
-            ..Default::default()
-        });
+        self.tabs.push(fresh);
         self.active_tab = self.tabs.len() - 1;
         let snap = self.tabs[self.active_tab].clone();
         self.restore_tab(&snap);
@@ -639,6 +835,12 @@ impl FsPanel {
             .into_iter()
             .map(|dir| PanelTabSnapshot {
                 dir,
+                // 排序/列/视图模式不持久化：继承面板当前值（= 启动时恢复的
+                // 全局值），切到这些标签时不会被重置回默认。
+                sort_key: self.sort_key,
+                sort_asc: self.sort_asc,
+                view_mode: self.view_mode,
+                columns: self.columns.clone(),
                 ..Default::default()
             })
             .collect();
@@ -1133,28 +1335,55 @@ impl FsPanel {
     /// 分隔线拖动（Explorer 语义，同 archive.rs drag_column_sep）：分隔线跟随
     /// 鼠标，其右侧各列保持宽度整体平移，左侧列吸收等量宽度变化（sep0 的
     /// 左侧是弹性的名称列 → 只动 col_shift）。撞限同步停住。
+    /// sep i = columns[i] 与 columns[i+1] 之间的分隔线（i ≥ 1 时调整
+    /// columns[i] 的宽度，其右侧列块经 col_shift 平移）。
     pub(crate) fn drag_column_sep(&mut self, sep: usize, dx: f32, header_rect: egui::Rect) {
-        let min_shift =
-            (header_rect.left() + NAME_COL_MIN + self.col_width_size + self.col_width_mtime
-                - (header_rect.right() - COL_RIGHT_PAD))
-                .min(0.0);
+        let total_fixed: f32 = self.columns[1..].iter().map(|(_, w)| w).sum();
+        let min_shift = (header_rect.left() + NAME_COL_MIN + total_fixed
+            - (header_rect.right() - COL_RIGHT_PAD))
+            .min(0.0);
         let shift_room = (self.col_shift + dx).clamp(min_shift, 0.0) - self.col_shift;
-        let d = match sep {
+        let d = if sep == 0 {
             // 名称列是弹性宽度，没有独立字段，列块平移即名称列缩放。
-            0 => shift_room,
-            _ => {
-                let width_room = (self.col_width_size + dx).clamp(COL_MIN_WIDTH, COL_MAX_WIDTH)
-                    - self.col_width_size;
-                let d = if dx > 0.0 {
-                    width_room.min(shift_room)
-                } else {
-                    width_room.max(shift_room)
-                };
-                self.col_width_size += d;
-                d
-            }
+            shift_room
+        } else {
+            let Some((_, width)) = self.columns.get_mut(sep) else {
+                return;
+            };
+            let width_room = (*width + dx).clamp(COL_MIN_WIDTH, COL_MAX_WIDTH) - *width;
+            let d = if dx > 0.0 {
+                width_room.min(shift_room)
+            } else {
+                width_room.max(shift_room)
+            };
+            *width += d;
+            d
         };
         self.col_shift += d;
+    }
+
+    /// 列头右键勾选增删列（阶段 V）：新增固定列追加到列块最右（默认
+    /// 宽度）；删除维持「固定列 ≥1」不变式（唯一固定列不可删）。Name
+    /// 恒为首列，不可增删（调用方菜单置灰，这里防御）。
+    pub fn toggle_column(&mut self, kind: ColumnKind) {
+        if kind == ColumnKind::Name {
+            return;
+        }
+        if let Some(pos) = self.columns.iter().position(|(k, _)| *k == kind) {
+            if self.columns.len() > 2 {
+                self.columns.remove(pos);
+            }
+        } else {
+            self.columns.push((kind, kind.default_width()));
+        }
+    }
+
+    /// 固定列宽度查询（snapshot 兼容字段 fm_col_size_width/mtime 用）。
+    pub fn column_width(&self, kind: ColumnKind) -> Option<f32> {
+        self.columns
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, w)| *w)
     }
 }
 
@@ -1177,6 +1406,11 @@ fn read_dir_entries(path: &Path) -> Result<DirListing, String> {
             .unwrap_or_else(|| item.file_type().map(|t| t.is_dir()).unwrap_or(false));
         let size = meta.as_ref().filter(|m| m.is_file()).map(|m| m.len());
         let is_hidden = is_hidden_name(&name) || windows_attr_hidden(meta.as_ref());
+        let is_readonly = meta
+            .as_ref()
+            .map(|m| m.permissions().readonly())
+            .unwrap_or(false);
+        let is_system = windows_attr_system(meta.as_ref());
         let mtime = meta.and_then(|m| m.modified().ok());
         entries.push(FsEntry {
             name,
@@ -1186,6 +1420,8 @@ fn read_dir_entries(path: &Path) -> Result<DirListing, String> {
             mtime,
             is_symlink,
             is_hidden,
+            is_readonly,
+            is_system,
             rel_dir: String::new(),
         });
     }
@@ -1236,6 +1472,11 @@ fn collect_branch(path: &Path, max: usize) -> Result<DirListing, String> {
             let meta = item.metadata().ok();
             let size = meta.as_ref().filter(|m| m.is_file()).map(|m| m.len());
             let is_hidden = is_hidden_name(&name) || windows_attr_hidden(meta.as_ref());
+            let is_readonly = meta
+                .as_ref()
+                .map(|m| m.permissions().readonly())
+                .unwrap_or(false);
+            let is_system = windows_attr_system(meta.as_ref());
             let mtime = meta.and_then(|m| m.modified().ok());
             let display = if rel.is_empty() {
                 name
@@ -1251,6 +1492,8 @@ fn collect_branch(path: &Path, max: usize) -> Result<DirListing, String> {
                 mtime,
                 is_symlink,
                 is_hidden,
+                is_readonly,
+                is_system,
                 rel_dir: rel.clone(),
             });
         }
@@ -1268,6 +1511,19 @@ fn windows_attr_hidden(meta: Option<&std::fs::Metadata>) -> bool {
 
 #[cfg(not(windows))]
 fn windows_attr_hidden(_: Option<&std::fs::Metadata>) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn windows_attr_system(meta: Option<&std::fs::Metadata>) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+    meta.map(|m| m.file_attributes() & FILE_ATTRIBUTE_SYSTEM != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn windows_attr_system(_: Option<&std::fs::Metadata>) -> bool {
     false
 }
 
@@ -1382,6 +1638,8 @@ mod tests {
             mtime: None,
             is_symlink: false,
             is_hidden,
+            is_readonly: false,
+            is_system: false,
             rel_dir: String::new(),
         };
         let mut panel = FsPanel::new(SortKey::Name, true);
@@ -1601,6 +1859,8 @@ mod tests {
             mtime: None,
             is_symlink: false,
             is_hidden: false,
+            is_readonly: false,
+            is_system: false,
             rel_dir: String::new(),
         };
         let mut panel = FsPanel::new(SortKey::Name, true);
@@ -1648,6 +1908,8 @@ mod tests {
             mtime: None,
             is_symlink: false,
             is_hidden: false,
+            is_readonly: false,
+            is_system: false,
             rel_dir: String::new(),
         };
         let mut panel = FsPanel::new(SortKey::Name, true);
@@ -1829,6 +2091,8 @@ mod tests {
             mtime: None,
             is_symlink: false,
             is_hidden: false,
+            is_readonly: false,
+            is_system: false,
             rel_dir: rel_dir.to_string(),
         };
         panel.inject_entries_branch(vec![
@@ -2007,5 +2271,174 @@ mod tests {
         let mut panel = FsPanel::new(SortKey::Name, true);
         panel.restore_tabs(Vec::new(), 0);
         assert_eq!(panel.tab_count(), 1);
+    }
+
+    /// fm_columns 解析/序列化（阶段 V）：未知 kind 丢弃、宽度 clamp、
+    /// 去重、Name 强制首位、固定列不足补默认；空输入 → None（legacy 播种）。
+    #[test]
+    fn parse_and_serialize_columns() {
+        assert!(parse_columns(&[]).is_none());
+        // 正常解析 + Name 归首位 + 宽度 clamp + 去重 + 未知丢弃。
+        let cols = parse_columns(&[
+            "size:120".to_string(),
+            "bogus".to_string(),
+            "name".to_string(),
+            "mtime:9999".to_string(),
+            "size:200".to_string(), // 重复丢弃
+        ])
+        .unwrap();
+        assert_eq!(
+            cols,
+            vec![
+                (ColumnKind::Name, 0.0),
+                (ColumnKind::Size, 120.0),
+                (ColumnKind::Mtime, 400.0),
+            ]
+        );
+        // 往返。
+        let items = serialize_columns(&cols);
+        assert_eq!(items, ["name", "size:120", "mtime:400"]);
+        assert_eq!(parse_columns(&items).unwrap(), cols);
+        // 只有 Name（或全未知）→ 补默认大小/时间列。
+        let cols = parse_columns(&["name".to_string(), "zzz".to_string()]).unwrap();
+        assert_eq!(
+            cols,
+            vec![
+                (ColumnKind::Name, 0.0),
+                (ColumnKind::Size, SIZE_COL_WIDTH),
+                (ColumnKind::Mtime, MTIME_COL_WIDTH),
+            ]
+        );
+    }
+
+    /// legacy 播种：fm_columns 空时用 fm_col_size_width/mtime 造默认三列。
+    #[test]
+    fn restore_columns_seeds_from_legacy_widths() {
+        let cols = restore_columns(&[], 120.0, 150.0);
+        assert_eq!(
+            cols,
+            vec![
+                (ColumnKind::Name, 0.0),
+                (ColumnKind::Size, 120.0),
+                (ColumnKind::Mtime, 150.0),
+            ]
+        );
+        // 非空 fm_columns 优先（legacy 宽度忽略）。
+        let cols = restore_columns(&["ext".to_string()], 120.0, 150.0);
+        assert_eq!(
+            cols,
+            vec![
+                (ColumnKind::Name, 0.0),
+                (ColumnKind::Ext, ColumnKind::Ext.default_width()),
+            ]
+        );
+    }
+
+    /// 列勾选增删（阶段 V）：Name 不可动；新增追加到列块最右（默认
+    /// 宽度）；唯一固定列不可删（不变式：Name + ≥1 固定列）。
+    #[test]
+    fn toggle_column_maintains_invariants() {
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        assert_eq!(panel.columns, default_columns());
+        panel.toggle_column(ColumnKind::Name);
+        assert_eq!(panel.columns, default_columns(), "Name 不可增删");
+        panel.toggle_column(ColumnKind::Ext);
+        assert_eq!(
+            panel.columns,
+            vec![
+                (ColumnKind::Name, 0.0),
+                (ColumnKind::Size, SIZE_COL_WIDTH),
+                (ColumnKind::Mtime, MTIME_COL_WIDTH),
+                (ColumnKind::Ext, ColumnKind::Ext.default_width()),
+            ]
+        );
+        panel.toggle_column(ColumnKind::Ext);
+        assert_eq!(panel.columns, default_columns());
+        // 删到剩 1 个固定列后再删 = no-op。
+        panel.toggle_column(ColumnKind::Size);
+        panel.toggle_column(ColumnKind::Mtime);
+        assert_eq!(panel.columns.len(), 2, "唯一固定列不可删");
+        assert_eq!(panel.columns[1].0, ColumnKind::Mtime);
+    }
+
+    /// 分隔线拖动回归（阶段 V 泛化后默认三列手感必须与旧硬编码一致，
+    /// 期望值 = 旧公式手算）：sep0 只动 col_shift；sep1 调 Size 宽 +
+    /// shift 吸收；撞限同步停住。
+    #[test]
+    fn drag_column_sep_default_layout_matches_legacy() {
+        let rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 22.0));
+        // min_shift = (0 + 80 + 90 + 110 - (800 - 6)).min(0) = -514。
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        // sep0 右拖：列块已贴右缘（shift=0 上限），不动。
+        panel.drag_column_sep(0, 50.0, rect);
+        assert_eq!(panel.col_shift, 0.0);
+        // sep0 左拖 50：列块左移 50。
+        panel.drag_column_sep(0, -50.0, rect);
+        assert_eq!(panel.col_shift, -50.0);
+        // sep0 左拖超额：撞 min_shift 停住。
+        panel.drag_column_sep(0, -9999.0, rect);
+        assert_eq!(panel.col_shift, -514.0);
+        panel.col_shift = 0.0;
+        // sep1（Size|Mtime）右拖：Size 变宽需列块右移，shift=0 挡住 → 不动。
+        panel.drag_column_sep(1, 20.0, rect);
+        assert_eq!(panel.columns[1].1, SIZE_COL_WIDTH);
+        assert_eq!(panel.col_shift, 0.0);
+        // sep1 左拖 20：Size 90→70，列块跟着左移 20。
+        panel.drag_column_sep(1, -20.0, rect);
+        assert_eq!(panel.columns[1].1, 70.0);
+        assert_eq!(panel.col_shift, -20.0);
+        // sep1 继续左拖至列宽下限 60 后停住。
+        panel.drag_column_sep(1, -100.0, rect);
+        assert_eq!(panel.columns[1].1, 60.0);
+        assert_eq!(panel.col_shift, -30.0);
+        // sep2（Mtime 右缘=行右缘线不存在；sep 最大 = columns.len()-2）。
+        // 三列 → sep ∈ {0, 1}；越界 sep 防御 no-op。
+        panel.drag_column_sep(9, -10.0, rect);
+        assert_eq!(panel.col_shift, -30.0);
+    }
+
+    /// 多列布局的 min_shift 按固定列宽合计（泛化点）。
+    #[test]
+    fn drag_column_sep_multi_column_min_shift() {
+        let rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 22.0));
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        panel.toggle_column(ColumnKind::Ext); // 固定列 = Size 90 + Mtime 110 + Ext 70
+                                              // min_shift = 80 + 270 - 794 = -444。
+        panel.drag_column_sep(0, -9999.0, rect);
+        assert_eq!(panel.col_shift, -444.0);
+        // sep2（Mtime|Ext）左拖调 Mtime 宽。
+        panel.col_shift = 0.0;
+        panel.drag_column_sep(2, -30.0, rect);
+        assert_eq!(panel.columns[2].1, MTIME_COL_WIDTH - 30.0);
+        assert_eq!(panel.col_shift, -30.0);
+    }
+
+    /// 标签快照携带排序/列/视图模式（阶段 V）；restore_tabs 的标签
+    /// 继承面板当前值（不被重置回默认）。
+    #[test]
+    fn tab_snapshot_carries_sort_columns_view_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut panel = FsPanel::new(SortKey::Mtime, false);
+        panel.view_mode = PanelViewMode::Brief;
+        panel.toggle_column(ColumnKind::Attr);
+        panel.navigate_to(tmp.path().to_path_buf());
+        poll_until_ready(&mut panel);
+        let snap = panel.snapshot_tab();
+        assert_eq!(snap.sort_key, SortKey::Mtime);
+        assert!(!snap.sort_asc);
+        assert_eq!(snap.view_mode, PanelViewMode::Brief);
+        assert_eq!(snap.columns, panel.columns);
+        // 恢复：字段生效。
+        let mut panel2 = FsPanel::new(SortKey::Name, true);
+        panel2.restore_tab(&snap);
+        assert_eq!(panel2.sort_key, SortKey::Mtime);
+        assert!(!panel2.sort_asc);
+        assert_eq!(panel2.view_mode, PanelViewMode::Brief);
+        assert_eq!(panel2.columns, snap.columns);
+        // restore_tabs 的标签继承面板当前配置。
+        panel2.restore_tabs(vec![tmp.path().to_path_buf()], 0);
+        let snap2 = panel2.snapshot_tab();
+        assert_eq!(snap2.sort_key, SortKey::Mtime);
+        assert_eq!(snap2.columns, snap.columns);
     }
 }
