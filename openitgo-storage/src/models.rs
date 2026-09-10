@@ -198,10 +198,18 @@ pub struct Settings {
     /// 网络盘递归监听开销大）。
     #[serde(default)]
     pub fm_watch_recursive: bool,
+    /// 文件操作并发上限（阶段 AA）：默认 2，0 = 不限，上限 8；超出的任务
+    /// 排队 FIFO 放行。
+    #[serde(default = "default_fm_op_threads")]
+    pub fm_op_threads: u32,
 }
 
 fn default_fm_rubber_band() -> String {
     "right".to_string()
+}
+
+fn default_fm_op_threads() -> u32 {
+    2
 }
 
 fn default_chrome_opacity() -> f32 {
@@ -325,6 +333,7 @@ impl Default for Settings {
             fm_command_bar: true,
             fm_button_bar: Vec::new(),
             fm_watch_recursive: false,
+            fm_op_threads: default_fm_op_threads(),
         }
     }
 }
@@ -420,6 +429,12 @@ impl Settings {
                 self.extract_threads
             ));
         }
+        if self.fm_op_threads > 8 {
+            return Err(format!(
+                "fm_op_threads must be <= 8, got {}",
+                self.fm_op_threads
+            ));
+        }
         if !matches!(self.extract_wrap.as_str(), "smart" | "always" | "never") {
             return Err(format!(
                 "extract_wrap must be smart/always/never, got {}",
@@ -497,6 +512,7 @@ impl Settings {
         self.media_volume = self.media_volume.clamp(0.0, 100.0);
         self.media_speed = self.media_speed.clamp(0.1, 16.0);
         self.extract_threads = self.extract_threads.min(32);
+        self.fm_op_threads = self.fm_op_threads.min(8);
         if !matches!(self.extract_wrap.as_str(), "smart" | "always" | "never") {
             self.extract_wrap = default_extract_wrap();
         }
@@ -1312,6 +1328,30 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let loaded: Settings = serde_json::from_str(&json).unwrap();
         assert!(loaded.fm_watch_recursive);
+    }
+
+    #[test]
+    fn test_fm_op_threads_default_validate_clamp() {
+        // 旧 settings 无字段：默认 2。
+        let loaded: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(loaded.fm_op_threads, 2);
+        assert_eq!(Settings::default().fm_op_threads, 2);
+        // 上限 8：validate 拒绝，clamp 收敛。
+        let mut s = Settings {
+            fm_op_threads: 9,
+            ..Default::default()
+        };
+        assert!(s.validate().is_err());
+        s.clamp();
+        assert_eq!(s.fm_op_threads, 8);
+        assert!(s.validate().is_ok());
+        // 0 = 不限，合法。
+        assert!(Settings {
+            fm_op_threads: 0,
+            ..Default::default()
+        }
+        .validate()
+        .is_ok());
     }
 
     #[test]

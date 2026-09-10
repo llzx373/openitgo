@@ -28,7 +28,7 @@ use crate::views::file_manager_thumbs::{
     THUMB_CELL_H, THUMB_CELL_W, THUMB_MAX_DIM,
 };
 use crate::views::file_ops::{
-    create_dir, create_text_file, format_eta, rename_entry, suggest_folder_name,
+    create_dir, create_text_file, format_eta, rename_entry, retry_sources, suggest_folder_name,
     suggest_text_file_name, ConflictMode, FileOpManager, FinishedOp, OpKind, OpSpeedMeter,
 };
 use crate::views::preview_bytes::{
@@ -200,6 +200,8 @@ pub struct FmBehaviorOptions {
     pub rubber_band: RubberBandMode,
     /// 底部命令行输入条（fm_command_bar，阶段 X）。
     pub command_bar: bool,
+    /// 文件操作并发上限（fm_op_threads，阶段 AA）：0 = 不限。
+    pub op_threads: usize,
     /// 递归 FS watch（fm_watch_recursive，阶段 Z）：true 时分支视图下
     /// 子目录变化也触发刷新（大目录有性能取舍）。
     pub watch_recursive: bool,
@@ -223,6 +225,7 @@ impl Default for FmBehaviorOptions {
             rubber_band: RubberBandMode::Right,
             command_bar: true,
             watch_recursive: false,
+            op_threads: 2,
         }
     }
 }
@@ -420,6 +423,23 @@ pub struct FileManagerView {
     breadcrumb_edit_focused: bool,
     /// Enter 后路径不存在：红字提示并保持编辑态（文本变化即清）。
     breadcrumb_edit_error: bool,
+    /// 任务面板窗口开关（阶段 AA；非模态 egui::Window，列出在途+排队任务）。
+    task_panel_open: bool,
+    /// 最近一次含失败项的操作报告（阶段 AA 错误汇总窗；None = 无/已关闭）。
+    op_error_report: Option<OpErrorReport>,
+}
+
+/// 错误汇总窗数据（阶段 AA）：含失败项的操作结束时从 FinishedOp 留存，
+/// 「重试失败项」据此重建同参数任务（Copy/Move 用原 dest_dir 与冲突策略，
+/// Delete 用原 permanent 档，Compress 用原 dest_zip）。
+struct OpErrorReport {
+    kind: OpKind,
+    /// 工作线程目标（Compress = dest_zip；Copy/Move = dest_dir）。
+    dest: Option<PathBuf>,
+    dest_dir: Option<PathBuf>,
+    conflict: ConflictMode,
+    delete_permanent: bool,
+    errors: Vec<(PathBuf, String)>,
 }
 
 /// 书签分组小对话框状态（新建/重命名共用；非模态 egui::Window——菜单内联
@@ -887,6 +907,8 @@ impl FileManagerView {
             search: SearchDialog::default(),
             group_dialog: None,
             pending_conflict: None,
+            task_panel_open: false,
+            op_error_report: None,
             breadcrumb_edit: None,
             breadcrumb_edit_text: String::new(),
             breadcrumb_edit_focused: false,
@@ -1080,6 +1102,9 @@ impl FileManagerView {
             // FS watch 回调唤醒 UI 用（首帧注入，后续 no-op）。
             panel.set_wake_ctx(ui.ctx().clone());
         }
+        // 文件操作并发上限（阶段 AA，fm_op_threads）：每帧下发，在途任务
+        // 不动，调高立即放行排队任务。
+        self.ops.set_max_concurrent(options.op_threads);
         let FmCallbacks {
             on_back,
             on_open_path,
@@ -1173,6 +1198,11 @@ impl FileManagerView {
         // 底栏：当前栏选中/条目统计 + 操作进度。
         let mut cancel_op: Option<u64> = None;
         let mut toggle_pause: Option<(u64, bool)> = None;
+        // 点击进度区打开任务面板（阶段 AA）。
+        let mut open_task_panel = false;
+        // 进度区在途/排队后缀计数（阶段 AA；+N = 未显示的其余在途）。
+        let op_extra_active = self.ops.active_count().saturating_sub(1);
+        let op_queued = self.ops.queued_count();
         // 驱动器剩余空间（「剩余 X GB」显示在右侧路径前）：30s 缓存 +
         // 切卷即重查，查询在 panel 借用之前完成（&mut self）。
         let drive_free = self.status_drive_free();
@@ -1252,7 +1282,26 @@ impl FileManagerView {
                         egui::ProgressBar::new(fraction)
                             .desired_width(200.0)
                             .text(bar_text),
-                    );
+                    )
+                    .interact(egui::Sense::click())
+                    .on_hover_text("点击打开任务面板")
+                    .clicked()
+                    .then(|| open_task_panel = true);
+                    // 在途/排队后缀（阶段 AA）：只显示第一个在途任务，
+                    // 其余经计数提示（点击进度区打开任务面板看全部）。
+                    if op_extra_active > 0 || op_queued > 0 {
+                        let mut suffix = String::new();
+                        if op_extra_active > 0 {
+                            suffix.push_str(&format!("+{op_extra_active} 在途"));
+                        }
+                        if op_queued > 0 {
+                            if !suffix.is_empty() {
+                                suffix.push(' ');
+                            }
+                            suffix.push_str(&format!("+{op_queued} 排队"));
+                        }
+                        ui.label(egui::RichText::new(format!("（{suffix}）")).weak());
+                    }
                     // 当前文件内进度（分块复制维护；cur_total=0 不显示）。
                     if op.progress.cur_total_bytes > 0 {
                         let cur_pct = (op.progress.cur_done_bytes as f64
@@ -1326,6 +1375,9 @@ impl FileManagerView {
         if let Some((id, paused)) = toggle_pause {
             self.ops.set_paused(id, paused);
         }
+        if open_task_panel {
+            self.task_panel_open = true;
+        }
 
         // 中央：双栏 + 可拖分隔条 / 单栏 + 预览占位。
         // 面包屑段/标签拖放落点 rect（阶段 Z）在 render_panels 内重记录，
@@ -1387,6 +1439,9 @@ impl FileManagerView {
         self.render_selection_dialog(ui.ctx());
         self.render_comment_dialog(ui.ctx());
         self.render_button_dialog(ui.ctx());
+        // 任务面板 + 错误汇总窗（阶段 AA；非模态 egui::Window）。
+        self.render_task_panel(ui.ctx());
+        self.render_op_error_report(ui.ctx());
         // 压缩包 ask 小菜单（fm_archive_open = "ask"；鼠标处弹出二选一）。
         self.render_archive_ask_menu(ui.ctx(), &mut intents);
 
@@ -1546,6 +1601,18 @@ impl FileManagerView {
                 .clicked()
             {
                 self.open_search_dialog();
+            }
+            // 任务面板（阶段 AA）：列出在途+排队的文件操作；无任务时置灰。
+            let has_tasks = self.ops.active_count() + self.ops.queued_count() > 0;
+            if ui
+                .add_enabled(
+                    has_tasks,
+                    egui::Button::new((icons::LIST_CHECKS, " 任务")).selected(self.task_panel_open),
+                )
+                .on_hover_text("文件操作任务面板（在途/排队/暂停/取消）")
+                .clicked()
+            {
+                self.task_panel_open = !self.task_panel_open;
             }
             // 按钮栏为空的占位提示（阶段 Y）：非空时按钮条在顶栏下方整行
             // 渲染（含末尾「+」），顶栏不再重复占位。
@@ -2562,6 +2629,195 @@ impl FileManagerView {
             }
         } else if !cancelled && open {
             self.group_dialog = Some(dialog);
+        }
+    }
+
+    /// 任务面板（阶段 AA）：非模态窗口列出全部在途 + 排队任务——动词图标、
+    /// 源→目标摘要（首项 + 共 N 项）、进度条（排队任务显示「排队中」）、
+    /// 暂停/继续（排队/压缩禁用）与取消。顶栏「任务」按钮与状态栏进度区
+    /// 点击开关；无任务时按钮置灰。
+    fn render_task_panel(&mut self, ctx: &egui::Context) {
+        if !self.task_panel_open {
+            return;
+        }
+        let summaries = self.ops.task_summaries();
+        let mut open = self.task_panel_open;
+        let mut cancel_id: Option<u64> = None;
+        let mut toggle_pause: Option<(u64, bool)> = None;
+        egui::Window::new("任务")
+            .collapsible(false)
+            .resizable(true)
+            .default_width(460.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                if summaries.is_empty() {
+                    ui.label(egui::RichText::new("无在途或排队任务").weak());
+                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for s in &summaries {
+                        let icon = match s.kind {
+                            OpKind::Copy => icons::COPY,
+                            OpKind::Move => icons::ARROW_RIGHT,
+                            OpKind::Delete => icons::TRASH,
+                            OpKind::Compress => icons::FILE_ZIP,
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label(icon);
+                            // 源→目标摘要：首项文件名 + 共 N 项；目标仅
+                            // 复制/移动/压缩有。
+                            let first = s
+                                .first_source
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            let mut text = format!("{} {first}", s.kind.verb());
+                            if s.source_count > 1 {
+                                text.push_str(&format!(" 等 {} 项", s.source_count));
+                            }
+                            if let Some(dest) = &s.dest_dir {
+                                text.push_str(&format!(" → {}", dest.display()));
+                            }
+                            let full = s
+                                .first_source
+                                .as_ref()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_default();
+                            ui.label(text).on_hover_text(full);
+                        });
+                        ui.horizontal(|ui| {
+                            if s.queued {
+                                ui.label(egui::RichText::new("排队中").weak());
+                            } else {
+                                let fraction = s.progress.fraction();
+                                let pct = (fraction * 100.0).round() as u32;
+                                let bar_text = if s.paused {
+                                    format!("{pct}%（已暂停）")
+                                } else {
+                                    format!("{pct}%")
+                                };
+                                ui.add(
+                                    egui::ProgressBar::new(fraction)
+                                        .desired_width(160.0)
+                                        .text(bar_text),
+                                );
+                                // 暂停/继续（压缩不支持暂停，禁用并说明）。
+                                let pause_label = if s.paused { "继续" } else { "暂停" };
+                                if ui
+                                    .add_enabled(
+                                        s.kind != OpKind::Compress,
+                                        egui::Button::new(pause_label).small(),
+                                    )
+                                    .on_hover_text(if s.kind == OpKind::Compress {
+                                        "压缩不支持暂停"
+                                    } else {
+                                        ""
+                                    })
+                                    .clicked()
+                                {
+                                    toggle_pause = Some((s.id, !s.paused));
+                                }
+                            }
+                            if ui.small_button("取消").clicked() {
+                                cancel_id = Some(s.id);
+                            }
+                        });
+                        ui.separator();
+                    }
+                });
+            });
+        self.task_panel_open = open;
+        if let Some(id) = cancel_id {
+            // 在途置旗标；排队任务直接出队（file_ops cancel 内部区分）。
+            self.ops.cancel(id);
+        }
+        if let Some((id, paused)) = toggle_pause {
+            self.ops.set_paused(id, paused);
+        }
+    }
+
+    /// 错误汇总窗（阶段 AA）：操作结束且 errors 非空时弹出（on_op_finished
+    /// 留存报告），虚拟化列出全部失败项（路径 + 原因）；「重试失败项」从
+    /// 失败项重建同参数任务（源路径仍在才纳入，retry_sources）。
+    fn render_op_error_report(&mut self, ctx: &egui::Context) {
+        let Some(report) = &self.op_error_report else {
+            return;
+        };
+        let mut open = true;
+        let mut retry = false;
+        egui::Window::new(format!(
+            "{} — {} 项失败",
+            report.kind.verb(),
+            report.errors.len()
+        ))
+        .collapsible(false)
+        .resizable(true)
+        .default_width(560.0)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            let row_height = ui.text_style_height(&egui::TextStyle::Body);
+            egui::ScrollArea::vertical().max_height(320.0).show_rows(
+                ui,
+                row_height,
+                report.errors.len(),
+                |ui, range| {
+                    for (path, err) in &report.errors[range] {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(path.display().to_string())
+                                    .color(ui.visuals().warn_fg_color),
+                            );
+                            ui.label(egui::RichText::new(err).weak());
+                        });
+                    }
+                },
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .button((icons::ARROW_CLOCKWISE, " 重试失败项"))
+                    .on_hover_text("以相同参数重试仍存在的源（Copy/Move 沿用原目标与冲突策略）")
+                    .clicked()
+                {
+                    retry = true;
+                }
+            });
+        });
+        if !open {
+            self.op_error_report = None;
+            return;
+        }
+        if retry {
+            let Some(report) = self.op_error_report.take() else {
+                return;
+            };
+            let sources = retry_sources(&report.errors);
+            if sources.is_empty() {
+                // 失败源全部消失：无可重试项（报告关闭）。
+                return;
+            }
+            match report.kind {
+                OpKind::Copy => {
+                    if let Some(dest) = report.dest_dir {
+                        self.ops.start_copy(sources, dest, report.conflict);
+                    }
+                }
+                OpKind::Move => {
+                    if let Some(dest) = report.dest_dir {
+                        self.ops.start_move(sources, dest, report.conflict);
+                    }
+                }
+                OpKind::Delete => {
+                    self.ops.start_delete(sources, report.delete_permanent);
+                }
+                OpKind::Compress => {
+                    // Compress 失败走 fatal 不进 errors，理论不到这里；
+                    // 兜底用原 dest_zip 重压。
+                    if let Some(zip) = report.dest {
+                        self.ops.start_compress(sources, zip);
+                    }
+                }
+            }
         }
     }
 
@@ -4799,6 +5055,16 @@ impl FileManagerView {
             parts.push(format!("{verb}失败: {fatal}"));
         }
         if !op.errors.is_empty() {
+            // 阶段 AA 错误汇总窗：留存完整失败清单 + 重试参数（toast 只报
+            // 前 3 项）。新报告覆盖旧窗。
+            self.op_error_report = Some(OpErrorReport {
+                kind: op.kind,
+                dest: op.dest.clone(),
+                dest_dir: op.dest_dir.clone(),
+                conflict: op.conflict,
+                delete_permanent: op.delete_permanent,
+                errors: op.errors.clone(),
+            });
             let first: Vec<String> = op
                 .errors
                 .iter()

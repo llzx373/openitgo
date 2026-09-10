@@ -7,6 +7,12 @@
 //! 节流 100ms）；暂停在块/项边界生效（200ms 轮询，期间可即时取消），
 //! Compress 不支持暂停。
 //!
+//! 任务队列（阶段 AA）：并发上限 `max_concurrent`（settings `fm_op_threads`，
+//! 默认 2，0 = 不限）——超限任务进 `queued` FIFO 队列（不起线程、无进度），
+//! 在途任务结束经 `pump_queue` 放行；排队任务取消 = 直接从队列移除（无半成品
+//! 静默丢弃）。`set_max_concurrent` 运行时下发：在途任务不动，调高立即放行、
+//! 调低只影响后续放行。
+//!
 //! 冲突语义：策略由 UI 层操作前一次性确定（见
 //! `file_manager_dialog.rs`）。`ConflictMode::Ask`（「逐个询问」）执行期
 //! 遇冲突经 `OpEvent::AskConflict` 向 UI 发问并阻塞等答（100ms 轮询，
@@ -28,6 +34,7 @@
 //! Windows 长路径：manifest 未声明 longPathAware，文件系统调用统一经
 //! `verbatim_path` 加 `\\?\` 前缀（见该函数注释）。
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -148,6 +155,15 @@ pub struct FileOpTask {
     pub id: u64,
     pub kind: OpKind,
     pub progress: OpProgress,
+    /// 源路径全集（任务面板摘要 + 重试重建用）。
+    sources: Vec<PathBuf>,
+    /// 工作线程目标（Copy/Move = dest_dir；Compress = dest_zip；Delete = None；
+    /// 重试重建用）。
+    dest: Option<PathBuf>,
+    /// 冲突策略（重试重建用；Delete/Compress 恒 Skip）。
+    conflict: ConflictMode,
+    /// 永久删除档（重试重建用；仅 Delete 有意义）。
+    delete_permanent: bool,
     /// 涉及的源目录（各 source 的 parent），完成后刷新用。
     src_dirs: Vec<PathBuf>,
     /// 目标目录（仅复制/移动），完成后刷新用。
@@ -164,6 +180,30 @@ pub struct FileOpTask {
     pending_query: Option<ConflictQuery>,
 }
 
+/// 排队任务（阶段 AA；未起线程，参数全集保留供放行时起线程）。
+struct QueuedTask {
+    id: u64,
+    kind: OpKind,
+    sources: Vec<PathBuf>,
+    dest: Option<PathBuf>,
+    conflict: ConflictMode,
+    delete_permanent: bool,
+}
+
+/// 任务面板行快照（阶段 AA；在途按提交序 + 排队按 FIFO 序）。
+pub struct TaskSummary {
+    pub id: u64,
+    pub kind: OpKind,
+    /// 首项源 + 总项数（UI 拼「首项 + 共 N 项」摘要）。
+    pub first_source: Option<PathBuf>,
+    pub source_count: usize,
+    /// 目标目录（Copy/Move = dest_dir；Compress = zip 父目录；Delete = None）。
+    pub dest_dir: Option<PathBuf>,
+    pub progress: OpProgress,
+    pub queued: bool,
+    pub paused: bool,
+}
+
 /// 本帧完成的任务快照（poll 返回值携带，已从 manager 移除）。
 pub struct FinishedOp {
     pub kind: OpKind,
@@ -172,6 +212,12 @@ pub struct FinishedOp {
     pub errors: Vec<(PathBuf, String)>,
     pub src_dirs: Vec<PathBuf>,
     pub dest_dir: Option<PathBuf>,
+    /// 重试重建参数（阶段 AA 错误汇总窗「重试失败项」）：工作线程目标
+    /// （Compress = dest_zip）/ 冲突策略 / 永久删除档；源从 errors 重建
+    /// （errors 恒为源路径，retry_sources 过滤仍在项）。
+    pub dest: Option<PathBuf>,
+    pub conflict: ConflictMode,
+    pub delete_permanent: bool,
 }
 
 /// 活动任务快照（状态栏进度条用）。
@@ -190,10 +236,24 @@ pub struct OpSummary {
     pub finished: Vec<FinishedOp>,
 }
 
-#[derive(Default)]
 pub struct FileOpManager {
     tasks: Vec<FileOpTask>,
+    /// 排队任务（FIFO；阶段 AA）：超过并发上限的任务在此等待放行。
+    queued: VecDeque<QueuedTask>,
     next_id: u64,
+    /// 并发上限（fm_op_threads）：0 = 不限。
+    max_concurrent: usize,
+}
+
+impl Default for FileOpManager {
+    fn default() -> Self {
+        Self {
+            tasks: Vec::new(),
+            queued: VecDeque::new(),
+            next_id: 0,
+            max_concurrent: 2,
+        }
+    }
 }
 
 impl FileOpManager {
@@ -204,7 +264,8 @@ impl FileOpManager {
         dest_dir: PathBuf,
         conflict: ConflictMode,
     ) -> u64 {
-        self.start_transfer(OpKind::Copy, sources, dest_dir, conflict)
+        // 复制/移动不涉及永久删除（Move 回退路径的源清理恒走回收站）。
+        self.submit(OpKind::Copy, sources, Some(dest_dir), conflict, false)
     }
 
     /// 后台移动：同盘 `fs::rename` 快速路径，失败回退复制 + trash 源。
@@ -214,82 +275,69 @@ impl FileOpManager {
         dest_dir: PathBuf,
         conflict: ConflictMode,
     ) -> u64 {
-        self.start_transfer(OpKind::Move, sources, dest_dir, conflict)
+        self.submit(OpKind::Move, sources, Some(dest_dir), conflict, false)
     }
 
     /// 后台删除：permanent=false 逐项移入回收站（trash::delete）；
     /// permanent=true（fm_delete_mode = "permanent" / Shift+Del 直删）
     /// 逐项物理删除（remove_file/remove_dir_all），失败记 errors 继续。
     pub fn start_delete(&mut self, sources: Vec<PathBuf>, permanent: bool) -> u64 {
-        self.spawn_task(OpKind::Delete, sources, None, ConflictMode::Skip, permanent)
+        self.submit(OpKind::Delete, sources, None, ConflictMode::Skip, permanent)
     }
 
     /// 后台压缩 sources 为 dest_zip（zip 引擎在 parser 侧，逐项进度桥接进
     /// OpProgress；dest_dir 记 dest_zip 的父目录使完成后栏刷新自动生效）。
     pub fn start_compress(&mut self, sources: Vec<PathBuf>, dest_zip: PathBuf) -> u64 {
-        let dest_dir = dest_zip.parent().map(Path::to_path_buf);
-        let (id, cancel, _paused, tx, _answer_rx) =
-            self.push_task(OpKind::Compress, &sources, dest_dir);
-        std::thread::spawn(move || {
-            run_compress(sources, dest_zip, cancel, tx);
-        });
-        id
+        self.submit(
+            OpKind::Compress,
+            sources,
+            Some(dest_zip),
+            ConflictMode::Skip,
+            false,
+        )
     }
 
-    fn start_transfer(
+    /// 提交任务：有空位立即起线程，否则进 FIFO 队列（阶段 AA）。
+    fn submit(
         &mut self,
         kind: OpKind,
         sources: Vec<PathBuf>,
-        dest_dir: PathBuf,
-        conflict: ConflictMode,
-    ) -> u64 {
-        // 复制/移动不涉及永久删除（Move 回退路径的源清理恒走回收站）。
-        self.spawn_task(kind, sources, Some(dest_dir), conflict, false)
-    }
-
-    fn spawn_task(
-        &mut self,
-        kind: OpKind,
-        sources: Vec<PathBuf>,
-        dest_dir: Option<PathBuf>,
+        dest: Option<PathBuf>,
         conflict: ConflictMode,
         delete_permanent: bool,
     ) -> u64 {
-        let (id, cancel, paused, tx, answer_rx) = self.push_task(kind, &sources, dest_dir.clone());
-        // Ask 模式才需要问答通道（worker 阻塞等答）；其余模式不需要。
-        let answer_rx = (conflict == ConflictMode::Ask).then_some(answer_rx);
-        std::thread::spawn(move || {
-            run_op(
+        self.next_id += 1;
+        let id = self.next_id;
+        if self.at_capacity() {
+            self.queued.push_back(QueuedTask {
+                id,
                 kind,
                 sources,
-                dest_dir,
+                dest,
                 conflict,
-                cancel,
-                paused,
-                tx,
-                answer_rx,
                 delete_permanent,
-            );
-        });
+            });
+        } else {
+            self.launch(id, kind, sources, dest, conflict, delete_permanent);
+        }
         id
     }
 
-    /// 登记任务并返回 (id, cancel, paused, 事件发送端, 冲突回答接收端)，
-    /// 由调用方自起工作线程。
-    fn push_task(
+    /// 是否已达并发上限（0 = 不限）。
+    fn at_capacity(&self) -> bool {
+        self.max_concurrent > 0 && self.tasks.len() >= self.max_concurrent
+    }
+
+    /// 起线程跑一个任务（submit 直放 / pump_queue 放行共用）。
+    fn launch(
         &mut self,
+        id: u64,
         kind: OpKind,
-        sources: &[PathBuf],
-        dest_dir: Option<PathBuf>,
-    ) -> (
-        u64,
-        Arc<AtomicBool>,
-        Arc<AtomicBool>,
-        Sender<OpEvent>,
-        Receiver<ConflictAnswer>,
+        sources: Vec<PathBuf>,
+        dest: Option<PathBuf>,
+        conflict: ConflictMode,
+        delete_permanent: bool,
     ) {
-        self.next_id += 1;
-        let id = self.next_id;
         let cancel = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
@@ -300,10 +348,22 @@ impl FileOpManager {
             .collect();
         src_dirs.sort();
         src_dirs.dedup();
+        // Compress 的刷新目录 = zip 父目录（dest 为 zip 路径）。
+        let dest_dir = match kind {
+            OpKind::Compress => dest
+                .as_deref()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf),
+            _ => dest.clone(),
+        };
         let task = FileOpTask {
             id,
             kind,
             progress: OpProgress::default(),
+            sources: sources.clone(),
+            dest: dest.clone(),
+            conflict,
+            delete_permanent,
             src_dirs,
             dest_dir,
             cancel: cancel.clone(),
@@ -313,11 +373,115 @@ impl FileOpManager {
             pending_query: None,
         };
         self.tasks.push(task);
-        (id, cancel, paused, tx, answer_rx)
+        match kind {
+            OpKind::Compress => {
+                let dest_zip = dest.expect("Compress 必有 dest_zip");
+                std::thread::spawn(move || {
+                    run_compress(sources, dest_zip, cancel, tx);
+                });
+            }
+            _ => {
+                // Ask 模式才需要问答通道（worker 阻塞等答）；其余模式不需要。
+                let answer_rx = (conflict == ConflictMode::Ask).then_some(answer_rx);
+                std::thread::spawn(move || {
+                    run_op(
+                        kind,
+                        sources,
+                        dest,
+                        conflict,
+                        cancel,
+                        paused,
+                        tx,
+                        answer_rx,
+                        delete_permanent,
+                    );
+                });
+            }
+        }
     }
 
-    /// 取消任务：工作线程在下一块/下一项停止并上报 Finished(cancelled)。
+    /// 放行排队任务（FIFO）：有空位才起线程。
+    fn pump_queue(&mut self) {
+        while !self.at_capacity() {
+            let Some(q) = self.queued.pop_front() else {
+                break;
+            };
+            self.launch(
+                q.id,
+                q.kind,
+                q.sources,
+                q.dest,
+                q.conflict,
+                q.delete_permanent,
+            );
+        }
+    }
+
+    /// 运行时调整并发上限（fm_op_threads 每帧下发）：在途任务不动——
+    /// 调高立即放行排队任务，调低只影响后续放行。
+    pub fn set_max_concurrent(&mut self, n: usize) {
+        if self.max_concurrent != n {
+            self.max_concurrent = n;
+            self.pump_queue();
+        }
+    }
+
+    /// 在途任务数（不含排队）。
+    pub fn active_count(&self) -> usize {
+        self.tasks.len()
+    }
+
+    /// 排队任务数。
+    pub fn queued_count(&self) -> usize {
+        self.queued.len()
+    }
+
+    /// 任务面板行快照（阶段 AA）：在途（提交序）+ 排队（FIFO 序）。
+    pub fn task_summaries(&self) -> Vec<TaskSummary> {
+        let mut out: Vec<TaskSummary> = self
+            .tasks
+            .iter()
+            .map(|t| TaskSummary {
+                id: t.id,
+                kind: t.kind,
+                first_source: t.sources.first().cloned(),
+                source_count: t.sources.len(),
+                dest_dir: t.dest_dir.clone(),
+                progress: t.progress.clone(),
+                queued: false,
+                paused: t.paused.load(Ordering::Relaxed),
+            })
+            .collect();
+        out.extend(self.queued.iter().map(|q| {
+            TaskSummary {
+                id: q.id,
+                kind: q.kind,
+                first_source: q.sources.first().cloned(),
+                source_count: q.sources.len(),
+                dest_dir: match q.kind {
+                    OpKind::Compress => q
+                        .dest
+                        .as_deref()
+                        .and_then(Path::parent)
+                        .map(Path::to_path_buf),
+                    _ => q.dest.clone(),
+                },
+                progress: OpProgress::default(),
+                queued: true,
+                paused: false,
+            }
+        }));
+        out
+    }
+
+    /// 取消任务：排队任务未起线程直接从队列移除（无半成品，静默）；
+    /// 在途任务置旗标，工作线程在下一块/下一项停止并上报
+    /// Finished(cancelled)。
     pub fn cancel(&mut self, id: u64) {
+        if let Some(pos) = self.queued.iter().position(|t| t.id == id) {
+            self.queued.remove(pos);
+            return;
+        }
         if let Some(task) = self.tasks.iter().find(|t| t.id == id) {
             task.cancel.store(true, Ordering::Relaxed);
         }
@@ -395,9 +559,14 @@ impl FileOpManager {
                     errors,
                     src_dirs: task.src_dirs,
                     dest_dir: task.dest_dir,
+                    dest: task.dest,
+                    conflict: task.conflict,
+                    delete_permanent: task.delete_permanent,
                 });
             }
         }
+        // 在途任务结束腾出空位：FIFO 放行排队任务（阶段 AA）。
+        self.pump_queue();
         summary.has_active = !self.tasks.is_empty();
         summary.active = self.tasks.first().map(|t| ActiveOp {
             id: t.id,
@@ -420,6 +589,17 @@ fn permanent_delete(path: &Path) -> Result<(), String> {
         std::fs::remove_file(&vp)
     };
     r.map_err(|e| e.to_string())
+}
+
+/// 从失败项重建重试源列表（阶段 AA 错误汇总窗「重试失败项」）：
+/// 源路径仍在才纳入（Copy/Move/Delete 的 errors 均为源路径），去重保序。
+pub fn retry_sources(errors: &[(PathBuf, String)]) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    errors
+        .iter()
+        .map(|(p, _)| p.clone())
+        .filter(|p| p.exists() && seen.insert(p.clone()))
+        .collect()
 }
 
 /// 工作线程入口：预扫描计数 → 逐项执行 → Finished 事件收尾。
@@ -1960,5 +2140,102 @@ mod tests {
         assert_eq!(format_eta(185.0), "~3m05s");
         assert_eq!(format_eta(7620.0), "~2h07m");
         assert_eq!(format_eta(-1.0), "~0s");
+    }
+
+    // ---- 阶段 AA：任务队列 + 重试重建 ----
+
+    /// 轮询直到 pred 满足（超时 panic）；返回最后一次 poll 的 summary 留给
+    /// 调用方继续断言的场景不适用——这里只驱动事件排空。
+    fn poll_until(mgr: &mut FileOpManager, mut pred: impl FnMut(&mut FileOpManager) -> bool) {
+        for _ in 0..500 {
+            mgr.poll();
+            if pred(mgr) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("条件未在限时内满足");
+    }
+
+    /// 队列化：超过并发上限的任务排队（Queued、不起线程）；在途结束按
+    /// FIFO 放行；排队取消 = 直接移除；set_max_concurrent 调高立即放行。
+    /// 确定性阻塞用 Ask 冲突：worker 发问后阻塞等答，任务钉在在途。
+    #[test]
+    fn queue_fifo_release_and_cancel() {
+        let t = TempTree::new("queue");
+        let src = t.path().join("a.txt");
+        write_file(&src, b"data");
+        let dest = t.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        // 冲突：dest 已有同名文件 → Ask 模式 worker 发问并阻塞。
+        write_file(&dest.join("a.txt"), b"old");
+        let src2 = t.path().join("b.txt");
+        write_file(&src2, b"data2");
+
+        let mut mgr = FileOpManager::default();
+        mgr.set_max_concurrent(1);
+        let id1 = mgr.start_copy(vec![src.clone()], dest.clone(), ConflictMode::Ask);
+        // 等 id1 发出冲突询问（= 已起线程且阻塞等答）。
+        poll_until(&mut mgr, |m| m.take_pending_conflict().is_some());
+        assert!(mgr.is_active(id1));
+
+        // 超限 → id2 排队：summaries 两行（在途 + 排队），排队行无进度。
+        let id2 = mgr.start_copy(vec![src2.clone()], dest.clone(), ConflictMode::AutoRename);
+        assert_eq!(mgr.active_count(), 1);
+        assert_eq!(mgr.queued_count(), 1);
+        let sums = mgr.task_summaries();
+        assert_eq!(sums.len(), 2);
+        assert_eq!(sums[0].id, id1);
+        assert!(!sums[0].queued);
+        assert_eq!(sums[0].first_source.as_deref(), Some(src.as_path()));
+        assert_eq!(sums[0].source_count, 1);
+        assert_eq!(sums[0].dest_dir.as_deref(), Some(dest.as_path()));
+        assert_eq!(sums[1].id, id2);
+        assert!(sums[1].queued);
+        assert!(!sums[1].paused);
+
+        // 排队取消 = 静默移除（无 Finished 事件）。
+        mgr.cancel(id2);
+        assert_eq!(mgr.queued_count(), 0);
+
+        // 再放一个排队任务；取消 id1（冲突等答被打断按 Cancel 收拢）→
+        // poll 收 Finished(cancelled) 后 FIFO 放行 id3。
+        let id3 = mgr.start_delete(vec![t.path().join("nothing.bin")], true);
+        assert_eq!(mgr.queued_count(), 1);
+        mgr.cancel(id1);
+        poll_until(&mut mgr, |m| m.is_active(id3));
+        assert_eq!(mgr.queued_count(), 0);
+        assert!(mgr.is_active(id3));
+        // id3 = 删除不存在项 → 单错收尾；排空。
+        poll_until(&mut mgr, |m| !m.is_active(id3));
+
+        // set_max_concurrent 调高立即放行：上限 1 时起 Ask 任务占坑，
+        // 再提交一个排队，调到 2 后排队任务立刻起线程。
+        mgr.set_max_concurrent(1);
+        let id4 = mgr.start_copy(vec![src.clone()], dest.clone(), ConflictMode::Ask);
+        poll_until(&mut mgr, |m| m.take_pending_conflict().is_some());
+        let id5 = mgr.start_copy(vec![src2.clone()], dest.clone(), ConflictMode::AutoRename);
+        assert_eq!(mgr.queued_count(), 1);
+        mgr.set_max_concurrent(2);
+        assert_eq!(mgr.queued_count(), 0);
+        assert!(mgr.is_active(id5));
+        mgr.cancel(id4);
+        poll_until(&mut mgr, |m| !m.is_active(id4) && !m.is_active(id5));
+    }
+
+    /// 重试重建（错误汇总窗「重试失败项」）：只保留仍存在的源、去重保序。
+    #[test]
+    fn retry_sources_filters_missing_and_dedups() {
+        let t = TempTree::new("retry");
+        let keep = t.path().join("keep.txt");
+        write_file(&keep, b"x");
+        let gone = t.path().join("gone.txt");
+        let errors = vec![
+            (keep.clone(), "占用".to_string()),
+            (gone, "不存在".to_string()),
+            (keep.clone(), "重复项".to_string()),
+        ];
+        assert_eq!(retry_sources(&errors), vec![keep]);
+        assert!(retry_sources(&[]).is_empty());
     }
 }

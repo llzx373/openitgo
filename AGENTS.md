@@ -148,7 +148,17 @@ cargo clippy --workspace --all-targets -- -D warnings
   AutoRename 用 `name (1).ext` 递增；移动 = `fs::rename` 快速路径，失败回退递归
   复制 + trash 源；取消清理半成品目标文件（写入前取消不动已存在目标）；预扫描与
   递归复制均不跟进符号链接目录（防环）；Windows 长路径统一经 `verbatim_path`
-  加 `\\?\` 前缀（>240 字符才加；manifest 未声明 longPathAware）。**fm_* settings**：
+  加 `\\?\` 前缀（>240 字符才加；manifest 未声明 longPathAware）。
+  **file_ops 队列化（阶段 AA）**：并发上限 `max_concurrent`
+  （settings `fm_op_threads`，默认 2，0 = 不限，validate/clamp ≤ 8）——
+  `submit` 超上限进 `queued: VecDeque<QueuedTask>`（不起线程、无进度），
+  `poll` 移除完成项后 `pump_queue` FIFO 放行；排队取消 = 直接出队（静默，
+  无 Finished 事件）。`set_max_concurrent` 经 `FmBehaviorOptions.op_threads`
+  每帧下发：在途不动，调高立即放行、调低只影响后续。`task_summaries()`
+  给任务面板行快照（在途提交序 + 排队 FIFO 序）；`FinishedOp` 增带
+  dest/conflict/delete_permanent 供「重试失败项」重建同参数任务
+  （`retry_sources` 从 errors 过滤仍在的源、去重保序；errors 恒为源路径）。
+  **fm_* settings**：
   `fm_layout`/`fm_dual_ratio`/`fm_preview_open`/`fm_sort_key`/`fm_sort_asc`/
   `fm_dir_left`/`fm_dir_right`/`fm_confirm_delete`/`fm_show_hidden`（隐藏 =
   `.` 开头或 Windows FILE_ATTRIBUTE_HIDDEN，行模型过滤不进快照，权威在
@@ -178,6 +188,7 @@ cargo clippy --workspace --all-targets -- -D warnings
   段）/`fm_command_bar`（命令行输入条，见「命令行输入条（阶段 X）」段）/
   `fm_button_bar`（自定义按钮栏，见「自定义按钮栏（阶段 Y）」段）/
   `fm_watch_recursive`（递归目录 watch，见「拖放/剪贴板/watch 收尾（阶段 Z）」
+  段）/`fm_op_threads`（文件操作并发上限，见「任务队列 + 错误汇总（阶段 AA）」
   段）；`FileManagerView::snapshot()`
   采集，`maybe_save_fm_state`（`App::update` 末尾）diff 快照后写回 settings——
   **不自行落盘**，退出时 `on_exit` 统一 `save_settings`（排序只持久化活动栏，
@@ -537,6 +548,21 @@ cargo clippy --workspace --all-targets -- -D warnings
   `FmBehaviorOptions` 每帧下发，`try_watch` 按标志选 RecursiveMode；
   `ensure_watch` 跳过条件含 `w.recursive == self.watch_recursive`——选项
   变化自动重建 watcher。大目录/网络盘递归监听开销大，设置页 hint 已注明。
+  **任务队列 + 错误汇总（阶段 AA）**：**任务面板**——顶栏「任务」按钮
+  （`icons::LIST_CHECKS`，无任务置灰）与点击状态栏进度区（ProgressBar
+  `interact(Sense::click())`）开关非模态窗口 `render_task_panel`：行 =
+  动词图标（Copy/Move/Delete/Compress → COPY/ARROW_RIGHT/TRASH/FILE_ZIP）
+  + 源→目标摘要（首项 + 共 N 项）+ 进度条（排队任务显示「排队中」）+
+  暂停/继续（排队/压缩禁用）+ 取消（排队任务经 `ops.cancel` 直接出队）。
+  状态栏进度区仍只显示第一个在途任务，其余经后缀 `（+N 在途 +M 排队）`
+  提示。**错误汇总窗**——`on_op_finished` 见 errors 非空即留存
+  `OpErrorReport`（kind/dest/dest_dir/conflict/delete_permanent/errors
+  全集；新报告覆盖旧窗），`render_op_error_report` 非模态窗虚拟化
+  （`show_rows`）列出全部失败项（路径 + 原因），toast 前 3 项不变；
+  「重试失败项」经 `retry_sources` 重建同参数任务（Copy/Move 用原
+  dest_dir 与冲突策略、Delete 用原 permanent 档、Compress 兜底原
+  dest_zip；源全消失则无可重试直接关窗）。两窗无文本输入，不进
+  handle_keyboard 对话框屏蔽列表。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

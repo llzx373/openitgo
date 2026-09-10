@@ -462,6 +462,14 @@ impl SettingsView {
             "目录自动刷新默认只盯当前层；开启后子目录变化也触发刷新。大目录/网络盘开销大，默认关",
         );
         ui.horizontal(|ui| {
+            ui.label("文件操作并发数:");
+            ui.add(egui::DragValue::new(&mut settings.fm_op_threads).range(0..=8));
+        });
+        hint(
+            ui,
+            "同时进行的复制/移动/删除/压缩任务数（0 = 不限）；超出的任务排队等待",
+        );
+        ui.horizontal(|ui| {
             ui.label("默认布局");
             egui::ComboBox::from_id_salt("fm_layout")
                 .selected_text(if settings.fm_layout == "single" {
