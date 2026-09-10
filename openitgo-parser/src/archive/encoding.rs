@@ -56,6 +56,20 @@ pub fn decode_text_guess(bytes: &[u8]) -> Option<String> {
     strict(guessed, bytes)
 }
 
+/// 按指定编码解码文本字节（预览器手动编码切换）：label ∈ "utf-8"|"gbk"|
+/// "shift-jis"|"big5"。UTF-8 严格（非法序列返回 None）；GBK/SJIS/Big5
+/// 为有损解码（非法字节替换为 U+FFFD——预览场景用户显式选择，截断的
+/// 多字节尾巴不应让整篇空白）。未知 label 返回 None。
+pub fn decode_text_with(bytes: &[u8], label: &str) -> Option<String> {
+    match label {
+        "utf-8" => std::str::from_utf8(bytes).ok().map(|s| s.to_string()),
+        "gbk" => Some(GBK.decode_without_bom_handling(bytes).0.into_owned()),
+        "shift-jis" => Some(SHIFT_JIS.decode_without_bom_handling(bytes).0.into_owned()),
+        "big5" => Some(BIG5.decode_without_bom_handling(bytes).0.into_owned()),
+        _ => None,
+    }
+}
+
 fn strict(encoding: &'static encoding_rs::Encoding, raw: &[u8]) -> Option<String> {
     encoding
         .decode_without_bom_handling_and_without_replacement(raw)

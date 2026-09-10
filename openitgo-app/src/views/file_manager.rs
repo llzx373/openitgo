@@ -29,7 +29,9 @@ use crate::views::file_ops::{
     create_dir, create_text_file, format_eta, rename_entry, suggest_folder_name,
     suggest_text_file_name, ConflictMode, FileOpManager, FinishedOp, OpKind, OpSpeedMeter,
 };
-use crate::views::preview_bytes::{is_previewable_name, load_file_preview, PreviewData};
+use crate::views::preview_bytes::{
+    decode_preview_text, format_hex_line, load_file_preview, PreviewData, PreviewOutcome,
+};
 use egui_phosphor_icons::{icons, Icon};
 use openitgo_parser::archive::archive_kind;
 use openitgo_storage::models::FmBookmarkGroup;
@@ -52,6 +54,71 @@ const NAME_HEADER_INDENT: f32 = 6.0 + 16.0 + 6.0;
 pub enum PanelLayout {
     Dual { ratio: f32 },
     Single { preview_open: bool },
+}
+
+/// 预览内容模式（阶段 R：预览头部 tab，按内容类型自动解析初值可手切）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewMode {
+    Text,
+    Image,
+    /// 二进制/任意字节查看（is_previewable_name 门槛之外类型的默认档）。
+    Hex,
+}
+
+/// 预览文本编码手动选择（默认 Auto = 自动检测）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewEncoding {
+    Auto,
+    Utf8,
+    Gbk,
+    ShiftJis,
+    Big5,
+}
+
+impl PreviewEncoding {
+    /// ComboBox 显示名。
+    fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "自动检测",
+            Self::Utf8 => "UTF-8",
+            Self::Gbk => "GBK",
+            Self::ShiftJis => "Shift-JIS",
+            Self::Big5 => "Big5",
+        }
+    }
+
+    /// decode_preview_text 的 label 参数（Auto = None）。
+    fn decode_label(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => None,
+            Self::Utf8 => Some("utf-8"),
+            Self::Gbk => Some("gbk"),
+            Self::ShiftJis => Some("shift-jis"),
+            Self::Big5 => Some("big5"),
+        }
+    }
+
+    const ALL: [Self; 5] = [
+        Self::Auto,
+        Self::Utf8,
+        Self::Gbk,
+        Self::ShiftJis,
+        Self::Big5,
+    ];
+}
+
+/// 文本内搜索（纯函数）：返回包含 needle 的行号列表（不区分大小写；
+/// needle 为空返回空）。作用于已加载（可能截断）的预览文本。
+fn find_text_matches(text: &str, needle: &str) -> Vec<usize> {
+    let needle = needle.to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| line.to_lowercase().contains(&needle))
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// 双击压缩包分发方式（settings.fm_archive_open）。
@@ -172,16 +239,33 @@ pub struct FileManagerView {
     /// 预览目标的条目快照（元信息占位用；目录列举刷新后可能已失效）。
     preview_entry: Option<FsEntry>,
     /// 在途的后台预览读取。
-    preview: Option<AsyncOpener<PreviewData>>,
+    preview: Option<AsyncOpener<PreviewOutcome>>,
     /// poll 拿到、待 ui() 上传为纹理的图片。
     pending_preview_image: Option<egui::ColorImage>,
     preview_tex: Option<egui::TextureHandle>,
     preview_text: Option<String>,
     preview_note: Option<String>,
+    /// 预览原始字节（阶段 R：HEX 查看与编码手动重解码用；读取成功的
+    /// 图片/文本/二进制均有，超上限未读为 None）。
+    preview_bytes: Option<std::sync::Arc<[u8]>>,
+    /// 预览模式（阶段 R：按内容类型自动解析初值，用户可经 tab 手切）。
+    preview_mode: PreviewMode,
+    /// 文本编码手动选择（Auto = 自动检测；换新目标回 Auto）。
+    preview_encoding: PreviewEncoding,
+    /// 图片显示层旋转（0..=3 = 0/90/180/270°；不写文件）。
+    preview_rotation: u8,
+    /// 文本内搜索：输入框内容 / 匹配行号 / 当前匹配序号 / 待揭示行。
+    preview_search: String,
+    preview_search_matches: Vec<usize>,
+    preview_search_cur: usize,
+    preview_search_reveal: Option<usize>,
     /// 图片预览「原始尺寸」模式（false = 适应宽度）。
     preview_full_size: bool,
     /// F3 临时预览弹窗开关（双栏模式）。
     preview_window_open: bool,
+    /// F3 弹窗最大化（铺满 CentralPanel 区域；egui Window 不支持自定义
+    /// 标题栏按钮，最大化态改走全屏 Area 自绘标题行）。
+    preview_window_maximized: bool,
     /// 后台文件操作（复制/移动/删除）。
     ops: FileOpManager,
     /// 操作确认对话框；Some 时渲染模态窗口并屏蔽面板键盘。
@@ -430,8 +514,17 @@ impl FileManagerView {
             preview_tex: None,
             preview_text: None,
             preview_note: None,
+            preview_bytes: None,
+            preview_mode: PreviewMode::Hex,
+            preview_encoding: PreviewEncoding::Auto,
+            preview_rotation: 0,
+            preview_search: String::new(),
+            preview_search_matches: Vec::new(),
+            preview_search_cur: 0,
+            preview_search_reveal: None,
             preview_full_size: false,
             preview_window_open: false,
+            preview_window_maximized: false,
             ops: FileOpManager::default(),
             dialog: None,
             clipboard: Vec::new(),
@@ -1136,7 +1229,7 @@ impl FileManagerView {
                         ui.allocate_ui_with_layout(
                             egui::vec2(w, height),
                             egui::Layout::top_down(egui::Align::Min),
-                            |ui| self.draw_preview_content(ui),
+                            |ui| self.draw_preview_content(ui, false),
                         );
                     });
                     self.preview_ratio = preview_ratio;
@@ -1165,7 +1258,7 @@ impl FileManagerView {
         intents: &mut FmIntents,
     ) {
         if self.quickview_open && self.active != idx {
-            self.draw_preview_content(ui);
+            self.draw_preview_content(ui, false);
         } else {
             self.render_panel(ui, idx, intents);
         }
@@ -3590,20 +3683,27 @@ impl FileManagerView {
         }
     }
 
-    /// 设置预览目标并发起后台读取（不可预览类型直接置元信息占位说明）。
+    /// 设置预览目标并发起后台读取（阶段 R 起不再按 is_previewable_name
+    /// 门槛分流：所有类型都读取——文本/图片走内容嗅探，其余落 HEX 模式；
+    /// 读取上限仍由 loader 的 PREVIEW_MAX_BYTES 把关）。每个新目标重置
+    /// 模式/编码/旋转/搜索态（手动编码选择「下一个文件回自动」）。
     fn set_preview_target(&mut self, entry: FsEntry) {
         self.preview = None;
         self.pending_preview_image = None;
         self.preview_tex = None;
         self.preview_text = None;
         self.preview_note = None;
+        self.preview_bytes = None;
+        self.preview_mode = PreviewMode::Hex;
+        self.preview_encoding = PreviewEncoding::Auto;
+        self.preview_rotation = 0;
+        self.preview_search.clear();
+        self.preview_search_matches = Vec::new();
+        self.preview_search_cur = 0;
+        self.preview_search_reveal = None;
         self.preview_full_size = false;
-        if is_previewable_name(&entry.name) {
-            let path = entry.path.clone();
-            self.preview = Some(AsyncOpener::open(path, load_file_preview));
-        } else {
-            self.preview_note = Some("不支持预览该类型".to_string());
-        }
+        let path = entry.path.clone();
+        self.preview = Some(AsyncOpener::open(path, load_file_preview));
         self.preview_path = Some(entry.path.clone());
         self.preview_entry = Some(entry);
     }
@@ -3617,6 +3717,10 @@ impl FileManagerView {
         self.preview_tex = None;
         self.preview_text = None;
         self.preview_note = None;
+        self.preview_bytes = None;
+        self.preview_search.clear();
+        self.preview_search_matches = Vec::new();
+        self.preview_search_reveal = None;
         self.preview_full_size = false;
     }
 
@@ -3634,19 +3738,79 @@ impl FileManagerView {
         }
     }
 
-    fn apply_preview_result(&mut self, result: Result<PreviewData, String>) {
+    /// 应用预览后台结果：按分类解析初始模式（图片/文本/HEX），原始字节
+    /// 留档供 HEX 查看与编码重解码（Note 带字节时——如图片解码失败——
+    /// 也可 HEX）。
+    fn apply_preview_result(&mut self, result: Result<PreviewOutcome, String>) {
         match result {
-            Ok(PreviewData::Image(img)) => self.pending_preview_image = Some(img),
-            Ok(PreviewData::Text(text)) => self.preview_text = Some(text),
-            Ok(PreviewData::Unsupported) => {
-                self.preview_note = Some("不支持预览该类型".to_string());
+            Ok(outcome) => {
+                self.preview_bytes = outcome.bytes;
+                match outcome.data {
+                    PreviewData::Image(img) => {
+                        self.pending_preview_image = Some(img);
+                        self.preview_mode = PreviewMode::Image;
+                    }
+                    PreviewData::Text(text) => {
+                        self.preview_text = Some(text);
+                        self.preview_mode = PreviewMode::Text;
+                    }
+                    // 二进制：不再显示「不支持预览」占位，直接落 HEX。
+                    PreviewData::Unsupported => self.preview_mode = PreviewMode::Hex,
+                    PreviewData::Note(note) => {
+                        self.preview_note = Some(note);
+                        if self.preview_bytes.is_some() {
+                            self.preview_mode = PreviewMode::Hex;
+                        }
+                    }
+                }
+                self.refresh_preview_search();
             }
-            Ok(PreviewData::Note(note)) => self.preview_note = Some(note),
             Err(e) => self.preview_note = Some(e),
         }
     }
 
+    /// 重算文本搜索匹配（搜索词变化 / 新文本加载 / 编码重解码后调用）。
+    fn refresh_preview_search(&mut self) {
+        self.preview_search_matches = match &self.preview_text {
+            Some(text) => find_text_matches(text, &self.preview_search),
+            None => Vec::new(),
+        };
+        self.preview_search_cur = 0;
+    }
+
+    /// 跳到下一个/上一个匹配（delta = ±1）：更新当前序号并置待揭示行。
+    fn preview_search_step(&mut self, delta: isize) {
+        let n = self.preview_search_matches.len();
+        if n == 0 {
+            return;
+        }
+        let cur = (self.preview_search_cur as isize + delta).rem_euclid(n as isize) as usize;
+        self.preview_search_cur = cur;
+        self.preview_search_reveal = Some(self.preview_search_matches[cur]);
+    }
+
+    /// 编码手动切换：用已读字节重解码（不重读文件）；解码失败显示说明
+    /// 并保留原文本。
+    fn preview_redecode(&mut self, enc: PreviewEncoding) {
+        self.preview_encoding = enc;
+        let Some(bytes) = self.preview_bytes.clone() else {
+            return;
+        };
+        match decode_preview_text(&bytes, enc.decode_label()) {
+            Some(text) => {
+                self.preview_text = Some(text);
+                self.preview_note = None;
+                self.refresh_preview_search();
+            }
+            None => {
+                self.preview_note = Some(format!("无法以 {} 解码", enc.label()));
+            }
+        }
+    }
+
     /// F3 临时预览弹窗（双栏模式）：与单栏预览面板共用绘制代码。
+    /// 最大化态铺满 CentralPanel 区域（egui Window 不支持自定义标题栏
+    /// 按钮，最大化改走全屏 Area 自绘标题行：还原/关闭）。
     fn render_preview_window(&mut self, ctx: &egui::Context) {
         if !self.preview_window_open {
             return;
@@ -3656,6 +3820,44 @@ impl FileManagerView {
             .as_ref()
             .map(|e| e.name.clone())
             .unwrap_or_else(|| "预览".to_string());
+        if self.preview_window_maximized {
+            let rect = ctx.content_rect();
+            let mut open = true;
+            let mut restore = false;
+            egui::Area::new(egui::Id::new("fm_preview_window_max"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(rect.min)
+                .show(ctx, |ui| {
+                    egui::Frame::window(&ctx.global_style()).show(ui, |ui| {
+                        ui.set_min_size(rect.size());
+                        ui.set_max_size(rect.size());
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(&title).strong());
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("✕").clicked() {
+                                        open = false;
+                                    }
+                                    if ui.button("还原").clicked() {
+                                        restore = true;
+                                    }
+                                },
+                            );
+                        });
+                        ui.separator();
+                        self.draw_preview_content(ui, false);
+                    });
+                });
+            if restore {
+                self.preview_window_maximized = false;
+            }
+            if !open {
+                self.preview_window_open = false;
+                self.preview_window_maximized = false;
+            }
+            return;
+        }
         let mut open = true;
         egui::Window::new(title)
             .collapsible(false)
@@ -3663,17 +3865,21 @@ impl FileManagerView {
             .default_size([420.0, 520.0])
             .open(&mut open)
             .show(ctx, |ui| {
-                self.draw_preview_content(ui);
+                self.draw_preview_content(ui, true);
             });
         if !open {
             self.preview_window_open = false;
         }
     }
 
-    /// 预览内容绘制（单栏预览面板与 F3 弹窗共用）：名称/大小/时间头部、
-    /// 图片适应宽度/原始尺寸切换、文本 Monospace 只读可选中、
-    /// 不支持类型显示元信息占位。
-    fn draw_preview_content(&mut self, ui: &mut egui::Ui) {
+    /// 预览内容绘制（单栏预览面板 / Ctrl+Q 快览 / F3 弹窗共用；阶段 R）：
+    /// 名称/大小/时间头部 + 模式 tab（文本/图片/HEX，按内容类型自动初值、
+    /// 可手切，可用性按已加载内容门控）；文本模式头部 = 编码下拉（手动
+    /// 重解码不重读文件）+ 搜索框（◀▶ 循环 + 计数，搜索激活时切换为行级
+    /// 虚拟化视图做高亮/揭示）；图片模式 = 适应宽度/原始尺寸 + 显示层
+    /// 旋转 90°（UV 角点轮换，不写文件）；HEX = format_hex_line 虚拟化。
+    /// in_popup = F3 弹窗（头部多一个「最大化」按钮）。
+    fn draw_preview_content(&mut self, ui: &mut egui::Ui, in_popup: bool) {
         // poll 收到的 ColorImage 在此（有 ctx）惰性上传为纹理。
         if let Some(img) = self.pending_preview_image.take() {
             self.preview_tex = Some(ui.ctx().load_texture(
@@ -3700,51 +3906,203 @@ impl FileManagerView {
         if !meta.is_empty() {
             ui.label(egui::RichText::new(meta).weak());
         }
-        // 图片预览的「适应宽度 / 原始尺寸」切换。
-        if self.preview_tex.is_some() {
+
+        let has_text = self.preview_text.is_some();
+        let has_image = self.preview_tex.is_some();
+        let has_bytes = self.preview_bytes.is_some();
+        // 当前模式指向不可用 tab（如重新解码失败清掉文本）→ 落回可用档。
+        let mode_ok = match self.preview_mode {
+            PreviewMode::Text => has_text,
+            PreviewMode::Image => has_image,
+            PreviewMode::Hex => has_bytes,
+        };
+        if !mode_ok {
+            self.preview_mode = if has_text {
+                PreviewMode::Text
+            } else if has_image {
+                PreviewMode::Image
+            } else {
+                PreviewMode::Hex
+            };
+        }
+        if has_text || has_image || has_bytes {
             ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(!self.preview_full_size, "适应宽度")
-                    .clicked()
-                {
-                    self.preview_full_size = false;
+                for (mode, label, enabled) in [
+                    (PreviewMode::Text, "文本", has_text),
+                    (PreviewMode::Image, "图片", has_image),
+                    (PreviewMode::Hex, "HEX", has_bytes),
+                ] {
+                    if ui
+                        .add_enabled(
+                            enabled,
+                            egui::Button::selectable(self.preview_mode == mode, label)
+                                .frame_when_inactive(false),
+                        )
+                        .clicked()
+                    {
+                        self.preview_mode = mode;
+                    }
                 }
-                if ui
-                    .selectable_label(self.preview_full_size, "原始尺寸")
-                    .clicked()
-                {
-                    self.preview_full_size = true;
+                // F3 弹窗：最大化（egui Window 标题栏不支持自定义按钮，
+                // 放内容头部；最大化态为全屏 Area 自绘标题行）。
+                if in_popup && !self.preview_window_maximized {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("最大化").clicked() {
+                            self.preview_window_maximized = true;
+                        }
+                    });
                 }
             });
         }
-        ui.separator();
-        // 原始尺寸模式：按纹理原始大小显示，独立双向滚动区。
-        if self.preview_full_size {
-            if let Some(tex) = &self.preview_tex {
-                egui::ScrollArea::both()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.image(egui::load::SizedTexture::new(tex.id(), tex.size_vec2()));
-                    });
-                return;
+        // 模式专属头部行。
+        match self.preview_mode {
+            PreviewMode::Image if has_image => {
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(!self.preview_full_size, "适应宽度")
+                        .clicked()
+                    {
+                        self.preview_full_size = false;
+                    }
+                    if ui
+                        .selectable_label(self.preview_full_size, "原始尺寸")
+                        .clicked()
+                    {
+                        self.preview_full_size = true;
+                    }
+                    ui.separator();
+                    if ui
+                        .button("旋转 90°")
+                        .on_hover_text("仅显示层旋转，不写文件")
+                        .clicked()
+                    {
+                        self.preview_rotation = (self.preview_rotation + 1) % 4;
+                    }
+                });
             }
+            PreviewMode::Text if has_text => {
+                ui.horizontal(|ui| {
+                    ui.label("编码");
+                    let mut selected = None;
+                    egui::ComboBox::from_id_salt("fm_preview_encoding")
+                        .selected_text(self.preview_encoding.label())
+                        .show_ui(ui, |ui| {
+                            for enc in PreviewEncoding::ALL {
+                                if ui
+                                    .selectable_label(self.preview_encoding == enc, enc.label())
+                                    .clicked()
+                                {
+                                    selected = Some(enc);
+                                }
+                            }
+                        });
+                    if let Some(enc) = selected {
+                        self.preview_redecode(enc);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.preview_search)
+                            .desired_width(140.0)
+                            .hint_text("搜索文本"),
+                    );
+                    if resp.changed() {
+                        self.refresh_preview_search();
+                    }
+                    let n = self.preview_search_matches.len();
+                    if !self.preview_search.is_empty() {
+                        if ui
+                            .add_enabled(n > 0, egui::Button::new("◀"))
+                            .on_hover_text("上一个")
+                            .clicked()
+                        {
+                            self.preview_search_step(-1);
+                        }
+                        if ui
+                            .add_enabled(n > 0, egui::Button::new("▶"))
+                            .on_hover_text("下一个")
+                            .clicked()
+                        {
+                            self.preview_search_step(1);
+                        }
+                        let count = if n == 0 {
+                            "无匹配".to_string()
+                        } else {
+                            format!("第 {}/{} 处", self.preview_search_cur + 1, n)
+                        };
+                        ui.label(egui::RichText::new(count).weak());
+                    }
+                });
+            }
+            _ => {}
+        }
+        ui.separator();
+
+        match self.preview_mode {
+            PreviewMode::Image if has_image => self.draw_preview_image(ui),
+            PreviewMode::Text if has_text => self.draw_preview_text(ui),
+            PreviewMode::Hex if has_bytes => self.draw_preview_hex(ui),
+            _ => {}
+        }
+        if let Some(note) = &self.preview_note {
+            ui.label(egui::RichText::new(note).weak());
+        }
+        if self.preview.is_some()
+            && self.preview_tex.is_none()
+            && self.preview_text.is_none()
+            && self.preview_note.is_none()
+            && self.preview_bytes.is_none()
+        {
+            ui.label(egui::RichText::new("正在读取…").weak());
+        }
+    }
+
+    /// 图片模式内容：适应宽度（单滚动）/ 原始尺寸（双向滚动），均经
+    /// paint_rotated_image 应用显示层旋转（90° 步进时交换宽高考量）。
+    fn draw_preview_image(&mut self, ui: &mut egui::Ui) {
+        let Some(tex) = &self.preview_tex else {
+            return;
+        };
+        let tex_id = tex.id();
+        let size = tex.size_vec2();
+        let k = self.preview_rotation % 4;
+        let (dw, dh) = if k % 2 == 1 {
+            (size.y, size.x)
+        } else {
+            (size.x, size.y)
+        };
+        if self.preview_full_size {
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(dw, dh), egui::Sense::hover());
+                    paint_rotated_image(ui.painter(), tex_id, rect, k);
+                });
+            return;
         }
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                if let Some(tex) = &self.preview_tex {
-                    let width = ui.available_width();
-                    let size = tex.size_vec2();
-                    let height = if size.x > 0.0 {
-                        width * size.y / size.x
-                    } else {
-                        width
-                    };
-                    ui.image(egui::load::SizedTexture::new(
-                        tex.id(),
-                        egui::vec2(width, height),
-                    ));
-                } else if let Some(text) = &self.preview_text {
+                let width = ui.available_width();
+                let height = if dw > 0.0 { width * dh / dw } else { width };
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+                paint_rotated_image(ui.painter(), tex_id, rect, k);
+            });
+    }
+
+    /// 文本模式内容：无搜索词 = 只读 TextEdit（自动换行、可选中复制，维持
+    /// 原手感）；有搜索词 = 行级虚拟化视图（匹配行底色高亮，当前匹配 =
+    /// 选中色，◀▶ 跳转后顶对齐揭示）。
+    fn draw_preview_text(&mut self, ui: &mut egui::Ui) {
+        let Some(text) = &self.preview_text else {
+            return;
+        };
+        if self.preview_search.is_empty() {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
                     // 只读 &str 缓冲（TextBuffer for &str 拒绝修改）：可选中复制。
                     let mut text = text.as_str();
                     ui.add(
@@ -3752,19 +4110,93 @@ impl FileManagerView {
                             .font(egui::TextStyle::Monospace)
                             .desired_width(f32::INFINITY),
                     );
+                });
+            return;
+        }
+        let text = text.clone();
+        let matches = self.preview_search_matches.clone();
+        let cur_line = matches.get(self.preview_search_cur).copied();
+        let reveal = self.preview_search_reveal.take();
+        let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+        let lines: Vec<&str> = text.lines().collect();
+        let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        if let Some(line) = reveal {
+            area = area.vertical_scroll_offset(line as f32 * row_h);
+        }
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let sel = ui.visuals().selection.bg_fill;
+        let faint = ui.visuals().faint_bg_color;
+        let text_color = ui.visuals().text_color();
+        area.show_rows(ui, row_h, lines.len(), |ui, range| {
+            for i in range {
+                let line = lines.get(i).copied().unwrap_or("");
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), row_h),
+                    egui::Sense::hover(),
+                );
+                if matches.binary_search(&i).is_ok() {
+                    let color = if Some(i) == cur_line { sel } else { faint };
+                    ui.painter().rect_filled(rect, 0.0, color);
                 }
-                if let Some(note) = &self.preview_note {
-                    ui.label(egui::RichText::new(note).weak());
-                }
-                if self.preview.is_some()
-                    && self.preview_tex.is_none()
-                    && self.preview_text.is_none()
-                    && self.preview_note.is_none()
-                {
-                    ui.label(egui::RichText::new("正在读取…").weak());
+                ui.painter().text(
+                    egui::pos2(rect.min.x + 4.0, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    line,
+                    egui::FontId::monospace(row_h * 0.85),
+                    text_color,
+                );
+            }
+        });
+    }
+
+    /// HEX 模式内容：16 字节/行虚拟化（行按需 format_hex_line，不物化全表）。
+    fn draw_preview_hex(&mut self, ui: &mut egui::Ui) {
+        let Some(bytes) = self.preview_bytes.clone() else {
+            return;
+        };
+        let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+        let line_count = bytes.len().div_ceil(16);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        egui::ScrollArea::both()
+            .auto_shrink([false, false])
+            .show_rows(ui, row_h, line_count, |ui, range| {
+                for line in range {
+                    if let Some(text) = format_hex_line(&bytes, line) {
+                        ui.monospace(text);
+                    }
                 }
             });
     }
+}
+
+/// 显示层图片旋转（阶段 R 预览「旋转 90°」）：Mesh 顶点固定、UV 角点
+/// 轮换实现顺时针 k×90°，纹理与文件不动。rect 由调用方按旋转后宽高比
+/// 分配（k 为奇数时交换宽/高）。
+fn paint_rotated_image(painter: &egui::Painter, tex: egui::TextureId, rect: egui::Rect, k: u8) {
+    let corners = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+    ];
+    let uv = [
+        egui::pos2(0.0, 0.0),
+        egui::pos2(1.0, 0.0),
+        egui::pos2(1.0, 1.0),
+        egui::pos2(0.0, 1.0),
+    ];
+    let k = k as usize % 4;
+    let mut mesh = egui::Mesh::with_texture(tex);
+    for i in 0..4 {
+        // 顺时针：显示角 i 采样原图角 (i + 4 - k) % 4。
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: corners[i],
+            uv: uv[(i + 4 - k) % 4],
+            color: egui::Color32::WHITE,
+        });
+    }
+    mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 /// 竖向分隔条：拖动返回本帧的水平位移（px），hover/拖拽时换光标。
@@ -4014,6 +4446,17 @@ mod tests {
         assert_eq!(drag_sources(&selected, &a), vec![a.clone(), b.clone()]);
         // 拖未选中行 → 仅该行自身。
         assert_eq!(drag_sources(&selected, &c), vec![c.clone()]);
+    }
+
+    #[test]
+    fn find_text_matches_case_insensitive_line_indices() {
+        let text = "第一行 Alpha\nsecond line\n第三个 ALPHA 行\n\nlast";
+        assert_eq!(find_text_matches(text, "alpha"), [0, 2]);
+        assert_eq!(find_text_matches(text, "ALPHA"), [0, 2]);
+        assert_eq!(find_text_matches(text, "第三"), [2]);
+        assert!(find_text_matches(text, "").is_empty());
+        assert!(find_text_matches(text, "不存在").is_empty());
+        assert_eq!(find_text_matches(text, "last"), [4]);
     }
 
     #[test]

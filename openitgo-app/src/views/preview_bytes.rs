@@ -21,21 +21,36 @@ pub(crate) enum PreviewData {
     Note(String),
 }
 
+/// 预览加载结果（阶段 R）：分类内容 + 原始字节（HEX 查看与编码手动切换
+/// 重解码用；超过 PREVIEW_MAX_BYTES 未读取时 bytes = None）。
+#[derive(Debug, Clone)]
+pub(crate) struct PreviewOutcome {
+    pub data: PreviewData,
+    pub bytes: Option<std::sync::Arc<[u8]>>,
+}
+
 /// 本地文件预览加载（文件管理器）：>64MB 不读，`fs::read` 后按
 /// 扩展名 + 内容嗅探分类（与压缩包条目预览同一管线）。
-pub(crate) fn load_file_preview(path: &Path) -> Result<PreviewData, String> {
+pub(crate) fn load_file_preview(path: &Path) -> Result<PreviewOutcome, String> {
     let size = std::fs::metadata(path)
         .map_err(|e| format!("无法读取文件信息: {e}"))?
         .len();
     if size > PREVIEW_MAX_BYTES {
-        return Ok(PreviewData::Note("文件过大，不预览".to_string()));
+        return Ok(PreviewOutcome {
+            data: PreviewData::Note("文件过大，不预览".to_string()),
+            bytes: None,
+        });
     }
     let bytes = std::fs::read(path).map_err(|e| format!("无法读取文件: {e}"))?;
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    Ok(classify_preview_bytes(&name, &bytes))
+    let bytes: std::sync::Arc<[u8]> = bytes.into();
+    Ok(PreviewOutcome {
+        data: classify_preview_bytes(&name, &bytes),
+        bytes: Some(bytes),
+    })
 }
 
 /// 预览图解码的宽/高上限：预览纹理最终经 `ctx.load_texture` 进 wgpu，任一边
@@ -75,17 +90,67 @@ pub(crate) fn classify_preview_bytes(name: &str, bytes: &[u8]) -> PreviewData {
             }
         };
     }
-    let prefix = &bytes[..bytes.len().min(TEXT_SNIFF_BYTES)];
-    match openitgo_parser::archive::decode_text_guess(prefix) {
-        Some(s) if !s.contains('\0') => {
-            let mut truncated: String = s.chars().take(TEXT_PREVIEW_MAX_CHARS).collect();
-            if s.chars().count() > TEXT_PREVIEW_MAX_CHARS {
-                truncated.push_str("\n…（内容过长，已截断）");
-            }
-            PreviewData::Text(truncated)
-        }
-        _ => PreviewData::Unsupported,
+    match decode_preview_text(bytes, None) {
+        Some(t) => PreviewData::Text(t),
+        None => PreviewData::Unsupported,
     }
+}
+
+/// 预览文本解码（阶段 R：自动检测 / 指定编码手动切换共用入口）：嗅探前
+/// 256KB，含 NUL 视为二进制，展示截断 64k 字符。label ∈ None（自动）|
+/// "utf-8"|"gbk"|"shift-jis"|"big5"（见 parser decode_text_with）。
+pub(crate) fn decode_preview_text(bytes: &[u8], label: Option<&str>) -> Option<String> {
+    let prefix = &bytes[..bytes.len().min(TEXT_SNIFF_BYTES)];
+    let decoded = match label {
+        None => openitgo_parser::archive::decode_text_guess(prefix),
+        Some(l) => openitgo_parser::archive::decode_text_with(prefix, l),
+    }?;
+    if decoded.contains('\0') {
+        return None;
+    }
+    Some(truncate_preview_text(decoded))
+}
+
+/// 文本预览展示的字符数截断（追加说明尾巴）。
+fn truncate_preview_text(s: String) -> String {
+    let mut truncated: String = s.chars().take(TEXT_PREVIEW_MAX_CHARS).collect();
+    if s.chars().count() > TEXT_PREVIEW_MAX_CHARS {
+        truncated.push_str("\n…（内容过长，已截断）");
+    }
+    truncated
+}
+
+/// HEX 预览单行格式化（纯函数，show_rows 虚拟化按需调用——不物化全表，
+/// 64MB 上限文件 = 4M 行）：`偏移(8 hex)  16 字节 hex 对（8+8 分组） |ASCII|`，
+/// 不可打印字节显示 `.`；line 越界返回 None。
+pub(crate) fn format_hex_line(bytes: &[u8], line: usize) -> Option<String> {
+    let start = line.checked_mul(16)?;
+    if start >= bytes.len() {
+        return None;
+    }
+    let chunk = &bytes[start..(start + 16).min(bytes.len())];
+    let mut out = format!("{start:08x}  ");
+    for i in 0..16 {
+        if i == 8 {
+            out.push(' ');
+        }
+        // 末行不足 16 字节：占位对齐 ASCII 列。
+        match chunk.get(i) {
+            Some(b) => out.push_str(&format!("{b:02x} ")),
+            None => out.push_str("   "),
+        }
+    }
+    out.push_str(" |");
+    for b in chunk {
+        let c = if b.is_ascii_graphic() || *b == b' ' {
+            *b as char
+        } else {
+            '.'
+        };
+        out.push(c);
+    }
+    out.push('|');
+    Some(out)
 }
 
 /// 常见文本扩展名集合（预览门槛与文件搜索的内容检索共用；小写比较）。
@@ -256,11 +321,58 @@ mod tests {
         let file = dir.join("hello.txt");
         std::fs::write(&file, "你好 preview").unwrap();
         match load_file_preview(&file) {
-            Ok(PreviewData::Text(t)) => assert_eq!(t, "你好 preview"),
-            other => panic!("expected Text, got {other:?}"),
+            Ok(out) => {
+                match out.data {
+                    PreviewData::Text(t) => assert_eq!(t, "你好 preview"),
+                    other => panic!("expected Text, got {other:?}"),
+                }
+                // 原始字节随结果返回（HEX 查看/编码重解码用）。
+                assert_eq!(out.bytes.as_deref(), Some("你好 preview".as_bytes()));
+            }
+            Err(e) => panic!("expected Ok, got {e}"),
         }
         // 不存在的文件 → Err。
         assert!(load_file_preview(&dir.join("missing.txt")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn decode_preview_text_manual_encoding() {
+        // GBK 字节（"你好"）：自动检测（样本太短可能识别失败）vs 指定 gbk。
+        let gbk: &[u8] = &[0xC4, 0xE3, 0xBA, 0xC3];
+        assert_eq!(
+            decode_preview_text(gbk, Some("gbk")).as_deref(),
+            Some("你好")
+        );
+        // 指定 utf-8 严格解码失败 → None。
+        assert!(decode_preview_text(gbk, Some("utf-8")).is_none());
+        // GBK 字节按 big5 有损解码总能产出字符串（含 replacement）。
+        assert!(decode_preview_text(gbk, Some("big5")).is_some());
+        // 未知 label → None。
+        assert!(decode_preview_text(gbk, Some("latin9")).is_none());
+        // 含 NUL 恒视为二进制。
+        assert!(decode_preview_text(b"ab\0cd", Some("gbk")).is_none());
+        assert!(decode_preview_text(b"ab\0cd", None).is_none());
+    }
+
+    #[test]
+    fn format_hex_line_layout() {
+        // 空输入 / 越界 → None。
+        assert!(format_hex_line(b"", 0).is_none());
+        assert!(format_hex_line(b"abc", 1).is_none());
+        // 首行：偏移 + 16 字节 + ASCII（不可打印显示 `.`）。
+        let data: Vec<u8> = (0u8..=31).collect();
+        let line = format_hex_line(&data, 0).unwrap();
+        assert_eq!(
+            line,
+            "00000000  00 01 02 03 04 05 06 07  08 09 0a 0b 0c 0d 0e 0f  |................|"
+        );
+        let line1 = format_hex_line(&data, 1).unwrap();
+        assert!(line1.starts_with("00000010  10 11"), "{line1}");
+        // 可打印 ASCII 直通。
+        let hello = format_hex_line(b"Hello, World!", 0).unwrap();
+        assert!(hello.ends_with("|Hello, World!|"), "{hello}");
+        // 末行不足 16 字节：hex 区占位对齐，ASCII 列（首 `|`）位置一致。
+        assert_eq!(hello.find('|'), line.find('|'), "短行与满行的 ASCII 列对齐");
     }
 }

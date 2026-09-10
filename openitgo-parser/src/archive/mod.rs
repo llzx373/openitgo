@@ -5,7 +5,7 @@ mod encoding;
 mod extract;
 mod zip_write;
 
-pub use encoding::{decode_text_guess, decode_zip_entry_name};
+pub use encoding::{decode_text_guess, decode_text_with, decode_zip_entry_name};
 pub use extract::{extract_archive, ExtractOptions, ExtractProgress};
 pub use zip_write::{create_zip, ZipWriteOptions, ZipWriteProgress};
 

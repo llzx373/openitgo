@@ -330,6 +330,28 @@ cargo clippy --workspace --all-targets -- -D warnings
   调用），卷 key 变化立即重查，每帧调用即「导航/刷新/切栏自然触发」。
   过滤激活指示：焦点栏过滤非空时状态栏弱色 `过滤: xxx`，与 type-ahead
   `定位:` 同区域并列。
+  **预览器增强（阶段 R，FM 三处共用 `draw_preview_content(ui, in_popup)`：
+  单栏预览面板 / Ctrl+Q 快览 / F3 弹窗；Archive 预览面板维持原行为仅
+  适配签名）**：加载器返回 `PreviewOutcome { data: PreviewData, bytes:
+  Option<Arc<[u8]>> }`（preview_bytes.rs）——原始字节留档是 HEX 查看与
+  编码重解码的数据源（超 64MB 未读为 None）；FM `set_preview_target`
+  不再按 `is_previewable_name` 门槛分流，所有类型都读取，二进制落 HEX
+  模式而非「不支持预览」占位。模式 tab（文本/图片/HEX）按内容自动初值、
+  可用性门控、手切换目标不保留（`preview_mode` 随目标重置）。HEX 渲染
+  = `format_hex_line(bytes, line)` 纯函数按需生成 + show_rows 虚拟化
+  （16 字节/行 `偏移  hex 对  |ASCII|`，不物化全表——64MB = 4M 行）。
+  文本编码手动切换：parser 新增 `decode_text_with(bytes, label)`
+  （utf-8 严格；gbk/shift-jis/big5 有损——截断多字节尾巴不致整篇空白），
+  app 侧 `decode_preview_text(bytes, label)` 统一嗅探上限/NUL 拒绝/64k
+  字符截断，`preview_redecode` 用已读字节重解码不重读文件，换新目标回
+  自动。文本内搜索：`find_text_matches` 纯函数（不区分大小写行号列表）；
+  **无搜索词时维持 TextEdit 只读多行（自动换行可选中），有搜索词才切换
+  行级虚拟化视图**（匹配行 faint 底色、当前匹配选中色、◀▶ 循环 +
+  `preview_search_reveal` 顶对齐揭示）。图片旋转 = `paint_rotated_image`
+  Mesh UV 角点轮换（顺时针 k×90°，k 奇数时分配 rect 交换宽高；不写文件）。
+  F3 弹窗最大化：egui Window 不支持自定义标题栏按钮——「最大化」按钮在
+  内容头部（in_popup=true 时），最大化态走全屏 Area（Order::Foreground +
+  content_rect）自绘标题行（还原/关闭），不经 Window 内存避免位置串扰。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

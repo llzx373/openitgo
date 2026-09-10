@@ -10,7 +10,7 @@ use crate::views::archive_tree::{
     breadcrumb_paths, build_dir_rows, build_dir_stats, list_rows, ListRow, SortKey, TreeRow,
 };
 use crate::views::preview_bytes::{
-    classify_preview_bytes, is_previewable_name, PreviewData, PREVIEW_MAX_BYTES,
+    classify_preview_bytes, is_previewable_name, PreviewData, PreviewOutcome, PREVIEW_MAX_BYTES,
 };
 use egui_phosphor_icons::{icons, Icon};
 use openitgo_parser::archive::{list_entries, read_comment, read_entry, ArchiveEntry};
@@ -235,7 +235,7 @@ pub struct ArchiveView {
     preview_entry: Option<String>,
     /// 已为该条目发起过后台读取（避免每帧重复 spawn）。
     preview_requested: Option<String>,
-    preview: Option<AsyncOpener<PreviewData>>,
+    preview: Option<AsyncOpener<PreviewOutcome>>,
     /// poll 拿到、待 ui() 上传为纹理的图片。
     pending_preview_image: Option<egui::ColorImage>,
     preview_tex: Option<egui::TextureHandle>,
@@ -680,14 +680,18 @@ impl ArchiveView {
         }));
     }
 
-    fn apply_preview_result(&mut self, result: Result<PreviewData, String>) {
+    fn apply_preview_result(&mut self, result: Result<PreviewOutcome, String>) {
+        // Archive 预览面板维持原行为（阶段 R 的 HEX/编码/搜索增强只进 FM
+        // 三处共用绘制）；原始字节随 PreviewOutcome 到达但此处不留档。
         match result {
-            Ok(PreviewData::Image(img)) => self.pending_preview_image = Some(img),
-            Ok(PreviewData::Text(text)) => self.preview_text = Some(text),
-            Ok(PreviewData::Unsupported) => {
-                self.preview_note = Some("不支持预览该类型".to_string());
-            }
-            Ok(PreviewData::Note(note)) => self.preview_note = Some(note),
+            Ok(outcome) => match outcome.data {
+                PreviewData::Image(img) => self.pending_preview_image = Some(img),
+                PreviewData::Text(text) => self.preview_text = Some(text),
+                PreviewData::Unsupported => {
+                    self.preview_note = Some("不支持预览该类型".to_string());
+                }
+                PreviewData::Note(note) => self.preview_note = Some(note),
+            },
             Err(e) => self.preview_note = Some(e),
         }
     }
@@ -2168,12 +2172,19 @@ fn load_preview(
     entry_name: &str,
     size: u64,
     password: Option<&str>,
-) -> Result<PreviewData, String> {
+) -> Result<PreviewOutcome, String> {
     if size > PREVIEW_MAX_BYTES {
-        return Ok(PreviewData::Note("文件过大，不预览".to_string()));
+        return Ok(PreviewOutcome {
+            data: PreviewData::Note("文件过大，不预览".to_string()),
+            bytes: None,
+        });
     }
     let bytes = read_entry(path, entry_name, password).map_err(|e| e.to_string())?;
-    Ok(classify_preview_bytes(entry_name, &bytes))
+    let bytes: std::sync::Arc<[u8]> = bytes.into();
+    Ok(PreviewOutcome {
+        data: classify_preview_bytes(entry_name, &bytes),
+        bytes: Some(bytes),
+    })
 }
 
 /// 名称列与「大小」「压缩后」「时间」列之间的淡竖线（表头与数据行共用；
