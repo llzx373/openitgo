@@ -3877,6 +3877,7 @@ dependencies = [
  "embed-resource",
  "foreign-types",
  "image",
+ "libc",
  "libmpv-sys",
  "libwebp-sys",
  "notify",

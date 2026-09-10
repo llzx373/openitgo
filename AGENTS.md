@@ -319,6 +319,17 @@ cargo clippy --workspace --all-targets -- -D warnings
   （内容坐标 = 指针 - 视口左上 + 滚动偏移；网格经 `GridBlankGeom` 把每行
   右侧余量与末行未排满部分也算空白），接线在 render_list/render_grid 帧尾
   `blank_dblclick_up`——行/cell 双击几何上不落在空白区，互不冲突。
+  **状态栏增强（阶段 Q）**：驱动器剩余空间——`platform::drive_info`
+  （Windows `platform/windows/drive_info.rs` `GetDiskFreeSpaceExW` 取
+  `lpFreeBytesAvailableToCaller` 调用者可用口径；`volume_key` 从路径提取
+  卷根缓存键：盘符根大写 `C:\` / UNC `\\server\share\`；非 Windows 为
+  statvfs 实现而非 stub——libc 已是 openitgo-media 直接依赖，openitgo-app
+  以 `[target.'cfg(unix)'] libc` 复用，unix 缓存键 = 目录路径本身）。
+  状态栏右侧路径前弱色显示 `剩余 X GB`（human_size）；`status_drive_free`
+  30s 会话内缓存（卷 key + 字节 + 时刻；失败 None 同样缓存防每帧系统
+  调用），卷 key 变化立即重查，每帧调用即「导航/刷新/切栏自然触发」。
+  过滤激活指示：焦点栏过滤非空时状态栏弱色 `过滤: xxx`，与 type-ahead
+  `定位:` 同区域并列。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

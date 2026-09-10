@@ -212,6 +212,9 @@ pub struct FileManagerView {
     bookmarks_menu_toggle: bool,
     /// 状态栏速度/ETA 估算器（任务 id + EMA 采样器；任务切换重置）。
     op_speed: Option<(u64, OpSpeedMeter)>,
+    /// 状态栏驱动器剩余空间缓存（卷 key + 字节 + 查询时刻；30s TTL，
+    /// 失败结果同样缓存——None 不每帧重查）。切卷（key 变化）立即重查。
+    drive_free: Option<(String, Option<u64>, Instant)>,
     /// Ctrl+Q 对面栏快速预览（双栏；会话内状态，不落盘）：开启时非活动栏
     /// 整栏替换为预览面板，目标 = 活动栏焦点文件，焦点移动跟随。
     quickview_open: bool,
@@ -443,6 +446,7 @@ impl FileManagerView {
             history_menu_toggle: false,
             bookmarks_menu_toggle: false,
             op_speed: None,
+            drive_free: None,
             quickview_open: false,
             thumbs: ThumbCache::new(),
             thumb_visible: [None, None],
@@ -688,6 +692,9 @@ impl FileManagerView {
         // 底栏：当前栏选中/条目统计 + 操作进度。
         let mut cancel_op: Option<u64> = None;
         let mut toggle_pause: Option<(u64, bool)> = None;
+        // 驱动器剩余空间（「剩余 X GB」显示在右侧路径前）：30s 缓存 +
+        // 切卷即重查，查询在 panel 借用之前完成（&mut self）。
+        let drive_free = self.status_drive_free();
         egui::Panel::bottom("fm_status_bar").show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -731,6 +738,12 @@ impl FileManagerView {
                     ui.separator();
                     ui.label(egui::RichText::new(format!("定位: {buf}")).weak());
                     ui.ctx().request_repaint_after(Duration::from_millis(200));
+                }
+                // 过滤激活指示：与「定位:」同区域并列（过滤框在顶栏，此处给
+                // 近处反馈）。
+                if !panel.filter.is_empty() {
+                    ui.separator();
+                    ui.label(egui::RichText::new(format!("过滤: {}", panel.filter)).weak());
                 }
                 // 操作进行中提示文本让位（状态栏宽度有限）。
                 if active_op.is_none() {
@@ -815,6 +828,11 @@ impl FileManagerView {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(egui::RichText::new(panel.dir.display().to_string()).weak());
+                    // 驱动器剩余空间（路径前；查询失败/不支持不显示）。
+                    if let Some(bytes) = drive_free {
+                        ui.separator();
+                        ui.label(egui::RichText::new(format!("剩余 {}", human_size(bytes))).weak());
+                    }
                 });
             });
             ui.add_space(4.0);
@@ -913,6 +931,24 @@ impl FileManagerView {
         if let Some(confirm) = intents.confirm_delete_change {
             on_confirm_delete_change(confirm);
         }
+    }
+
+    /// 状态栏「剩余 X GB」数据源：焦点栏目录所在卷的可用字节
+    /// （`platform::drive_info`）；会话内 30s 缓存，卷 key 变化（切盘/切栏
+    /// 到异卷）立即重查；查询失败同样缓存（None 不每帧系统调用）。
+    fn status_drive_free(&mut self) -> Option<u64> {
+        const TTL: Duration = Duration::from_secs(30);
+        let dir = self.panels[self.active].dir.clone();
+        let key = crate::platform::drive_info::volume_key(&dir)?;
+        let now = Instant::now();
+        if let Some((k, bytes, t)) = &self.drive_free {
+            if *k == key && now.duration_since(*t) < TTL {
+                return *bytes;
+            }
+        }
+        let bytes = crate::platform::drive_info::free_space(&dir);
+        self.drive_free = Some((key, bytes, now));
+        bytes
     }
 
     /// 顶栏：返回书架 / 单双栏切换（单栏时含预览开关）/ 右侧过滤框

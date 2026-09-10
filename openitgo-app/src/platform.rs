@@ -798,6 +798,7 @@ pub mod macos {
 pub mod windows {
     pub mod clipboard_files;
     pub mod drag_out;
+    pub mod drive_info;
     pub mod file_assoc;
     pub mod mpv_view;
     pub mod restore_rect;
@@ -987,6 +988,48 @@ pub mod shell_verbs {
 /// Unified shell-verbs API (`crate::platform::shell_verbs`)。
 #[cfg(target_os = "windows")]
 pub use windows::shell_verbs;
+
+/// 驱动器剩余空间（非 Windows）：`statvfs` 实现（libc 已是 openitgo-media
+/// 直接依赖，openitgo-app 以 target-gated 依赖复用）。
+#[cfg(not(target_os = "windows"))]
+pub mod drive_info {
+    use std::path::Path;
+
+    /// 卷缓存键：unix 以目录路径本身为键（statvfs 廉价，挂载点经路径
+    /// 自然区分；30s TTL 防每帧系统调用）。
+    pub fn volume_key(path: &Path) -> Option<String> {
+        Some(path.display().to_string())
+    }
+
+    /// 路径所在文件系统的可用字节（`f_bavail × f_frsize`，非 root 可用
+    /// 口径）；失败返回 None。
+    pub fn free_space(path: &Path) -> Option<u64> {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        unsafe {
+            let mut stat: libc::statvfs = std::mem::zeroed();
+            if libc::statvfs(c_path.as_ptr(), &mut stat) != 0 {
+                return None;
+            }
+            Some(stat.f_bavail as u64 * stat.f_frsize as u64)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn free_space_root() {
+            let bytes = free_space(Path::new("/")).expect("根文件系统应可查询");
+            assert!(bytes > 0);
+        }
+    }
+}
+
+/// Unified drive-info API (`crate::platform::drive_info`)。
+#[cfg(target_os = "windows")]
+pub use windows::drive_info;
 
 /// Unified video-view API used by views/media.rs (`PendingVideoView`
 /// two-phase construction + `MpvNativeView`).
