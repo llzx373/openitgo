@@ -175,7 +175,8 @@ cargo clippy --workspace --all-targets -- -D warnings
   见「系统真实图标（阶段 S）」段）/`fm_saved_filters`/`fm_filter_bar_bottom`
   （见「过滤增强（阶段 T）」段）/`fm_rubber_band`（见「选择增强（阶段 U）」
   段）/`fm_columns`（明细列表列配置，见「显示模式与自定义列（阶段 V）」
-  段）/`fm_command_bar`（命令行输入条，见「命令行输入条（阶段 X）」段）；`FileManagerView::snapshot()`
+  段）/`fm_command_bar`（命令行输入条，见「命令行输入条（阶段 X）」段）/
+  `fm_button_bar`（自定义按钮栏，见「自定义按钮栏（阶段 Y）」段）；`FileManagerView::snapshot()`
   采集，`maybe_save_fm_state`（`App::update` 末尾）diff 快照后写回 settings——
   **不自行落盘**，退出时 `on_exit` 统一 `save_settings`（排序只持久化活动栏，
   取舍见 `FmStateSnapshot` 注释）；快照在离开 FileManager 视图时重置。设置页
@@ -494,6 +495,23 @@ cargo clippy --workspace --all-targets -- -D warnings
   补进 handle_keyboard 的对话框屏蔽列表（阶段 W 遗漏）；测试基座
   `headless_frame` 现在从注入的 Key 事件回填 `RawInput.modifiers`
   （egui 不从事件推导修饰键状态，不带修饰键的快捷键测试此前无法模拟）。
+  **自定义按钮栏（阶段 Y）**：`fm_button_bar: Vec<FmButton>`（label/
+  command/tooltip；clamp 去空白、label/command 缺一则移除）——顶栏下方
+  一条按钮条，**列表为空不渲染不占垂直空间**（空栏的「+ 添加按钮」占位
+  提示在顶栏「搜索」后，非空时不再重复）。点击经 `spawn_shell_command`
+  同命令行条后台执行（current_dir = 焦点栏目录，失败 → op_error）；
+  悬停显示 tooltip（空 = 展开后的命令）；命令占位符 `%P` = 焦点栏目录、
+  `%N` = 焦点项名称（无焦点 = 空串）、`%p` = 另一栏目录，展开为纯函数
+  `expand_button_command`（无转义、未知占位符原样保留、大小写敏感）。
+  右键按钮弹 egui `context_menu`「编辑…/删除」；`ButtonDialog`
+  （非模态 egui::Window，BookmarkGroupDialog 模式扩展为三字段，已进
+  handle_keyboard 对话框屏蔽列表）。**写回路径**同 fm_bookmark_groups：
+  视图持 `button_bar` 副本（`set_button_bar` 注入/同步）、快照
+  `FmStateSnapshot.button_bar` 经 maybe_save_fm_state diff 写回；设置页
+  「文件管理器」tab「按钮栏」子区块（列表 ↑↓/✕ + 三输入添加表单，
+  `file_manager_ui` 因此从静态方法改为 `&mut self`）直接改 settings，
+  render_settings 前后 diff 后经 `set_button_bar` 同步休眠视图（同
+  apply_layout_settings 先例，防快照写回覆盖）。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

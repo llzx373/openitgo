@@ -3,8 +3,8 @@ use egui_phosphor_icons::icons;
 use openitgo_core::ebook::EbookReadingMode;
 use openitgo_core::models::{FitMode, ReadingMode};
 use openitgo_storage::models::{
-    ComicEndAction, EbookTheme, MediaEndAction, PasswordBook, PasswordBookEntry, Settings, Theme,
-    ToolbarDisplayMode,
+    ComicEndAction, EbookTheme, FmButton, MediaEndAction, PasswordBook, PasswordBookEntry,
+    Settings, Theme, ToolbarDisplayMode,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -50,6 +50,10 @@ pub struct SettingsView {
     file_assoc: Option<Vec<ExtAssoc>>,
     /// 文件关联操作结果 / 错误提示。
     assoc_status: Option<String>,
+    /// 按钮栏「添加按钮」表单（阶段 Y）：按钮文字 / 命令 / 悬停提示。
+    button_add_label: String,
+    button_add_command: String,
+    button_add_tooltip: String,
 }
 
 impl SettingsView {
@@ -81,7 +85,7 @@ impl SettingsView {
                         SettingsTab::Archive => {
                             book_changed = self.archive_ui(ui, settings, password_book);
                         }
-                        SettingsTab::FileManager => Self::file_manager_ui(ui, settings),
+                        SettingsTab::FileManager => self.file_manager_ui(ui, settings),
                         SettingsTab::FileAssoc => self.file_assoc_ui(ui),
                         SettingsTab::Performance => self.performance_ui(ui, settings),
                         SettingsTab::Shortcuts => self.shortcut_editor(ui, &mut settings.shortcuts),
@@ -410,7 +414,7 @@ impl SettingsView {
 
     /// 文件管理器 tab：删除 / 显示与布局 / 交互行为（阶段 O 可选行为包，
     /// 默认值 = 一期现状行为）。
-    fn file_manager_ui(ui: &mut egui::Ui, settings: &mut Settings) {
+    fn file_manager_ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {
         ui.label(egui::RichText::new("删除").strong());
         ui.horizontal(|ui| {
             ui.label("删除方式");
@@ -560,6 +564,76 @@ impl SettingsView {
                     );
                 });
         });
+
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("按钮栏").strong());
+        hint(
+            ui,
+            "顶栏下方的自定义命令按钮；占位符 %P = 当前目录、%N = 焦点项名称、%p = 另一栏目录",
+        );
+        // 列表：label + 命令摘要 + 上移/下移/删除（改动先收集、循环后应用）。
+        let mut delete_idx = None;
+        let mut swap_idx = None;
+        let count = settings.fm_button_bar.len();
+        for (i, b) in settings.fm_button_bar.iter().enumerate() {
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(i > 0, egui::Button::new(icons::CARET_UP.as_str()).small())
+                    .clicked()
+                {
+                    swap_idx = Some(i - 1);
+                }
+                if ui
+                    .add_enabled(
+                        i + 1 < count,
+                        egui::Button::new(icons::CARET_DOWN.as_str()).small(),
+                    )
+                    .clicked()
+                {
+                    swap_idx = Some(i);
+                }
+                ui.label(&b.label);
+                ui.label(egui::RichText::new(&b.command).weak().small());
+                if ui
+                    .add(egui::Button::new(icons::X.as_str()).small().frame(false))
+                    .on_hover_text("删除该按钮")
+                    .clicked()
+                {
+                    delete_idx = Some(i);
+                }
+            });
+        }
+        if let Some(i) = swap_idx {
+            settings.fm_button_bar.swap(i, i + 1);
+        }
+        if let Some(i) = delete_idx {
+            settings.fm_button_bar.remove(i);
+        }
+        // 添加表单：三输入 + 添加按钮（label/command 非空才可添加）。
+        ui.horizontal(|ui| {
+            ui.label("按钮文字");
+            ui.add(egui::TextEdit::singleline(&mut self.button_add_label).desired_width(100.0));
+            ui.label("命令");
+            ui.add(egui::TextEdit::singleline(&mut self.button_add_command).desired_width(220.0));
+            ui.label("悬停提示");
+            ui.add(egui::TextEdit::singleline(&mut self.button_add_tooltip).desired_width(140.0));
+            let ready = !self.button_add_label.trim().is_empty()
+                && !self.button_add_command.trim().is_empty();
+            if ui
+                .add_enabled(ready, egui::Button::new("添加按钮"))
+                .clicked()
+            {
+                settings.fm_button_bar.push(FmButton {
+                    label: self.button_add_label.trim().to_string(),
+                    command: self.button_add_command.trim().to_string(),
+                    tooltip: self.button_add_tooltip.trim().to_string(),
+                });
+                self.button_add_label.clear();
+                self.button_add_command.clear();
+                self.button_add_tooltip.clear();
+            }
+        });
+        hint(ui, "文件管理器中右键按钮也可编辑/删除；两边改动互通");
     }
 
     /// 压缩包 tab：解压目录/线程/覆盖 + 密码本管理。返回密码本是否有变更。

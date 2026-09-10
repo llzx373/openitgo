@@ -13,6 +13,20 @@ pub struct FmBookmarkGroup {
     pub items: Vec<String>,
 }
 
+/// 文件管理器自定义按钮栏按钮（阶段 Y）。命令支持占位符：`%P` = 焦点栏
+/// 当前目录、`%N` = 焦点项名称（无焦点 = 空串）、`%p` = 另一栏目录
+/// （展开在 app 侧 `expand_button_command`）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FmButton {
+    /// 按钮文字（clamp 去空白；空 = 该按钮被移除）。
+    pub label: String,
+    /// 点击执行的命令（clamp 去空白；空 = 该按钮被移除）。
+    pub command: String,
+    /// 悬停提示（可空串；clamp 去空白；空 = 悬停显示展开后的命令）。
+    pub tooltip: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Settings {
@@ -176,6 +190,10 @@ pub struct Settings {
     /// 底部命令行输入条（阶段 X；false = 隐藏）。
     #[serde(default = "default_true")]
     pub fm_command_bar: bool,
+    /// 自定义按钮栏（阶段 Y）：顶栏下方一条按钮条；空 = 只渲染「+ 添加
+    /// 按钮」占位。clamp 去空白，label/command 缺一则移除该按钮。
+    #[serde(default)]
+    pub fm_button_bar: Vec<FmButton>,
 }
 
 fn default_fm_rubber_band() -> String {
@@ -301,6 +319,7 @@ impl Default for Settings {
             fm_filter_bar_bottom: false,
             fm_rubber_band: default_fm_rubber_band(),
             fm_command_bar: true,
+            fm_button_bar: Vec::new(),
         }
     }
 }
@@ -539,6 +558,14 @@ impl Settings {
                 .items
                 .retain(|b| !b.trim().is_empty() && seen.insert(b.clone()));
         }
+        // 按钮栏（阶段 Y）：三字段去空白；label/command 缺一则移除该按钮。
+        for b in &mut self.fm_button_bar {
+            b.label = b.label.trim().to_string();
+            b.command = b.command.trim().to_string();
+            b.tooltip = b.tooltip.trim().to_string();
+        }
+        self.fm_button_bar
+            .retain(|b| !b.label.is_empty() && !b.command.is_empty());
         self.fm_active_tab_left =
             clamp_active_tab(self.fm_tabs_left.len(), self.fm_active_tab_left);
         self.fm_active_tab_right =
@@ -1226,6 +1253,45 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let loaded: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(s, loaded);
+    }
+
+    #[test]
+    fn test_fm_button_bar_default_and_clamp() {
+        // 旧 settings 无字段：默认空按钮栏。
+        let loaded: Settings = serde_json::from_str("{}").unwrap();
+        assert!(loaded.fm_button_bar.is_empty());
+
+        // clamp：去空白；label/command 缺一则移除；tooltip 可空。
+        let mut s = Settings {
+            fm_button_bar: vec![
+                FmButton {
+                    label: "  终端  ".to_string(),
+                    command: " cmd ".to_string(),
+                    tooltip: "  在此打开终端  ".to_string(),
+                },
+                FmButton {
+                    label: "无命令".to_string(),
+                    command: "  ".to_string(),
+                    tooltip: String::new(),
+                },
+                FmButton {
+                    label: String::new(),
+                    command: "echo hi".to_string(),
+                    tooltip: String::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        s.clamp();
+        assert_eq!(s.fm_button_bar.len(), 1);
+        assert_eq!(s.fm_button_bar[0].label, "终端");
+        assert_eq!(s.fm_button_bar[0].command, "cmd");
+        assert_eq!(s.fm_button_bar[0].tooltip, "在此打开终端");
+
+        // roundtrip。
+        let json = serde_json::to_string(&s).unwrap();
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(s.fm_button_bar, loaded.fm_button_bar);
     }
 
     #[test]

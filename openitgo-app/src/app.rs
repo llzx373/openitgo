@@ -474,6 +474,7 @@ impl Default for ReaderApp {
             &settings.fm_bookmark_groups,
         );
         file_manager_view.set_saved_filters(&settings.fm_saved_filters);
+        file_manager_view.set_button_bar(&settings.fm_button_bar);
         // 视图模式全局单值（同 fm_sort_key 先例），恢复时两栏同用。
         let fm_view_mode = PanelViewMode::from_setting(&settings.fm_view_mode);
         for panel in &mut file_manager_view.panels {
@@ -2334,6 +2335,7 @@ impl ReaderApp {
     fn render_settings(&mut self, ui: &mut egui::Ui) {
         let from_ebook = self.ebook_view.open.is_some();
         let fm_layout_before = (self.settings.fm_layout.clone(), self.settings.fm_dual_ratio);
+        let fm_button_bar_before = self.settings.fm_button_bar.clone();
         egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("← 返回").clicked() {
@@ -2361,6 +2363,11 @@ impl ReaderApp {
         if fm_layout_after != fm_layout_before {
             self.file_manager_view
                 .apply_layout_settings(&self.settings.fm_layout, self.settings.fm_dual_ratio);
+        }
+        // 按钮栏（阶段 Y）同理：设置页编辑后同步到休眠视图，防快照写回覆盖。
+        if self.settings.fm_button_bar != fm_button_bar_before {
+            let buttons = self.settings.fm_button_bar.clone();
+            self.file_manager_view.set_button_bar(&buttons);
         }
         if from_ebook {
             self.ebook_view.apply_settings(&self.settings.ebook);
@@ -3769,6 +3776,7 @@ impl ReaderApp {
         self.settings.fm_col_mtime_width = snapshot.col_mtime_width;
         self.settings.fm_col_shift = snapshot.col_shift;
         self.settings.fm_columns = serialize_columns(&snapshot.columns);
+        self.settings.fm_button_bar = snapshot.button_bar.clone();
         self.last_saved_fm_state = Some(snapshot);
     }
 
@@ -5571,6 +5579,7 @@ mod tests {
                 &settings.fm_bookmark_groups,
             );
             file_manager_view.set_saved_filters(&settings.fm_saved_filters);
+            file_manager_view.set_button_bar(&settings.fm_button_bar);
             Self {
                 current_view: View::Library,
                 last_view: View::Library,
@@ -6583,6 +6592,30 @@ mod tests {
         assert!(app.file_manager_view.remove_bookmark(0, Path::new("/a")));
         app.maybe_save_fm_state();
         assert!(app.settings.fm_bookmark_groups[0].items.is_empty());
+    }
+
+    #[test]
+    fn test_maybe_save_fm_state_writes_button_bar() {
+        let (mut app, _tmp) = app_with_temp_store();
+        app.current_view = View::FileManager;
+        app.maybe_save_fm_state();
+        assert!(app.settings.fm_button_bar.is_empty());
+
+        // 视图侧改动（运行时添加按钮）→ diff 后写回 settings.fm_button_bar。
+        app.file_manager_view
+            .set_button_bar(&[openitgo_storage::models::FmButton {
+                label: "终端".to_string(),
+                command: "cmd".to_string(),
+                tooltip: String::new(),
+            }]);
+        app.maybe_save_fm_state();
+        assert_eq!(app.settings.fm_button_bar.len(), 1);
+        assert_eq!(app.settings.fm_button_bar[0].label, "终端");
+
+        // 清空同样写回。
+        app.file_manager_view.set_button_bar(&[]);
+        app.maybe_save_fm_state();
+        assert!(app.settings.fm_button_bar.is_empty());
     }
 
     #[test]

@@ -36,7 +36,7 @@ use crate::views::preview_bytes::{
 };
 use egui_phosphor_icons::{icons, Icon};
 use openitgo_parser::archive::archive_kind;
-use openitgo_storage::models::FmBookmarkGroup;
+use openitgo_storage::models::{FmBookmarkGroup, FmButton};
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -263,6 +263,8 @@ pub struct FmStateSnapshot {
     /// 明细列表列配置（阶段 V）：取活动栏（取舍同 sort_key），app 侧序列化
     /// 为 settings.fm_columns，恢复时两栏同用。
     pub columns: Vec<(ColumnKind, f32)>,
+    /// 自定义按钮栏（阶段 Y；两栏共享，权威在 settings.fm_button_bar）。
+    pub button_bar: Vec<FmButton>,
 }
 
 pub struct FileManagerView {
@@ -328,6 +330,9 @@ pub struct FileManagerView {
     archive_ask: Option<(PathBuf, egui::Pos2)>,
     /// 常用目录书签分组（两栏共享，权威走快照写回 settings.fm_bookmark_groups）。
     bookmark_groups: Vec<FmBookmarkGroup>,
+    /// 自定义按钮栏（阶段 Y；两栏共享，权威走快照写回 settings.fm_button_bar；
+    /// 构造后由 app 经 set_button_bar 喂入，设置页改动经同方法同步休眠视图）。
+    button_bar: Vec<FmButton>,
     /// 保存的过滤方案（两栏共享，权威走快照写回 settings.fm_saved_filters；
     /// 构造后经 `set_saved_filters` 注入）。
     saved_filters: Vec<String>,
@@ -353,6 +358,8 @@ pub struct FileManagerView {
     /// 「编辑注释…」小对话框（阶段 W；非模态 egui::Window，同选择集对话框
     /// 模式）。
     comment_dialog: Option<CommentDialog>,
+    /// 「添加/编辑按钮」对话框（阶段 Y 按钮栏；非模态 egui::Window）。
+    button_dialog: Option<ButtonDialog>,
     /// 「选择组」对话框上次使用的模式（会话内记忆，不落盘）。
     select_group_pattern: String,
     /// Alt+↓ 的一次性请求：下一帧焦点栏的历史下拉菜单开/关切换
@@ -476,6 +483,40 @@ impl BookmarkGroupDialog {
         Self {
             rename: Some(group),
             name: current.to_string(),
+            focused: false,
+        }
+    }
+}
+
+/// 「添加/编辑按钮」对话框状态（阶段 Y 按钮栏；非模态 egui::Window，同
+/// BookmarkGroupDialog 模式扩展为多字段）。
+struct ButtonDialog {
+    /// None = 添加；Some(i) = 编辑 button_bar 第 i 个。
+    edit: Option<usize>,
+    label: String,
+    command: String,
+    tooltip: String,
+    /// 首帧 request_focus 一次性标志（聚焦按钮文字输入框）。
+    focused: bool,
+}
+
+impl ButtonDialog {
+    fn new_create() -> Self {
+        Self {
+            edit: None,
+            label: String::new(),
+            command: String::new(),
+            tooltip: String::new(),
+            focused: false,
+        }
+    }
+
+    fn new_edit(index: usize, button: &FmButton) -> Self {
+        Self {
+            edit: Some(index),
+            label: button.label.clone(),
+            command: button.command.clone(),
+            tooltip: button.tooltip.clone(),
             focused: false,
         }
     }
@@ -807,6 +848,7 @@ impl FileManagerView {
             options: FmBehaviorOptions::default(),
             archive_ask: None,
             bookmark_groups: bookmark_groups.to_vec(),
+            button_bar: Vec::new(),
             saved_filters: Vec::new(),
             filter_history: Vec::new(),
             filter_focus_request: false,
@@ -816,6 +858,7 @@ impl FileManagerView {
             saved_selections: Vec::new(),
             selection_dialog: None,
             comment_dialog: None,
+            button_dialog: None,
             select_group_pattern: String::new(),
             history_menu_toggle: false,
             bookmarks_menu_toggle: false,
@@ -883,6 +926,7 @@ impl FileManagerView {
             col_mtime_width,
             col_shift: panel.col_shift,
             columns: panel.columns.clone(),
+            button_bar: self.button_bar.clone(),
         }
     }
 
@@ -896,6 +940,13 @@ impl FileManagerView {
     /// 注入保存的过滤方案（构造后由 app 从 settings 喂入）。
     pub fn set_saved_filters(&mut self, filters: &[String]) {
         self.saved_filters = filters.to_vec();
+    }
+
+    /// 注入/同步按钮栏（阶段 Y）：构造后由 app 从 settings 喂入；设置页编辑
+    /// 时也经本方法同步到休眠视图（同 apply_layout_settings 先例——否则
+    /// 下次进入 FM 时 maybe_save_fm_state 会把旧副本写回覆盖设置页改动）。
+    pub fn set_button_bar(&mut self, buttons: &[FmButton]) {
+        self.button_bar = buttons.to_vec();
     }
 
     /// 恢复列配置（阶段 V）：全局单值，两栏同用（同 fm_sort_key 先例）。
@@ -1101,6 +1152,8 @@ impl FileManagerView {
         }
 
         self.render_top_bar(ui, &mut intents);
+        // 自定义按钮栏（阶段 Y）：顶栏下方一条。
+        self.render_button_bar(ui, &mut intents);
         ui.separator();
 
         // 底栏：当前栏选中/条目统计 + 操作进度。
@@ -1315,6 +1368,7 @@ impl FileManagerView {
         self.render_group_dialog(ui.ctx());
         self.render_selection_dialog(ui.ctx());
         self.render_comment_dialog(ui.ctx());
+        self.render_button_dialog(ui.ctx());
         // 压缩包 ask 小菜单（fm_archive_open = "ask"；鼠标处弹出二选一）。
         self.render_archive_ask_menu(ui.ctx(), &mut intents);
 
@@ -1475,12 +1529,98 @@ impl FileManagerView {
             {
                 self.open_search_dialog();
             }
+            // 按钮栏为空的占位提示（阶段 Y）：非空时按钮条在顶栏下方整行
+            // 渲染（含末尾「+」），顶栏不再重复占位。
+            if self.button_bar.is_empty()
+                && ui
+                    .button((icons::PLUS, " 添加按钮"))
+                    .on_hover_text("添加自定义命令按钮（按钮栏）")
+                    .clicked()
+            {
+                self.button_dialog = Some(ButtonDialog::new_create());
+            }
             // 过滤框（焦点栏）：默认顶栏右侧；fm_filter_bar_bottom 时改由
             // render_panel 渲染在焦点栏底部。
             if !self.options.filter_bar_bottom {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.render_filter_bar(ui);
                 });
+            }
+        });
+    }
+
+    /// 自定义按钮栏（阶段 Y，fm_button_bar）：顶栏下方一条按钮条，列表为空
+    /// 时不渲染、不占垂直空间（空栏的「+ 添加按钮」占位在顶栏，见
+    /// render_top_bar）。点击经 spawn_shell_command 在焦点栏目录后台执行
+    /// （占位符 %P/%N/%p 由 expand_button_command 展开；启动失败 →
+    /// intents.op_error）。悬停显示 tooltip（空 = 展开后的命令）；右键弹
+    /// 「编辑…/删除」小菜单；末尾「+」开添加对话框。列表权威在
+    /// settings.fm_button_bar，本视图持副本经快照 diff 写回。
+    fn render_button_bar(&mut self, ui: &mut egui::Ui, intents: &mut FmIntents) {
+        if self.button_bar.is_empty() {
+            return;
+        }
+        // 占位符值与按钮副本先取好（水平闭包内不能再借 self）。
+        let focus_dir = self.panels[self.active].dir.display().to_string();
+        let focus_name = self.panels[self.active].focused_entry().map(|e| e.name);
+        let other_dir = self.panels[1 - self.active].dir.display().to_string();
+        let buttons = self.button_bar.clone();
+        ui.horizontal(|ui| {
+            let mut run_idx = None;
+            let mut edit_idx = None;
+            let mut delete_idx = None;
+            for (i, b) in buttons.iter().enumerate() {
+                let expanded = expand_button_command(
+                    &b.command,
+                    &focus_dir,
+                    focus_name.as_deref(),
+                    &other_dir,
+                );
+                let response = ui.button(&b.label);
+                let response = if b.tooltip.is_empty() {
+                    response.on_hover_text(expanded)
+                } else {
+                    response.on_hover_text(&b.tooltip)
+                };
+                if response.clicked() {
+                    run_idx = Some(i);
+                }
+                response.context_menu(|ui| {
+                    if ui.button((icons::PENCIL_SIMPLE, " 编辑…")).clicked() {
+                        edit_idx = Some(i);
+                        ui.close();
+                    }
+                    if ui.button((icons::TRASH, " 删除")).clicked() {
+                        delete_idx = Some(i);
+                        ui.close();
+                    }
+                });
+            }
+            // 末尾小「+」开添加对话框（空栏时整条不渲染，占位在顶栏）。
+            if ui
+                .add(egui::Button::new(icons::PLUS.as_str()).small())
+                .on_hover_text("添加按钮")
+                .clicked()
+            {
+                self.button_dialog = Some(ButtonDialog::new_create());
+            }
+            if let Some(i) = edit_idx {
+                self.button_dialog = Some(ButtonDialog::new_edit(i, &self.button_bar[i]));
+            }
+            if let Some(i) = delete_idx {
+                self.button_bar.remove(i);
+            }
+            if let Some(i) = run_idx {
+                let cmd = expand_button_command(
+                    &self.button_bar[i].command,
+                    &focus_dir,
+                    focus_name.as_deref(),
+                    &other_dir,
+                );
+                let dir = self.panels[self.active].dir.clone();
+                if let Err(e) = spawn_shell_command(&dir, &cmd) {
+                    intents.op_error = Some(e);
+                }
             }
         });
     }
@@ -2397,6 +2537,90 @@ impl FileManagerView {
             }
         } else if !cancelled && open {
             self.group_dialog = Some(dialog);
+        }
+    }
+
+    /// 「添加/编辑按钮」对话框（阶段 Y）：三字段（按钮文字/命令/悬停提示），
+    /// 确定时 trim 后写回 button_bar（权威经快照 diff 进 settings.fm_button_bar）。
+    fn render_button_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.button_dialog.take() else {
+            return;
+        };
+        let title = if dialog.edit.is_some() {
+            "编辑按钮"
+        } else {
+            "添加按钮"
+        };
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancelled = false;
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("按钮文字：");
+                    let response =
+                        ui.add(egui::TextEdit::singleline(&mut dialog.label).desired_width(160.0));
+                    if !dialog.focused {
+                        response.request_focus();
+                        dialog.focused = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("命令：");
+                    ui.add(egui::TextEdit::singleline(&mut dialog.command).desired_width(320.0));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("悬停提示：");
+                    ui.add(egui::TextEdit::singleline(&mut dialog.tooltip).desired_width(320.0));
+                });
+                ui.label(
+                    egui::RichText::new("占位符：%P = 当前目录，%N = 焦点项名称，%p = 另一栏目录")
+                        .weak()
+                        .small(),
+                );
+                let error = if dialog.label.trim().is_empty() {
+                    Some("按钮文字不能为空")
+                } else if dialog.command.trim().is_empty() {
+                    Some("命令不能为空")
+                } else {
+                    None
+                };
+                if let Some(err) = error {
+                    ui.colored_label(ui.visuals().error_fg_color, err);
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(error.is_none(), egui::Button::new("确定"))
+                        .clicked()
+                    {
+                        confirm = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        cancelled = true;
+                    }
+                });
+            });
+        if confirm {
+            let button = FmButton {
+                label: dialog.label.trim().to_string(),
+                command: dialog.command.trim().to_string(),
+                tooltip: dialog.tooltip.trim().to_string(),
+            };
+            match dialog.edit {
+                Some(i) => {
+                    if let Some(slot) = self.button_bar.get_mut(i) {
+                        *slot = button;
+                    }
+                }
+                None => self.button_bar.push(button),
+            }
+        } else if !cancelled && open {
+            self.button_dialog = Some(dialog);
         }
     }
 
@@ -4544,6 +4768,7 @@ impl FileManagerView {
             || self.group_dialog.is_some()
             || self.selection_dialog.is_some()
             || self.comment_dialog.is_some()
+            || self.button_dialog.is_some()
         {
             return;
         }
@@ -5793,6 +6018,20 @@ fn spawn_shell_command(dir: &Path, input: &str) -> Result<(), String> {
         .map_err(|e| format!("命令启动失败: {e}"))
 }
 
+/// 按钮栏命令占位符展开（阶段 Y）：`%P` = 焦点栏当前目录、`%N` = 焦点项
+/// 名称（无焦点 = 空串）、`%p` = 另一栏目录。不提供转义，未知占位符原样
+/// 保留（replace 天然如此）。
+fn expand_button_command(
+    cmd: &str,
+    focus_dir: &str,
+    focus_name: Option<&str>,
+    other_dir: &str,
+) -> String {
+    cmd.replace("%P", focus_dir)
+        .replace("%N", focus_name.unwrap_or(""))
+        .replace("%p", other_dir)
+}
+
 /// 网格空白区几何（双击回上级判定用）：cell 定宽左排，每行右侧余量与
 /// 末行未排满部分都算空白。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -6793,5 +7032,97 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let input = if cfg!(windows) { "exit 0" } else { "true" };
         spawn_shell_command(tmp.path(), input).unwrap();
+    }
+
+    /// 按钮栏占位符展开（阶段 Y）：%P/%N/%p 各自替换，无焦点时 %N 为空，
+    /// 未知占位符原样保留。
+    #[test]
+    fn expand_button_command_replaces_placeholders() {
+        assert_eq!(
+            expand_button_command("echo %P %N %p", "C:\\dir", Some("a.txt"), "D:\\other"),
+            "echo C:\\dir a.txt D:\\other"
+        );
+        assert_eq!(
+            expand_button_command("echo %N", "C:\\dir", None, "D:\\other"),
+            "echo "
+        );
+        // 未知占位符/字面 % 原样保留；大小写敏感（%P 与 %p 不同）。
+        assert_eq!(
+            expand_button_command("echo 100% %X %P%p", "A", None, "B"),
+            "echo 100% %X AB"
+        );
+    }
+
+    /// 按钮栏快照往返（阶段 Y）：set_button_bar 注入 → snapshot 取回。
+    #[test]
+    fn button_bar_snapshot_roundtrip() {
+        let buttons = vec![
+            FmButton {
+                label: "终端".to_string(),
+                command: "cmd".to_string(),
+                tooltip: String::new(),
+            },
+            FmButton {
+                label: "记事本".to_string(),
+                command: "notepad %N".to_string(),
+                tooltip: "打开焦点文件".to_string(),
+            },
+        ];
+        let mut view = FileManagerView::new("single", 0.5, false, "name", true, &[]);
+        assert!(view.snapshot().button_bar.is_empty());
+        view.set_button_bar(&buttons);
+        assert_eq!(view.snapshot().button_bar, buttons);
+    }
+
+    /// 按钮栏无头冒烟（阶段 Y）：按钮渲染 + 点击执行无害命令 +
+    /// 添加对话框渲染不 panic。
+    #[test]
+    fn button_bar_render_headless() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), b"x").unwrap();
+        let mut view = FileManagerView::new("single", 0.5, false, "name", true, &[]);
+        navigate_ready(&mut view.panels[0], tmp.path());
+        view.set_button_bar(&[FmButton {
+            label: "无害".to_string(),
+            command: if cfg!(windows) {
+                "exit 0".to_string()
+            } else {
+                "true".to_string()
+            },
+            tooltip: String::new(),
+        }]);
+        let ctx = egui::Context::default();
+        setup_test_fonts(&ctx);
+        let mut t = 0.0;
+        for _ in 0..3 {
+            t += 1.0;
+            headless_frame(&ctx, &mut view, t, vec![]);
+        }
+        // 自上而下扫描单击，命中按钮行即执行（历史不进命令行——按钮栏
+        // 与命令行历史无关；这里验证点击链路不 panic、视图状态健在）。
+        let mut y = 30.0;
+        while y < 120.0 {
+            t += 1.0;
+            headless_frame(
+                &ctx,
+                &mut view,
+                t,
+                primary_click_events(egui::pos2(400.0, y)),
+            );
+            y += 4.0;
+        }
+        assert_eq!(view.button_bar.len(), 1, "扫描点击不应改动按钮列表");
+        // 添加对话框渲染。
+        view.button_dialog = Some(ButtonDialog::new_create());
+        for _ in 0..3 {
+            t += 1.0;
+            headless_frame(&ctx, &mut view, t, vec![]);
+        }
+        assert!(view.button_dialog.is_some(), "未确认/取消时对话框应保持");
+        // 编辑对话框预填渲染。
+        view.button_dialog = Some(ButtonDialog::new_edit(0, &view.button_bar[0]));
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, vec![]);
+        assert!(view.button_dialog.is_some());
     }
 }
