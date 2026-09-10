@@ -344,6 +344,9 @@ pub struct FileManagerView {
     /// 「保存当前选择…」小对话框（非模态 egui::Window，同 BookmarkGroupDialog
     /// 模式）。
     selection_dialog: Option<SaveSelectionDialog>,
+    /// 「编辑注释…」小对话框（阶段 W；非模态 egui::Window，同选择集对话框
+    /// 模式）。
+    comment_dialog: Option<CommentDialog>,
     /// 「选择组」对话框上次使用的模式（会话内记忆，不落盘）。
     select_group_pattern: String,
     /// Alt+↓ 的一次性请求：下一帧焦点栏的历史下拉菜单开/关切换
@@ -406,6 +409,33 @@ impl SaveSelectionDialog {
             name: String::new(),
             focused: false,
             paths,
+        }
+    }
+}
+
+/// 「编辑注释…」对话框状态（阶段 W）：写回目标 = 所属栏当前目录 +
+/// 文件名（descript.ion 按名匹配）。
+struct CommentDialog {
+    /// 所属栏（写回后 reload_comments）。
+    panel: usize,
+    /// 条目文件名（descript.ion 的 key）。
+    name: String,
+    /// 编辑中文本（预填现注释；空 = 删除该条）。
+    text: String,
+    /// 首帧 request_focus 一次性标志（同 SaveSelectionDialog 模式）。
+    focused: bool,
+    /// 上一次写回失败的错误（对话框保持打开并显示）。
+    error: Option<String>,
+}
+
+impl CommentDialog {
+    fn new(panel: usize, name: String, existing: Option<&str>) -> Self {
+        Self {
+            panel,
+            name,
+            text: existing.unwrap_or_default().to_string(),
+            focused: false,
+            error: None,
         }
     }
 }
@@ -655,9 +685,10 @@ fn drag_sources(selected: &HashSet<PathBuf>, row_path: &Path) -> Vec<PathBuf> {
     }
 }
 
-/// 悬停信息提示（明细行与网格 cell 共用）：全路径 + 大小；
-/// 「..」= 上级目录 / 分支模式 = 退出分支视图提示。
-fn row_hover_tip(entry: Option<&FsEntry>, branch: bool) -> String {
+/// 悬停信息提示（明细行与网格/简表 cell 共用）：全路径 + 大小，有注释
+/// （阶段 W descript.ion）时追加注释行；「..」= 上级目录 / 分支模式 =
+/// 退出分支视图提示。
+fn row_hover_tip(entry: Option<&FsEntry>, branch: bool, comment: Option<&str>) -> String {
     match entry {
         None => {
             if branch {
@@ -671,6 +702,11 @@ fn row_hover_tip(entry: Option<&FsEntry>, branch: bool) -> String {
             if !e.is_dir {
                 if let Some(size) = e.size {
                     tip.push_str(&format!("\n大小: {}", human_size(size)));
+                }
+            }
+            if let Some(comment) = comment {
+                if !comment.is_empty() {
+                    tip.push_str(&format!("\n注释: {comment}"));
                 }
             }
             tip
@@ -760,6 +796,7 @@ impl FileManagerView {
             band: None,
             saved_selections: Vec::new(),
             selection_dialog: None,
+            comment_dialog: None,
             select_group_pattern: String::new(),
             history_menu_toggle: false,
             bookmarks_menu_toggle: false,
@@ -1252,6 +1289,7 @@ impl FileManagerView {
         // 书签分组小对话框（新建/重命名；非模态 egui::Window）。
         self.render_group_dialog(ui.ctx());
         self.render_selection_dialog(ui.ctx());
+        self.render_comment_dialog(ui.ctx());
         // 压缩包 ask 小菜单（fm_archive_open = "ask"；鼠标处弹出二选一）。
         self.render_archive_ask_menu(ui.ctx(), &mut intents);
 
@@ -2282,6 +2320,66 @@ impl FileManagerView {
         }
     }
 
+    /// 「编辑注释…」对话框（阶段 W）：多行输入预填现注释；确定写回
+    /// descript.ion（空 = 删除该条）并重读该栏缓存；失败保持打开显示错误。
+    /// Ctrl+Enter = 确认（多行框里 Enter 是换行）。
+    fn render_comment_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.comment_dialog.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancelled = false;
+        egui::Window::new(format!("编辑注释 — {}", dialog.name))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("注释（留空 = 删除该条；换行写回时折叠为空格）：");
+                let response = ui.add(
+                    egui::TextEdit::multiline(&mut dialog.text)
+                        .desired_width(320.0)
+                        .desired_rows(3),
+                );
+                if !dialog.focused {
+                    response.request_focus();
+                    dialog.focused = true;
+                }
+                if response.has_focus()
+                    && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter))
+                {
+                    confirm = true;
+                }
+                if let Some(err) = &dialog.error {
+                    ui.colored_label(ui.visuals().error_fg_color, err);
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("确定").clicked() {
+                        confirm = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        cancelled = true;
+                    }
+                });
+            });
+        if confirm {
+            let dir = self.panels[dialog.panel].dir.clone();
+            match crate::views::fm_comments::write_comment(&dir, &dialog.name, Some(&dialog.text)) {
+                Ok(()) => {
+                    self.panels[dialog.panel].reload_comments();
+                }
+                Err(e) => {
+                    dialog.error = Some(e);
+                    self.comment_dialog = Some(dialog);
+                }
+            }
+        } else if !cancelled && open {
+            self.comment_dialog = Some(dialog);
+        }
+    }
+
     /// 列头：名称 + 固定列（FsPanel::columns 驱动，阶段 V），整列格可点击
     /// 切换排序键与升降序（Comment 列无数据来源不可排序），当前键显示
     /// ▲/▼。列坐标取自 column_layout（与行内容/竖线同一来源）。每个列头
@@ -2688,7 +2786,15 @@ impl FileManagerView {
                         // 各列文本（None = 该单元格留空，如目录的大小列未算
                         // 出/文件的 Attr 无属性；Comment 列占位恒空）。
                         let (text, color) = match kind {
-                            ColumnKind::Name | ColumnKind::Comment => (None, col),
+                            ColumnKind::Name => (None, col),
+                            ColumnKind::Comment => {
+                                // 注释列（阶段 W）：descript.ion 缓存按文件名
+                                // 匹配；无注释留空。弱一档色与大小列区分。
+                                (
+                                    self.panels[idx].comments.get(&e.name).cloned(),
+                                    col.gamma_multiply(0.85),
+                                )
+                            }
                             ColumnKind::Ext => {
                                 // 扩展名列：目录与无扩展名文件留空。
                                 let text = if e.is_dir { None } else { lower_ext(&e.name) };
@@ -2771,7 +2877,14 @@ impl FileManagerView {
                 self.entry_context_menu(ui, idx, rows, row, e, intents);
             });
         }
-        response.on_hover_text(row_hover_tip(entry.as_ref(), branch));
+        response.on_hover_text(row_hover_tip(
+            entry.as_ref(),
+            branch,
+            entry
+                .as_ref()
+                .and_then(|e| self.panels[idx].comments.get(&e.name))
+                .map(String::as_str),
+        ));
     }
 
     /// 条目右键菜单本体（明细行与网格 cell 共用；调用方负责「先单选」
@@ -2861,6 +2974,23 @@ impl FileManagerView {
         ui.separator();
         if ui.button((icons::PENCIL_SIMPLE, " 重命名")).clicked() {
             self.dialog = Some(FmDialog::Rename(RenameDialog::new(e.path.clone())));
+            ui.close();
+        }
+        // 编辑注释（阶段 W）：descript.ion 按文件名匹配当前目录——分支视图
+        // 子目录项（rel_dir 非空）的注释在其各自目录，这里不接盘（禁用）。
+        if ui
+            .add_enabled(
+                e.rel_dir.is_empty(),
+                egui::Button::new((icons::NOTE, " 编辑注释…")),
+            )
+            .on_hover_text("编辑 descript.ion 注释（Ctrl+Shift+Z）")
+            .clicked()
+        {
+            self.comment_dialog = Some(CommentDialog::new(
+                idx,
+                e.name.clone(),
+                self.panels[idx].comments.get(&e.name).map(String::as_str),
+            ));
             ui.close();
         }
         if ui
@@ -3360,7 +3490,14 @@ impl FileManagerView {
                 self.entry_context_menu(ui, idx, rows, row, e, intents);
             });
         }
-        response.on_hover_text(row_hover_tip(entry.as_ref(), branch));
+        response.on_hover_text(row_hover_tip(
+            entry.as_ref(),
+            branch,
+            entry
+                .as_ref()
+                .and_then(|e| self.panels[idx].comments.get(&e.name))
+                .map(String::as_str),
+        ));
     }
 
     /// 双击空白处回上级（fm_dblclick_blank_up）：本帧主键双击命中空白区
@@ -3799,7 +3936,14 @@ impl FileManagerView {
                 self.entry_context_menu(ui, idx, rows, row, e, intents);
             });
         }
-        response.on_hover_text(row_hover_tip(entry.as_ref(), branch));
+        response.on_hover_text(row_hover_tip(
+            entry.as_ref(),
+            branch,
+            entry
+                .as_ref()
+                .and_then(|e| self.panels[idx].comments.get(&e.name))
+                .map(String::as_str),
+        ));
     }
 
     /// 打开一行的默认动作（双击/Enter/右键「打开」共用）：「..」= 上级；
@@ -4595,6 +4739,22 @@ impl FileManagerView {
         // Ctrl+M：批量重命名（作用于选中集或焦点项）。
         if mods.command && ui.input(|i| i.key_pressed(egui::Key::M)) {
             self.open_multi_rename_dialog(active);
+        }
+        // Ctrl+Shift+Z：编辑焦点项注释（阶段 W；Ctrl+Z 预留给撤销，不占）。
+        // 分支视图子目录项同右键菜单门槛（注释写回当前目录 descript.ion）。
+        if mods.command && mods.shift && ui.input(|i| i.key_pressed(egui::Key::Z)) {
+            if let Some(entry) = self.panels[active].focused_entry() {
+                if entry.rel_dir.is_empty() {
+                    self.comment_dialog = Some(CommentDialog::new(
+                        active,
+                        entry.name.clone(),
+                        self.panels[active]
+                            .comments
+                            .get(&entry.name)
+                            .map(String::as_str),
+                    ));
+                }
+            }
         }
         // Ctrl+Q：双栏 = 开关对面栏快速预览（快览面板恒渲染非活动栏位置，
         // 目标 = 活动栏焦点文件）；单栏 = 切换预览面板（同顶栏「预览」）。
@@ -6308,5 +6468,45 @@ mod tests {
         t += 1.0;
         headless_frame(&ctx, &mut view, t, vec![]);
         assert_eq!(view.panels[0].columns.len(), 5);
+    }
+
+    /// 注释（阶段 W）无头冒烟：列举就绪后 descript.ion 进缓存；Comment
+    /// 列渲染不 panic；编辑对话框打开渲染不 panic。
+    #[test]
+    fn comments_render_headless() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), b"x").unwrap();
+        std::fs::write(tmp.path().join("b.txt"), b"x").unwrap();
+        std::fs::write(
+            tmp.path().join("descript.ion"),
+            "a.txt 这是注释\n".as_bytes(),
+        )
+        .unwrap();
+        let mut view = FileManagerView::new("single", 0.5, false, "name", true, &[]);
+        navigate_ready(&mut view.panels[0], tmp.path());
+        assert_eq!(
+            view.panels[0].comments.get("a.txt").map(String::as_str),
+            Some("这是注释")
+        );
+        // Comment 列渲染。
+        view.panels[0].toggle_column(ColumnKind::Comment);
+        let ctx = egui::Context::default();
+        setup_test_fonts(&ctx);
+        let mut t = 0.0;
+        for _ in 0..3 {
+            t += 1.0;
+            headless_frame(&ctx, &mut view, t, vec![]);
+        }
+        // 编辑对话框打开渲染。
+        view.comment_dialog = Some(CommentDialog::new(
+            0,
+            "a.txt".to_string(),
+            view.panels[0].comments.get("a.txt").map(String::as_str),
+        ));
+        for _ in 0..3 {
+            t += 1.0;
+            headless_frame(&ctx, &mut view, t, vec![]);
+        }
+        assert!(view.comment_dialog.is_some(), "未确认/取消时对话框应保持");
     }
 }

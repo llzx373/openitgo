@@ -28,9 +28,9 @@
 |---|---|---|
 | Brief（仅名称多列）/ Full（详细列）/ **缩略图视图** | ✅ 阶段 V：三态（列表/简表/缩略图）顶栏菜单切换；简表 = 多列图标+截断名称（行主序，键盘/框选/空白双击与网格共用机制） | 已对齐（简表为行主序，TC 为列主序） |
 | **分支视图**（Ctrl+B：当前目录+所有子目录文件扁平列出） | ✅ 阶段 E：Ctrl+B 递归扁平列举（上限截断状态栏提示，面包屑 [分支] 标记） | 已对齐 |
-| **自定义列视图**（可增删列、按属性/插件字段配置多套列布局） | ✅ 阶段 V：列头右键勾选增删 Ext/Size/Mtime/Attr/Comment 列（Name 恒首列弹性，固定列 ≥1），`fm_columns` 持久化 | 弱化（单套列配置，无多套列布局/插件字段；Comment 为占位空列，无 descript.ion） |
+| **自定义列视图**（可增删列、按属性/插件字段配置多套列布局） | ✅ 阶段 V：列头右键勾选增删 Ext/Size/Mtime/Attr/Comment 列（Name 恒首列弹性，固定列 ≥1），`fm_columns` 持久化 | 弱化（单套列配置，无多套列布局/插件字段） |
 | 按文件类型**着色规则**（如 .exe 红色、临时文件灰色） | 无（仅图标区分类型） | 缺失 |
-| 文件**注释**列（descript.ion） | 无 | 缺失 |
+| 文件**注释**列（descript.ion） | ✅ 阶段 W：`fm_comments.rs` 读/写 descript.ion（引号名、编码探测、保序重写、清空删文件）；Comment 列接数据 + 悬停 tooltip 追加注释 + 右键「编辑注释…」/Ctrl+Shift+Z 对话框编辑 | 已对齐（分支视图子目录项不读各自目录注释；Ctrl+Z 预留撤销故用 Ctrl+Shift+Z） |
 | 显示系统**真实文件图标**（exe 内嵌图标、图片缩略图图标） | ✅ 阶段 S：SHGetFileInfoW 系统图标（列表 16pt/网格 32pt 档，`fm_system_icons` 可关，Windows）；图片网格另走缩略图 | 已对齐（Windows；非 Windows 字体图标） |
 
 ### 3. 选择与过滤
@@ -258,6 +258,10 @@ F6 移动、F7 新建文件夹、F8/Del 删除。
   列头右键勾选增删 Ext/Size/Mtime/Attr/Comment 列，`fm_columns` 持久化，
   旧档由 `fm_col_*` 播种默认三列；`SortKey::Unsorted`/`Attr` 排序键；
   标签快照补齐排序/列/视图模式）
+- ✅ 文件注释（阶段 W：descript.ion 读/写——引号名、chardetng 编码
+  探测、保序重写、清空删文件、UTF-8 无 BOM；Comment 列接数据 +
+  悬停 tooltip 追加注释行 + 右键「编辑注释…」/Ctrl+Shift+Z 对话框，
+  列举就绪时读入面板缓存、FS watch 变更天然触发重读）
 
 **不做/有意不同（建议保留现状）**
 - 删除/移动源进回收站（比 TC 默认安全）

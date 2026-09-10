@@ -408,6 +408,10 @@ pub struct FsPanel {
     /// restore_tab 后的待恢复滚动偏移（render_list 首帧消费；精确恢复
     /// 偏移而非焦点最小滚动揭示）。
     pending_scroll_restore: Option<f32>,
+    /// 当前目录的 descript.ion 注释缓存（阶段 W；key = 文件名）：
+    /// 列举就绪（Ready）时读取，navigate/refresh 自然重读；FS watch
+    /// 覆盖 descript.ion 变更（改动触发 refresh → 重列 → 重读）。
+    pub comments: HashMap<String, String>,
     /// reveal_path 跨目录/退出注入模式后的待选中项（poll 就绪时应用）。
     pending_reveal: Option<PathBuf>,
 }
@@ -478,6 +482,7 @@ impl FsPanel {
             pending_tab_restore: None,
             pending_scroll_restore: None,
             pending_reveal: None,
+            comments: HashMap::new(),
         }
     }
 
@@ -908,6 +913,7 @@ impl FsPanel {
                     self.anchor = None;
                 }
                 self.state = PanelLoadState::Ready;
+                self.comments = crate::views::fm_comments::read_comments(&self.dir);
                 self.ensure_watch();
                 false
             }
@@ -923,6 +929,11 @@ impl FsPanel {
         if self.wake_ctx.is_none() {
             self.wake_ctx = Some(ctx);
         }
+    }
+
+    /// 重读当前目录的 descript.ion 注释缓存（编辑写回后调用；阶段 W）。
+    pub fn reload_comments(&mut self) {
+        self.comments = crate::views::fm_comments::read_comments(&self.dir);
     }
 
     /// 为当前目录建立 FS 监听；已监听同一路径则跳过（避免每帧重建）。

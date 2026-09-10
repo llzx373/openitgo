@@ -11,6 +11,7 @@ pub mod file_manager_rows;
 pub mod file_manager_search;
 pub mod file_manager_thumbs;
 pub mod file_ops;
+pub mod fm_comments;
 pub mod library;
 pub mod media;
 pub mod preview_bytes;

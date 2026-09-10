@@ -422,7 +422,7 @@ cargo clippy --workspace --all-targets -- -D warnings
   非 List）/`GridBlankGeom` 空白双击/`rubber_band` 框选（grid 参数加
   cell 宽）。**自定义列**：`ColumnKind{Name, Ext, Size, Mtime, Attr,
   Comment}`（panel.rs；`as_str`/`from_setting`/`label`/`sort_key`/
-  `default_width`，Comment 为占位空列不可排序）；`FsPanel::columns:
+  `default_width`，Comment 无排序键——数据见阶段 W）；`FsPanel::columns:
   Vec<(ColumnKind, f32)>` 不变式 **columns[0] 恒为 Name 且弹性宽度**
   （宽度值忽略）、固定列 ≥1（`toggle_column` 维持，列头右键勾选增删，
   唯一固定列置灰）；`column_layout(right, shift, columns)` 从右往左排
@@ -432,7 +432,7 @@ cargo clippy --workspace --all-targets -- -D warnings
   只动 shift，i≥1 调 columns[i] 宽 + shift 吸收，min_shift 按固定列宽
   合计）；列头每格都可右键（排序菜单含「不排序」「属性」+ 升降序 +
   列勾选）；行直绘按 layout.fixed 遍历（Size 目录弱档/Ext 目录留空/
-  Attr = `attr_string`(R/H/S，空留空）/Comment 恒空）。**排序键**：
+  Attr = `attr_string`(R/H/S，空留空）/Comment = 注释）。**排序键**：
   `SortKey::Unsorted`（list_rows 入口早退：read_dir 物理序，不做目录/
   文件分组，asc=false 整体反向）与 `SortKey::Attr`（属性串字典序，
   空垫底同 Ext 约定）；FsEntry 加 `is_readonly`/`is_system`（Windows
@@ -447,6 +447,23 @@ cargo clippy --workspace --all-targets -- -D warnings
   （仅会话内——标签持久化仍只存目录；`restore_tabs` 的标签继承面板
   当前值防重置，空 columns = restore_tab 不覆盖）；`new_tab` 继承当前
   排序/列/模式（选中/过滤/焦点仍不带入）。
+  **文件注释（阶段 W）**：`views/fm_comments.rs` 读写 descript.ion
+  （TC 惯例：每行 `文件名 注释`，名含空白用双引号包裹）。纯函数
+  `parse_comments`（保序、同名后者覆盖、空注释/畸形行跳过）/
+  `format_comments`（引号名、注释内换行与连续空白折叠为单空格——
+  行格式不支持多行）；`read_comments` 经 parser `decode_text_guess`
+  探测编码（UTF-8 BOM 手动剥前缀；GBK 等 ANSI 经 chardetng）；
+  `write_comment(dir, name, Option)`（None/空 = 删除该条；保序重写、
+  新条目追加尾部、条目清空删文件、UTF-8 无 BOM 写出）。**接线**：
+  `FsPanel.comments: HashMap<String,String>` 在列举就绪（poll → Ready）
+  时读入，`reload_comments()` 供编辑写回后重读（FS watch 对
+  descript.ion 的变更经既有 refresh 链路天然重读）；Comment 列直绘与
+  行悬停 tooltip（`row_hover_tip` 第三参数，有注释追加「注释：」行）
+  按**文件名**匹配（分支视图子目录项 rel_dir 非空时注释在其各自目录，
+  不递归读，编辑入口同步禁用）。编辑入口 = 右键「编辑注释…」+
+  Ctrl+Shift+Z（**Ctrl+Z 预留阶段 AG 撤销，勿占**）；`CommentDialog`
+  非模态 egui::Window（同 SaveSelectionDialog 模式），多行输入预填、
+  Ctrl+Enter/确定写回（空 = 删除），失败保持打开显示错误。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`
