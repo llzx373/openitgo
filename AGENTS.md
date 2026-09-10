@@ -176,7 +176,9 @@ cargo clippy --workspace --all-targets -- -D warnings
   （见「过滤增强（阶段 T）」段）/`fm_rubber_band`（见「选择增强（阶段 U）」
   段）/`fm_columns`（明细列表列配置，见「显示模式与自定义列（阶段 V）」
   段）/`fm_command_bar`（命令行输入条，见「命令行输入条（阶段 X）」段）/
-  `fm_button_bar`（自定义按钮栏，见「自定义按钮栏（阶段 Y）」段）；`FileManagerView::snapshot()`
+  `fm_button_bar`（自定义按钮栏，见「自定义按钮栏（阶段 Y）」段）/
+  `fm_watch_recursive`（递归目录 watch，见「拖放/剪贴板/watch 收尾（阶段 Z）」
+  段）；`FileManagerView::snapshot()`
   采集，`maybe_save_fm_state`（`App::update` 末尾）diff 快照后写回 settings——
   **不自行落盘**，退出时 `on_exit` 统一 `save_settings`（排序只持久化活动栏，
   取舍见 `FmStateSnapshot` 注释）；快照在离开 FileManager 视图时重置。设置页
@@ -512,6 +514,29 @@ cargo clippy --workspace --all-targets -- -D warnings
   `file_manager_ui` 因此从静态方法改为 `&mut self`）直接改 settings，
   render_settings 前后 diff 后经 `set_button_bar` 同步休眠视图（同
   apply_layout_settings 先例，防快照写回覆盖）。
+  **拖放/剪贴板/watch 收尾（阶段 Z）**：① **拖到面包屑段/标签复制**——
+  `render_breadcrumb`/`render_tab_bar` 渲染时把「目录 → rect」记进
+  `breadcrumb_drop_rects`/`tab_drop_rects`（帧首 clear，同 panel_drop_rects
+  模式；标签只记非当前标签）；`poll_inter_panel_dnd` 在 Dual 早退**之前**
+  遍历两列表做落点判定（单栏也接收），跳过源栏当前目录（当前段/当前标签
+  天然命中），悬停淡底+选中色描边高亮，松开按 `fm_drag_confirm` 弹
+  CopyMove 框或直拷自动改名（此落点不做 Shift 移动，栏体落点才支持）。
+  ② **拖出 MOVE 语义**：`do_drag_drop(files, allow_move) -> Result<bool,
+  String>`（Ok(true) = 落点实际执行了 MOVE；DRAGDROP_S_CANCEL 归一为
+  Ok(false)）；FM `poll_drag_out_external` 在进 OLE 模态**前**快照 Shift
+  （模态内 egui 输入不更新），Shift = allow_move，返回 MOVE 且成功 → 源经
+  `start_delete(sources, false)` 走既有回收站 Delete 任务；Archive 视图
+  调用点维持 COPY-only（传 false）。③ **macOS 剪贴板文件列表**：
+  `platform/macos/clipboard_files.rs`（raw `msg_send!` + `#[link(Cocoa)]`，
+  不引 objc2-app-kit——树内 objc2-foundation 0.2 与 objc2 0.6 不兼容；
+  **本机只编 Windows，该文件未经本地编译验证，依赖 CI/真机**）：
+  `set_files` 经 generalPasteboard `writeObjects:` NSURL 数组（cut 语义
+  忽略，恒复制），`get_files` 经 `readObjectsForClasses:` 读回且
+  is_cut 恒 false；clipboard stub 的 cfg 收窄为 `not(any(windows, macos))`。
+  ④ **`fm_watch_recursive`**（默认 false）：`FsPanel.watch_recursive` 经
+  `FmBehaviorOptions` 每帧下发，`try_watch` 按标志选 RecursiveMode；
+  `ensure_watch` 跳过条件含 `w.recursive == self.watch_recursive`——选项
+  变化自动重建 watcher。大目录/网络盘递归监听开销大，设置页 hint 已注明。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

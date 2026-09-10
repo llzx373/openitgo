@@ -456,6 +456,11 @@ impl SettingsView {
         hint(ui, "开启后过滤框渲染在焦点栏列表底部，关闭则在顶栏右侧");
         ui.checkbox(&mut settings.fm_command_bar, "显示命令行输入条");
         hint(ui, "底部命令行条：Enter 执行 shell 命令，↑/↓ 回填历史，Ctrl+P 送当前路径、Ctrl+Enter 送焦点项文件名");
+        ui.checkbox(&mut settings.fm_watch_recursive, "递归监听子目录变化");
+        hint(
+            ui,
+            "目录自动刷新默认只盯当前层；开启后子目录变化也触发刷新。大目录/网络盘开销大，默认关",
+        );
         ui.horizontal(|ui| {
             ui.label("默认布局");
             egui::ComboBox::from_id_salt("fm_layout")

@@ -776,6 +776,7 @@ fn fm_behavior_options(settings: &Settings) -> FmBehaviorOptions {
         filter_bar_bottom: settings.fm_filter_bar_bottom,
         rubber_band: RubberBandMode::from_setting(&settings.fm_rubber_band),
         command_bar: settings.fm_command_bar,
+        watch_recursive: settings.fm_watch_recursive,
     }
 }
 

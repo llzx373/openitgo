@@ -591,8 +591,9 @@ impl ArchiveView {
                 let left_window = pos.is_none_or(|p| !viewport.contains(p));
                 if left_window {
                     // 模态阻塞；DROP/CANCEL 返回后本次拖出都结束。暂存目录不删
-                    // （落点可能还在读，交给 24h clean_stale 兜底）。
-                    if let Err(e) = crate::platform::drag_out::do_drag_drop(&files) {
+                    // （落点可能还在读，交给 24h clean_stale 兜底）。Archive 拖出
+                    // 恒 COPY-only（源是只读压缩包，MOVE 无意义，阶段 Z 签名）。
+                    if let Err(e) = crate::platform::drag_out::do_drag_drop(&files, false) {
                         self.drag_error = Some(e);
                     }
                 } else {

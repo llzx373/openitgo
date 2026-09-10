@@ -194,6 +194,10 @@ pub struct Settings {
     /// 按钮」占位。clamp 去空白，label/command 缺一则移除该按钮。
     #[serde(default)]
     pub fm_button_bar: Vec<FmButton>,
+    /// 目录 watch 递归监听子目录（阶段 Z；默认 false 只盯当前层——大目录/
+    /// 网络盘递归监听开销大）。
+    #[serde(default)]
+    pub fm_watch_recursive: bool,
 }
 
 fn default_fm_rubber_band() -> String {
@@ -320,6 +324,7 @@ impl Default for Settings {
             fm_rubber_band: default_fm_rubber_band(),
             fm_command_bar: true,
             fm_button_bar: Vec::new(),
+            fm_watch_recursive: false,
         }
     }
 }
@@ -1292,6 +1297,21 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let loaded: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(s.fm_button_bar, loaded.fm_button_bar);
+    }
+
+    #[test]
+    fn test_fm_watch_recursive_default() {
+        // 旧 settings 无字段：默认 false（只盯当前层）。
+        let loaded: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!loaded.fm_watch_recursive);
+        // roundtrip。
+        let s = Settings {
+            fm_watch_recursive: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert!(loaded.fm_watch_recursive);
     }
 
     #[test]

@@ -200,6 +200,9 @@ pub struct FmBehaviorOptions {
     pub rubber_band: RubberBandMode,
     /// 底部命令行输入条（fm_command_bar，阶段 X）。
     pub command_bar: bool,
+    /// 递归 FS watch（fm_watch_recursive，阶段 Z）：true 时分支视图下
+    /// 子目录变化也触发刷新（大目录有性能取舍）。
+    pub watch_recursive: bool,
 }
 
 impl Default for FmBehaviorOptions {
@@ -219,6 +222,7 @@ impl Default for FmBehaviorOptions {
             filter_bar_bottom: false,
             rubber_band: RubberBandMode::Right,
             command_bar: true,
+            watch_recursive: false,
         }
     }
 }
@@ -395,6 +399,11 @@ pub struct FileManagerView {
     sys_icons: SysIconCache,
     /// 外部拖入的落点区域（render_panels 每帧记录；快览替换栏为 None）。
     panel_drop_rects: [Option<egui::Rect>; 2],
+    /// 栏内拖放（FmDragPayload）的面包屑段/标签落点 rect（阶段 Z）：
+    /// render_breadcrumb / render_tab_bar 每帧重记录（ui() 帧首清空），
+    /// poll_inter_panel_dnd 判定悬停高亮与松开复制；(目标目录, rect)。
+    breadcrumb_drop_rects: Vec<(PathBuf, egui::Rect)>,
+    tab_drop_rects: Vec<(PathBuf, egui::Rect)>,
     /// 文件搜索对话框（Alt+F7；非模态 egui::Window，worker 关闭即取消）。
     search: SearchDialog,
     /// 书签分组小对话框（新建/重命名；非模态 egui::Window，同 SelectGroupDialog
@@ -873,6 +882,8 @@ impl FileManagerView {
             thumb_visible: [None, None],
             sys_icons: SysIconCache::new(),
             panel_drop_rects: [None, None],
+            breadcrumb_drop_rects: Vec::new(),
+            tab_drop_rects: Vec::new(),
             search: SearchDialog::default(),
             group_dialog: None,
             pending_conflict: None,
@@ -1063,6 +1074,9 @@ impl FileManagerView {
         for panel in &mut self.panels {
             panel.show_hidden = options.show_hidden;
             panel.dirs_first = options.dirs_first;
+            // 递归 watch 选项（阶段 Z）：每帧下发，ensure_watch 按
+            // (路径, recursive) 跳过/重建。
+            panel.watch_recursive = options.watch_recursive;
             // FS watch 回调唤醒 UI 用（首帧注入，后续 no-op）。
             panel.set_wake_ctx(ui.ctx().clone());
         }
@@ -1314,6 +1328,10 @@ impl FileManagerView {
         }
 
         // 中央：双栏 + 可拖分隔条 / 单栏 + 预览占位。
+        // 面包屑段/标签拖放落点 rect（阶段 Z）在 render_panels 内重记录，
+        // 帧首清空（同 panel_drop_rects 模式，只是记录点在渲染内部）。
+        self.breadcrumb_drop_rects.clear();
+        self.tab_drop_rects.clear();
         let panel_rects = self.render_panels(ui, &mut intents);
 
         // 外部拖入的落点区域（app 侧 handle_dropped_files 经 panel_rect_at
@@ -2051,6 +2069,11 @@ impl FileManagerView {
                         let resp = ui
                             .add(egui::Button::new(tab_label(&dir)).selected(i == active_tab))
                             .on_hover_text(dir.display().to_string());
+                        // 拖放落点 rect（阶段 Z）：非当前标签才记（当前标签 =
+                        // 本栏目录，拖上没有意义）。
+                        if i != active_tab {
+                            self.tab_drop_rects.push((dir.clone(), resp.rect));
+                        }
                         if resp.clicked() {
                             action = Some(TabAction::Switch(i));
                         }
@@ -2178,12 +2201,14 @@ impl FileManagerView {
                         } else {
                             egui::RichText::new(label)
                         };
-                        if ui
+                        let seg_resp = ui
                             .selectable_label(i == last, text)
-                            .on_hover_text(path.display().to_string())
-                            .clicked()
-                            && i != last
-                        {
+                            .on_hover_text(path.display().to_string());
+                        // 拖放落点 rect（阶段 Z）：全部段都记（含当前段——
+                        // 同目录跳过由 poll_inter_panel_dnd 判定）。
+                        self.breadcrumb_drop_rects
+                            .push((path.clone(), seg_resp.rect));
+                        if seg_resp.clicked() && i != last {
                             jump = Some(path.clone());
                         }
                     }
@@ -4436,11 +4461,57 @@ impl FileManagerView {
                     });
             }
         }
+        // 面包屑段/标签落点（阶段 Z，单/双栏通用，优先于栏体落点）：
+        // 悬停高亮该段/标签，松开 = 复制到其目录（确认框沿用 fm_drag_confirm；
+        // 免确认模式直拷自动改名，不做 Shift 移动——栏体落点才支持）。
+        let layer = ui.layer_id();
+        let released = ctx.input(|i| i.pointer.primary_released());
+        let mut drop_dest: Option<PathBuf> = None;
+        if pointer_down || released {
+            for (target, rect) in self
+                .breadcrumb_drop_rects
+                .iter()
+                .chain(self.tab_drop_rects.iter())
+            {
+                // 拖回源栏当前目录无意义（当前段/当前标签天然落在此）。
+                if *target == self.panels[payload.src_panel].dir {
+                    continue;
+                }
+                if !ctx.rect_contains_pointer(layer, *rect) {
+                    continue;
+                }
+                if pointer_down {
+                    // 高亮落点段/标签：栏体落点同款淡底 + 选中色描边。
+                    let painter = ui.painter();
+                    painter.rect_filled(*rect, 2.0, ui.visuals().faint_bg_color);
+                    painter.rect_stroke(
+                        *rect,
+                        2.0,
+                        egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                        egui::StrokeKind::Inside,
+                    );
+                } else {
+                    drop_dest = Some(target.clone());
+                }
+            }
+        }
+        if let Some(dest) = drop_dest {
+            egui::DragAndDrop::clear_payload(ctx);
+            let sources = payload.sources.clone();
+            if self.options.drag_confirm {
+                self.dialog = Some(FmDialog::CopyMove(CopyMoveDialog::new(
+                    OpKind::Copy,
+                    sources,
+                    &dest,
+                )));
+            } else {
+                self.ops.start_copy(sources, dest, ConflictMode::AutoRename);
+            }
+            return;
+        }
         if !matches!(self.layout, PanelLayout::Dual { .. }) {
             return;
         }
-        let released = ctx.input(|i| i.pointer.primary_released());
-        let layer = ui.layer_id();
         let mut drop_sources: Option<Vec<PathBuf>> = None;
         for &(idx, rect) in panel_rects {
             // 快览面板（被替换的非活动栏）不作为落点（不高亮、不响应 drop）。
@@ -4500,9 +4571,11 @@ impl FileManagerView {
     }
 
     /// FM 行拖出窗口（Windows OLE）：拖动中位移 >40pt 且指针出窗 → 清
-    /// egui payload 后 do_drag_drop（文件本就在盘上无需暂存，COPY-only
-    /// 同 drag_out 现状）。松开未出窗 = 栏间拖放现状（egui dnd 插件
-    /// 自行管理 payload，本函数不介入）；Esc 取消由 egui 内建处理。
+    /// egui payload 后 do_drag_drop（文件本就在盘上无需暂存）。按住 Shift
+    /// 拖出允许 MOVE（阶段 Z）：落点实际执行 MOVE 且成功后，源经
+    /// file_ops Delete 任务进回收站（保进度/回收站语义）。松开未出窗 =
+    /// 栏间拖放现状（egui dnd 插件自行管理 payload，本函数不介入）；
+    /// Esc 取消由 egui 内建处理。
     fn poll_drag_out_external(&mut self, ctx: &egui::Context, intents: &mut FmIntents) {
         if !crate::platform::drag_out::is_supported() {
             return;
@@ -4527,8 +4600,14 @@ impl FileManagerView {
         let sources = payload.sources.clone();
         egui::DragAndDrop::clear_payload(ctx);
         // 模态阻塞（自带消息循环）；DROP/CANCEL 返回后本次拖出都结束。
-        if let Err(e) = crate::platform::drag_out::do_drag_drop(&sources) {
-            intents.op_error = Some(e);
+        // Shift 在进模态前快照（模态内 egui 输入不再更新）。
+        let allow_move = ctx.input(|i| i.modifiers.shift);
+        match crate::platform::drag_out::do_drag_drop(&sources, allow_move) {
+            // 落点执行了 MOVE：源进回收站（Delete 任务带进度；失败会在
+            // on_op_finished 汇总上报）。
+            Ok(true) => self.start_delete(sources, false),
+            Ok(false) => {}
+            Err(e) => intents.op_error = Some(e),
         }
     }
 
@@ -6610,6 +6689,90 @@ mod tests {
         t += 0.1;
         headless_frame(&ctx, &mut view, t, vec![press(mid, false)]);
         assert!(view.dialog.is_none(), "拖回源栏不应弹框");
+    }
+
+    /// 阶段 Z：拖到面包屑段松开 = 复制到该段目录（沿用 fm_drag_confirm
+    /// 确认框）；面包屑落点在单栏也接收（优先于栏体落点、Dual 早退之前）。
+    #[test]
+    fn drag_row_to_breadcrumb_segment_opens_copy_dialog() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("a.txt"), b"x").unwrap();
+        let mut view = FileManagerView::new("single", 0.5, false, "name", true, &[]);
+        navigate_ready(&mut view.panels[0], &sub);
+        let ctx = egui::Context::default();
+        setup_test_fonts(&ctx);
+        let mut t = 0.0;
+        headless_frame(&ctx, &mut view, t, vec![]); // 布局帧
+
+        // 面包屑落点 rect 记录：末段 = 当前目录，且含父目录段。
+        assert_eq!(
+            view.breadcrumb_drop_rects.last().map(|(p, _)| p),
+            Some(&sub),
+            "面包屑末段应为当前目录"
+        );
+        let seg_rect = view
+            .breadcrumb_drop_rects
+            .iter()
+            .find(|(p, _)| *p == tmp.path())
+            .map(|(_, r)| *r)
+            .expect("面包屑应含父目录段");
+
+        let pos = locate_file_row(&ctx, &mut view, &mut t, "a.txt");
+        let press = |pos: egui::Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        // 起拖（按下 + 位移超过拖拽阈值）。
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, vec![press(pos, true)]);
+        t += 0.1;
+        let mid = egui::pos2(pos.x + 30.0, pos.y + 10.0);
+        headless_frame(&ctx, &mut view, t, vec![egui::Event::PointerMoved(mid)]);
+        assert!(egui::DragAndDrop::has_payload_of_type::<FmDragPayload>(
+            &ctx
+        ));
+
+        // 按住悬停父目录段：只高亮，不弹框。
+        let seg_pos = seg_rect.center();
+        t += 0.1;
+        headless_frame(&ctx, &mut view, t, vec![egui::Event::PointerMoved(seg_pos)]);
+        assert!(view.dialog.is_none(), "悬停落点段不应弹框");
+
+        // 松开 → 弹「复制到 tmp」确认框，payload 清空。
+        t += 0.1;
+        headless_frame(
+            &ctx,
+            &mut view,
+            t,
+            vec![egui::Event::PointerMoved(seg_pos), press(seg_pos, false)],
+        );
+        assert!(
+            matches!(view.dialog, Some(FmDialog::CopyMove(_))),
+            "drop 到面包屑段应弹「复制到…」确认框"
+        );
+        assert!(!egui::DragAndDrop::has_any_payload(&ctx));
+    }
+
+    /// 阶段 Z：标签落点 rect 只记录非当前标签；当前目录天然被 poll 跳过。
+    #[test]
+    fn tab_drop_rects_track_inactive_tabs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut view = FileManagerView::new("single", 0.5, false, "name", true, &[]);
+        navigate_ready(&mut view.panels[0], tmp.path());
+        let ctx = egui::Context::default();
+        setup_test_fonts(&ctx);
+        headless_frame(&ctx, &mut view, 0.0, vec![]); // 布局帧
+        assert!(view.tab_drop_rects.is_empty(), "单标签时不应有标签落点");
+
+        // 新开标签（复制当前目录并切过去）：原标签成为落点。
+        view.panels[0].new_tab();
+        headless_frame(&ctx, &mut view, 1.0, vec![]);
+        assert_eq!(view.tab_drop_rects.len(), 1, "只记录非当前标签");
+        assert_eq!(view.tab_drop_rects[0].0, tmp.path());
     }
 
     // ---- 预览链路回归（查看预览崩溃）----

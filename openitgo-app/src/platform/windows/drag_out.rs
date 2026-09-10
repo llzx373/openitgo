@@ -19,7 +19,7 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::{
     DoDragDrop, IDropSource, IDropSource_Impl, OleInitialize, OleUninitialize, CF_HDROP,
-    DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
+    DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_MOVE, DROPEFFECT_NONE,
 };
 use windows::Win32::System::SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS};
 use windows::Win32::UI::Shell::DROPFILES;
@@ -30,32 +30,40 @@ pub fn is_supported() -> bool {
 }
 
 /// 对一组已落盘文件发起 OLE 拖出（阻塞至拖放结束或被取消）。
-pub fn do_drag_drop(files: &[PathBuf]) -> Result<(), String> {
+/// `allow_move` = true 时允许 `DROPEFFECT_COPY | DROPEFFECT_MOVE`（FM 拖出
+/// 按 Shift 置位）；返回 Ok(true) 表示落点实际执行了 MOVE（调用方负责删源）。
+/// 压缩包拖出恒 COPY-only（源是只读压缩包，MOVE 无意义）。
+pub fn do_drag_drop(files: &[PathBuf], allow_move: bool) -> Result<bool, String> {
     if files.is_empty() {
         return Err("没有可拖出的文件".to_string());
     }
     unsafe {
         OleInitialize(None).map_err(|e| format!("OleInitialize 失败: {e}"))?;
-        let result = drag_drop_inner(files);
+        let result = drag_drop_inner(files, allow_move);
         OleUninitialize();
         result
     }
 }
 
-unsafe fn drag_drop_inner(files: &[PathBuf]) -> Result<(), String> {
+unsafe fn drag_drop_inner(files: &[PathBuf], allow_move: bool) -> Result<bool, String> {
     let data: IDataObject = FileDataObject {
         files: files.to_vec(),
     }
     .into();
     let source: IDropSource = SimpleDropSource.into();
     let mut effect = DROPEFFECT_NONE;
-    // 压缩包拖出惯例只允许 COPY（源是只读压缩包，MOVE 无意义）。
-    let hr = unsafe { DoDragDrop(&data, &source, DROPEFFECT_COPY, &mut effect) };
+    let allowed = if allow_move {
+        DROPEFFECT_COPY | DROPEFFECT_MOVE
+    } else {
+        DROPEFFECT_COPY
+    };
+    let hr = unsafe { DoDragDrop(&data, &source, allowed, &mut effect) };
     // DRAGDROP_S_CANCEL（用户 Esc/右键取消）是 S 开头的成功码，不算错误。
     if hr == DRAGDROP_S_CANCEL {
-        return Ok(());
+        return Ok(false);
     }
-    hr.ok().map_err(|e| format!("拖放失败: {e}"))
+    hr.ok().map_err(|e| format!("拖放失败: {e}"))?;
+    Ok(effect & DROPEFFECT_MOVE == DROPEFFECT_MOVE)
 }
 
 /// 把路径表编码为 HDROP 的宽字符负载：各路径 UTF-16 + NUL，末尾再补一个 NUL。

@@ -283,13 +283,15 @@ struct RowsKey {
     branch: bool,
 }
 
-/// 当前目录的 FS 变更监听（非递归）：事件经 channel 汇入 poll 去抖后
+/// 当前目录的 FS 变更监听：事件经 channel 汇入 poll 去抖后
 /// 触发 refresh；watcher drop 即停止监听。
 struct PanelWatch {
     /// 监听句柄（仅保活，drop 停止监听）。
     _watcher: notify::RecommendedWatcher,
-    /// 已监听的目录（与 dir 相同则跳过重建）。
+    /// 已监听的目录（与 dir 相同且 recursive 一致则跳过重建）。
     path: PathBuf,
+    /// 建立时的递归模式（fm_watch_recursive；选项变化时重建）。
+    recursive: bool,
     rx: crossbeam_channel::Receiver<()>,
     /// 最近一次事件时间（去抖基准；None = 无待刷新事件）。
     last_event: Option<Instant>,
@@ -303,9 +305,11 @@ fn watch_debounce_ready(last: Option<Instant>, now: Instant) -> bool {
     }
 }
 
-/// 为目录建立非递归 FS 监听：事件发 channel 信号并经 wake_ctx 唤醒 UI
+/// 为目录建立 FS 监听：事件发 channel 信号并经 wake_ctx 唤醒 UI
 /// （egui 空闲不重绘）；建立失败（网络盘/权限/路径不存在）静默降级 None。
-fn try_watch(path: &Path, wake_ctx: Option<egui::Context>) -> Option<PanelWatch> {
+/// `recursive` = true 时 RecursiveMode::Recursive（fm_watch_recursive，
+/// 阶段 Z：分支视图下子目录变化也刷新；大目录有性能取舍，默认非递归）。
+fn try_watch(path: &Path, wake_ctx: Option<egui::Context>, recursive: bool) -> Option<PanelWatch> {
     use notify::{RecursiveMode, Watcher};
     let (tx, rx) = crossbeam_channel::unbounded();
     let mut watcher = notify::recommended_watcher(move |_res: notify::Result<notify::Event>| {
@@ -315,10 +319,16 @@ fn try_watch(path: &Path, wake_ctx: Option<egui::Context>) -> Option<PanelWatch>
         }
     })
     .ok()?;
-    watcher.watch(path, RecursiveMode::NonRecursive).ok()?;
+    let mode = if recursive {
+        RecursiveMode::Recursive
+    } else {
+        RecursiveMode::NonRecursive
+    };
+    watcher.watch(path, mode).ok()?;
     Some(PanelWatch {
         _watcher: watcher,
         path: path.to_path_buf(),
+        recursive,
         rx,
         last_event: None,
     })
@@ -348,6 +358,10 @@ pub struct FsPanel {
     /// 是否显示隐藏文件（settings.fm_show_hidden 经 ui() 每帧下发；
     /// 纳入 RowsKey，切换时 rows_cache 自动失效）。
     pub show_hidden: bool,
+    /// 递归 FS watch（settings.fm_watch_recursive 经 ui() 每帧下发，阶段 Z）：
+    /// true 时分支视图下子目录变化也触发刷新；ensure_watch 按
+    /// (路径, recursive) 判定重建。
+    pub watch_recursive: bool,
     /// 目录恒排在文件前（settings.fm_dirs_first 经 ui() 每帧下发；
     /// false = 目录文件混排统一排序；纳入 RowsKey 同 show_hidden）。
     pub dirs_first: bool,
@@ -457,6 +471,7 @@ impl FsPanel {
             view_mode: PanelViewMode::List,
             last_grid_cols: 1,
             show_hidden: true,
+            watch_recursive: false,
             dirs_first: true,
             branch_view: false,
             listing_truncated: false,
@@ -936,17 +951,18 @@ impl FsPanel {
         self.comments = crate::views::fm_comments::read_comments(&self.dir);
     }
 
-    /// 为当前目录建立 FS 监听；已监听同一路径则跳过（避免每帧重建）。
+    /// 为当前目录建立 FS 监听；已监听同一路径且递归模式一致则跳过
+    /// （避免每帧重建）；fm_watch_recursive 选项变化时按新模式重建。
     fn ensure_watch(&mut self) {
         if self
             .watch
             .as_ref()
-            .map(|w| w.path == self.dir)
+            .map(|w| w.path == self.dir && w.recursive == self.watch_recursive)
             .unwrap_or(false)
         {
             return;
         }
-        self.watch = try_watch(&self.dir, self.wake_ctx.clone());
+        self.watch = try_watch(&self.dir, self.wake_ctx.clone(), self.watch_recursive);
     }
 
     /// 排空 FS 监听事件：去抖 300ms 后触发 refresh（保留选中，同 Ctrl+R）。
@@ -1804,7 +1820,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        assert!(try_watch(&missing, None).is_none());
+        assert!(try_watch(&missing, None, false).is_none());
     }
 
     /// 集成：navigate 就绪后建立 watch；外部在目录里新建文件，事件经
@@ -1856,6 +1872,43 @@ mod tests {
         }
         assert!(matches!(panel.state, PanelLoadState::Ready));
         assert_eq!(panel.watch.as_ref().map(|w| w.path.clone()), Some(sub));
+    }
+
+    /// 递归 watch（fm_watch_recursive，阶段 Z）：子目录内的新建文件也触发
+    /// refresh（非递归只看当前层）。子目录新文件不进当前层 entries，以
+    /// entries_version 变化为 refresh 证据。
+    #[test]
+    fn watch_recursive_sees_subdir_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        panel.watch_recursive = true;
+        panel.navigate_to(tmp.path().to_path_buf());
+        for _ in 0..200 {
+            if !panel.poll() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(matches!(panel.state, PanelLoadState::Ready));
+        assert!(
+            panel.watch.as_ref().is_some_and(|w| w.recursive),
+            "watch_recursive = true 时应建递归 watcher"
+        );
+
+        let version = panel.entries_version;
+        std::fs::write(sub.join("deep-new-file.txt"), b"x").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            panel.poll();
+            if panel.entries_version != version {
+                break;
+            }
+            assert!(Instant::now() < deadline, "递归 watch 未感知子目录变化");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(matches!(panel.state, PanelLoadState::Ready));
     }
 
     /// 反选与「选择组」模式选择：作用于当前可见行（不含「..」行），

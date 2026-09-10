@@ -2,6 +2,7 @@
 
 #[cfg(target_os = "macos")]
 pub mod macos {
+    pub mod clipboard_files;
     pub mod mpv_view;
 
     use crate::loader::{dynamic_to_loaded_image, LoadedImage, MAX_IMAGE_DIMENSION};
@@ -922,8 +923,8 @@ pub mod drag_out {
         false
     }
 
-    /// 非 Windows 不支持 OLE 拖出。
-    pub fn do_drag_drop(_files: &[PathBuf]) -> Result<(), String> {
+    /// 非 Windows 不支持 OLE 拖出（签名与 Windows 版一致；返回值无意义）。
+    pub fn do_drag_drop(_files: &[PathBuf], _allow_move: bool) -> Result<bool, String> {
         Err("拖出解压仅支持 Windows".to_string())
     }
 }
@@ -932,28 +933,32 @@ pub mod drag_out {
 #[cfg(target_os = "windows")]
 pub use windows::drag_out;
 
-/// 系统剪贴板文件列表 stub（非 Windows）：写返回 Err，读恒 None。
-#[cfg(not(target_os = "windows"))]
+/// 系统剪贴板文件列表 stub（Linux）：写返回 Err，读恒 None。
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub mod clipboard_files {
     use std::path::PathBuf;
 
-    /// 非 Windows 不支持系统剪贴板文件列表。
+    /// 非 Windows/macOS 不支持系统剪贴板文件列表。
     pub fn set_files(_paths: &[PathBuf], _cut: bool) -> Result<(), String> {
-        Err("系统剪贴板文件列表仅支持 Windows".to_string())
+        Err("系统剪贴板文件列表仅支持 Windows/macOS".to_string())
     }
 
-    /// 非 Windows 不支持系统剪贴板文件列表。
+    /// 非 Windows/macOS 不支持系统剪贴板文件列表。
     pub fn get_files() -> Option<(Vec<PathBuf>, bool)> {
         None
     }
 
-    /// 非 Windows 无需清空。
+    /// 非 Windows/macOS 无需清空。
     pub fn clear() {}
 }
 
 /// Unified clipboard-files API (`crate::platform::clipboard_files`)。
 #[cfg(target_os = "windows")]
 pub use windows::clipboard_files;
+
+/// Unified clipboard-files API (`crate::platform::clipboard_files`)。
+#[cfg(target_os = "macos")]
+pub use macos::clipboard_files;
 
 /// Shell 动词 stub（非 Windows）：`is_supported` 恒 false，调用一律 Err。
 #[cfg(not(target_os = "windows"))]
