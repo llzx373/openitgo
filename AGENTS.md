@@ -620,6 +620,21 @@ cargo clippy --workspace --all-targets -- -D warnings
   `<name>.crc`（sfv 单行，复用阶段 AC `parse_checksum_file`）存在时
   流式顺带 CRC32 校验（不一致记 errors、结果保留）。错误汇总窗
   Split/Merge 不支持「重试失败项」（失败项为产出文件非源）。
+  **同步目录（阶段 AE）**：`file_manager_sync.rs` 非模态 `SyncDialog`
+  （FileManagerView 持 `sync_dialog` 字段；顶栏「同步」按钮双栏才渲染、
+  两栏目录不同才可用，右键「同步目录…」同条件）。打开即后台
+  `SyncCompareTask` 递归对比（`collect_tree` 迭代栈：不跟进符号链接、
+  单项失败跳过、cancel 提前返回；进度 = 已扫描条目数）；`diff_dir_trees`
+  纯函数（输入 `TreeMap` = rel 路径 → TreeMeta，不碰磁盘可单测）分类
+  OnlyLeft/OnlyRight/LeftNewer/RightNewer/Same——文件大小不同按 mtime
+  新者归类（mtime 相同大小不同归 LeftNewer），大小相同 mtime 差 ≤2s
+  视为 Same（FAT 精度），目录只参与 OnlyX、dir↔file 类型不一致归
+  LeftNewer 由引擎报错兜底。结果虚拟化列表，Same 默认隐藏（checkbox
+  可开）。执行：`build_sync_plan` 纯函数产出 Copy（Overwrite）/Delete
+  （回收站）任务组——`keep_top_level` 去嵌套（父在集合内后代丢弃，
+  目录整体复制）；左→右 = OnlyLeft+LeftNewer 复制到右、可选删除
+  OnlyRight；右→左对称；双向 = OnlyLeft→右 + OnlyRight→左 + 新覆盖旧、
+  无删除。「交换左右」交换目录并重对比。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

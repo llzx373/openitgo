@@ -11,6 +11,7 @@ pub mod file_manager_panel;
 pub mod file_manager_rename;
 pub mod file_manager_rows;
 pub mod file_manager_search;
+pub mod file_manager_sync;
 pub mod file_manager_thumbs;
 pub mod file_ops;
 pub mod fm_comments;

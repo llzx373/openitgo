@@ -25,6 +25,7 @@ use crate::views::file_manager_panel::{
 };
 use crate::views::file_manager_rows::{attr_string, lower_ext, FsEntry, SortKey};
 use crate::views::file_manager_search::{SearchDialog, SearchUiAction};
+use crate::views::file_manager_sync::{SyncDialog, SyncUiAction};
 use crate::views::file_manager_thumbs::{
     grid_cols, grid_row_count, grid_row_of, truncate_cell_name, ThumbCache, ThumbKey, ThumbLookup,
     THUMB_CELL_H, THUMB_CELL_W, THUMB_MAX_DIM,
@@ -414,6 +415,8 @@ pub struct FileManagerView {
     search: SearchDialog,
     /// 校验和对话框（阶段 AC；非模态 egui::Window，worker 关闭即取消）。
     checksum: ChecksumDialog,
+    /// 同步目录对话框（阶段 AE；非模态 egui::Window，对比 worker 关闭即取消）。
+    sync_dialog: SyncDialog,
     /// 「修改属性/时间戳…」对话框（阶段 AC；comment_dialog 同款非模态模式）。
     attr_dialog: Option<AttrTimestampDialog>,
     /// 书签分组小对话框（新建/重命名；非模态 egui::Window，同 SelectGroupDialog
@@ -913,6 +916,7 @@ impl FileManagerView {
             tab_drop_rects: Vec::new(),
             search: SearchDialog::default(),
             checksum: ChecksumDialog::default(),
+            sync_dialog: SyncDialog::default(),
             attr_dialog: None,
             group_dialog: None,
             pending_conflict: None,
@@ -1436,6 +1440,8 @@ impl FileManagerView {
         // 校验和 + 属性/时间戳对话框（阶段 AC；非模态 egui::Window）。
         self.checksum.ui(ui.ctx());
         self.render_attr_dialog(ui.ctx());
+        // 同步目录对话框（阶段 AE；非模态 egui::Window）。
+        self.render_sync_dialog(ui.ctx());
         // 书签分组小对话框（新建/重命名；非模态 egui::Window）。
         self.render_group_dialog(ui.ctx());
         self.render_selection_dialog(ui.ctx());
@@ -1615,6 +1621,22 @@ impl FileManagerView {
                 .clicked()
             {
                 self.task_panel_open = !self.task_panel_open;
+            }
+            // 同步目录（阶段 AE）：仅双栏渲染（单栏隐藏），两栏目录不同才可用。
+            if matches!(self.layout, PanelLayout::Dual { .. }) {
+                let dirs_differ = self.panels[0].dir != self.panels[1].dir;
+                if ui
+                    .add_enabled(
+                        dirs_differ,
+                        egui::Button::new((icons::ARROWS_CLOCKWISE, " 同步")),
+                    )
+                    .on_hover_text("同步两栏目录…")
+                    .clicked()
+                {
+                    let l = self.panels[0].dir.clone();
+                    let r = self.panels[1].dir.clone();
+                    self.sync_dialog.open_with(l, r);
+                }
             }
             // 按钮栏为空的占位提示（阶段 Y）：非空时按钮条在顶栏下方整行
             // 渲染（含末尾「+」），顶栏不再重复占位。
@@ -3598,6 +3620,15 @@ impl FileManagerView {
             self.open_search_dialog();
             ui.close();
         }
+        // 「同步目录…」（阶段 AE）：双栏且两栏目录不同才显示（同顶栏按钮）。
+        let sync_available = matches!(self.layout, PanelLayout::Dual { .. })
+            && self.panels[0].dir != self.panels[1].dir;
+        if sync_available && ui.button((icons::ARROWS_CLOCKWISE, " 同步目录…")).clicked() {
+            let l = self.panels[0].dir.clone();
+            let r = self.panels[1].dir.clone();
+            self.sync_dialog.open_with(l, r);
+            ui.close();
+        }
         let dir_targets: Vec<PathBuf> = self.panels[idx]
             .entries
             .iter()
@@ -4986,6 +5017,22 @@ impl FileManagerView {
         self.dialog = Some(FmDialog::NewFile(NewFileDialog::new(parent, suggested)));
     }
 
+    /// 渲染同步目录对话框（阶段 AE）：「开始同步」确认经 file_ops 提交
+    /// Copy（Overwrite）任务组与 Delete（回收站）任务——任务队列/进度/
+    /// 错误汇总天然生效，完成刷新同既有 on_op_finished 路径。
+    fn render_sync_dialog(&mut self, ctx: &egui::Context) {
+        let SyncUiAction::Run(plan) = self.sync_dialog.ui(ctx) else {
+            return;
+        };
+        for (sources, dest_dir) in plan.copies {
+            self.ops
+                .start_copy(sources, dest_dir, ConflictMode::Overwrite);
+        }
+        if !plan.deletes.is_empty() {
+            self.ops.start_delete(plan.deletes, false);
+        }
+    }
+
     /// 渲染搜索对话框并消费动作：跳转 = 焦点栏 reveal 并关闭；
     /// 「输送到焦点栏」= 命中集注入焦点栏（分支视图同款）并关闭。
     fn render_search_dialog(&mut self, ctx: &egui::Context) {
@@ -5005,8 +5052,7 @@ impl FileManagerView {
         }
     }
 
-    /// 渲染「修改属性/时间戳…」对话框（阶段 AC；take/reinsert 模式同
-    /// render_comment_dialog）：确认经 `apply_to_path` 逐项应用（平台属性位
+    /// 渲染「修改属性/时间戳…」对话框（阶段 AC；take/reinsert 模式同    /// render_comment_dialog）：确认经 `apply_to_path` 逐项应用（平台属性位
     /// 与 filetime 时间戳），任一失败回传 error 保持打开；全成功后刷新涉及
     /// 栏（父目录匹配，选中集不动）。
     fn render_attr_dialog(&mut self, ctx: &egui::Context) {
