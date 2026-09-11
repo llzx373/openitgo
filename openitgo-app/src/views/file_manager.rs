@@ -1076,6 +1076,14 @@ impl FileManagerView {
         push_history_capped(&mut self.filter_history, filter, FILTER_HISTORY_CAP);
     }
 
+    /// 诊断探针/无头测试用：请求下一帧打开焦点栏的书签菜单（同 Ctrl+D
+    /// 通道）。bin 目标不用，仅 example/test 可达。
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub fn debug_open_bookmarks_menu(&mut self) {
+        self.bookmarks_menu_toggle = true;
+    }
+
     /// 添加书签到指定分组（两栏共享）；组内已有时 no-op 返回 false。
     pub fn add_bookmark_to_group(&mut self, group: usize, dir: &Path) -> bool {
         let Some(g) = self.bookmark_groups.get_mut(group) else {
@@ -2858,38 +2866,36 @@ impl FileManagerView {
                             ui.label(egui::RichText::new("（空分组）").weak());
                         }
                         for bm in &g.items {
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui
-                                        .add(
-                                            egui::Button::new(icons::X.as_str())
-                                                .frame(false)
-                                                .small(),
-                                        )
-                                        .on_hover_text("移除书签")
-                                        .clicked()
-                                    {
-                                        remove_bm = Some((gi, PathBuf::from(bm)));
-                                    }
-                                    let icon = if Path::new(bm).is_dir() {
-                                        icons::FOLDER
-                                    } else {
-                                        icons::FILE
-                                    };
-                                    if ui
-                                        .add(
-                                            egui::Label::new(format!("{} {}", icon.as_str(), bm))
-                                                .truncate()
-                                                .sense(egui::Sense::click()),
-                                        )
-                                        .on_hover_text(bm)
-                                        .clicked()
-                                    {
-                                        jump = Some(PathBuf::from(bm));
-                                    }
-                                },
-                            );
+                            let icon = if Path::new(bm).is_dir() {
+                                icons::FOLDER
+                            } else {
+                                icons::FILE
+                            };
+                            // 普通 horizontal 行（标签左、✕ 紧随其后）——
+                            // 不要用 with_layout(right_to_left)：egui 0.35
+                            // 在自动定宽的菜单弹出层里 RTL 子 ui 的 max_rect
+                            // 拉满屏幕宽，文字画到弹出层右缘之外，飞出菜单
+                            // 变成超宽全白框（同明细列的 RTL 嵌套坑）。
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(
+                                        egui::Label::new(format!("{} {}", icon.as_str(), bm))
+                                            .truncate()
+                                            .sense(egui::Sense::click()),
+                                    )
+                                    .on_hover_text(bm)
+                                    .clicked()
+                                {
+                                    jump = Some(PathBuf::from(bm));
+                                }
+                                if ui
+                                    .add(egui::Button::new(icons::X.as_str()).frame(false).small())
+                                    .on_hover_text("移除书签")
+                                    .clicked()
+                                {
+                                    remove_bm = Some((gi, PathBuf::from(bm)));
+                                }
+                            });
                         }
                         ui.separator();
                         if ui.button("重命名分组…").clicked() {
@@ -7664,6 +7670,51 @@ mod tests {
         panic!("目录列举未在限时内完成");
     }
 
+    /// headless_frame 的带输出版：返回 FullOutput（检查绘制形状用）。
+    fn headless_frame_out(
+        ctx: &egui::Context,
+        view: &mut FileManagerView,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let modifiers = events
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                egui::Event::Key { modifiers, .. } => Some(*modifiers),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            time: Some(time),
+            modifiers,
+            events,
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| {
+            view.ui(
+                ui,
+                FmCallbacks {
+                    on_back: &mut || {},
+                    on_open_path: &mut |_| {},
+                    on_open_archive: &mut |_| {},
+                    on_open_as_comic: &mut |_| {},
+                    on_extract: &mut |_, _| {},
+                    on_op_error: &mut |_| {},
+                    on_confirm_delete_change: &mut |_| {},
+                },
+                FmBehaviorOptions {
+                    confirm_delete: false,
+                    ..Default::default()
+                },
+            );
+        })
+    }
+
     /// epaint 0.35 对未注册的字体族直接 panic：FM 行/按钮用磷图标字体
     /// （fonts.rs 在 lib crate root，bin 测试目标够不到，此处内联最小版）。
     fn setup_test_fonts(ctx: &egui::Context) {
@@ -7722,6 +7773,65 @@ mod tests {
         }
         assert!(view.panels[0].dir.ends_with("d1"));
         assert!(matches!(view.panels[0].state, PanelLoadState::Ready));
+    }
+
+    /// 回归（书签分组飞出菜单「瞬间展开超长的无内容列表」）：书签行的
+    /// `with_layout(right_to_left)` 嵌在自动定宽的菜单弹出层里，RTL 子 ui
+    /// 的 max_rect 拉满屏幕宽、文字被画到弹出层右缘之外，飞出面版变成
+    /// 超宽全白框（AGENTS.md 已记录 egui 0.35 RTL 嵌套同类问题）。修复后
+    /// 书签路径文字必须画在菜单附近有界 x 范围内。用悬停展开（自底向上
+    /// 扫描，避免悬停/点击到「添加当前目录」「新建分组…」产生副作用；
+    /// PointerMoved 不触发 CloseOnClickOutside）。
+    #[test]
+    fn bookmark_submenu_flyout_keeps_text_near_menu() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("novel");
+        std::fs::create_dir(&dir).unwrap();
+        let mut view = FileManagerView::new("single", 0.5, false, "name", true, &[]);
+        navigate_ready(&mut view.panels[0], tmp.path());
+        assert!(view.add_group("常用"));
+        assert!(view.add_bookmark_to_group(0, &dir));
+        let ctx = egui::Context::default();
+        setup_test_fonts(&ctx);
+        let mut t = 0.0;
+        headless_frame(&ctx, &mut view, t, vec![]); // 布局帧
+        view.debug_open_bookmarks_menu();
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, vec![]);
+
+        let full = dir.display().to_string();
+        let flyout_text_x = |out: &egui::FullOutput| -> Option<f32> {
+            out.shapes.iter().find_map(|cs| {
+                if let egui::Shape::Text(ts) = &cs.shape {
+                    if ts.galley.text().contains(&full) {
+                        return Some(cs.shape.visual_bounding_rect().min.x);
+                    }
+                }
+                None
+            })
+        };
+        // 自底向上悬停扫描，命中「常用 ▸」即展开飞出菜单（路径文字出现）。
+        // x=160 位于菜单行内（菜单左缘 ≈120）。
+        let mut x = None;
+        for y in (60..=260).rev().step_by(4) {
+            t += 1.0;
+            let pos = egui::pos2(160.0, y as f32);
+            headless_frame(&ctx, &mut view, t, vec![egui::Event::PointerMoved(pos)]);
+            t += 0.1;
+            let out = headless_frame_out(&ctx, &mut view, t, vec![]);
+            x = flyout_text_x(&out);
+            if x.is_some() {
+                break;
+            }
+        }
+        let x = x.expect("悬停未能展开书签飞出菜单（未绘制路径文字）");
+        // 飞出菜单从父菜单右缘（x≈400 起）展开，路径文字应紧贴其左缘；
+        // RTL 布局 bug 下文字被画到 x≈654（屏幕越宽漂得越远，真机 1920
+        // 下直接出窗不可见 = 用户看到的「全白」）。
+        assert!(
+            x < 600.0,
+            "书签路径文字画到 x={x}：飞出菜单超宽/文字出界（应紧贴菜单右缘）"
+        );
     }
 
     /// 回归（双栏滚动串扰）：两栏 ScrollArea 曾共享 auto-id，滚动状态
