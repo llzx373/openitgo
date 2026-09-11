@@ -7,13 +7,13 @@
 use crate::app::{PASSWORD_INCORRECT_MARKER, PASSWORD_REQUIRED_MARKER};
 use crate::opener::{AsyncOpener, OpenStatus};
 use crate::views::archive_tree::{
-    breadcrumb_paths, build_dir_rows, build_dir_stats, list_rows, ListRow, SortKey, TreeRow,
+    ListRow, SortKey, TreeRow, breadcrumb_paths, build_dir_rows, build_dir_stats, list_rows,
 };
 use crate::views::preview_bytes::{
-    classify_preview_bytes, is_previewable_name, PreviewData, PreviewOutcome, PREVIEW_MAX_BYTES,
+    PREVIEW_MAX_BYTES, PreviewData, PreviewOutcome, classify_preview_bytes, is_previewable_name,
 };
-use egui_phosphor_icons::{icons, Icon};
-use openitgo_parser::archive::{list_entries, read_comment, read_entry, ArchiveEntry};
+use egui_phosphor_icons::{Icon, icons};
+use openitgo_parser::archive::{ArchiveEntry, list_entries, read_comment, read_entry};
 use openitgo_parser::traits::ParseError;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1680,11 +1680,7 @@ impl ArchiveView {
                 painter.rect_filled(rect, 0.0, ui.visuals().widgets.hovered.bg_fill);
             }
             let arrow = if self.sort_key == key {
-                if self.sort_asc {
-                    " ▲"
-                } else {
-                    " ▼"
-                }
+                if self.sort_asc { " ▲" } else { " ▼" }
             } else {
                 ""
             };
@@ -1918,22 +1914,33 @@ impl ArchiveView {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 match row {
                     ListRow::Parent => {
-                        ui.label(egui::RichText::new(icons::ARROW_UP.as_str()).weak());
-                        ui.label(egui::RichText::new("..").weak());
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(icons::ARROW_UP.as_str()).weak())
+                                .selectable(false),
+                        );
+                        ui.add(
+                            egui::Label::new(egui::RichText::new("..").weak()).selectable(false),
+                        );
                     }
                     ListRow::Dir { name, .. } => {
-                        ui.label(egui::RichText::new(icons::FOLDER.as_str()).weak());
-                        ui.add(egui::Label::new(name).truncate());
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(icons::FOLDER.as_str()).weak())
+                                .selectable(false),
+                        );
+                        ui.add(egui::Label::new(name).truncate().selectable(false));
                     }
                     ListRow::File { .. } => {
                         let name = &file.expect("file row").name;
-                        ui.label(egui::RichText::new(entry_icon(name).as_str()).weak());
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(entry_icon(name).as_str()).weak())
+                                .selectable(false),
+                        );
                         let display = if flat {
                             name.as_str()
                         } else {
                             name.rsplit(['/', '\\']).next().unwrap_or(name)
                         };
-                        ui.add(egui::Label::new(display).truncate());
+                        ui.add(egui::Label::new(display).truncate().selectable(false));
                     }
                 }
                 // 右对齐列：与表头/竖线共用 column_layout 锚点直接绘制，天然跟随
