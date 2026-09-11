@@ -391,6 +391,9 @@ pub struct FileManagerView {
     /// Ctrl+D 的一次性请求：下一帧焦点栏的书签菜单开/关切换（同
     /// history_menu_toggle 机制）。
     bookmarks_menu_toggle: bool,
+    /// 书签菜单点击文件项的一次性打开请求：面包屑渲染期拿不到
+    /// FmIntents，经此字段中转，帧尾排空进 intents.open_path。
+    pending_bookmark_open: Option<PathBuf>,
     /// 命令行输入条（阶段 X）：输入文本 + 会话内历史（去重置顶，上限
     /// `COMMAND_HISTORY_CAP`）。
     command_input: String,
@@ -621,6 +624,25 @@ pub struct FmCallbacks<'a> {
     pub on_op_error: &'a mut dyn FnMut(String),
     /// 删除确认框「不再询问」勾选变化（写回 settings.fm_confirm_delete）。
     pub on_confirm_delete_change: &'a mut dyn FnMut(bool),
+}
+
+/// 书签点击的分流结果（bookmark_jump_target）。
+#[derive(Debug, PartialEq, Eq)]
+enum BookmarkJump {
+    /// 栏内导航到目录（不存在的书签已回退到最近存在的祖先）。
+    Navigate(PathBuf),
+    /// 经 open_path 分发直接打开文件。
+    OpenFile(PathBuf),
+}
+
+/// 书签点击分流（纯函数）：是文件 → OpenFile；目录或已不存在 →
+/// Navigate（不存在的经 fallback_existing_dir 爬到最近存在的祖先目录）。
+fn bookmark_jump_target(path: &Path) -> BookmarkJump {
+    if path.is_file() {
+        BookmarkJump::OpenFile(path.to_path_buf())
+    } else {
+        BookmarkJump::Navigate(fallback_existing_dir(path.to_path_buf()))
+    }
 }
 
 /// 明细列表各列的 x 坐标单一来源（表头 paint、行列分隔竖线、列宽拖拽
@@ -927,6 +949,7 @@ impl FileManagerView {
             select_group_pattern: String::new(),
             history_menu_toggle: false,
             bookmarks_menu_toggle: false,
+            pending_bookmark_open: None,
             command_input: String::new(),
             command_history: Vec::new(),
             command_history_pos: None,
@@ -1515,6 +1538,13 @@ impl FileManagerView {
         self.render_op_error_report(ui.ctx());
         // 压缩包 ask 小菜单（fm_archive_open = "ask"；鼠标处弹出二选一）。
         self.render_archive_ask_menu(ui.ctx(), &mut intents);
+
+        // 书签菜单的文件项打开请求（面包屑渲染期拿不到 intents，字段中转）。
+        if let Some(path) = self.pending_bookmark_open.take() {
+            if intents.open_path.is_none() {
+                intents.open_path = Some(path);
+            }
+        }
 
         // 双击压缩包 ask 意图 → 记录弹出位置转状态（菜单下一帧起渲染）。
         if let Some(path) = intents.archive_ask.take() {
@@ -2737,16 +2767,18 @@ impl FileManagerView {
         });
     }
 
-    /// 面包屑上的书签菜单（两栏共享一份）：顶部「添加当前目录 ▸」（分组子菜单，
-    /// 已在组内打勾禁用）+「新建分组…」，下方各分组子菜单（书签点击跳转经
-    /// fallback_existing_dir、✕ 移除不收起菜单；组尾重命名/删除分组）。
+    /// 面包屑上的书签菜单（两栏共享一份）：顶部「添加当前目录 ▸」与
+    /// 「添加焦点文件 ▸」（分组子菜单，已在组内打勾禁用；无分组时一键
+    /// 建「常用」组）+「新建分组…」，下方各分组子菜单（目录书签点击经
+    /// fallback_existing_dir 导航，文件书签点击经 pending_bookmark_open
+    /// 走 open_path 直接打开，✕ 移除不收起菜单；组尾重命名/删除分组）。
     /// 动作先收集、闭包内统一应用（迭代分组时 self 只能只读借用）。
     /// Ctrl+D 经 bookmarks_menu_toggle 一次性请求切换焦点栏菜单开/关（与点击
     /// 共用同一 memory 弹层状态，同历史下拉的 Alt+↓ 模式）。
     fn render_bookmarks_button(&mut self, ui: &mut egui::Ui, idx: usize) {
         let response = ui
             .add(egui::Button::new(icons::STAR.as_str()).frame(false))
-            .on_hover_text("常用目录书签（Ctrl+D）");
+            .on_hover_text("常用书签（目录/文件，Ctrl+D）");
         let kb_toggle = self.bookmarks_menu_toggle && self.active == idx;
         if kb_toggle {
             self.bookmarks_menu_toggle = false;
@@ -2759,7 +2791,12 @@ impl FileManagerView {
             .show(|ui| {
                 ui.set_min_width(280.0);
                 let dir = self.panels[idx].dir.clone();
-                let mut add_to: Option<usize> = None;
+                let focused_file = self.panels[idx]
+                    .focused_entry()
+                    .filter(|e| !e.is_dir)
+                    .map(|e| e.path);
+                // (目标分组, 书签路径)；分组 None = 无分组时自动建「常用」。
+                let mut add: Option<(Option<usize>, PathBuf)> = None;
                 let mut open_create = false;
                 let mut open_rename: Option<usize> = None;
                 let mut delete_group: Option<usize> = None;
@@ -2767,7 +2804,9 @@ impl FileManagerView {
                 let mut jump: Option<PathBuf> = None;
                 egui::containers::menu::SubMenuButton::new("添加当前目录").ui(ui, |ui| {
                     if self.bookmark_groups.is_empty() {
-                        ui.label(egui::RichText::new("（无分组，请先新建分组）").weak());
+                        if ui.button("添加到新分组「常用」").clicked() {
+                            add = Some((None, dir.clone()));
+                        }
                         return;
                     }
                     for (gi, g) in self.bookmark_groups.iter().enumerate() {
@@ -2778,9 +2817,32 @@ impl FileManagerView {
                             g.name.clone()
                         };
                         if ui.add_enabled(!already, egui::Button::new(label)).clicked() {
-                            add_to = Some(gi);
+                            add = Some((Some(gi), dir.clone()));
                         }
                     }
+                });
+                let ff = focused_file.clone();
+                ui.add_enabled_ui(ff.is_some(), |ui| {
+                    egui::containers::menu::SubMenuButton::new("添加焦点文件").ui(ui, |ui| {
+                        let Some(file) = &ff else { return };
+                        if self.bookmark_groups.is_empty() {
+                            if ui.button("添加到新分组「常用」").clicked() {
+                                add = Some((None, file.clone()));
+                            }
+                            return;
+                        }
+                        for (gi, g) in self.bookmark_groups.iter().enumerate() {
+                            let already = g.items.iter().any(|b| Path::new(b) == file.as_path());
+                            let label = if already {
+                                format!("✓ {}", g.name)
+                            } else {
+                                g.name.clone()
+                            };
+                            if ui.add_enabled(!already, egui::Button::new(label)).clicked() {
+                                add = Some((Some(gi), file.clone()));
+                            }
+                        }
+                    });
                 });
                 if ui.button("新建分组…").clicked() {
                     open_create = true;
@@ -2810,9 +2872,14 @@ impl FileManagerView {
                                     {
                                         remove_bm = Some((gi, PathBuf::from(bm)));
                                     }
+                                    let icon = if Path::new(bm).is_dir() {
+                                        icons::FOLDER
+                                    } else {
+                                        icons::FILE
+                                    };
                                     if ui
                                         .add(
-                                            egui::Label::new(bm.as_str())
+                                            egui::Label::new(format!("{} {}", icon.as_str(), bm))
                                                 .truncate()
                                                 .sense(egui::Sense::click()),
                                         )
@@ -2835,15 +2902,26 @@ impl FileManagerView {
                     });
                 }
                 // 统一应用收集到的动作。
-                if let Some(gi) = add_to {
-                    self.add_bookmark_to_group(gi, &dir);
+                if let Some((group, path)) = add {
+                    let gi = match group {
+                        Some(gi) => gi,
+                        None => {
+                            self.add_group("常用");
+                            self.bookmark_groups.len().saturating_sub(1)
+                        }
+                    };
+                    self.add_bookmark_to_group(gi, &path);
                 }
                 if let Some((gi, bm)) = remove_bm {
                     self.remove_bookmark(gi, &bm);
                 }
                 if let Some(bm) = jump {
-                    let target = fallback_existing_dir(bm);
-                    self.panels[idx].navigate_to(target);
+                    match bookmark_jump_target(&bm) {
+                        BookmarkJump::OpenFile(path) => {
+                            self.pending_bookmark_open = Some(path);
+                        }
+                        BookmarkJump::Navigate(dir) => self.panels[idx].navigate_to(dir),
+                    }
                     ui.close();
                 }
                 if open_create {
@@ -7199,6 +7277,32 @@ fn dblclick_hits_blank(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bookmark_jump_target_splits_file_and_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("d");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("f.txt");
+        std::fs::write(&file, b"x").unwrap();
+
+        // 文件 → 直接打开。
+        assert_eq!(
+            bookmark_jump_target(&file),
+            BookmarkJump::OpenFile(file.clone())
+        );
+        // 目录 → 栏内导航。
+        assert_eq!(
+            bookmark_jump_target(&dir),
+            BookmarkJump::Navigate(dir.clone())
+        );
+        // 已不存在 → 回退到最近存在的祖先目录。
+        let gone = dir.join("gone").join("deeper");
+        assert_eq!(
+            bookmark_jump_target(&gone),
+            BookmarkJump::Navigate(dir.clone())
+        );
+    }
 
     #[test]
     fn push_history_capped_dedupes_and_truncates() {

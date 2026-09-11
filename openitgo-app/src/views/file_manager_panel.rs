@@ -508,7 +508,7 @@ impl FsPanel {
         }
     }
 
-    /// 后台列举目录（清选择/焦点/缓存）；调用方负责压历史。
+    /// 后台列举目录（清选择/焦点/缓存/过滤器）；调用方负责压历史。
     /// 任何导航都退出分支视图回普通列举。
     fn start_listing(&mut self, path: PathBuf) {
         self.branch_view = false;
@@ -525,6 +525,10 @@ impl FsPanel {
         self.clear_dir_sizes();
         self.watch = None;
         self.type_ahead = None;
+        // 目录切换清空过滤器（TC 语义）：旧过滤串残留会让新目录一行都
+        // 不匹配，列表只剩「..」，观感「一片空白」。refresh 不经此保留
+        // 过滤；restore_tab 在本函数之后自行恢复快照过滤串，不受影响。
+        self.filter.clear();
         // 清掉上一目录遗留的标签恢复负载（restore_tab 在 start_listing
         // 之后重新设置；用户在其就绪前又导航时不串目录）。
         self.pending_tab_restore = None;
@@ -2310,6 +2314,30 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(matches!(panel.state, PanelLoadState::Ready));
+    }
+
+    /// 目录切换清空过滤器（残留过滤串会让新目录列表空白）；refresh 保留。
+    #[test]
+    fn navigate_clears_filter_but_refresh_keeps_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_a = tmp.path().join("a");
+        std::fs::create_dir_all(&dir_a).unwrap();
+
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        panel.navigate_to(dir_a.clone());
+        poll_until_ready(&mut panel);
+        panel.filter = "zzz".to_string();
+
+        // refresh：过滤保留（FS watch 自动刷新不清用户输入）。
+        panel.refresh();
+        poll_until_ready(&mut panel);
+        assert_eq!(panel.filter, "zzz");
+
+        // 导航到其他目录：过滤清空（同步生效，无需等列举就绪）。
+        panel.navigate_to(tmp.path().to_path_buf());
+        assert!(panel.filter.is_empty());
+        poll_until_ready(&mut panel);
+        assert!(panel.filter.is_empty());
     }
 
     /// 标签页不变式：切换往返状态保持（选中/焦点按名/过滤恢复；快照在

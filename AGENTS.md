@@ -183,7 +183,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 排序/目录——`fm_sort_key`/`fm_sort_asc`/`fm_dirs_first`/`fm_dir_left`/`fm_dir_right`。
 标签/书签——`fm_tabs_left`/`fm_tabs_right`/`fm_active_tab_left`/`fm_active_tab_right`/
 `fm_tab_groups`（AI）/`fm_bookmark_groups`（`FmBookmarkGroup{name, items}` 两栏共享；旧扁平
-`fm_bookmarks` 仅读取兼容，clamp 时并入「常用」组）。
+`fm_bookmarks` 仅读取兼容，clamp 时并入「常用」组。书签项目录/文件均可：点击目录
+经 `fallback_existing_dir` 导航，点击文件经 `pending_bookmark_open` → `open_path`
+直接打开——`bookmark_jump_target` 纯函数分流；目录切换在 `start_listing` 清空过滤器，
+防残留过滤串导致列表空白，refresh/标签恢复快照不受影响）。
 行为包（O）——`fm_confirm_delete`/`fm_show_hidden`/`fm_delete_mode`/`fm_space_action`/
 `fm_drag_confirm`/`fm_archive_open`/`fm_esc_keep_selection`/`fm_dblclick_blank_up`。
 其他——`fm_saved_filters`/`fm_filter_bar_bottom`（T）/`fm_rubber_band`（U）/
