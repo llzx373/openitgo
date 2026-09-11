@@ -16,7 +16,7 @@ use crate::views::file_manager_attr::{apply_to_path, AttrAction, AttrTimestampDi
 use crate::views::file_manager_checksum::{is_checksum_file_name, ChecksumDialog};
 use crate::views::file_manager_dialog::{
     CompressDialog, ConflictDialog, CopyMoveDialog, DeleteDialog, FmDialog, FmDialogOutcome,
-    MultiRenameDialog, NewDirDialog, NewFileDialog, RenameDialog, SelectGroupDialog,
+    MultiRenameDialog, NewDirDialog, NewFileDialog, RenameDialog, SelectGroupDialog, SplitDialog,
 };
 use crate::views::file_manager_icons::{sys_icon_kind, SysIconCache, SysIconLookup};
 use crate::views::file_manager_panel::{
@@ -30,8 +30,9 @@ use crate::views::file_manager_thumbs::{
     THUMB_CELL_H, THUMB_CELL_W, THUMB_MAX_DIM,
 };
 use crate::views::file_ops::{
-    create_dir, create_text_file, format_eta, rename_entry, retry_sources, suggest_folder_name,
-    suggest_text_file_name, ConflictMode, FileOpManager, FinishedOp, OpKind, OpSpeedMeter,
+    collect_chunks, create_dir, create_text_file, format_eta, merge_target_base, rename_entry,
+    retry_sources, suggest_folder_name, suggest_text_file_name, ConflictMode, FileOpManager,
+    FinishedOp, OpKind, OpSpeedMeter,
 };
 use crate::views::preview_bytes::{
     decode_preview_text, format_hex_line, load_file_preview, PreviewData, PreviewOutcome,
@@ -2661,6 +2662,8 @@ impl FileManagerView {
                             OpKind::Move => icons::ARROW_RIGHT,
                             OpKind::Delete => icons::TRASH,
                             OpKind::Compress => icons::FILE_ZIP,
+                            OpKind::Split => icons::SCISSORS,
+                            OpKind::Merge => icons::ARROWS_MERGE,
                         };
                         ui.horizontal(|ui| {
                             ui.label(icon);
@@ -2807,6 +2810,9 @@ impl FileManagerView {
                         self.ops.start_compress(sources, zip);
                     }
                 }
+                // Split/Merge 的失败项是产出文件（分块/合并结果）而非源，
+                // retry_sources 语义不适用；且 Split 重建缺 chunk_size——不重试。
+                OpKind::Split | OpKind::Merge => {}
             }
         }
     }
@@ -3695,6 +3701,49 @@ impl FileManagerView {
             let targets = self.op_targets(idx);
             if !targets.is_empty() {
                 self.open_compress_dialog(targets, idx);
+            }
+            ui.close();
+        }
+        // 「分割…」（阶段 AD）：选中集恰为单个文件时可用。
+        let split_src = match targets.as_slice() {
+            [p] if p.is_file() => Some(p.clone()),
+            _ => None,
+        };
+        if ui
+            .add_enabled(
+                split_src.is_some(),
+                egui::Button::new((icons::SCISSORS, " 分割…")),
+            )
+            .clicked()
+        {
+            if let Some(src) = split_src {
+                let dest = self.panels[idx].dir.clone();
+                self.dialog = Some(FmDialog::Split(SplitDialog::new(src, &dest)));
+            }
+            ui.close();
+        }
+        // 「合并…」（阶段 AD）：单个 .001 或一组同目录同前缀 .NNN 分块；
+        // 缺号/目标已存在直接报错（intents.op_error），不经对话框。
+        let merge_base = merge_target_base(&targets);
+        if ui
+            .add_enabled(
+                merge_base.is_some(),
+                egui::Button::new((icons::ARROWS_MERGE, " 合并…")),
+            )
+            .clicked()
+        {
+            if let Some((dir, base)) = merge_base {
+                match collect_chunks(&dir, &base) {
+                    Ok(chunks) => {
+                        let dest = dir.join(&base);
+                        if dest.exists() {
+                            intents.op_error = Some(format!("合并目标已存在：{}", dest.display()));
+                        } else {
+                            self.ops.start_merge(chunks, dest);
+                        }
+                    }
+                    Err(e) => intents.op_error = Some(e),
+                }
             }
             ui.close();
         }
@@ -5025,11 +5074,20 @@ impl FileManagerView {
                             crate::platform::clipboard_files::clear();
                         }
                     }
-                    OpKind::Delete | OpKind::Compress => unreachable!("各有专用路径"),
+                    OpKind::Delete | OpKind::Compress | OpKind::Split | OpKind::Merge => {
+                        unreachable!("各有专用路径")
+                    }
                 };
             }
             FmDialogOutcome::ConfirmCompress { sources, dest_zip } => {
                 self.ops.start_compress(sources, dest_zip);
+            }
+            FmDialogOutcome::ConfirmSplit {
+                source,
+                dest_dir,
+                chunk_size,
+            } => {
+                self.ops.start_split(source, dest_dir, chunk_size);
             }
             FmDialogOutcome::ConfirmDelete {
                 sources,

@@ -605,6 +605,21 @@ cargo clippy --workspace --all-targets -- -D warnings
   （`parse_datetime_local`/`format_datetime_local`，time crate
   local-offset，取不到回退 UTC），写入走 `filetime`（已在依赖树 ← tar）。
   时间戳/属性位改动**无独立 settings**（即时生效不落盘）。
+  **分割/合并（阶段 AD）**：`OpKind::Split`/`Merge` 扩展（任务队列/进度/
+  暂停/取消/错误汇总天然生效；`submit`/`launch`/`QueuedTask` 增
+  `chunk_size` 参数链，仅 Split 用；`stream_ctx` 构造无问答/无过滤的
+  OpCtx 复用 wait_if_paused 等）。右键「分割…」（选中集恰为单个文件）
+  开 `SplitDialog`（按大小 KB/MB/GB 或按份数二选一，实时预览
+  `name.001 … name.NNN`）；`split_plan` 纯函数（编号超 999 自然延伸，
+  空文件单空块）。执行 `run_split`：COPY_CHUNK 流式，**已存在分块
+  整批不覆盖**（冲突列 errors 收工不动文件），取消/失败删当前半成品
+  分块（已完成块保留），IO 错误 = fatal。右键「合并…」（单个 .001 或
+  一组同目录同前缀分块，`merge_target_base` 推导；`collect_chunks`
+  要求 .001 起连续、缺号报错列出）不经对话框直接起任务（目标已存在/
+  缺号经 op_error）；`run_merge` 预扫描全部分块可读才开工，同目录
+  `<name>.crc`（sfv 单行，复用阶段 AC `parse_checksum_file`）存在时
+  流式顺带 CRC32 校验（不一致记 errors、结果保留）。错误汇总窗
+  Split/Merge 不支持「重试失败项」（失败项为产出文件非源）。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

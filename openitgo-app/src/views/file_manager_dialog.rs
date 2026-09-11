@@ -20,6 +20,7 @@ pub enum FmDialog {
     NewDir(NewDirDialog),
     NewFile(NewFileDialog),
     Compress(CompressDialog),
+    Split(SplitDialog),
     SelectGroup(SelectGroupDialog),
     MultiRename(MultiRenameDialog),
 }
@@ -58,6 +59,12 @@ pub enum FmDialogOutcome {
         sources: Vec<PathBuf>,
         dest_zip: PathBuf,
     },
+    /// 分割确认（阶段 AD）：单源 + 目标目录 + 分块字节数。
+    ConfirmSplit {
+        source: PathBuf,
+        dest_dir: PathBuf,
+        chunk_size: u64,
+    },
     /// 「选择组」确认：通配模式 + 方向（select=true 选择 / false 取消选择）。
     SelectGroup {
         pattern: String,
@@ -80,6 +87,7 @@ impl FmDialog {
             FmDialog::NewDir(d) => d.ui(ctx),
             FmDialog::NewFile(d) => d.ui(ctx),
             FmDialog::Compress(d) => d.ui(ctx),
+            FmDialog::Split(d) => d.ui(ctx),
             FmDialog::SelectGroup(d) => d.ui(ctx),
             FmDialog::MultiRename(d) => d.ui(ctx),
         }
@@ -144,7 +152,7 @@ impl CopyMoveDialog {
         let title = match self.kind {
             OpKind::Copy => "复制到",
             OpKind::Move => "移动到",
-            OpKind::Delete | OpKind::Compress => unreachable!("Delete/Compress 各有对话框"),
+            _ => unreachable!("Delete/Compress/Split/Merge 各有对话框或专用路径"),
         };
         let mut outcome = None;
         let mut open = true;
@@ -159,7 +167,7 @@ impl CopyMoveDialog {
                     match self.kind {
                         OpKind::Copy => "复制",
                         OpKind::Move => "移动",
-                        OpKind::Delete | OpKind::Compress => unreachable!(),
+                        _ => unreachable!(),
                     }
                 ));
                 render_source_list(ui, &self.sources);
@@ -445,6 +453,161 @@ impl CompressDialog {
                         outcome = Some(FmDialogOutcome::ConfirmCompress {
                             sources: self.sources.clone(),
                             dest_zip,
+                        });
+                    }
+                    if ui.button("取消").clicked() {
+                        outcome = Some(FmDialogOutcome::Cancelled);
+                    }
+                });
+            });
+        if !open {
+            outcome = Some(FmDialogOutcome::Cancelled);
+        }
+        outcome
+    }
+}
+
+/// 分割（阶段 AD）：按大小（数值 + KB/MB/GB 单位）或按份数二选一；
+/// 目标目录默认当前目录；实时预览分块数与产出名（`name.NNN`）。
+/// 已存在分块不覆盖（worker 执行前列出冲突报错）。
+pub struct SplitDialog {
+    source: PathBuf,
+    total_len: u64,
+    dest_dir: String,
+    /// true = 按大小，false = 按份数。
+    by_size: bool,
+    size_text: String,
+    unit_idx: usize,
+    parts_text: String,
+}
+
+/// 分割单位表（显示名, 字节数）。
+const SPLIT_UNITS: [(&str, u64); 3] = [
+    ("KB", 1024),
+    ("MB", 1024 * 1024),
+    ("GB", 1024 * 1024 * 1024),
+];
+
+impl SplitDialog {
+    pub fn new(source: PathBuf, dest_dir: &Path) -> Self {
+        let total_len = std::fs::metadata(&source).map(|m| m.len()).unwrap_or(0);
+        Self {
+            source,
+            total_len,
+            dest_dir: dest_dir.display().to_string(),
+            by_size: true,
+            size_text: "10".to_string(),
+            unit_idx: 1,
+            parts_text: "2".to_string(),
+        }
+    }
+
+    /// 当前输入折算的分块字节数（非法输入 None）。
+    fn chunk_size(&self) -> Option<u64> {
+        if self.by_size {
+            let v: f64 = self.size_text.trim().parse().ok()?;
+            if v <= 0.0 {
+                return None;
+            }
+            let bytes = (v * SPLIT_UNITS[self.unit_idx].1 as f64).round() as u64;
+            (bytes > 0).then_some(bytes)
+        } else {
+            let n: u64 = self.parts_text.trim().parse().ok()?;
+            if n == 0 {
+                return None;
+            }
+            Some(self.total_len.div_ceil(n).max(1))
+        }
+    }
+
+    fn ui(&mut self, ctx: &egui::Context) -> Option<FmDialogOutcome> {
+        let mut outcome = None;
+        let mut open = true;
+        let name = self
+            .source
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.source.display().to_string());
+        egui::Window::new("分割文件")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!("分割 {name}（{}）：", human_size(self.total_len)));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut self.by_size, true, "按大小：");
+                    ui.add_enabled_ui(self.by_size, |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.size_text).desired_width(80.0));
+                        egui::ComboBox::from_id_salt("fm-split-unit")
+                            .selected_text(SPLIT_UNITS[self.unit_idx].0)
+                            .show_ui(ui, |ui| {
+                                for (i, (label, _)) in SPLIT_UNITS.iter().enumerate() {
+                                    ui.selectable_value(&mut self.unit_idx, i, *label);
+                                }
+                            });
+                    });
+                });
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut self.by_size, false, "按份数：");
+                    ui.add_enabled_ui(!self.by_size, |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.parts_text).desired_width(80.0),
+                        );
+                        ui.label("份");
+                    });
+                });
+                ui.horizontal(|ui| {
+                    ui.label("目标文件夹：");
+                    ui.add(egui::TextEdit::singleline(&mut self.dest_dir).desired_width(360.0));
+                    if ui.button("浏览…").clicked() {
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            self.dest_dir = dir.display().to_string();
+                        }
+                    }
+                });
+                // 预览与校验。
+                let dest_dir = PathBuf::from(self.dest_dir.trim());
+                let dir_ok = !self.dest_dir.trim().is_empty() && dest_dir.is_dir();
+                let chunk = self.chunk_size();
+                match chunk {
+                    Some(bytes) => {
+                        let plan = crate::views::file_ops::split_plan(bytes, self.total_len);
+                        let last = plan.len();
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "将产出 {} 块（每块 {}）：{name}.001 … {name}.{last:03}",
+                                plan.len(),
+                                human_size(bytes),
+                            ))
+                            .weak(),
+                        );
+                    }
+                    None => {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            if self.by_size {
+                                "分块大小无效"
+                            } else {
+                                "份数无效（正整数）"
+                            },
+                        );
+                    }
+                }
+                if !self.dest_dir.trim().is_empty() && !dir_ok {
+                    ui.colored_label(ui.visuals().error_fg_color, "目标文件夹不存在");
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(chunk.is_some() && dir_ok, egui::Button::new("分割"))
+                        .clicked()
+                    {
+                        outcome = Some(FmDialogOutcome::ConfirmSplit {
+                            source: self.source.clone(),
+                            dest_dir,
+                            chunk_size: chunk.unwrap_or(0),
                         });
                     }
                     if ui.button("取消").clicked() {

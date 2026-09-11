@@ -1,11 +1,16 @@
-//! 文件操作引擎：复制/移动/删除/压缩的后台执行 + 进度/取消/暂停/冲突处理；
-//! 重命名/新建文件夹为瞬时操作，提供同步 helper。对齐 extract 约定：
+//! 文件操作引擎：复制/移动/删除/压缩/分割/合并的后台执行 + 进度/取消/暂停/
+//! 冲突处理；重命名/新建文件夹为瞬时操作，提供同步 helper。对齐 extract 约定：
 //! 每任务一条后台线程、channel 上报进度、`Arc<AtomicBool>` 取消与暂停、
 //! 取消清理半成品目标文件（已完整复制/移动的保留并计入进度）、
 //! 单项失败记 `errors` 继续整批、结束汇总上报。
 //! 进度含当前文件内进度（cur_done/cur_total_bytes，分块复制维护，
 //! 节流 100ms）；暂停在块/项边界生效（200ms 轮询，期间可即时取消），
 //! 压缩（阶段 AB 起）经 create_zip 的 paused 参数在条目/块边界生效。
+//! 分割/合并（阶段 AD，`run_split`/`run_merge`）：COPY_CHUNK 分块流式读写，
+//! 块边界响应暂停/取消；分割已存在 `.NNN` 分块整批不覆盖（冲突列 errors
+//! 直接收工），取消/失败删当前半成品分块（已完成块保留）；合并预扫描全部
+//! 分块可读才开工，取消/失败删半成品输出，同目录 `<name>.crc`（sfv 单行）
+//! 存在时流式顺带 CRC32 校验（不一致记 errors、结果保留）。
 //!
 //! 任务队列（阶段 AA）：并发上限 `max_concurrent`（settings `fm_op_threads`，
 //! 默认 2，0 = 不限）——超限任务进 `queued` FIFO 队列（不起线程、无进度），
@@ -57,6 +62,8 @@ pub enum OpKind {
     Move,
     Delete,
     Compress,
+    Split,
+    Merge,
 }
 
 impl OpKind {
@@ -66,6 +73,8 @@ impl OpKind {
             OpKind::Move => "移动",
             OpKind::Delete => "删除",
             OpKind::Compress => "压缩",
+            OpKind::Split => "分割",
+            OpKind::Merge => "合并",
         }
     }
 }
@@ -257,6 +266,8 @@ struct QueuedTask {
     delete_permanent: bool,
     /// 复制/移动高级选项（阶段 AB；Delete/Compress 为默认）。
     opts: CopyOptions,
+    /// 分块字节数（阶段 AD；仅 Split 有意义，其余恒 0）。
+    chunk_size: u64,
 }
 
 /// 任务面板行快照（阶段 AA；在途按提交序 + 排队按 FIFO 序）。
@@ -345,7 +356,15 @@ impl FileOpManager {
         conflict: ConflictMode,
         opts: CopyOptions,
     ) -> u64 {
-        self.submit(OpKind::Copy, sources, Some(dest_dir), conflict, false, opts)
+        self.submit(
+            OpKind::Copy,
+            sources,
+            Some(dest_dir),
+            conflict,
+            false,
+            opts,
+            0,
+        )
     }
 
     /// 后台移动：同盘 `fs::rename` 快速路径，失败回退复制 + trash 源。
@@ -366,7 +385,15 @@ impl FileOpManager {
         conflict: ConflictMode,
         opts: CopyOptions,
     ) -> u64 {
-        self.submit(OpKind::Move, sources, Some(dest_dir), conflict, false, opts)
+        self.submit(
+            OpKind::Move,
+            sources,
+            Some(dest_dir),
+            conflict,
+            false,
+            opts,
+            0,
+        )
     }
 
     /// 后台删除：permanent=false 逐项移入回收站（trash::delete）；
@@ -380,6 +407,7 @@ impl FileOpManager {
             ConflictMode::Skip,
             permanent,
             CopyOptions::default(),
+            0,
         )
     }
 
@@ -393,6 +421,37 @@ impl FileOpManager {
             ConflictMode::Skip,
             false,
             CopyOptions::default(),
+            0,
+        )
+    }
+
+    /// 后台分割 source 为 dest_dir 下的 `name.NNN` 分块（阶段 AD）：
+    /// 已存在分块不覆盖（执行前列出冲突报错）；取消删除当前半成品分块
+    /// （已完成分块保留）。
+    pub fn start_split(&mut self, source: PathBuf, dest_dir: PathBuf, chunk_size: u64) -> u64 {
+        self.submit(
+            OpKind::Split,
+            vec![source],
+            Some(dest_dir),
+            ConflictMode::Skip,
+            false,
+            CopyOptions::default(),
+            chunk_size,
+        )
+    }
+
+    /// 后台合并 chunks（连续编号全集，由调用方经 `collect_chunks` 收集）
+    /// 为 dest（阶段 AD）；同目录存在 `<name>.crc`（sfv 单行）时合并后
+    /// 校验 CRC32（流式顺带计算，无额外 IO），不一致记 errors。
+    pub fn start_merge(&mut self, chunks: Vec<PathBuf>, dest: PathBuf) -> u64 {
+        self.submit(
+            OpKind::Merge,
+            chunks,
+            Some(dest),
+            ConflictMode::Skip,
+            false,
+            CopyOptions::default(),
+            0,
         )
     }
 
@@ -406,6 +465,7 @@ impl FileOpManager {
         conflict: ConflictMode,
         delete_permanent: bool,
         opts: CopyOptions,
+        chunk_size: u64,
     ) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
@@ -418,9 +478,19 @@ impl FileOpManager {
                 conflict,
                 delete_permanent,
                 opts,
+                chunk_size,
             });
         } else {
-            self.launch(id, kind, sources, dest, conflict, delete_permanent, opts);
+            self.launch(
+                id,
+                kind,
+                sources,
+                dest,
+                conflict,
+                delete_permanent,
+                opts,
+                chunk_size,
+            );
         }
         id
     }
@@ -441,6 +511,7 @@ impl FileOpManager {
         conflict: ConflictMode,
         delete_permanent: bool,
         opts: CopyOptions,
+        chunk_size: u64,
     ) {
         let cancel = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
@@ -452,9 +523,10 @@ impl FileOpManager {
             .collect();
         src_dirs.sort();
         src_dirs.dedup();
-        // Compress 的刷新目录 = zip 父目录（dest 为 zip 路径）。
+        // Compress/Merge 的刷新目录 = 产出文件父目录（dest 为产出路径）；
+        // Split 的 dest 本身就是目标目录。
         let dest_dir = match kind {
-            OpKind::Compress => dest
+            OpKind::Compress | OpKind::Merge => dest
                 .as_deref()
                 .and_then(Path::parent)
                 .map(Path::to_path_buf),
@@ -482,6 +554,18 @@ impl FileOpManager {
                 let dest_zip = dest.expect("Compress 必有 dest_zip");
                 std::thread::spawn(move || {
                     run_compress(sources, dest_zip, cancel, paused, tx);
+                });
+            }
+            OpKind::Split => {
+                let dest_dir = dest.expect("Split 必有 dest_dir");
+                std::thread::spawn(move || {
+                    run_split(sources, dest_dir, chunk_size, cancel, paused, tx);
+                });
+            }
+            OpKind::Merge => {
+                let dest = dest.expect("Merge 必有 dest");
+                std::thread::spawn(move || {
+                    run_merge(sources, dest, cancel, paused, tx);
                 });
             }
             _ => {
@@ -519,6 +603,7 @@ impl FileOpManager {
                 q.conflict,
                 q.delete_permanent,
                 q.opts,
+                q.chunk_size,
             );
         }
     }
@@ -565,7 +650,7 @@ impl FileOpManager {
                 first_source: q.sources.first().cloned(),
                 source_count: q.sources.len(),
                 dest_dir: match q.kind {
-                    OpKind::Compress => q
+                    OpKind::Compress | OpKind::Merge => q
                         .dest
                         .as_deref()
                         .and_then(Path::parent)
@@ -751,7 +836,9 @@ fn run_op(
     }
     let mut fatal = None;
     match kind {
-        OpKind::Compress => unreachable!("Compress 走 run_compress"),
+        OpKind::Compress | OpKind::Split | OpKind::Merge => {
+            unreachable!("Compress/Split/Merge 各有专用 run 函数")
+        }
         OpKind::Delete => {
             for (i, src) in sources.iter().enumerate() {
                 if ctx.wait_if_paused() {
@@ -907,6 +994,391 @@ fn run_compress(
         cancelled: cancel.load(Ordering::Relaxed),
         fatal: result.err().map(|e| e.to_string()),
         errors: Vec::new(),
+    });
+}
+
+// ---------- 分割/合并（阶段 AD） ----------
+
+/// 非复制类流式任务的占位选项（Split/Merge 无过滤/校验语义；String::new
+/// 为 const fn，可静态构造）。
+static NO_OPTS: CopyOptions = CopyOptions {
+    verify: false,
+    filter_pattern: String::new(),
+    filter_newer_days: 0,
+};
+
+/// Split/Merge 工作线程共用的 OpCtx（无问答通道、无过滤选项）。
+fn stream_ctx<'a>(
+    cancel: &'a AtomicBool,
+    paused: &'a AtomicBool,
+    tx: &'a Sender<OpEvent>,
+) -> OpCtx<'a> {
+    OpCtx {
+        cancel,
+        paused,
+        tx,
+        answer_rx: None,
+        opts: &NO_OPTS,
+        drop_source_unsafe: false,
+        move_prune: false,
+        remembered_file: None,
+        remembered_dir: None,
+        progress: OpProgress::default(),
+        errors: Vec::new(),
+        cancelled: false,
+    }
+}
+
+/// 分割计划（阶段 AD；纯函数）：按 chunk_size 切 total_len，返回
+/// (分块编号后缀 "001".."NNN", 各自字节数)——编号超 999 自然延伸
+/// （"1000"…）。total_len == 0 → 单个空分块 "001"；chunk_size == 0 按 1
+/// 防御（对话框已保证 >0）。
+pub fn split_plan(chunk_size: u64, total_len: u64) -> Vec<(String, u64)> {
+    let chunk = chunk_size.max(1);
+    if total_len == 0 {
+        return vec![("001".to_string(), 0)];
+    }
+    let count = total_len.div_ceil(chunk);
+    (1..=count)
+        .map(|i| {
+            let bytes = if i < count {
+                chunk
+            } else {
+                total_len - chunk * (count - 1)
+            };
+            (format!("{i:03}"), bytes)
+        })
+        .collect()
+}
+
+/// 分块名解析：`base.NNN`（恰好 3 位数字后缀）→ Some((base, 编号))。
+pub(crate) fn parse_chunk_name(name: &str) -> Option<(&str, u32)> {
+    let (base, suffix) = name.rsplit_once('.')?;
+    if base.is_empty() || suffix.len() != 3 || !suffix.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    suffix.parse().ok().map(|n| (base, n))
+}
+
+/// 「合并…」目标推导（阶段 AD；纯函数）：选中集为单个 `.001` 文件，或一组
+/// 同目录同前缀 `.NNN` 分块（须含 .001）→ Some((目录, 前缀))。
+pub fn merge_target_base(targets: &[PathBuf]) -> Option<(PathBuf, String)> {
+    let mut base: Option<String> = None;
+    let mut dir: Option<PathBuf> = None;
+    let mut has_001 = false;
+    for p in targets {
+        if p.is_dir() {
+            return None;
+        }
+        let name = p.file_name()?.to_string_lossy().into_owned();
+        let (b, n) = parse_chunk_name(&name)?;
+        if n == 1 {
+            has_001 = true;
+        }
+        match &base {
+            Some(prev) if prev != b => return None,
+            None => base = Some(b.to_string()),
+            _ => {}
+        }
+        let parent = p.parent()?.to_path_buf();
+        match &dir {
+            Some(prev) if *prev != parent => return None,
+            None => dir = Some(parent),
+            _ => {}
+        }
+    }
+    // 单个文件时须恰为 .001（一组时 .001 必含其中）。
+    if !has_001 {
+        return None;
+    }
+    dir.zip(base)
+}
+
+/// 收集 dir 下 `base.NNN` 连续分块（阶段 AD；从 .001 起无缺号，重号去重）。
+/// 缺号报错列出（前 5 个）；无任何分块亦报错。
+pub fn collect_chunks(dir: &Path, base: &str) -> Result<Vec<PathBuf>, String> {
+    let rd = std::fs::read_dir(verbatim_path(dir)).map_err(|e| format!("无法列举目录: {e}"))?;
+    let mut numbered: Vec<(u32, PathBuf)> = Vec::new();
+    for item in rd.flatten() {
+        let name = item.file_name().to_string_lossy().into_owned();
+        let Some((b, n)) = parse_chunk_name(&name) else {
+            continue;
+        };
+        if b == base && n >= 1 && item.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            numbered.push((n, item.path()));
+        }
+    }
+    if numbered.is_empty() {
+        return Err(format!("未找到 {base}.001 起的分块"));
+    }
+    numbered.sort_by_key(|(n, _)| *n);
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<PathBuf> = Vec::new();
+    for (n, p) in numbered {
+        if seen.insert(n) {
+            out.push(p);
+        }
+    }
+    let max = *seen.iter().max().unwrap_or(&0);
+    let missing: Vec<u32> = (1..=max).filter(|n| !seen.contains(n)).collect();
+    if !missing.is_empty() {
+        let list: Vec<String> = missing.iter().take(5).map(|n| format!(".{n:03}")).collect();
+        let more = if missing.len() > 5 { " …" } else { "" };
+        return Err(format!("分块缺失：{}{more}", list.join(" ")));
+    }
+    Ok(out)
+}
+
+/// 合并输出的同名 `.crc` 校验文件（sfv 单行，复用阶段 AC 解析）：条目
+/// 文件名与 dest 名匹配（忽略大小写）时返回期望 CRC32 hex。
+fn expected_crc_for(dest: &Path) -> Option<String> {
+    use crate::views::file_manager_checksum::{parse_checksum_file, ChecksumAlgorithm};
+    let crc_path = PathBuf::from(format!("{}.crc", dest.display()));
+    let bytes = std::fs::read(verbatim_path(&crc_path)).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let name = dest.file_name()?.to_string_lossy();
+    parse_checksum_file(&text)
+        .into_iter()
+        .find(|e| {
+            e.algorithm == Some(ChecksumAlgorithm::Crc32) && e.filename.eq_ignore_ascii_case(&name)
+        })
+        .map(|e| e.hash)
+}
+
+/// 分割工作线程（阶段 AD）：`name.NNN` 逐块写出，COPY_CHUNK 分块读写
+/// （块间响应暂停/取消，进度按字节推进）。已存在分块不覆盖——开始前
+/// 一次性列出冲突进 errors 直接收工（不动任何文件）；取消/写失败删除
+/// 当前半成品分块（已完成分块保留）；读源/写块 IO 错误 = fatal 终止
+/// （残缺分块集无意义，不继续后续块）。
+fn run_split(
+    sources: Vec<PathBuf>,
+    dest_dir: PathBuf,
+    chunk_size: u64,
+    cancel: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    tx: Sender<OpEvent>,
+) {
+    use std::io::{Read, Write};
+    let mut ctx = stream_ctx(&cancel, &paused, &tx);
+    let mut fatal: Option<String> = None;
+    'done: {
+        let Some(source) = sources.first() else {
+            fatal = Some("无分割源".to_string());
+            break 'done;
+        };
+        let meta = match std::fs::symlink_metadata(verbatim_path(source)) {
+            Ok(m) if m.is_file() => m,
+            Ok(_) => {
+                fatal = Some("分割源不是文件".to_string());
+                break 'done;
+            }
+            Err(e) => {
+                fatal = Some(format!("无法读取分割源: {e}"));
+                break 'done;
+            }
+        };
+        let Some(name) = source.file_name() else {
+            fatal = Some("无法确定分割源名称".to_string());
+            break 'done;
+        };
+        let name = name.to_string_lossy().into_owned();
+        let plan = split_plan(chunk_size, meta.len());
+        let chunk_paths: Vec<PathBuf> = plan
+            .iter()
+            .map(|(suffix, _)| dest_dir.join(format!("{name}.{suffix}")))
+            .collect();
+        // 冲突预检：任一 .NNN 已存在则整批不动（分割不适用 AutoRename）。
+        let mut has_conflict = false;
+        for p in &chunk_paths {
+            if verbatim_path(p).exists() {
+                ctx.errors.push((
+                    p.clone(),
+                    "目标分块已存在（分割不覆盖，请先处理）".to_string(),
+                ));
+                has_conflict = true;
+            }
+        }
+        if has_conflict {
+            break 'done;
+        }
+        ctx.progress.total_files = plan.len() as u64;
+        ctx.progress.total_bytes = meta.len();
+        ctx.send_progress();
+        let mut input = match std::fs::File::open(verbatim_path(source)) {
+            Ok(f) => f,
+            Err(e) => {
+                fatal = Some(format!("无法打开分割源: {e}"));
+                break 'done;
+            }
+        };
+        let mut buf = vec![0u8; COPY_CHUNK];
+        let mut last_sent = Instant::now();
+        for ((_, bytes), chunk_path) in plan.iter().zip(&chunk_paths) {
+            if ctx.wait_if_paused() {
+                break;
+            }
+            ctx.progress.current = chunk_path.clone();
+            let mut out = match std::fs::File::create(verbatim_path(chunk_path)) {
+                Ok(f) => f,
+                Err(e) => {
+                    fatal = Some(format!("无法创建分块 {}: {e}", chunk_path.display()));
+                    break;
+                }
+            };
+            let mut remaining = *bytes;
+            while remaining > 0 {
+                if ctx.wait_if_paused() {
+                    break;
+                }
+                let want = remaining.min(COPY_CHUNK as u64) as usize;
+                match input.read(&mut buf[..want]) {
+                    Ok(0) => {
+                        fatal = Some("源文件读取提前结束（大小已变化）".to_string());
+                        break;
+                    }
+                    Ok(n) => {
+                        if let Err(e) = out.write_all(&buf[..n]) {
+                            fatal = Some(format!("写入分块失败: {e}"));
+                            break;
+                        }
+                        remaining -= n as u64;
+                        ctx.progress.done_bytes += n as u64;
+                        if last_sent.elapsed() >= PROGRESS_INTERVAL {
+                            ctx.send_progress();
+                            last_sent = Instant::now();
+                        }
+                    }
+                    Err(e) => {
+                        fatal = Some(format!("读取分割源失败: {e}"));
+                        break;
+                    }
+                }
+            }
+            // 取消/失败：当前分块为半成品，删除；已完成分块保留。
+            if ctx.cancelled || fatal.is_some() {
+                drop(out);
+                let _ = std::fs::remove_file(verbatim_path(chunk_path));
+                break;
+            }
+            ctx.progress.done_files += 1;
+            ctx.send_progress();
+        }
+    }
+    let _ = tx.send(OpEvent::Finished {
+        cancelled: ctx.cancelled,
+        fatal,
+        errors: ctx.errors,
+    });
+}
+
+/// 合并工作线程（阶段 AD）：chunks 按序流式拼合进 dest（COPY_CHUNK
+/// 分块，块间响应暂停/取消）；同目录 `<name>.crc`（sfv 单行）存在时
+/// 顺带计算 CRC32（无额外 IO）合并后比对，不一致记 errors（结果保留）。
+/// 取消/IO 错误删除半成品 dest。
+fn run_merge(
+    chunks: Vec<PathBuf>,
+    dest: PathBuf,
+    cancel: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    tx: Sender<OpEvent>,
+) {
+    use std::io::{Read, Write};
+    let mut ctx = stream_ctx(&cancel, &paused, &tx);
+    let mut fatal: Option<String> = None;
+    'done: {
+        if chunks.is_empty() {
+            fatal = Some("无分块可合并".to_string());
+            break 'done;
+        }
+        // 预扫描：全部分块可读才开工（缺/坏分块不产半成品输出）。
+        let mut total_bytes = 0u64;
+        for c in &chunks {
+            match std::fs::symlink_metadata(verbatim_path(c)) {
+                Ok(m) if m.is_file() => total_bytes += m.len(),
+                _ => {
+                    ctx.errors
+                        .push((c.clone(), "分块不存在或不是文件".to_string()));
+                }
+            }
+        }
+        if !ctx.errors.is_empty() {
+            break 'done;
+        }
+        let expected_crc = expected_crc_for(&dest);
+        ctx.progress.total_files = chunks.len() as u64;
+        ctx.progress.total_bytes = total_bytes;
+        ctx.send_progress();
+        let mut out = match std::fs::File::create(verbatim_path(&dest)) {
+            Ok(f) => f,
+            Err(e) => {
+                fatal = Some(format!("无法创建目标文件 {}: {e}", dest.display()));
+                break 'done;
+            }
+        };
+        let mut crc = crc32fast::Hasher::new();
+        let mut buf = vec![0u8; COPY_CHUNK];
+        let mut last_sent = Instant::now();
+        for chunk in &chunks {
+            if ctx.wait_if_paused() {
+                break;
+            }
+            ctx.progress.current = chunk.clone();
+            let mut input = match std::fs::File::open(verbatim_path(chunk)) {
+                Ok(f) => f,
+                Err(e) => {
+                    fatal = Some(format!("无法打开分块 {}: {e}", chunk.display()));
+                    break;
+                }
+            };
+            loop {
+                if ctx.wait_if_paused() {
+                    break;
+                }
+                match input.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Err(e) = out.write_all(&buf[..n]) {
+                            fatal = Some(format!("写入目标失败: {e}"));
+                            break;
+                        }
+                        crc.update(&buf[..n]);
+                        ctx.progress.done_bytes += n as u64;
+                        if last_sent.elapsed() >= PROGRESS_INTERVAL {
+                            ctx.send_progress();
+                            last_sent = Instant::now();
+                        }
+                    }
+                    Err(e) => {
+                        fatal = Some(format!("读取分块失败: {e}"));
+                        break;
+                    }
+                }
+            }
+            if ctx.cancelled || fatal.is_some() {
+                break;
+            }
+            ctx.progress.done_files += 1;
+            ctx.send_progress();
+        }
+        drop(out);
+        if ctx.cancelled || fatal.is_some() {
+            let _ = std::fs::remove_file(verbatim_path(&dest));
+            break 'done;
+        }
+        if let Some(expected) = expected_crc {
+            let actual = format!("{:08x}", crc.finalize());
+            if !actual.eq_ignore_ascii_case(&expected) {
+                ctx.errors.push((
+                    dest.clone(),
+                    format!("CRC 校验不一致（期望 {expected}，实际 {actual}；结果已保留）"),
+                ));
+            }
+        }
+    }
+    let _ = tx.send(OpEvent::Finished {
+        cancelled: ctx.cancelled,
+        fatal,
+        errors: ctx.errors,
     });
 }
 
@@ -2712,5 +3184,199 @@ mod tests {
             std::fs::read(dest.join("src/sub/b.txt")).unwrap(),
             b"nested verify"
         );
+    }
+
+    // ---------- 阶段 AD：分割/合并 ----------
+
+    /// 同步驱动分割/合并工作线程（直接调用，断言 Finished）。
+    fn run_split_sync(
+        source: PathBuf,
+        dest_dir: PathBuf,
+        chunk_size: u64,
+        cancel: Arc<AtomicBool>,
+    ) -> FinishedLike {
+        let (tx, rx) = channel();
+        run_split(
+            vec![source],
+            dest_dir,
+            chunk_size,
+            cancel,
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        );
+        let mut finished = None;
+        while let Ok(ev) = rx.try_recv() {
+            if let OpEvent::Finished {
+                cancelled, errors, ..
+            } = ev
+            {
+                finished = Some(FinishedLike { cancelled, errors });
+            }
+        }
+        finished.expect("run_split 必有 Finished")
+    }
+
+    fn run_merge_sync(
+        chunks: Vec<PathBuf>,
+        dest: PathBuf,
+        cancel: Arc<AtomicBool>,
+    ) -> FinishedLike {
+        let (tx, rx) = channel();
+        run_merge(chunks, dest, cancel, Arc::new(AtomicBool::new(false)), tx);
+        let mut finished = None;
+        while let Ok(ev) = rx.try_recv() {
+            if let OpEvent::Finished {
+                cancelled, errors, ..
+            } = ev
+            {
+                finished = Some(FinishedLike { cancelled, errors });
+            }
+        }
+        finished.expect("run_merge 必有 Finished")
+    }
+
+    #[test]
+    fn split_plan_sizes_and_names() {
+        // 整除 + 余数。
+        let plan = split_plan(4, 10);
+        assert_eq!(
+            plan,
+            vec![
+                ("001".to_string(), 4),
+                ("002".to_string(), 4),
+                ("003".to_string(), 2)
+            ]
+        );
+        // 单块（chunk >= total）。
+        assert_eq!(split_plan(100, 5), vec![("001".to_string(), 5)]);
+        // 空文件：单个空分块。
+        assert_eq!(split_plan(4, 0), vec![("001".to_string(), 0)]);
+        // chunk_size 0 防御按 1。
+        assert_eq!(split_plan(0, 3).len(), 3);
+        // 字节总数守恒。
+        let plan = split_plan(1024, 1_000_000);
+        assert_eq!(plan.iter().map(|(_, b)| b).sum::<u64>(), 1_000_000);
+    }
+
+    #[test]
+    fn parse_chunk_name_rules() {
+        assert_eq!(parse_chunk_name("a.001"), Some(("a", 1)));
+        assert_eq!(parse_chunk_name("a.b.mkv.010"), Some(("a.b.mkv", 10)));
+        assert_eq!(parse_chunk_name("a.1"), None);
+        assert_eq!(parse_chunk_name("a.001x"), None);
+        assert_eq!(parse_chunk_name(".001"), None);
+        assert_eq!(parse_chunk_name("noext"), None);
+    }
+
+    #[test]
+    fn merge_target_base_rules() {
+        let dir = std::env::temp_dir();
+        let p = |n: &str| dir.join(n);
+        // 单个 .001。
+        let (d, b) = merge_target_base(&[p("a.001")]).expect("single .001");
+        assert_eq!((d, b), (dir.clone(), "a".to_string()));
+        // 一组同前缀分块。
+        let (d, b) = merge_target_base(&[p("a.002"), p("a.001"), p("a.003")]).expect("group");
+        assert_eq!((d, b), (dir.clone(), "a".to_string()));
+        // 单个非 .001 分块不行。
+        assert!(merge_target_base(&[p("a.002")]).is_none());
+        // 混合前缀不行。
+        assert!(merge_target_base(&[p("a.001"), p("b.002")]).is_none());
+        // 非分块名不行。
+        assert!(merge_target_base(&[p("a.zip")]).is_none());
+        // 一组缺 .001 不行。
+        assert!(merge_target_base(&[p("a.002"), p("a.003")]).is_none());
+    }
+
+    #[test]
+    fn collect_chunks_continuous_and_missing() {
+        let t = tempfile::tempdir().unwrap();
+        for n in ["a.001", "a.002", "a.003"] {
+            std::fs::write(t.path().join(n), b"x").unwrap();
+        }
+        std::fs::write(t.path().join("b.001"), b"x").unwrap();
+        let chunks = collect_chunks(t.path(), "a").expect("continuous");
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks[0].ends_with("a.001"));
+        assert!(chunks[2].ends_with("a.003"));
+        // 缺号报错并列出。
+        std::fs::remove_file(t.path().join("a.002")).unwrap();
+        let err = collect_chunks(t.path(), "a").unwrap_err();
+        assert!(err.contains(".002"), "{err}");
+        // 无前缀分块报错。
+        assert!(collect_chunks(t.path(), "zzz").is_err());
+    }
+
+    #[test]
+    fn split_merge_roundtrip_with_crc() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("data.bin");
+        let data: Vec<u8> = (0..700_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&src, &data).unwrap();
+        let out_dir = t.path().join("out");
+        std::fs::create_dir(&out_dir).unwrap();
+
+        // 分割（chunk 256KB+ 边界外小一点，跨多块）。
+        let r = run_split_sync(
+            src.clone(),
+            out_dir.clone(),
+            200_000,
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let chunks = collect_chunks(&out_dir, "data.bin").expect("chunks");
+        assert_eq!(chunks.len(), 4); // ceil(700000/200000)
+        let sizes: Vec<u64> = chunks
+            .iter()
+            .map(|c| std::fs::metadata(c).unwrap().len())
+            .collect();
+        assert_eq!(sizes, vec![200_000, 200_000, 200_000, 100_000]);
+
+        // 冲突预检：再分割同目标 → 列出全部冲突、不改动。
+        let before = std::fs::read(out_dir.join("data.bin.001")).unwrap();
+        let r = run_split_sync(
+            src.clone(),
+            out_dir.clone(),
+            200_000,
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert_eq!(r.errors.len(), 4, "{:?}", r.errors);
+        assert_eq!(std::fs::read(out_dir.join("data.bin.001")).unwrap(), before);
+
+        // 写 .crc（sfv 单行：文件名 + 空格 + crc32 hex）。
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&data);
+        let crc = format!("{:08x}", hasher.finalize());
+        std::fs::write(out_dir.join("data.bin.crc"), format!("data.bin {crc}\n")).unwrap();
+
+        // 合并 + CRC 校验通过。
+        let dest = out_dir.join("data.bin");
+        let r = run_merge_sync(
+            chunks.clone(),
+            dest.clone(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(std::fs::read(&dest).unwrap(), data);
+
+        // CRC 不一致 → errors 报告（结果保留）。
+        std::fs::write(out_dir.join("data.bin.crc"), "data.bin 00000000\n").unwrap();
+        std::fs::remove_file(&dest).unwrap();
+        let r = run_merge_sync(chunks, dest.clone(), Arc::new(AtomicBool::new(false)));
+        assert_eq!(r.errors.len(), 1);
+        assert!(r.errors[0].1.contains("校验不一致"), "{:?}", r.errors);
+        assert_eq!(std::fs::read(&dest).unwrap(), data);
+    }
+
+    #[test]
+    fn split_cancel_removes_partial_chunk() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("big.bin");
+        std::fs::write(&src, vec![7u8; 600_000]).unwrap();
+        let cancel = Arc::new(AtomicBool::new(true)); // 预置取消：第一块即停
+        let r = run_split_sync(src, t.path().to_path_buf(), 100_000, cancel);
+        assert!(r.cancelled);
+        // 半成品分块已删除（无任何 .NNN 产出残留）。
+        assert!(collect_chunks(t.path(), "big.bin").is_err());
     }
 }
