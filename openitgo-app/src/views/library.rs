@@ -1,4 +1,6 @@
-use openitgo_storage::models::{Bookmarks, History, Library, LibraryEntry, LibrarySort, MediaType};
+use openitgo_storage::models::{
+    Bookmarks, History, HistoryEntry, Library, LibraryEntry, LibrarySort, MediaType,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -619,11 +621,15 @@ impl LibraryView {
             });
         });
         ui.separator();
+        // 最近阅读在前；删除回调需要原始下标。
+        let mut order: Vec<usize> = (0..history.entries.len()).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(history.entries[i].last_read_at));
         egui::Grid::new("history_grid").show(ui, |ui| {
-            for (idx, entry) in history.entries.iter().enumerate() {
+            for idx in order {
+                let entry = &history.entries[idx];
                 let (title, path) = match self.find_by_id(&entry.comic_id) {
                     Some(lib) => (lib.title.clone(), Some(lib.path.clone())),
-                    None => (entry.comic_id.clone(), None),
+                    None => (history_entry_title(entry), None),
                 };
                 ui.label(&title);
                 ui.label(format!("第 {} 页", entry.page_index + 1));
@@ -838,6 +844,16 @@ fn render_empty_placeholder(ui: &mut egui::Ui, icon: &str, title: &str, subtitle
     });
 }
 
+/// 历史条目标题：不在书架时回退为文件名（去扩展名；目录取末级名）。
+fn history_entry_title(entry: &HistoryEntry) -> String {
+    entry
+        .path
+        .file_stem()
+        .or_else(|| entry.path.file_name())
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| entry.comic_id.clone())
+}
+
 fn sort_label(sort: LibrarySort) -> &'static str {
     match sort {
         LibrarySort::LastRead => "最近阅读",
@@ -940,6 +956,24 @@ mod tests {
         // 2024-01-02 03:04:00 UTC
         let ts = 1704164640;
         assert_eq!(format_timestamp(ts), "2024-01-02 03:04");
+    }
+
+    #[test]
+    fn test_history_entry_title_falls_back_to_file_stem() {
+        let entry = HistoryEntry {
+            comic_id: "abc123".to_string(),
+            path: PathBuf::from("/downloads/Some Comic.zip"),
+            volume_index: 0,
+            page_index: 0,
+            char_offset: None,
+            last_read_at: 0,
+        };
+        assert_eq!(history_entry_title(&entry), "Some Comic");
+        let dir_entry = HistoryEntry {
+            path: PathBuf::from("/downloads/某漫画 第5卷"),
+            ..entry
+        };
+        assert_eq!(history_entry_title(&dir_entry), "某漫画 第5卷");
     }
 
     #[test]
