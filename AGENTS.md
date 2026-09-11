@@ -647,6 +647,24 @@ cargo clippy --workspace --all-targets -- -D warnings
   LCS（u16 DP 表 (n+1)×(m+1) + 回溯，平局优先 Del 使「修改」呈先删后增
   相邻块）；渲染单 ScrollArea `show_rows` 左右两列对照（Del 左红底、
   Add 右绿底、Same 无色、对侧空位占位——单滚动区天然联动滚动）。
+  **撤销（阶段 AG）**：`file_manager_undo.rs` 会话内 `UndoStack`
+  （FileManagerView 持 `undo` 字段，上限 32 丢弃最旧）。可撤销：
+  Copy（撤销 = 目标集走 file_ops Delete 任务进回收站）、Move（撤销 =
+  dest 改名回 src）、Rename/MultiRename（反向改名；批量逆序回改防互换
+  类命名相撞）、NewFile/NewDir（撤销 = 回收站）；Delete（回收站已可
+  恢复）/覆盖写/Compress/Split/Merge/属性修改不可撤销——不入栈也
+  **不清空栈**（TC 同）。记账点：Copy/Move 在 `on_op_finished` 按
+  `FinishedOp.written`（OpEvent::Finished 新增字段 = 实际写入的顶层
+  (目标, 源)，AutoRename 后为准；Move 仅源已移除项记入）入栈，
+  Rename/MultiRename/NewFile/NewDir 在对话框成功路径入栈。执行
+  `undo_top`：`plan_undo` 纯函数产 `UndoPlan`（Trash / RenameBack），
+  `precheck` 执行前一次性过滤（Trash 目标缺失跳过；RenameBack 当前
+  位置缺失或**改回位置被占用**跳过，防覆盖第三方文件），Trash 走
+  `start_delete(permanent=false)`（回收站保底，刷新由 on_op_finished
+  兜底），RenameBack 同步逐个 `fs::rename`（verbatim_path 包长路径）
+  后按涉及目录刷新栏；跳过/失败项汇总 op_error。入口：Ctrl+Z
+  （Ctrl+Shift+Z 仍是注释编辑，无冲突；栈空提示「没有可撤销的操作」）
+  + 右键菜单顶部动态项「撤销 {label}」（栈空不显示）。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

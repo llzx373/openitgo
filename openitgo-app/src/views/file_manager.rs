@@ -31,10 +31,11 @@ use crate::views::file_manager_thumbs::{
     grid_cols, grid_row_count, grid_row_of, truncate_cell_name, ThumbCache, ThumbKey, ThumbLookup,
     THUMB_CELL_H, THUMB_CELL_W, THUMB_MAX_DIM,
 };
+use crate::views::file_manager_undo::{plan_undo, precheck, UndoPlan, UndoStack, UndoableOp};
 use crate::views::file_ops::{
     collect_chunks, create_dir, create_text_file, format_eta, merge_target_base, rename_entry,
-    retry_sources, suggest_folder_name, suggest_text_file_name, ConflictMode, FileOpManager,
-    FinishedOp, OpKind, OpSpeedMeter,
+    retry_sources, suggest_folder_name, suggest_text_file_name, verbatim_path, ConflictMode,
+    FileOpManager, FinishedOp, OpKind, OpSpeedMeter,
 };
 use crate::views::preview_bytes::{
     decode_preview_text, format_hex_line, load_file_preview, PreviewData, PreviewOutcome,
@@ -418,6 +419,11 @@ pub struct FileManagerView {
     checksum: ChecksumDialog,
     /// 比较内容对话框（阶段 AF；非模态 egui::Window，worker 关闭即取消）。
     compare: CompareDialog,
+    /// 撤销栈（阶段 AG；会话内，上限 32 丢弃最旧）。Copy/Move 在
+    /// on_op_finished 按实际写入记账，Rename/MultiRename/NewFile/NewDir
+    /// 在对话框成功路径记账；Delete/Compress/Split/Merge/覆盖写/属性修改
+    /// 不可撤销（不入栈也不清空栈）。
+    undo: UndoStack,
     /// 同步目录对话框（阶段 AE；非模态 egui::Window，对比 worker 关闭即取消）。
     sync_dialog: SyncDialog,
     /// 「修改属性/时间戳…」对话框（阶段 AC；comment_dialog 同款非模态模式）。
@@ -920,6 +926,7 @@ impl FileManagerView {
             search: SearchDialog::default(),
             checksum: ChecksumDialog::default(),
             compare: CompareDialog::default(),
+            undo: UndoStack::default(),
             sync_dialog: SyncDialog::default(),
             attr_dialog: None,
             group_dialog: None,
@@ -3569,6 +3576,17 @@ impl FileManagerView {
         e: &FsEntry,
         intents: &mut FmIntents,
     ) {
+        // 「撤销 …」（阶段 AG）：菜单顶部动态项，栈空时不显示。
+        if let Some(label) = self.undo.peek_label() {
+            if ui
+                .button((icons::ARROW_COUNTER_CLOCKWISE, format!(" 撤销 {label}")))
+                .clicked()
+            {
+                self.undo_top(intents);
+                ui.close();
+            }
+            ui.separator();
+        }
         if ui.button((icons::ARROW_SQUARE_OUT, " 打开")).clicked() {
             self.open_ui_row(idx, rows, row, intents);
             ui.close();
@@ -5189,17 +5207,33 @@ impl FileManagerView {
             }
             FmDialogOutcome::ConfirmRename { path, new_name } => {
                 match rename_entry(&path, &new_name) {
-                    Ok(new_path) => self.refresh_panel_of(&new_path),
+                    Ok(new_path) => {
+                        self.undo.push(UndoableOp::Rename {
+                            from: path.clone(),
+                            to: new_path.clone(),
+                        });
+                        self.refresh_panel_of(&new_path);
+                    }
                     Err(e) => intents.op_error = Some(e),
                 }
             }
             FmDialogOutcome::ConfirmNewDir { parent, name } => match create_dir(&parent, &name) {
-                Ok(new_path) => self.refresh_panel_of(&new_path),
+                Ok(new_path) => {
+                    self.undo.push(UndoableOp::NewDir {
+                        path: new_path.clone(),
+                    });
+                    self.refresh_panel_of(&new_path);
+                }
                 Err(e) => intents.op_error = Some(e),
             },
             FmDialogOutcome::ConfirmNewFile { parent, name } => {
                 match create_text_file(&parent, &name) {
-                    Ok(new_path) => self.refresh_panel_of(&new_path),
+                    Ok(new_path) => {
+                        self.undo.push(UndoableOp::NewFile {
+                            path: new_path.clone(),
+                        });
+                        self.refresh_panel_of(&new_path);
+                    }
                     Err(e) => intents.op_error = Some(e),
                 }
             }
@@ -5214,11 +5248,18 @@ impl FileManagerView {
             }
             FmDialogOutcome::ConfirmMultiRename { plans } => {
                 let mut failures = Vec::new();
+                let mut renamed: Vec<(PathBuf, PathBuf)> = Vec::new();
                 for plan in &plans {
                     match rename_entry(&plan.src, &plan.dst_name) {
-                        Ok(new_path) => self.refresh_panel_of(&new_path),
+                        Ok(new_path) => {
+                            renamed.push((plan.src.clone(), new_path.clone()));
+                            self.refresh_panel_of(&new_path);
+                        }
                         Err(e) => failures.push(format!("{}: {e}", plan.src.display())),
                     }
+                }
+                if !renamed.is_empty() {
+                    self.undo.push(UndoableOp::MultiRename { pairs: renamed });
                 }
                 if !failures.is_empty() {
                     intents.op_error = Some(format!(
@@ -5254,6 +5295,24 @@ impl FileManagerView {
 
     /// 操作完成：刷新涉及的两栏（目标栏 + 源栏），汇总错误经回调上报。
     fn on_op_finished(&mut self, op: FinishedOp, intents: &mut FmIntents) {
+        // 撤销记账（阶段 AG）：Copy/Move 按实际写入的顶层目标入栈
+        // （AutoRename 后为准；取消/部分失败时已完成项仍记入，撤销只
+        // 作用于成功项）。Delete（回收站已可恢复）/Compress/Split/Merge/
+        // 覆盖写/属性修改不可撤销——不入栈也不清空栈（TC 同）。撤销自身
+        // 触发的 Delete 任务（UndoPlan::Trash）天然不会再入栈。
+        match op.kind {
+            OpKind::Copy if !op.written.is_empty() => {
+                self.undo.push(UndoableOp::Copy {
+                    targets: op.written.iter().map(|(d, _)| d.clone()).collect(),
+                });
+            }
+            OpKind::Move if !op.written.is_empty() => {
+                self.undo.push(UndoableOp::Move {
+                    pairs: op.written.clone(),
+                });
+            }
+            _ => {}
+        }
         for panel in &mut self.panels {
             let involved =
                 op.dest_dir.as_ref() == Some(&panel.dir) || op.src_dirs.contains(&panel.dir);
@@ -5294,6 +5353,59 @@ impl FileManagerView {
         }
         if !parts.is_empty() {
             intents.op_error = Some(parts.join("\n"));
+        }
+    }
+
+    /// 撤销栈顶操作（阶段 AG；Ctrl+Z / 右键菜单顶部动态项共用）：
+    /// 栈空提示「没有可撤销的操作」。Trash 计划走 file_ops Delete 任务
+    /// （回收站保底，完成刷新由 on_op_finished 兜底）；RenameBack 计划
+    /// 同步逐个 rename（瞬时操作），失败/跳过项汇总上报。预检
+    /// （precheck）已滤掉位置缺失/被占用项，执行期不再询问。
+    fn undo_top(&mut self, intents: &mut FmIntents) {
+        let Some(op) = self.undo.pop() else {
+            intents.op_error = Some("没有可撤销的操作".to_string());
+            return;
+        };
+        let label = op.label();
+        let (plan, mut skipped) = precheck(plan_undo(&op));
+        match plan {
+            UndoPlan::Trash { targets } => {
+                if !targets.is_empty() {
+                    self.ops.start_delete(targets, false);
+                }
+            }
+            UndoPlan::RenameBack { pairs } => {
+                let mut dirs: Vec<PathBuf> = pairs
+                    .iter()
+                    .flat_map(|(cur, dst)| [cur.parent(), dst.parent()])
+                    .flatten()
+                    .map(Path::to_path_buf)
+                    .collect();
+                dirs.sort();
+                dirs.dedup();
+                for (cur, dst) in &pairs {
+                    if let Err(e) = std::fs::rename(verbatim_path(cur), verbatim_path(dst)) {
+                        skipped.push((cur.clone(), format!("改回失败: {e}")));
+                    }
+                }
+                for panel in &mut self.panels {
+                    if dirs.contains(&panel.dir) {
+                        panel.refresh();
+                    }
+                }
+            }
+        }
+        if !skipped.is_empty() {
+            let first: Vec<String> = skipped
+                .iter()
+                .take(3)
+                .map(|(p, e)| format!("{}: {e}", p.display()))
+                .collect();
+            intents.op_error = Some(format!(
+                "撤销{label}，{} 项跳过/失败:\n{}",
+                skipped.len(),
+                first.join("\n")
+            ));
         }
     }
 
@@ -5697,6 +5809,10 @@ impl FileManagerView {
         // Ctrl+M：批量重命名（作用于选中集或焦点项）。
         if mods.command && ui.input(|i| i.key_pressed(egui::Key::M)) {
             self.open_multi_rename_dialog(active);
+        }
+        // Ctrl+Z：撤销栈顶（阶段 AG；Ctrl+Shift+Z 是注释编辑，见下）。
+        if mods.command && !mods.shift && !mods.alt && ui.input(|i| i.key_pressed(egui::Key::Z)) {
+            self.undo_top(intents);
         }
         // Ctrl+Shift+Z：编辑焦点项注释（阶段 W；Ctrl+Z 预留给撤销，不占）。
         // 分支视图子目录项同右键菜单门槛（注释写回当前目录 descript.ion）。

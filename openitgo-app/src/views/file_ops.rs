@@ -224,6 +224,11 @@ enum OpEvent {
         cancelled: bool,
         fatal: Option<String>,
         errors: Vec<(PathBuf, String)>,
+        /// 实际写入的顶层目标与对应源（阶段 AG 撤销用）：Copy = 每个成功
+        /// 复制的 (目标, 源)（AutoRename 后为准）；Move = 源已移除的
+        /// (目标, 源) 配对（源残留的不记——原位置仍被占用，撤销无意义）；
+        /// Delete/Compress/Split/Merge 恒空。
+        written: Vec<(PathBuf, PathBuf)>,
     },
 }
 
@@ -298,6 +303,8 @@ pub struct FinishedOp {
     pub dest: Option<PathBuf>,
     pub conflict: ConflictMode,
     pub delete_permanent: bool,
+    /// 实际写入的顶层目标与对应源（阶段 AG 撤销用；语义见 OpEvent::Finished）。
+    pub written: Vec<(PathBuf, PathBuf)>,
 }
 
 /// 活动任务快照（状态栏进度条用）。
@@ -723,8 +730,9 @@ impl FileOpManager {
                         cancelled,
                         fatal,
                         errors,
+                        written,
                     }) => {
-                        finished_ids.push((task.id, cancelled, fatal, errors));
+                        finished_ids.push((task.id, cancelled, fatal, errors, written));
                         break;
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -735,13 +743,14 @@ impl FileOpManager {
                             false,
                             Some("操作线程异常终止".to_string()),
                             Vec::new(),
+                            Vec::new(),
                         ));
                         break;
                     }
                 }
             }
         }
-        for (id, cancelled, fatal, errors) in finished_ids {
+        for (id, cancelled, fatal, errors, written) in finished_ids {
             if let Some(pos) = self.tasks.iter().position(|t| t.id == id) {
                 let task = self.tasks.remove(pos);
                 summary.finished.push(FinishedOp {
@@ -754,6 +763,7 @@ impl FileOpManager {
                     dest: task.dest,
                     conflict: task.conflict,
                     delete_permanent: task.delete_permanent,
+                    written,
                 });
             }
         }
@@ -823,6 +833,7 @@ fn run_op(
         remembered_dir: None,
         progress: OpProgress::default(),
         errors: Vec::new(),
+        written: Vec::new(),
         cancelled: false,
     };
     // 预扫描：递归计数（文件+目录项数、文件字节，过滤后集合）；符号链接
@@ -884,6 +895,7 @@ fn run_op(
                     if !verbatim_path(&dst).exists()
                         && std::fs::rename(verbatim_path(src), verbatim_path(&dst)).is_ok()
                     {
+                        ctx.written.push((dst, src.clone()));
                         ctx.progress.done_files += items;
                         ctx.progress.done_bytes += bytes;
                         ctx.send_progress();
@@ -906,10 +918,13 @@ fn run_op(
                 };
                 if let Some(dst) = dst {
                     ctx.drop_source_unsafe = false;
-                    if copy_recursive(src, &dst, conflict, &mut ctx).is_ok()
-                        && kind == OpKind::Move
-                        && !ctx.cancelled
-                    {
+                    let copied = copy_recursive(src, &dst, conflict, &mut ctx).is_ok();
+                    // 撤销记账（阶段 AG）：Copy 成功即记 (目标, 源)；Move 仅
+                    // 源已移除才记（源残留 = 原位置仍被占用，移回必冲突）。
+                    if copied && kind == OpKind::Copy && !ctx.cancelled {
+                        ctx.written.push((dst.clone(), src.clone()));
+                    }
+                    if copied && kind == OpKind::Move && !ctx.cancelled {
                         // 跨盘/占用回退：复制成功后清理源。过滤移动
                         // （move_prune）已逐文件 trash + 清空空目录，此处
                         // 只除根并说明残留；非过滤且发生过校验失败时不整删。
@@ -928,10 +943,14 @@ fn run_op(
                                 ));
                             }
                         } else if ctx.move_prune {
-                            let _ = std::fs::remove_dir(verbatim_path(src));
+                            if std::fs::remove_dir(verbatim_path(src)).is_ok() {
+                                ctx.written.push((dst.clone(), src.clone()));
+                            }
                         } else if let Err(e) = trash::delete(src) {
                             ctx.errors
                                 .push((src.clone(), format!("源移入回收站失败: {e}")));
+                        } else {
+                            ctx.written.push((dst.clone(), src.clone()));
                         }
                     }
                 }
@@ -942,6 +961,7 @@ fn run_op(
         cancelled: ctx.cancelled,
         fatal: fatal.take(),
         errors: ctx.errors,
+        written: ctx.written,
     });
 }
 
@@ -994,6 +1014,7 @@ fn run_compress(
         cancelled: cancel.load(Ordering::Relaxed),
         fatal: result.err().map(|e| e.to_string()),
         errors: Vec::new(),
+        written: Vec::new(),
     });
 }
 
@@ -1025,6 +1046,7 @@ fn stream_ctx<'a>(
         remembered_dir: None,
         progress: OpProgress::default(),
         errors: Vec::new(),
+        written: Vec::new(),
         cancelled: false,
     }
 }
@@ -1268,6 +1290,7 @@ fn run_split(
         cancelled: ctx.cancelled,
         fatal,
         errors: ctx.errors,
+        written: ctx.written,
     });
 }
 
@@ -1379,6 +1402,7 @@ fn run_merge(
         cancelled: ctx.cancelled,
         fatal,
         errors: ctx.errors,
+        written: ctx.written,
     });
 }
 
@@ -1404,6 +1428,9 @@ struct OpCtx<'a> {
     remembered_dir: Option<ConflictAction>,
     progress: OpProgress,
     errors: Vec<(PathBuf, String)>,
+    /// 实际写入的顶层目标与对应源（阶段 AG 撤销；Copy = 成功复制项，
+    /// Move = 源已移除项，AutoRename 后为准）。
+    written: Vec<(PathBuf, PathBuf)>,
     cancelled: bool,
 }
 
@@ -2618,6 +2645,7 @@ mod tests {
             remembered_dir: None,
             progress: OpProgress::default(),
             errors: Vec::new(),
+            written: Vec::new(),
             cancelled: false,
         };
         let r = copy_file_chunks(&src, &dst, &mut ctx);
