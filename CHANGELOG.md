@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+### Fixed
+
+- 启动闪黑：修复最大化启动瞬间全屏黑窗闪烁——winit 创建期 `set_maximized` 内部的 `ShowWindow(SW_MAXIMIZE)` 会强制显示尚未绘制的窗口（随后 `SW_HIDE` 藏回，先于任何应用代码无法拦截）；Windows 下改为按保存尺寸创建普通隐藏窗口，`ReaderApp::new` 经 `platform::startup_cloak` 在 DWM cloak（`DWMWA_CLOAK`）遮蔽下写入最大化 show state，首帧几何验证通过后解除遮蔽，用户第一眼即带内容的最终画面。
+
 ## [Unreleased]
 
 ### Added

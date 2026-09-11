@@ -1,11 +1,12 @@
 //! Windows：把「取消最大化时还原到的矩形」写成保存的窗口几何。
 //!
-//! 启动最大化走「不传 inner_size」方案后创建期最大化存活，但窗口的
-//! normal rect 是 Windows 默认值（CW_USEDEFAULT 位置/尺寸），用户首次
-//! 取消最大化不会回到保存的几何，持久化还会把默认尺寸写进 settings。
-//! 本模块在启动最大化确认后调用一次 `SetWindowPlacement`，仅改写
-//! `WINDOWPLACEMENT.rcNormalPosition`（showCmd/flags 保持原值，不改变
-//! 当前最大化状态）。
+//! 启动最大化改走 cloak 遮蔽方案（`startup_cloak`：不向 winit 传
+//! `with_maximized`，创建普通隐藏窗口后在 DWM cloak 下写入最大化 show
+//! state），但最大化后窗口的 normal rect 是创建时的默认值（CW_USEDEFAULT
+//! 位置），用户首次取消最大化不会回到保存的几何，持久化还会把默认尺寸
+//! 写进 settings。本模块在启动最大化确认后调用一次 `SetWindowPlacement`，
+//! 仅改写 `WINDOWPLACEMENT.rcNormalPosition`（showCmd/flags 保持原值，
+//! 不改变当前最大化状态）。
 //!
 //! 坐标口径：settings 的 `window_size` 是 egui 逻辑点的**客户区**尺寸、
 //! `window_pos` 是外框左上角；`rcNormalPosition` 是物理像素的**外框**
@@ -66,7 +67,7 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
 }
 
 /// 查找本进程主窗口（类名为 winit 用户窗口类的顶层窗口）。
-fn main_hwnd() -> Option<HWND> {
+pub(crate) fn main_hwnd() -> Option<HWND> {
     let mut ctx = EnumCtx {
         pid: std::process::id(),
         found: std::ptr::null_mut(),

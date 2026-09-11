@@ -49,6 +49,16 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ### 通用
 
+- **Startup maximize (Windows)**：`main.rs` 最大化启动**不传 `with_maximized`**——
+  winit 创建期 `set_maximized` 的 `ShowWindow(SW_MAXIMIZE)` 会强制显示未绘制窗口
+  （SW_HIDE 前 DWM 已合成黑帧 = 启动闪黑），且先于任何应用代码。改为按保存尺寸
+  创建普通隐藏窗口，`ReaderApp::new` 经 `platform/windows/startup_cloak.rs` 在 DWM
+  cloak（`DWMWA_CLOAK`，窗口对合成器不可见但 `IsWindowVisible` 为真）下
+  SW_MAXIMIZE→SW_HIDE 写入最大化 show state；`maybe_uncloak_startup_window`
+  在 `window_geometry_validated` 后解除遮蔽（2s 看门狗兜底）。winit 内部 MAXIMIZED
+  标志由 `maybe_validate_window_geometry` 首帧补发同步（cloaked 下无闪烁）；
+  还原矩形仍由 `platform::restore_rect` 写保存值。**不要回退为传
+  `with_maximized` 或首帧后发 Maximized 命令**（前者闪黑，后者有最大化动画跳变）。
 - **Comic IDs**: deterministic from file/folder path via `openitgo_parser::stable_comic_id`.
   Never use the filename alone.
 - **History entries** store both `comic_id` and `path` for robust matching.

@@ -806,6 +806,7 @@ pub mod windows {
     pub mod mpv_view;
     pub mod restore_rect;
     pub mod shell_verbs;
+    pub mod startup_cloak;
 }
 
 /// 还原矩形 stub（非 Windows）：无操作。

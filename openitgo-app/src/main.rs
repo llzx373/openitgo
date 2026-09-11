@@ -57,15 +57,28 @@ fn main() -> eframe::Result<()> {
     };
 
     let mut viewport = egui::ViewportBuilder::default().with_clamp_size_to_monitor_size(true);
-    // 最大化时不传 inner_size：egui-winit 创建窗口后会按 inner_size 调
-    // winit request_inner_size，它异步 ShowWindow(SW_RESTORE) 撤销创建期
-    // 最大化，且紧随的 set_maximized 因 winit 内部标志尚未同步成为空操作。
-    // 不传 inner_size 则该调用被跳过，创建期最大化存活——窗口创建出来即
-    // 最大化，全程无 resize / surface 重配置 / 黑帧。还原矩形由 ReaderApp
-    // 确认最大化后经 platform::restore_rect 写成保存值；罕见丢失时由
-    // maybe_validate_window_geometry 首帧补发兜底。
+    // 最大化启动（Windows）：不传 with_maximized——winit 创建期
+    // set_maximized 内部的 ShowWindow(SW_MAXIMIZE) 会强制显示尚未绘制的
+    // 窗口，紧随的 SW_HIDE 藏回之前 DWM 已把全屏黑窗合成上屏（启动闪黑），
+    // 且该序列先于任何应用代码，无法拦截。改为按保存尺寸创建普通隐藏窗口，
+    // 由 ReaderApp::new 经 platform::startup_cloak 在 DWM cloak 遮蔽下写入
+    // 最大化 show state，首帧几何验证通过后才解除遮蔽（app.rs
+    // maybe_uncloak_startup_window）。还原矩形仍由 platform::restore_rect
+    // 写成保存值；winit 侧的 Maximized 标志由 maybe_validate_window_geometry
+    // 补发同步（cloaked 下无闪烁）。
     if restored.maximized {
-        viewport = viewport.with_maximized(true);
+        #[cfg(target_os = "windows")]
+        {
+            viewport = viewport.with_inner_size([w, h]);
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            // 非 Windows 维持创建期最大化：egui-winit 创建后若再按
+            // inner_size 调 winit request_inner_size，会异步撤销创建期
+            // 最大化（SW_RESTORE），紧随的 set_maximized 因 winit 内部
+            // 标志未同步成为空操作；不传 inner_size 则整链跳过。
+            viewport = viewport.with_maximized(true);
+        }
     } else {
         viewport = viewport.with_inner_size([w, h]);
     }

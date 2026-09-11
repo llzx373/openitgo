@@ -7,13 +7,13 @@
 use crate::app::{PASSWORD_INCORRECT_MARKER, PASSWORD_REQUIRED_MARKER};
 use crate::opener::{AsyncOpener, OpenStatus};
 use crate::views::archive_tree::{
-    ListRow, SortKey, TreeRow, breadcrumb_paths, build_dir_rows, build_dir_stats, list_rows,
+    breadcrumb_paths, build_dir_rows, build_dir_stats, list_rows, ListRow, SortKey, TreeRow,
 };
 use crate::views::preview_bytes::{
-    PREVIEW_MAX_BYTES, PreviewData, PreviewOutcome, classify_preview_bytes, is_previewable_name,
+    classify_preview_bytes, is_previewable_name, PreviewData, PreviewOutcome, PREVIEW_MAX_BYTES,
 };
-use egui_phosphor_icons::{Icon, icons};
-use openitgo_parser::archive::{ArchiveEntry, list_entries, read_comment, read_entry};
+use egui_phosphor_icons::{icons, Icon};
+use openitgo_parser::archive::{list_entries, read_comment, read_entry, ArchiveEntry};
 use openitgo_parser::traits::ParseError;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1680,7 +1680,11 @@ impl ArchiveView {
                 painter.rect_filled(rect, 0.0, ui.visuals().widgets.hovered.bg_fill);
             }
             let arrow = if self.sort_key == key {
-                if self.sort_asc { " ▲" } else { " ▼" }
+                if self.sort_asc {
+                    " ▲"
+                } else {
+                    " ▼"
+                }
             } else {
                 ""
             };

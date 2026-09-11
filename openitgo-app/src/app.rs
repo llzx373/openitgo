@@ -424,6 +424,10 @@ pub struct ReaderApp {
     pub window_geometry_validated: bool,
     /// 启动最大化补救是否已发出（只发一次，失败不与用户对抗）。
     pub maximize_restore_sent: bool,
+    /// Windows 启动最大化：待解除 DWM cloak 遮蔽的主窗口（HWND 值 +
+    /// 遮蔽起始时刻，用于看门狗兜底）。见 platform::startup_cloak。
+    #[cfg(target_os = "windows")]
+    pub startup_uncloak: Option<(usize, Instant)>,
     /// 上次设置的窗口标题，避免每帧重复发 ViewportCommand。
     last_window_title: String,
 }
@@ -548,6 +552,8 @@ impl Default for ReaderApp {
             last_window_geometry_flush: None,
             window_geometry_validated: false,
             maximize_restore_sent: false,
+            #[cfg(target_os = "windows")]
+            startup_uncloak: None,
             last_window_title: String::new(),
         }
     }
@@ -673,6 +679,8 @@ impl eframe::App for ReaderApp {
         self.tick_reading_stats();
         self.tick_persist_history_bookmarks();
         self.maybe_validate_window_geometry(&ctx);
+        #[cfg(target_os = "windows")]
+        self.maybe_uncloak_startup_window();
         self.tick_persist_window_geometry(&ctx);
         self.sync_window_title(&ctx);
     }
@@ -795,6 +803,17 @@ impl ReaderApp {
         let arg1 = std::env::args_os().nth(1).map(std::path::PathBuf::from);
         if let Some(path) = initial_open_path(env_open, arg1) {
             app.open_path(path);
+        }
+        // Windows 启动最大化：main.rs 未向 winit 传 with_maximized（其创建期
+        // set_maximized 会强制显示未绘制的窗口，造成启动闪黑，且先于任何应用
+        // 代码无法拦截），窗口按保存尺寸普通隐藏创建；此处趁首帧渲染前在 DWM
+        // cloak 遮蔽下写入最大化 show state，几何验证通过后解除遮蔽。
+        #[cfg(target_os = "windows")]
+        if app.settings.window_maximized {
+            if let Some(hwnd) = crate::platform::restore_rect::main_hwnd() {
+                crate::platform::windows::startup_cloak::cloak_and_maximize(hwnd as usize);
+                app.startup_uncloak = Some((hwnd as usize, Instant::now()));
+            }
         }
         // 启动时回收临时打开/拖出目录中的陈旧文件（24h，失败静默）。
         crate::temp_open::clean_stale(crate::temp_open::STALE_MAX_AGE);
@@ -3884,6 +3903,21 @@ impl ReaderApp {
         self.persist_history_bookmarks_if_due(Instant::now(), HISTORY_FLUSH_INTERVAL);
     }
 
+    /// Windows 启动最大化收尾：首帧几何验证通过（最大化补发与还原矩形均已
+    /// 落定）后解除 DWM cloak 遮蔽，用户第一眼即带内容的最终画面；2s 看门狗
+    /// 兜底，防验证条件异常导致窗口永远不可见。
+    #[cfg(target_os = "windows")]
+    fn maybe_uncloak_startup_window(&mut self) {
+        let Some((hwnd, since)) = self.startup_uncloak else {
+            return;
+        };
+        if !self.window_geometry_validated && since.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        crate::platform::windows::startup_cloak::uncloak(hwnd);
+        self.startup_uncloak = None;
+    }
+
     /// 首帧（或 monitor 信息就绪后）：最大化确认与还原矩形修复，再校验是否屏外。
     fn maybe_validate_window_geometry(&mut self, ctx: &egui::Context) {
         if self.window_geometry_validated {
@@ -3899,10 +3933,13 @@ impl ReaderApp {
         if ms.x < 1.0 || ms.y < 1.0 {
             return;
         }
-        // 兜底：创建期最大化（main.rs，不传 inner_size 使其存活）若因罕见
-        // 竞态丢失，补发一次 Maximized(true)。命令当帧末尾才被处理，live
-        // 状态要下帧才更新，故发出后先不置 validated，让 tick_persist 等
-        // 一帧，避免把未生效的 false 落盘覆盖保存的 true；只发一次，
+        // 兜底：启动最大化若未在 winit 侧生效，补发一次 Maximized(true)。
+        // Windows 下启动最大化由 startup_cloak 经 Win32 直接写 show state，
+        // winit 内部 MAXIMIZED 标志不知情（is_maximized 读标志），故首帧必然
+        // 走一次补发把标志同步过来——此时窗口仍在 cloak 遮蔽下，无闪烁；
+        // macOS 则为创建期最大化的罕见竞态丢失兜底。命令当帧末尾才被处理，
+        // live 状态要下帧才更新，故发出后先不置 validated，让 tick_persist
+        // 等一帧，避免把未生效的 false 落盘覆盖保存的 true；只发一次，
         // 失败则下帧按现实几何继续。
         if !fullscreen.unwrap_or(false)
             && self.settings.window_maximized
@@ -3916,7 +3953,7 @@ impl ReaderApp {
         self.window_geometry_validated = true;
 
         if maximized.unwrap_or(false) {
-            // 方案 A 下窗口的还原矩形是 Windows 默认值；写成保存的几何，
+            // 最大化窗口的还原矩形是创建时的默认值；写成保存的几何，
             // 让首次取消最大化回到记忆中的尺寸/位置（platform::restore_rect）。
             if self.settings.window_maximized {
                 crate::platform::restore_rect::set_saved_restore_rect(
@@ -5693,6 +5730,8 @@ mod tests {
                 last_window_geometry_flush: None,
                 window_geometry_validated: false,
                 maximize_restore_sent: false,
+                #[cfg(target_os = "windows")]
+                startup_uncloak: None,
                 last_window_title: String::new(),
             }
         }
