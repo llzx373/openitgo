@@ -868,6 +868,11 @@ impl ReaderApp {
                         }
                         let comic_id = comic.id.clone();
                         let page_count = comic.total_pages();
+                        // 打开即入库（设置开关）：已存在同路径条目时 add 内部去重。
+                        if self.settings.auto_add_to_library {
+                            let path = comic.path.clone();
+                            self.add_comic_to_library(&comic, &path);
+                        }
                         let archive_password =
                             self.passwords.get(&password_key(&comic.path)).cloned();
                         // 会话密码验证成功（手动输入或密码本自动尝试）：记入密码本。
@@ -981,6 +986,7 @@ impl ReaderApp {
             let mut add_requested = false;
             let mut request_cover_idx: Option<usize> = None;
             let mut remove_missing = false;
+            let mut clear_library = false;
             let mut delete_bookmark_idx: Option<usize> = None;
             let mut update_bookmark: Option<(usize, Option<String>)> = None;
             let mut update_title: Option<(usize, String)> = None;
@@ -1003,6 +1009,7 @@ impl ReaderApp {
                     on_add: &mut || add_requested = true,
                     on_request_cover: &mut |idx| request_cover_idx = Some(idx),
                     on_remove_missing: &mut || remove_missing = true,
+                    on_clear_library: &mut || clear_library = true,
                     on_delete_bookmark: &mut |idx| delete_bookmark_idx = Some(idx),
                     on_update_bookmark: &mut |idx, note| update_bookmark = Some((idx, note)),
                     on_update_title: &mut |idx, title| update_title = Some((idx, title)),
@@ -1036,6 +1043,9 @@ impl ReaderApp {
             }
             if remove_missing {
                 self.remove_missing_library_entries();
+            }
+            if clear_library {
+                self.clear_library_entries();
             }
             if let Some((idx, title)) = update_title {
                 if let Some(entry) = self.library_view.library.entries.get_mut(idx) {
@@ -4294,7 +4304,7 @@ impl ReaderApp {
         }
 
         if let Ok(comic) = openitgo_parser::parse(&path) {
-            self.add_comic_to_library(comic, &path);
+            self.add_comic_to_library(&comic, &path);
             return;
         }
 
@@ -4326,7 +4336,7 @@ impl ReaderApp {
 
     fn add_comic_to_library(
         &mut self,
-        comic: openitgo_core::models::Comic,
+        comic: &openitgo_core::models::Comic,
         path: &std::path::Path,
     ) {
         let added_at = std::time::SystemTime::now()
@@ -4464,7 +4474,7 @@ impl ReaderApp {
                         self.password_book.record_success(&pw);
                         self.save_password_book();
                     }
-                    self.add_comic_to_library(comic, &path);
+                    self.add_comic_to_library(&comic, &path);
                 }
                 Err(e)
                     if matches!(
@@ -4608,6 +4618,29 @@ impl ReaderApp {
         if removed > 0 {
             timing::log(&format!("removed {} missing library entries", removed));
         }
+    }
+
+    /// 清空书架漫画视图（漫画/视频/音频）的全部条目：移除条目并清理封面
+    /// 与书签缩略图，不删除源文件，历史记录保留（历史页有独立「清空」）。
+    fn clear_library_entries(&mut self) {
+        let covers_dir = self.covers_dir();
+        let (removed, kept): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.library_view.library.entries)
+                .into_iter()
+                .partition(|e| {
+                    matches!(
+                        e.media_type,
+                        MediaType::Comic | MediaType::Video | MediaType::Audio
+                    )
+                });
+        self.library_view.library.entries = kept;
+        for entry in removed {
+            if let Some(cover) = &entry.cover_path {
+                let _ = std::fs::remove_file(cover);
+            }
+            remove_bookmark_thumbs(&covers_dir, &entry.comic_id, None);
+        }
+        let _ = self.store.save_library(&self.library_view.library);
     }
 
     fn open_comic(&mut self, path: std::path::PathBuf) {
@@ -6327,6 +6360,98 @@ mod tests {
         );
         let saved = app.store.load_library().unwrap();
         assert_eq!(saved.entries[0].page_count, Some(total));
+    }
+
+    #[test]
+    fn open_comic_auto_adds_to_library_when_enabled() {
+        let (mut app, _tmp) = app_with_temp_store();
+        assert!(app.settings.auto_add_to_library);
+        let tmp_dir = tempfile::tempdir().unwrap();
+        write_dummy_image(tmp_dir.path(), "page0.png");
+        write_dummy_image(tmp_dir.path(), "page1.png");
+
+        app.open_comic(tmp_dir.path().to_path_buf());
+        let ctx = egui::Context::default();
+        for _ in 0..100 {
+            app.poll_opener(&ctx);
+            if app.current_view == View::Reader {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(app.current_view, View::Reader);
+        let entry = app
+            .library_view
+            .library
+            .entries
+            .iter()
+            .find(|e| e.path == tmp_dir.path())
+            .expect("comic should be auto-added to library");
+        assert_eq!(entry.media_type, MediaType::Comic);
+        assert_eq!(entry.page_count, Some(2));
+    }
+
+    #[test]
+    fn open_comic_does_not_auto_add_when_disabled() {
+        let (mut app, _tmp) = app_with_temp_store();
+        app.settings.auto_add_to_library = false;
+        let tmp_dir = tempfile::tempdir().unwrap();
+        write_dummy_image(tmp_dir.path(), "page0.png");
+
+        app.open_comic(tmp_dir.path().to_path_buf());
+        let ctx = egui::Context::default();
+        for _ in 0..100 {
+            app.poll_opener(&ctx);
+            if app.current_view == View::Reader {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(app.current_view, View::Reader);
+        assert!(
+            app.library_view.library.entries.is_empty(),
+            "auto-add disabled: library should stay empty"
+        );
+    }
+
+    #[test]
+    fn clear_library_entries_removes_comics_keeps_ebooks() {
+        let (mut app, _tmp) = app_with_temp_store();
+        for (id, media_type) in [
+            ("comic-1", MediaType::Comic),
+            ("video-1", MediaType::Video),
+            ("ebook-1", MediaType::Ebook),
+        ] {
+            app.library_view
+                .library
+                .entries
+                .push(openitgo_storage::models::LibraryEntry {
+                    comic_id: id.to_string(),
+                    title: id.to_string(),
+                    path: PathBuf::from(format!("/nonexistent/{id}")),
+                    cover_path: None,
+                    added_at: 0,
+                    media_type,
+                    tags: Vec::new(),
+                    page_count: None,
+                });
+        }
+
+        app.clear_library_entries();
+
+        let remaining: Vec<&str> = app
+            .library_view
+            .library
+            .entries
+            .iter()
+            .map(|e| e.comic_id.as_str())
+            .collect();
+        assert_eq!(remaining, ["ebook-1"]);
+        let saved = app.store.load_library().unwrap();
+        assert_eq!(saved.entries.len(), 1);
+        assert_eq!(saved.entries[0].comic_id, "ebook-1");
     }
 
     #[test]

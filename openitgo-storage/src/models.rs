@@ -112,6 +112,9 @@ pub struct Settings {
     pub background_color: [u8; 3],
     pub shortcuts: Shortcuts,
     pub library_sort: LibrarySort,
+    /// 打开漫画时自动加入书架。
+    #[serde(default = "default_true")]
+    pub auto_add_to_library: bool,
     pub toolbar_display_mode: ToolbarDisplayMode,
     pub ebook: EbookSettings,
     pub media_volume: f64,
@@ -345,6 +348,7 @@ impl Default for Settings {
             background_color: [30, 30, 30],
             shortcuts: Shortcuts::default(),
             library_sort: LibrarySort::default(),
+            auto_add_to_library: true,
             toolbar_display_mode: ToolbarDisplayMode::default(),
             ebook: EbookSettings::default(),
             media_volume: 100.0,

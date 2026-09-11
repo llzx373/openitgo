@@ -20,6 +20,8 @@ pub struct LibraryView {
     pub search_query: String,
     edit_buffer: Option<(usize, String)>,
     pending_delete: Option<usize>,
+    /// 「清空书架」按钮的确认态（第一次点击后等待二次确认）。
+    pending_clear_library: bool,
     cover_textures: HashMap<String, egui::TextureHandle>,
     /// 标签过滤 chips 的当前选择（None = 全部）。
     pub tag_filter: Option<String>,
@@ -37,6 +39,7 @@ impl Default for LibraryView {
             search_query: String::new(),
             edit_buffer: None,
             pending_delete: None,
+            pending_clear_library: false,
             cover_textures: HashMap::new(),
             tag_filter: None,
             tag_edit_buffer: None,
@@ -64,6 +67,8 @@ pub struct LibraryCallbacks<'a> {
     pub on_extract_archive: &'a mut dyn FnMut(usize),
     /// 顶栏「文件管理器」按钮：进入双栏文件管理器视图。
     pub on_open_file_manager: &'a mut dyn FnMut(),
+    /// 清空书架（移除当前漫画视图的全部条目）。
+    pub on_clear_library: &'a mut dyn FnMut(),
 }
 
 impl LibraryView {
@@ -136,6 +141,30 @@ impl LibraryView {
                         .clicked()
                 {
                     (callbacks.on_remove_missing)();
+                }
+                if matches!(self.mode, LibraryMode::Library) {
+                    if self.pending_clear_library {
+                        if ui
+                            .button(
+                                egui::RichText::new("确定清空？")
+                                    .color(ui.visuals().error_fg_color),
+                            )
+                            .on_hover_text("移除书架上的全部漫画条目（不删除源文件）")
+                            .clicked()
+                        {
+                            (callbacks.on_clear_library)();
+                            self.pending_clear_library = false;
+                        }
+                        if ui.button("取消").clicked() {
+                            self.pending_clear_library = false;
+                        }
+                    } else if ui
+                        .button("清空书架")
+                        .on_hover_text("移除书架上的全部漫画条目（不删除源文件）")
+                        .clicked()
+                    {
+                        self.pending_clear_library = true;
+                    }
                 }
                 if ui
                     .button(format!(

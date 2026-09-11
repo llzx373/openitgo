@@ -180,6 +180,7 @@ impl SettingsView {
             });
 
         ui.checkbox(&mut settings.double_page, "默认双页");
+        ui.checkbox(&mut settings.auto_add_to_library, "打开漫画时自动加入书架");
 
         ui.label("默认缩放 / 适应");
         egui::ComboBox::from_id_salt("fit")
