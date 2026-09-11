@@ -34,6 +34,14 @@ trash = "5"
 # FS watch 自动刷新（文件管理器，views/file_manager_panel.rs PanelWatch）；
 # 默认后端：Windows ReadDirectoryChanges / macOS FSEvents / Linux inotify。
 notify = "8"
+# FM 校验和对话框（views/file_manager_checksum.rs，阶段 AC）：三者均已在
+# 依赖树（crc32fast ← zip/flate2，sha1/sha2 ← sevenz-rust2），显式声明复用。
+crc32fast = "1.5"
+sha1 = "0.10"
+sha2 = "0.10"
+# FM「修改属性/时间戳」对话框（阶段 AC）：跨平台 set_file_times，已在依赖树
+# （← tar），显式声明复用。
+filetime = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"

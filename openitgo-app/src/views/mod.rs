@@ -3,6 +3,8 @@ pub mod archive_tree;
 pub mod ebook;
 pub mod ebook_toc;
 pub mod file_manager;
+pub mod file_manager_attr;
+pub mod file_manager_checksum;
 pub mod file_manager_dialog;
 pub mod file_manager_icons;
 pub mod file_manager_panel;

@@ -12,6 +12,8 @@
 
 use crate::opener::{AsyncOpener, OpenStatus};
 use crate::views::archive::{format_mtime, human_size};
+use crate::views::file_manager_attr::{apply_to_path, AttrAction, AttrTimestampDialog};
+use crate::views::file_manager_checksum::{is_checksum_file_name, ChecksumDialog};
 use crate::views::file_manager_dialog::{
     CompressDialog, ConflictDialog, CopyMoveDialog, DeleteDialog, FmDialog, FmDialogOutcome,
     MultiRenameDialog, NewDirDialog, NewFileDialog, RenameDialog, SelectGroupDialog,
@@ -409,6 +411,10 @@ pub struct FileManagerView {
     tab_drop_rects: Vec<(PathBuf, egui::Rect)>,
     /// 文件搜索对话框（Alt+F7；非模态 egui::Window，worker 关闭即取消）。
     search: SearchDialog,
+    /// 校验和对话框（阶段 AC；非模态 egui::Window，worker 关闭即取消）。
+    checksum: ChecksumDialog,
+    /// 「修改属性/时间戳…」对话框（阶段 AC；comment_dialog 同款非模态模式）。
+    attr_dialog: Option<AttrTimestampDialog>,
     /// 书签分组小对话框（新建/重命名；非模态 egui::Window，同 SelectGroupDialog
     /// 模式——菜单内联输入与 CloseOnClickOutside 焦点冲突，故走独立窗口）。
     group_dialog: Option<BookmarkGroupDialog>,
@@ -905,6 +911,8 @@ impl FileManagerView {
             breadcrumb_drop_rects: Vec::new(),
             tab_drop_rects: Vec::new(),
             search: SearchDialog::default(),
+            checksum: ChecksumDialog::default(),
+            attr_dialog: None,
             group_dialog: None,
             pending_conflict: None,
             task_panel_open: false,
@@ -1424,6 +1432,9 @@ impl FileManagerView {
         self.render_conflict_dialog(ui.ctx());
         // 文件搜索对话框（非模态 egui::Window）。
         self.render_search_dialog(ui.ctx());
+        // 校验和 + 属性/时间戳对话框（阶段 AC；非模态 egui::Window）。
+        self.checksum.ui(ui.ctx());
+        self.render_attr_dialog(ui.ctx());
         // 书签分组小对话框（新建/重命名；非模态 egui::Window）。
         self.render_group_dialog(ui.ctx());
         self.render_selection_dialog(ui.ctx());
@@ -3597,6 +3608,38 @@ impl FileManagerView {
             self.panels[idx].request_dir_sizes(dir_targets);
             ui.close();
         }
+        // 「校验和…」（阶段 AC）：选中集含文件时可用；选中集恰为单个校验
+        // 文件（.md5/.sfv/.sha1/.sha256）时直接进验证模式。
+        let file_targets: Vec<PathBuf> = self.panels[idx]
+            .entries
+            .iter()
+            .filter(|e| !e.is_dir && targets.contains(&e.path))
+            .map(|e| e.path.clone())
+            .collect();
+        let checksum_file = match targets.as_slice() {
+            [p] if p
+                .file_name()
+                .is_some_and(|n| is_checksum_file_name(&n.to_string_lossy()))
+                && p.is_file() =>
+            {
+                Some(p.clone())
+            }
+            _ => None,
+        };
+        if ui
+            .add_enabled(
+                checksum_file.is_some() || !file_targets.is_empty(),
+                egui::Button::new((icons::FINGERPRINT, " 校验和…")),
+            )
+            .clicked()
+        {
+            if let Some(p) = checksum_file {
+                self.checksum.open_verify(p);
+            } else {
+                self.checksum.open_compute(file_targets);
+            }
+            ui.close();
+        }
         ui.separator();
         if ui.button((icons::PENCIL_SIMPLE, " 重命名")).clicked() {
             self.dialog = Some(FmDialog::Rename(RenameDialog::new(e.path.clone())));
@@ -3723,6 +3766,18 @@ impl FileManagerView {
                 ui.close();
             }
         });
+        // 「修改属性/时间戳…」（阶段 AC）：应用内可编辑版，区别于末尾的
+        // 系统属性框（全平台可用；unix 仅只读位有效）。
+        if ui
+            .add_enabled(
+                !targets.is_empty(),
+                egui::Button::new((icons::CLOCK_USER, " 修改属性/时间戳…")),
+            )
+            .clicked()
+        {
+            self.attr_dialog = Some(AttrTimestampDialog::new(targets.clone()));
+            ui.close();
+        }
         // 「属性」：末尾（Explorer 惯例；非 Windows 隐藏）。
         if crate::platform::shell_verbs::is_supported() {
             ui.separator();
@@ -4897,6 +4952,40 @@ impl FileManagerView {
                 let active = self.active;
                 self.panels[active].inject_entries_branch(entries);
                 self.search.close();
+            }
+        }
+    }
+
+    /// 渲染「修改属性/时间戳…」对话框（阶段 AC；take/reinsert 模式同
+    /// render_comment_dialog）：确认经 `apply_to_path` 逐项应用（平台属性位
+    /// 与 filetime 时间戳），任一失败回传 error 保持打开；全成功后刷新涉及
+    /// 栏（父目录匹配，选中集不动）。
+    fn render_attr_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.attr_dialog.take() else {
+            return;
+        };
+        match dialog.ui(ctx) {
+            None => self.attr_dialog = Some(dialog),
+            Some(AttrAction::Close) => {}
+            Some(AttrAction::Apply { bits, mtime, atime }) => {
+                let mut errors: Vec<String> = Vec::new();
+                for path in dialog.paths() {
+                    if let Err(e) = apply_to_path(path, bits, mtime, atime) {
+                        errors.push(format!("{}: {e}", path.display()));
+                    }
+                }
+                if errors.is_empty() {
+                    for path in dialog.paths() {
+                        for panel in &mut self.panels {
+                            if path.parent() == Some(panel.dir.as_path()) {
+                                panel.refresh();
+                            }
+                        }
+                    }
+                } else {
+                    dialog.error = Some(errors.join("；"));
+                    self.attr_dialog = Some(dialog);
+                }
             }
         }
     }

@@ -801,6 +801,7 @@ pub mod windows {
     pub mod drag_out;
     pub mod drive_info;
     pub mod file_assoc;
+    pub mod file_attr;
     pub mod file_icons;
     pub mod mpv_view;
     pub mod restore_rect;
@@ -1051,6 +1052,47 @@ pub mod file_icons {
 /// Unified file-icons API (`crate::platform::file_icons`)。
 #[cfg(target_os = "windows")]
 pub use windows::file_icons;
+
+/// 文件属性位 stub（非 Windows）：仅 readonly 位经 `fs::set_permissions`
+/// 可读写；hidden/system/archive 为 Windows 概念，查询恒 false、写入忽略
+/// （与阶段 AC 需求一致：unix 只支持只读位）。
+#[cfg(not(target_os = "windows"))]
+pub mod file_attr {
+    use std::path::Path;
+
+    /// 应用内可编辑的属性位（非 Windows 仅 readonly 有效）。
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct FileAttrBits {
+        pub readonly: bool,
+        pub hidden: bool,
+        pub system: bool,
+        pub archive: bool,
+    }
+
+    /// 查询属性位（仅 readonly 有实义）。
+    pub fn query_attributes(path: &Path) -> Result<FileAttrBits, String> {
+        let meta = std::fs::metadata(path)
+            .map_err(|e| format!("读取属性失败（{}）: {e}", path.display()))?;
+        Ok(FileAttrBits {
+            readonly: meta.permissions().readonly(),
+            ..Default::default()
+        })
+    }
+
+    /// 写入属性位（仅应用 readonly；其余位忽略）。
+    pub fn set_attributes(path: &Path, bits: FileAttrBits) -> Result<(), String> {
+        let mut perms = std::fs::metadata(path)
+            .map_err(|e| format!("读取属性失败（{}）: {e}", path.display()))?
+            .permissions();
+        perms.set_readonly(bits.readonly);
+        std::fs::set_permissions(path, perms)
+            .map_err(|e| format!("设置属性失败（{}）: {e}", path.display()))
+    }
+}
+
+/// Unified file-attributes API (`crate::platform::file_attr`)。
+#[cfg(target_os = "windows")]
+pub use windows::file_attr;
 
 /// Unified video-view API used by views/media.rs (`PendingVideoView`
 /// two-phase construction + `MpvNativeView`).

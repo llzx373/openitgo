@@ -585,6 +585,26 @@ cargo clippy --workspace --all-targets -- -D warnings
   paused、等待中仍查 cancel），FM 侧 run_compress 传 Some(paused)，
   状态栏/任务面板的压缩暂停禁用随之解除。**删除字节进度**：Delete 循环
   早已按 source 粒度累加 done_bytes（trash::delete 无法更细），无需改动。
+  **校验和 + 属性/时间戳（阶段 AC）**：右键「校验和…」开
+  `ChecksumDialog`（`file_manager_checksum.rs`，非模态 egui::Window，
+  search 同款 worker 模式；选中集恰为单个 .md5/.sfv/.sha1/.sha256 直接进
+  验证模式）。计算 = 后台逐文件 256KB 分块单次过同算 CRC32/SHA-1/SHA-256
+  （`HashAccumulator`；crc32fast/sha1/sha2 均已在依赖树，openitgo-app
+  显式声明复用；**MD5 无依赖不引入**，校验文件中 md5 条目标「不支持」），
+  算法经 ComboBox 切换、点击行复制 hex；验证 = `parse_checksum_file`
+  （md5sum 族按 hash 长度 32/40/64 分 md5/sha1/sha256，sfv 取末位 8 位
+  hex token，`;`/`#` 注释行跳过）+ 逐条重算标 ✓/✗/缺失/不支持。
+  右键「修改属性/时间戳…」开 `AttrTimestampDialog`
+  （`file_manager_attr.rs`，comment_dialog 同款 Option 模式；对话框不做
+  IO，`AttrAction::Apply` 由 `render_attr_dialog` 经 `apply_to_path`
+  逐项应用——**时间戳先于属性位写入**（只读文件 SetFileTime 被拒），
+  失败回传 error 保持打开，全成功刷新涉及栏）。属性位读写走
+  `platform::file_attr`（Windows `GetFileAttributesW`/`SetFileAttributesW`
+  仅改 READONLY/HIDDEN/SYSTEM/ARCHIVE 四位；unix stub 仅 readonly 经
+  `fs::set_permissions`）；时间文本 `YYYY-MM-DD HH:MM:SS` 本地时区解析
+  （`parse_datetime_local`/`format_datetime_local`，time crate
+  local-offset，取不到回退 UTC），写入走 `filetime`（已在依赖树 ← tar）。
+  时间戳/属性位改动**无独立 settings**（即时生效不落盘）。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`
