@@ -635,6 +635,18 @@ cargo clippy --workspace --all-targets -- -D warnings
   目录整体复制）；左→右 = OnlyLeft+LeftNewer 复制到右、可选删除
   OnlyRight；右→左对称；双向 = OnlyLeft→右 + OnlyRight→左 + 新覆盖旧、
   无删除。「交换左右」交换目录并重对比。
+  **比较内容（阶段 AF）**：`file_manager_compare.rs` 非模态
+  `CompareDialog`（FileManagerView 持 `compare` 字段；右键「比较内容…」
+  = 选中集恰 2 个非目录；双栏且两栏各有焦点非目录文件时另有
+  「比较两栏焦点文件」）。`CompareTask` 后台 worker（`fm-compare` 线程，
+  Drop 即取消）：先 `binary_compare` 二进制快比——大小不等直接结论，
+  否则 256KB 分块双读报首个差异偏移（`BinaryVerdict`）；文本判定
+  （扩展名命中 `preview_bytes::is_text_extension` 或前 8KB 无 NUL 嗅探）
+  且 ≤64MB 时续做 `text_diff`（`decode_text_guess` 解码、行数乘积
+  >4001×4001 回退 TooManyLines 仅示二进制结论）。`diff_lines` 自实现
+  LCS（u16 DP 表 (n+1)×(m+1) + 回溯，平局优先 Del 使「修改」呈先删后增
+  相邻块）；渲染单 ScrollArea `show_rows` 左右两列对照（Del 左红底、
+  Add 右绿底、Same 无色、对侧空位占位——单滚动区天然联动滚动）。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

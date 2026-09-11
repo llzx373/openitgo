@@ -14,6 +14,7 @@ use crate::opener::{AsyncOpener, OpenStatus};
 use crate::views::archive::{format_mtime, human_size};
 use crate::views::file_manager_attr::{apply_to_path, AttrAction, AttrTimestampDialog};
 use crate::views::file_manager_checksum::{is_checksum_file_name, ChecksumDialog};
+use crate::views::file_manager_compare::CompareDialog;
 use crate::views::file_manager_dialog::{
     CompressDialog, ConflictDialog, CopyMoveDialog, DeleteDialog, FmDialog, FmDialogOutcome,
     MultiRenameDialog, NewDirDialog, NewFileDialog, RenameDialog, SelectGroupDialog, SplitDialog,
@@ -415,6 +416,8 @@ pub struct FileManagerView {
     search: SearchDialog,
     /// 校验和对话框（阶段 AC；非模态 egui::Window，worker 关闭即取消）。
     checksum: ChecksumDialog,
+    /// 比较内容对话框（阶段 AF；非模态 egui::Window，worker 关闭即取消）。
+    compare: CompareDialog,
     /// 同步目录对话框（阶段 AE；非模态 egui::Window，对比 worker 关闭即取消）。
     sync_dialog: SyncDialog,
     /// 「修改属性/时间戳…」对话框（阶段 AC；comment_dialog 同款非模态模式）。
@@ -916,6 +919,7 @@ impl FileManagerView {
             tab_drop_rects: Vec::new(),
             search: SearchDialog::default(),
             checksum: ChecksumDialog::default(),
+            compare: CompareDialog::default(),
             sync_dialog: SyncDialog::default(),
             attr_dialog: None,
             group_dialog: None,
@@ -1440,6 +1444,8 @@ impl FileManagerView {
         // 校验和 + 属性/时间戳对话框（阶段 AC；非模态 egui::Window）。
         self.checksum.ui(ui.ctx());
         self.render_attr_dialog(ui.ctx());
+        // 比较内容对话框（阶段 AF；非模态 egui::Window）。
+        self.compare.ui(ui.ctx());
         // 同步目录对话框（阶段 AE；非模态 egui::Window）。
         self.render_sync_dialog(ui.ctx());
         // 书签分组小对话框（新建/重命名；非模态 egui::Window）。
@@ -3674,6 +3680,42 @@ impl FileManagerView {
                 self.checksum.open_verify(p);
             } else {
                 self.checksum.open_compute(file_targets);
+            }
+            ui.close();
+        }
+        // 「比较内容…」（阶段 AF）：选中集恰为 2 个文件；否则双栏两栏
+        // 各有焦点文件时给「比较两栏焦点文件」。
+        let compare_pair: Option<(PathBuf, PathBuf)> = match targets.as_slice() {
+            [a, b] if !a.is_dir() && !b.is_dir() => Some((a.clone(), b.clone())),
+            _ => {
+                if matches!(self.layout, PanelLayout::Dual { .. }) {
+                    match (
+                        self.panels[0].focused_entry(),
+                        self.panels[1].focused_entry(),
+                    ) {
+                        (Some(a), Some(b)) if !a.is_dir && !b.is_dir => {
+                            Some((a.path.clone(), b.path.clone()))
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+        };
+        let compare_label = match targets.as_slice() {
+            [_, _] => " 比较内容…",
+            _ => " 比较两栏焦点文件",
+        };
+        if ui
+            .add_enabled(
+                compare_pair.is_some(),
+                egui::Button::new((icons::GIT_DIFF, compare_label)),
+            )
+            .clicked()
+        {
+            if let Some((a, b)) = compare_pair {
+                self.compare.open_with(a, b);
             }
             ui.close();
         }
