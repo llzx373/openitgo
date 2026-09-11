@@ -665,6 +665,26 @@ cargo clippy --workspace --all-targets -- -D warnings
   后按涉及目录刷新栏；跳过/失败项汇总 op_error。入口：Ctrl+Z
   （Ctrl+Shift+Z 仍是注释编辑，无冲突；栈空提示「没有可撤销的操作」）
   + 右键菜单顶部动态项「撤销 {label}」（栈空不显示）。
+  **树形面板（阶段 AH）**：`file_manager_tree.rs` `DirTree`——双栏下
+  Alt+F10/顶栏「树」把**非活动栏**整栏替换为目录树（`render_panel_slot`
+  三态 Panel/Quickview/Tree，与 Ctrl+Q 快览互斥：开树关快览、开快览
+  关树；被替换栏对象不动，关闭后原样恢复；单栏忽略/切单栏自动关树）。
+  懒加载：根 = `list_drives` 一次性后台枚举；展开时 `fm-tree` 单
+  worker 线程列直接子目录（`list_child_dirs`：natural_cmp 排序、
+  `.` 前缀+Windows 隐藏属性按 fm_show_hidden 过滤——show_hidden 变化
+  经 `set_show_hidden` 清缓存 + bump 代际，过期回复丢弃），缓存
+  `children: HashMap<PathBuf, Vec<PathBuf>>`，展开态
+  `expanded: HashSet`。行模型纯函数：`visible_rows`（展开节点递归插
+  子行，未加载不出子行，三角 = 已加载无子目录才不显示）、
+  `move_cursor`（clamp）、`parent_in_rows`（行序列中 depth−1 最近
+  前行，不查 fs）。打开时锚定活动栏目录：根到达后 `expand_to_anchor`
+  最长前缀匹配根并逐级展开祖先链 + 置光标。交互：单击选中、双击/
+  Enter = **活动栏** navigate_to（树驱动文件栏）、三角只展开/折叠、
+  活动栏当前目录节点加粗（不强制展开）；`tree_focused`（点击树区域
+  获得、点击文件栏失去）决定 ↑↓←→/Enter 归树还是归面板，Esc/Alt+F10
+  关闭；键盘移动/打开置 `tree_reveal` 渲染时对光标行 scroll_to_me
+  一次（不每帧钉住）。树栏不做外部拖入落点、点击不切活动栏
+  （panel_drop_rects/点击激活同快览跳过逻辑）。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

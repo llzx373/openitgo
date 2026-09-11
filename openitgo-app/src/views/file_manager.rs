@@ -31,6 +31,7 @@ use crate::views::file_manager_thumbs::{
     grid_cols, grid_row_count, grid_row_of, truncate_cell_name, ThumbCache, ThumbKey, ThumbLookup,
     THUMB_CELL_H, THUMB_CELL_W, THUMB_MAX_DIM,
 };
+use crate::views::file_manager_tree::{move_cursor, DirTree};
 use crate::views::file_manager_undo::{plan_undo, precheck, UndoPlan, UndoStack, UndoableOp};
 use crate::views::file_ops::{
     collect_chunks, create_dir, create_text_file, format_eta, merge_target_base, rename_entry,
@@ -424,6 +425,15 @@ pub struct FileManagerView {
     /// 在对话框成功路径记账；Delete/Compress/Split/Merge/覆盖写/属性修改
     /// 不可撤销（不入栈也不清空栈）。
     undo: UndoStack,
+    /// 目录树面板（阶段 AH，Alt+F10；仅双栏）：整栏替换非活动栏
+    /// （与快览互斥），树驱动活动栏导航。tree_focused = 键盘归树
+    /// （点击树区域获得，点击文件栏失去；Esc/Alt+F10 关闭时复位）。
+    tree: DirTree,
+    tree_open: bool,
+    tree_focused: bool,
+    /// 键盘移动/打开锚定后置位：渲染时对光标行 scroll_to_me 一次（避免
+    /// 每帧钉住与用户滚动打架）。
+    tree_reveal: bool,
     /// 同步目录对话框（阶段 AE；非模态 egui::Window，对比 worker 关闭即取消）。
     sync_dialog: SyncDialog,
     /// 「修改属性/时间戳…」对话框（阶段 AC；comment_dialog 同款非模态模式）。
@@ -927,6 +937,10 @@ impl FileManagerView {
             checksum: ChecksumDialog::default(),
             compare: CompareDialog::default(),
             undo: UndoStack::default(),
+            tree: DirTree::default(),
+            tree_open: false,
+            tree_focused: false,
+            tree_reveal: false,
             sync_dialog: SyncDialog::default(),
             attr_dialog: None,
             group_dialog: None,
@@ -1098,6 +1112,9 @@ impl FileManagerView {
             self.preview_window_open = false;
             // 单栏无对面栏概念，快览关闭。
             self.quickview_open = false;
+            // 单栏无对面栏概念，目录树关闭（阶段 AH：仅双栏可用）。
+            self.tree_open = false;
+            self.tree_focused = false;
             self.layout = PanelLayout::Single {
                 preview_open: self.saved_preview_open,
             };
@@ -1129,6 +1146,8 @@ impl FileManagerView {
         // 文件操作并发上限（阶段 AA，fm_op_threads）：每帧下发，在途任务
         // 不动，调高立即放行排队任务。
         self.ops.set_max_concurrent(options.op_threads);
+        // 目录树（阶段 AH）：show_hidden 每帧下发（变化时清缓存重取）。
+        self.tree.set_show_hidden(options.show_hidden);
         let FmCallbacks {
             on_back,
             on_open_path,
@@ -1185,6 +1204,10 @@ impl FileManagerView {
         }
         for finished in op_summary.finished {
             self.on_op_finished(finished, &mut intents);
+        }
+        // 目录树（阶段 AH）：排空懒加载结果；在途期间主动重绘。
+        if self.tree_open && self.tree.poll() {
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
         }
         // 执行期冲突问答（Ask 模式）：取新询问（一次一窗）；待答询问所属
         // 任务已结束（取消打断等待/异常）时关窗——worker 侧经 cancel 旗标
@@ -1401,18 +1424,19 @@ impl FileManagerView {
         let panel_rects = self.render_panels(ui, &mut intents);
 
         // 外部拖入的落点区域（app 侧 handle_dropped_files 经 panel_rect_at
-        // 查询；快览替换栏不算落点——此时该栏显示的是预览面板，同下方的
-        // 点击激活跳过逻辑）。
+        // 查询；快览/树替换栏不算落点——此时该栏显示的是预览/树面板，同下
+        // 方的点击激活跳过逻辑）。
         self.panel_drop_rects = [None, None];
         for (idx, rect) in &panel_rects {
-            if self.quickview_open && *idx != self.active {
+            if (self.quickview_open || self.tree_open) && *idx != self.active {
                 continue;
             }
             self.panel_drop_rects[*idx] = Some(*rect);
         }
 
-        // 鼠标点击某栏任意处即激活该栏（快览面板不产生栏切换：
-        // 快览恒停在「对面」，点击它激活会把两栏语义搞乱）。
+        // 鼠标点击某栏任意处即激活该栏（快览/树面板不产生栏切换：快览与
+        // 树恒停在「对面」，点击它激活会把两栏语义搞乱）。树面板点击获得
+        // 键盘焦点（tree_focused），点击文件栏交还面板。
         let (pressed, pos) = ui.ctx().input(|i| {
             (
                 i.pointer.primary_pressed() || i.pointer.secondary_pressed(),
@@ -1422,11 +1446,15 @@ impl FileManagerView {
         if pressed {
             if let Some(pos) = pos {
                 for (idx, rect) in &panel_rects {
-                    if self.quickview_open && *idx != self.active {
+                    if (self.quickview_open || self.tree_open) && *idx != self.active {
+                        if self.tree_open && rect.contains(pos) {
+                            self.tree_focused = true;
+                        }
                         continue;
                     }
                     if rect.contains(pos) {
                         self.active = *idx;
+                        self.tree_focused = false;
                     }
                 }
             }
@@ -1557,6 +1585,9 @@ impl FileManagerView {
                 self.preview_window_open = false;
                 // 单栏无对面栏概念，快览关闭。
                 self.quickview_open = false;
+                // 单栏无对面栏概念，目录树关闭（阶段 AH：仅双栏可用）。
+                self.tree_open = false;
+                self.tree_focused = false;
                 self.layout = PanelLayout::Single {
                     preview_open: self.saved_preview_open,
                 };
@@ -1571,7 +1602,20 @@ impl FileManagerView {
                 if !self.quickview_open {
                     // 关闭即清预览目标，避免后台继续读取。
                     self.clear_preview();
+                } else {
+                    // 快览与目录树互斥（阶段 AH）：开快览关树。
+                    self.tree_open = false;
+                    self.tree_focused = false;
                 }
+            }
+            // 目录树（阶段 AH，Alt+F10）：仅双栏可用，与快览互斥。
+            if matches!(self.layout, PanelLayout::Dual { .. })
+                && ui
+                    .add(egui::Button::new((icons::TREE_STRUCTURE, " 树")).selected(self.tree_open))
+                    .on_hover_text("目录树面板（Alt+F10）")
+                    .clicked()
+            {
+                self.toggle_tree_panel();
             }
             // 视图模式三态切换（焦点栏；选中/焦点是线性行索引天然保留，
             // 滚动按焦点行重定位——last_scroll_offset 的行高单位变了，
@@ -1985,7 +2029,7 @@ impl FileManagerView {
                         // 的持久状态被跨栏共享，滚左栏右栏跟着动）。
                         |ui| {
                             ui.push_id(("fm_panel", 0), |ui| {
-                                self.render_panel_or_quickview(ui, 0, intents)
+                                self.render_panel_slot(ui, 0, intents)
                             });
                         },
                     );
@@ -2003,7 +2047,7 @@ impl FileManagerView {
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                             ui.push_id(("fm_panel", 1), |ui| {
-                                self.render_panel_or_quickview(ui, 1, intents)
+                                self.render_panel_slot(ui, 1, intents)
                             });
                         },
                     );
@@ -2058,19 +2102,140 @@ impl FileManagerView {
         }
     }
 
-    /// 双栏一侧内容：Ctrl+Q 快览开启且本侧为非活动栏时整栏替换为预览面板
-    /// （被替换栏对象不列举不渲染，state/selected/滚动原样保留，关闭快览
-    /// 后原样恢复）；否则渲染常规栏。
-    fn render_panel_or_quickview(
-        &mut self,
-        ui: &mut egui::Ui,
-        idx: usize,
-        intents: &mut FmIntents,
-    ) {
+    /// 双栏一侧内容（三态）：Ctrl+Q 快览 / Alt+F10 目录树（阶段 AH）开启
+    /// 且本侧为非活动栏时整栏替换为预览/树面板（快览与树互斥——开树关
+    /// 快览、开快览关树；被替换栏对象不列举不渲染，state/selected/滚动
+    /// 原样保留，关闭后原样恢复）；否则渲染常规栏。
+    fn render_panel_slot(&mut self, ui: &mut egui::Ui, idx: usize, intents: &mut FmIntents) {
         if self.quickview_open && self.active != idx {
             self.draw_preview_content(ui, false);
+        } else if self.tree_open && self.active != idx {
+            self.render_tree_panel(ui, intents);
         } else {
             self.render_panel(ui, idx, intents);
+        }
+    }
+
+    /// Alt+F10 / 顶栏「树」：目录树面板开关（阶段 AH；仅双栏，单栏忽略）。
+    /// 打开时与快览互斥（关快览清预览目标），锚定活动栏当前目录
+    /// （根到达后自动展开祖先链），键盘焦点归树。
+    fn toggle_tree_panel(&mut self) {
+        if !matches!(self.layout, PanelLayout::Dual { .. }) {
+            return;
+        }
+        self.tree_open = !self.tree_open;
+        if self.tree_open {
+            self.quickview_open = false;
+            self.clear_preview();
+            self.tree_focused = true;
+            self.tree_reveal = true;
+            let anchor = self.panels[self.active].dir.clone();
+            self.tree.open(&anchor);
+        } else {
+            self.tree_focused = false;
+            self.tree.close();
+        }
+    }
+
+    /// 目录树面板（阶段 AH）：单击选中、双击导航活动栏、三角只展开/折叠；
+    /// 活动栏当前目录对应节点加粗高亮（仅已展开集合内，不强制展开）。
+    fn render_tree_panel(&mut self, ui: &mut egui::Ui, _intents: &mut FmIntents) {
+        let mut close = false;
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("{} 目录树", icons::TREE_STRUCTURE.as_str())).weak(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(icons::X.as_str())
+                    .on_hover_text("关闭目录树（Esc / Alt+F10）")
+                    .clicked()
+                {
+                    close = true;
+                }
+            });
+        });
+        ui.separator();
+        let rows = self.tree.rows();
+        let active_dir = self.panels[self.active].dir.clone();
+        let cursor = self.tree.cursor.clone();
+        let mut toggle: Option<PathBuf> = None;
+        let mut select: Option<PathBuf> = None;
+        let mut navigate: Option<PathBuf> = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if rows.is_empty() {
+                    ui.label(egui::RichText::new("正在读取盘符…").weak());
+                }
+                for row in &rows {
+                    let name = row
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| row.path.display().to_string());
+                    ui.horizontal(|ui| {
+                        ui.add_space(row.depth as f32 * 14.0);
+                        if row.expandable {
+                            let icon = if row.expanded {
+                                icons::CARET_DOWN
+                            } else {
+                                icons::CARET_RIGHT
+                            };
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(icon.as_str()).size(11.0),
+                                    )
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                toggle = Some(row.path.clone());
+                            }
+                        } else {
+                            ui.add_space(16.0);
+                        }
+                        let mut text =
+                            egui::RichText::new(format!("{} {}", icons::FOLDER.as_str(), name));
+                        if row.path == active_dir {
+                            // 活动栏当前目录节点高亮。
+                            text = text.strong();
+                        }
+                        let selected = cursor.as_ref() == Some(&row.path);
+                        let resp = ui.selectable_label(selected, text);
+                        if self.tree_reveal && selected {
+                            resp.scroll_to_me(Some(egui::Align::Center));
+                        }
+                        if row.loading {
+                            ui.weak("…");
+                        }
+                        if resp.clicked() {
+                            select = Some(row.path.clone());
+                        }
+                        if resp.double_clicked() {
+                            navigate = Some(row.path.clone());
+                        }
+                    });
+                }
+            });
+        self.tree_reveal = false;
+        if let Some(p) = toggle {
+            self.tree.toggle(&p);
+        }
+        if let Some(p) = select {
+            self.tree.cursor = Some(p);
+            self.tree_focused = true;
+        }
+        if let Some(p) = navigate {
+            self.tree.cursor = Some(p.clone());
+            self.tree_focused = true;
+            self.panels[self.active].navigate_to(p);
+        }
+        if close {
+            self.tree_open = false;
+            self.tree_focused = false;
+            self.tree.close();
         }
     }
 
@@ -5429,7 +5594,8 @@ impl FileManagerView {
     /// F4 系统「编辑」动词（无关联回退「打开方式…」，目录忽略）/
     /// Shift+F4 新建文本文件 / F8(Delete) 删除（confirm_delete 时先弹确认框；
     /// Shift+Del = 删除方式的另一档快捷）；Alt+F5 压缩为 zip、
-    /// Alt+F9 解压对话框（单压缩包选中集）、Alt+F7 文件搜索；
+    /// Alt+F9 解压对话框（单压缩包选中集）、Alt+F7 文件搜索、
+    /// Alt+F10 目录树面板（仅双栏；树持焦时 ↑↓←→/Enter 归树，Esc 关树）；
     /// Alt+Enter 焦点项系统属性、Ctrl+Shift+Enter 以管理员身份运行（runas）；
     /// Ctrl+C/X/V 剪贴板。行为开关由 self.options（每帧下发）提供。
     /// （纯功能键分支需排 Alt——key_pressed 不认修饰键，Alt+F4 系统关窗不拦。）
@@ -5840,6 +6006,10 @@ impl FileManagerView {
                     if !self.quickview_open {
                         // 关闭即清预览目标，避免后台继续读取。
                         self.clear_preview();
+                    } else {
+                        // 快览与目录树互斥（阶段 AH）：开快览关树。
+                        self.tree_open = false;
+                        self.tree_focused = false;
                     }
                 }
                 PanelLayout::Single { preview_open } => {
@@ -5848,8 +6018,39 @@ impl FileManagerView {
                 }
             }
         }
+        // Alt+F10：目录树面板开关（阶段 AH；仅双栏，单栏忽略）。
+        if mods.alt && ui.input(|i| i.key_pressed(egui::Key::F10)) {
+            self.toggle_tree_panel();
+        }
         if mods.command && ui.input(|i| i.key_pressed(egui::Key::R)) {
             self.panels[active].refresh();
+        }
+        // 目录树键盘（阶段 AH）：树持焦时 ↑↓ 移光标、→ 展开、← 折叠/回
+        // 父级、Enter 导航活动栏（只拦裸键，Ctrl/Alt 组合放行给面板）。
+        if self.tree_open && self.tree_focused && !mods.command && !mods.alt {
+            let mut tree_handled = true;
+            if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                self.tree.cursor = move_cursor(&self.tree.rows(), self.tree.cursor.as_deref(), 1);
+                self.tree_reveal = true;
+            } else if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                self.tree.cursor = move_cursor(&self.tree.rows(), self.tree.cursor.as_deref(), -1);
+                self.tree_reveal = true;
+            } else if ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                self.tree.cursor_expand();
+                self.tree_reveal = true;
+            } else if ui.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                self.tree.cursor_collapse_or_parent();
+                self.tree_reveal = true;
+            } else if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if let Some(cur) = self.tree.cursor.clone() {
+                    self.panels[active].navigate_to(cur);
+                }
+            } else {
+                tree_handled = false;
+            }
+            if tree_handled {
+                return;
+            }
         }
         // 网格状模式（简表/缩略图）：↑↓ 按列数步进（线性行号换算，列数由
         // render_brief/render_grid 每帧写入 last_grid_cols），←→ 步进 1
@@ -5960,6 +6161,11 @@ impl FileManagerView {
                 self.archive_ask = None;
             } else if self.preview_window_open {
                 self.preview_window_open = false;
+            } else if self.tree_open && self.tree_focused {
+                // 目录树持焦时 Esc 关树（阶段 AH；非持焦时留给面板 Esc 链）。
+                self.tree_open = false;
+                self.tree_focused = false;
+                self.tree.close();
             } else {
                 let panel = &mut self.panels[active];
                 if panel.type_ahead_buffer().is_some() {
