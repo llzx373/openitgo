@@ -13,6 +13,60 @@ pub struct FmBookmarkGroup {
     pub items: Vec<String>,
 }
 
+/// 文件管理器标签页持久化状态（阶段 AI）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FmTabState {
+    pub dir: String,
+    /// 锁定（TC 语义）：该标签活动时导航自动改为新开标签。
+    pub locked: bool,
+    /// 自定义标题（空 = 无，显示回退目录 basename）。
+    pub custom_title: String,
+}
+
+/// fm_tabs_left/right 的条目：旧格式为纯目录字符串（向后兼容），
+/// 阶段 AI 起写出均为 Full 对象（untagged 双向可读）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum FmTabEntry {
+    Dir(String),
+    Full(FmTabState),
+}
+
+impl FmTabEntry {
+    /// 目录字符串（两种形态统一访问）。
+    pub fn dir(&self) -> &str {
+        match self {
+            FmTabEntry::Dir(d) => d,
+            FmTabEntry::Full(s) => &s.dir,
+        }
+    }
+
+    /// 归一化为完整状态（旧格式 locked=false、无自定义标题）。
+    pub fn to_state(&self) -> FmTabState {
+        match self {
+            FmTabEntry::Dir(d) => FmTabState {
+                dir: d.clone(),
+                ..Default::default()
+            },
+            FmTabEntry::Full(s) => s.clone(),
+        }
+    }
+}
+
+/// 文件管理器标签组（阶段 AI；两栏共享，标签条右侧组菜单管理）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FmTabGroup {
+    /// 组名（clamp 时空名修「未命名」）。
+    pub name: String,
+    /// 组内标签目录（clamp 时组内去重、去空串）。
+    pub dirs: Vec<String>,
+    /// 活动标签索引（clamp 到 dirs 范围）。
+    #[serde(default)]
+    pub active: usize,
+}
+
 /// 文件管理器自定义按钮栏按钮（阶段 Y）。命令支持占位符：`%P` = 焦点栏
 /// 当前目录、`%N` = 焦点项名称（无焦点 = 空串）、`%p` = 另一栏目录
 /// （展开在 app 侧 `expand_button_command`）。
@@ -124,17 +178,22 @@ pub struct Settings {
     /// 常用目录书签分组（两栏共享）。
     #[serde(default)]
     pub fm_bookmark_groups: Vec<FmBookmarkGroup>,
-    /// 左/右栏标签页目录列表（活动标签 = 当前目录；只存目录路径）。
-    /// 空列表（旧 settings 无此字段）= 单标签，恢复回退 fm_dir_left/right。
+    /// 左/右栏标签页目录列表（活动标签 = 当前目录）。旧格式为纯目录
+    /// 字符串数组（向后兼容读入为 FmTabEntry::Dir），阶段 AI 起写出
+    /// 均为含 locked/custom_title 的对象。空列表（旧 settings 无此
+    /// 字段）= 单标签，恢复回退 fm_dir_left/right。
     #[serde(default)]
-    pub fm_tabs_left: Vec<String>,
+    pub fm_tabs_left: Vec<FmTabEntry>,
     #[serde(default)]
-    pub fm_tabs_right: Vec<String>,
+    pub fm_tabs_right: Vec<FmTabEntry>,
     /// 左/右栏活动标签索引（越界加载时 clamp）。
     #[serde(default)]
     pub fm_active_tab_left: usize,
     #[serde(default)]
     pub fm_active_tab_right: usize,
+    /// 标签组（阶段 AI；两栏共享，标签条右侧组菜单保存/应用/删除）。
+    #[serde(default)]
+    pub fm_tab_groups: Vec<FmTabGroup>,
     /// 文件管理器大小/时间列宽与列块平移量（全局单值，恢复时两栏同用；
     /// 取舍同 fm_sort_key——持久化活动栏的值）。默认值同 panel.rs 的
     /// SIZE_COL_WIDTH/MTIME_COL_WIDTH/0（storage 不依赖 app，数值硬编码同步）。
@@ -315,6 +374,7 @@ impl Default for Settings {
             fm_tabs_right: Vec::new(),
             fm_active_tab_left: 0,
             fm_active_tab_right: 0,
+            fm_tab_groups: Vec::new(),
             fm_col_size_width: default_fm_col_size_width(),
             fm_col_mtime_width: default_fm_col_mtime_width(),
             fm_col_shift: 0.0,
@@ -591,6 +651,21 @@ impl Settings {
             clamp_active_tab(self.fm_tabs_left.len(), self.fm_active_tab_left);
         self.fm_active_tab_right =
             clamp_active_tab(self.fm_tabs_right.len(), self.fm_active_tab_right);
+        // 标签组（阶段 AI）校验：空名修「未命名」；组内去空串 + 去重；
+        // active clamp 到组内范围（空组归 0）。空组保留（同书签分组先例）。
+        for group in &mut self.fm_tab_groups {
+            let name = group.name.trim();
+            if name.is_empty() {
+                group.name = "未命名".to_string();
+            } else if name.len() != group.name.len() {
+                group.name = name.to_string();
+            }
+            let mut seen = std::collections::HashSet::new();
+            group
+                .dirs
+                .retain(|d| !d.trim().is_empty() && seen.insert(d.clone()));
+            group.active = clamp_active_tab(group.dirs.len(), group.active);
+        }
         // 列宽 clamp 同 panel.rs 的 COL_MIN_WIDTH/COL_MAX_WIDTH；col_shift
         // ≤0，下限取 -(两列宽之和)（panel.rs drag_column_sep 的 min_shift
         // 近似——运行时还会按栏宽再 clamp，此处只防脏值）。
@@ -1226,6 +1301,64 @@ mod tests {
 
         let loaded: Settings = serde_json::from_str("{}").unwrap();
         assert!(loaded.fm_show_hidden);
+    }
+
+    #[test]
+    fn test_fm_tab_entries_backward_compat_and_groups_clamp() {
+        // 旧格式（纯目录字符串数组）读入为 Dir 条目；to_state 归一化。
+        let json = r#"{"fm_tabs_left": ["C:\\a", "D:\\b"], "fm_active_tab_left": 1}"#;
+        let loaded: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(loaded.fm_tabs_left.len(), 2);
+        assert_eq!(loaded.fm_tabs_left[0].dir(), "C:\\a");
+        assert_eq!(
+            loaded.fm_tabs_left[1].to_state(),
+            FmTabState {
+                dir: "D:\\b".to_string(),
+                locked: false,
+                custom_title: String::new(),
+            }
+        );
+        // 新格式（Full 对象）读入；写出均为 Full 对象。
+        let json =
+            r#"{"fm_tabs_left": [{"dir": "C:\\a", "locked": true, "custom_title": "工作"}]}"#;
+        let loaded: Settings = serde_json::from_str(json).unwrap();
+        let state = loaded.fm_tabs_left[0].to_state();
+        assert!(state.locked);
+        assert_eq!(state.custom_title, "工作");
+        let out = serde_json::to_string(&loaded).unwrap();
+        assert!(out.contains("\"locked\":true"));
+        assert!(out.contains("\"custom_title\":\"工作\""));
+
+        // 标签组 clamp：空名修「未命名」、组内去重去空、active clamp。
+        let mut s = Settings {
+            fm_tab_groups: vec![
+                FmTabGroup {
+                    name: " ".to_string(),
+                    dirs: vec![
+                        "C:\\a".to_string(),
+                        "".to_string(),
+                        "C:\\a".to_string(),
+                        "D:\\b".to_string(),
+                    ],
+                    active: 9,
+                },
+                FmTabGroup {
+                    name: "空组".to_string(),
+                    dirs: Vec::new(),
+                    active: 3,
+                },
+            ],
+            ..Default::default()
+        };
+        s.clamp();
+        assert_eq!(s.fm_tab_groups[0].name, "未命名");
+        assert_eq!(s.fm_tab_groups[0].dirs, ["C:\\a", "D:\\b"]);
+        assert_eq!(s.fm_tab_groups[0].active, 1);
+        assert_eq!(s.fm_tab_groups[1].name, "空组");
+        assert_eq!(s.fm_tab_groups[1].active, 0);
+        // 全新 settings：无标签组。
+        let loaded: Settings = serde_json::from_str("{}").unwrap();
+        assert!(loaded.fm_tab_groups.is_empty());
     }
 
     #[test]

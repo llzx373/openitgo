@@ -435,6 +435,8 @@ pub struct FsPanel {
 /// focus 存文件名而非行索引——列举后按名定位（目录内容可能已变）。
 /// 排序/列/视图模式（阶段 V）仅会话内随标签切换恢复；标签持久化仍
 /// 只存目录（restore_tabs 时这些字段继承面板当前值）。
+/// locked/custom_title（阶段 AI）随快照往返：活动标签的锁定/标题存于
+/// tabs[active_tab]，snapshot_tab 回写时原样带出。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PanelTabSnapshot {
     pub dir: PathBuf,
@@ -447,6 +449,11 @@ pub struct PanelTabSnapshot {
     pub view_mode: PanelViewMode,
     /// 列配置；空 = restore_tab 不覆盖（兼容 Default 快照的「不动」语义）。
     pub columns: Vec<(ColumnKind, f32)>,
+    /// 锁定（阶段 AI，TC 语义）：该标签活动时 navigate_to/历史前进后退/
+    /// 「..」上级自动改为新开标签到目标目录（本标签保持原目录不动）。
+    pub locked: bool,
+    /// 自定义标题（阶段 AI；显示优先级 = custom_title > 目录 basename）。
+    pub custom_title: Option<String>,
 }
 
 /// restore_tab 后待应用的选中/焦点（选中按路径恢复，焦点按文件名定位）。
@@ -528,6 +535,7 @@ impl FsPanel {
 
     /// 导航到目录（双击/Enter/面包屑共用）：截断前进分支后压历史。
     /// 目标与当前目录相同且已就绪/加载中时 no-op（避免点当前面包屑段重列）。
+    /// 活动标签锁定（阶段 AI）时改为新开标签到目标（锁定标签保持原目录）。
     pub fn navigate_to(&mut self, path: PathBuf) {
         if path == self.dir
             && matches!(
@@ -537,15 +545,53 @@ impl FsPanel {
         {
             return;
         }
+        if self.active_tab_locked() {
+            self.new_tab_to(path);
+            return;
+        }
         self.history.truncate(self.history_pos);
         self.history.push(path.clone());
         self.history_pos = self.history.len();
         self.start_listing(path);
     }
 
-    /// Alt+←：回退到历史中的上一个目录。
+    /// 活动标签是否锁定。
+    pub fn active_tab_locked(&self) -> bool {
+        self.tabs
+            .get(self.active_tab)
+            .map(|t| t.locked)
+            .unwrap_or(false)
+    }
+
+    /// 锁定标签的导航落点（阶段 AI）：目标目录开新标签——新标签不继承
+    /// 锁定/自定义标题/选中/过滤（同 new_tab 的「干净副本」语义；标签
+    /// 切换不进导航历史，见 restore_tab 注释）。
+    pub fn new_tab_to(&mut self, path: PathBuf) {
+        let current = self.snapshot_tab();
+        let mut fresh = current.clone();
+        fresh.dir = path;
+        fresh.selected = Vec::new();
+        fresh.focus_name = None;
+        fresh.filter = String::new();
+        fresh.scroll_offset = 0.0;
+        fresh.locked = false;
+        fresh.custom_title = None;
+        self.tabs[self.active_tab] = current;
+        self.tabs.push(fresh);
+        self.active_tab = self.tabs.len() - 1;
+        let snap = self.tabs[self.active_tab].clone();
+        self.restore_tab(&snap);
+    }
+
+    /// Alt+←：回退到历史中的上一个目录。活动标签锁定时同样开新标签
+    /// 到历史目标（阶段 AI 从简：历史在锁定标签内不移动）。
     pub fn go_back(&mut self) -> bool {
         if self.history_pos > 1 {
+            if self.active_tab_locked() {
+                let path = self.history[self.history_pos - 2].clone();
+                self.new_tab_to(path);
+                return true;
+            }
             self.history_pos -= 1;
             let path = self.history[self.history_pos - 1].clone();
             self.start_listing(path);
@@ -555,11 +601,16 @@ impl FsPanel {
         }
     }
 
-    /// Alt+→：前进到历史中的下一个目录。
+    /// Alt+→：前进到历史中的下一个目录。锁定同 go_back。
     pub fn go_forward(&mut self) -> bool {
         if self.history_pos < self.history.len() {
-            let path = self.history[self.history_pos].clone();
+            if self.active_tab_locked() {
+                let path = self.history[self.history_pos].clone();
+                self.new_tab_to(path);
+                return true;
+            }
             self.history_pos += 1;
+            let path = self.history[self.history_pos - 1].clone();
             self.start_listing(path);
             true
         } else {
@@ -588,8 +639,14 @@ impl FsPanel {
     /// 历史直跳（历史下拉菜单用）：移动 history_pos 到 pos（1 起，对应
     /// history[pos-1]）并切目录；不截断历史、不重复压栈（同 go_back/
     /// go_forward 的目录切换路径）。非法位置或与当前相同为 no-op。
+    /// 活动标签锁定时同样开新标签到目标（阶段 AI，同 go_back）。
     pub fn navigate_history_to(&mut self, pos: usize) {
         if pos == 0 || pos > self.history.len() || pos == self.history_pos {
+            return;
+        }
+        if self.active_tab_locked() {
+            let path = self.history[pos - 1].clone();
+            self.new_tab_to(path);
             return;
         }
         self.history_pos = pos;
@@ -745,6 +802,10 @@ impl FsPanel {
             sort_asc: self.sort_asc,
             view_mode: self.view_mode,
             columns: self.columns.clone(),
+            // 锁定/自定义标题随快照往返（阶段 AI）：活动标签的这两项
+            // 存于 tabs[active_tab]，回写时原样带出。
+            locked: self.tabs[self.active_tab].locked,
+            custom_title: self.tabs[self.active_tab].custom_title.clone(),
         }
     }
 
@@ -790,7 +851,7 @@ impl FsPanel {
     }
 
     /// Ctrl+T / 「+」：新建标签（复制当前目录与排序/列/视图模式；选中/
-    /// 过滤/焦点/滚动不带入新标签），追加到末尾并切过去。
+    /// 过滤/焦点/滚动/锁定/自定义标题不带入新标签），追加到末尾并切过去。
     pub fn new_tab(&mut self) {
         let current = self.snapshot_tab();
         let mut fresh = current.clone();
@@ -798,11 +859,50 @@ impl FsPanel {
         fresh.focus_name = None;
         fresh.filter = String::new();
         fresh.scroll_offset = 0.0;
+        fresh.locked = false;
+        fresh.custom_title = None;
         self.tabs[self.active_tab] = current;
         self.tabs.push(fresh);
         self.active_tab = self.tabs.len() - 1;
         let snap = self.tabs[self.active_tab].clone();
         self.restore_tab(&snap);
+    }
+
+    /// 标签 i 是否锁定。
+    pub fn tab_locked(&self, i: usize) -> bool {
+        self.tabs.get(i).map(|t| t.locked).unwrap_or(false)
+    }
+
+    /// 锁定/解锁标签（右键菜单「锁定」）。
+    pub fn set_tab_locked(&mut self, i: usize, locked: bool) {
+        if let Some(t) = self.tabs.get_mut(i) {
+            t.locked = locked;
+        }
+    }
+
+    /// 标签 i 的自定义标题（无 = None）。
+    pub fn tab_custom_title(&self, i: usize) -> Option<String> {
+        self.tabs.get(i).and_then(|t| t.custom_title.clone())
+    }
+
+    /// 设置/清除自定义标题（空串按 None 清除）。
+    pub fn set_tab_custom_title(&mut self, i: usize, title: Option<String>) {
+        if let Some(t) = self.tabs.get_mut(i) {
+            t.custom_title = title.filter(|s| !s.trim().is_empty());
+        }
+    }
+
+    /// 标签标题（未截断）：custom_title > 目录 basename（根目录显示完整
+    /// 路径；截断在渲染层 tab_label 统一处理）。
+    pub fn tab_title(&self, i: usize) -> String {
+        if let Some(title) = self.tab_custom_title(i) {
+            return title;
+        }
+        let dir = self.tab_dir(i);
+        dir.file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| dir.display().to_string())
     }
 
     /// 切换标签：回写当前快照 → 恢复目标 → 重新列举。
@@ -847,13 +947,19 @@ impl FsPanel {
     /// fallback_existing_dir 回退；选中/过滤/滚动不持久化）。
     /// 活动索引越界自动 clamp；dirs 为空退化为单空标签。
     pub fn restore_tabs(&mut self, dirs: Vec<PathBuf>, active: usize) {
-        let mut dirs = dirs;
-        if dirs.is_empty() {
-            dirs.push(PathBuf::new());
+        self.restore_tabs_full(dirs.into_iter().map(|d| (d, false, None)).collect(), active);
+    }
+
+    /// 整组恢复（阶段 AI：带锁定/自定义标题——启动恢复 fm_tabs_* 用；
+    /// 标签组应用走 restore_tabs 不恢复锁定）。
+    pub fn restore_tabs_full(&mut self, tabs: Vec<(PathBuf, bool, Option<String>)>, active: usize) {
+        let mut tabs = tabs;
+        if tabs.is_empty() {
+            tabs.push((PathBuf::new(), false, None));
         }
-        self.tabs = dirs
+        self.tabs = tabs
             .into_iter()
-            .map(|dir| PanelTabSnapshot {
+            .map(|(dir, locked, custom_title)| PanelTabSnapshot {
                 dir,
                 // 排序/列/视图模式不持久化：继承面板当前值（= 启动时恢复的
                 // 全局值），切到这些标签时不会被重置回默认。
@@ -861,6 +967,8 @@ impl FsPanel {
                 sort_asc: self.sort_asc,
                 view_mode: self.view_mode,
                 columns: self.columns.clone(),
+                locked,
+                custom_title,
                 ..Default::default()
             })
             .collect();
@@ -2335,6 +2443,100 @@ mod tests {
         let mut panel = FsPanel::new(SortKey::Name, true);
         panel.restore_tabs(Vec::new(), 0);
         assert_eq!(panel.tab_count(), 1);
+    }
+
+    /// 锁定标签（阶段 AI）：锁定时 navigate_to 自动改为新开标签（原标签
+    /// 目录不动、新标签不继承锁定/标题）；解锁后恢复正常导航。
+    #[test]
+    fn locked_tab_navigates_open_new_tab() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_a = tmp.path().join("a");
+        let dir_b = tmp.path().join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        panel.restore_tabs(vec![dir_a.clone()], 0);
+        poll_until_ready(&mut panel);
+        // 未锁定：正常导航（单标签）。
+        panel.navigate_to(dir_b.clone());
+        assert_eq!(panel.tab_count(), 1);
+        poll_until_ready(&mut panel);
+        assert_eq!(panel.dir, dir_b);
+        // 锁定后导航：新开标签到目标，原标签保持原目录。
+        panel.set_tab_locked(0, true);
+        panel.navigate_to(dir_a.clone());
+        assert_eq!(panel.tab_count(), 2);
+        assert_eq!(panel.active_tab(), 1, "新标签成为活动标签");
+        poll_until_ready(&mut panel);
+        assert_eq!(panel.dir, dir_a);
+        assert_eq!(panel.tab_dir(0), dir_b.as_path(), "锁定标签保持原目录");
+        assert!(panel.tab_locked(0));
+        assert!(!panel.tab_locked(1), "新标签不继承锁定");
+        // 新标签（未锁定）导航仍走正常路径。
+        panel.navigate_to(dir_b.clone());
+        assert_eq!(panel.tab_count(), 2);
+        poll_until_ready(&mut panel);
+        assert_eq!(panel.dir, dir_b);
+    }
+
+    /// 锁定标签的历史后退同样开新标签（阶段 AI 从简：历史不移动）。
+    #[test]
+    fn locked_tab_go_back_opens_new_tab() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_a = tmp.path().join("a");
+        let dir_b = tmp.path().join("b");
+        let dir_c = tmp.path().join("c");
+        for d in [&dir_a, &dir_b, &dir_c] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        panel.restore_tabs(vec![dir_a.clone()], 0);
+        poll_until_ready(&mut panel);
+        // 初始目录不进历史（restore_tabs 语义）：a→b→c 后历史 = [b, c]。
+        panel.navigate_to(dir_b.clone());
+        panel.navigate_to(dir_c.clone());
+        poll_until_ready(&mut panel);
+        panel.set_tab_locked(0, true);
+        assert!(panel.go_back());
+        assert_eq!(panel.tab_count(), 2);
+        poll_until_ready(&mut panel);
+        assert_eq!(panel.dir, dir_b, "历史目标开在新标签");
+        assert_eq!(panel.tab_dir(0), dir_c.as_path());
+        assert!(panel.can_go_back(), "锁定标签的历史不移动");
+    }
+
+    /// 自定义标题（阶段 AI）：显示优先级 custom_title > basename；空串
+    /// 按清除处理；restore_tabs_full 恢复锁定/标题。
+    #[test]
+    fn tab_custom_title_and_restore_full() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_a = tmp.path().join("alpha");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        let mut panel = FsPanel::new(SortKey::Name, true);
+        panel.restore_tabs_full(
+            vec![
+                (dir_a.clone(), true, Some("工作".to_string())),
+                (tmp.path().to_path_buf(), false, None),
+            ],
+            0,
+        );
+        assert!(panel.tab_locked(0));
+        assert!(!panel.tab_locked(1));
+        assert_eq!(panel.tab_title(0), "工作");
+        assert_eq!(
+            panel.tab_title(1),
+            tmp.path().file_name().unwrap().to_string_lossy()
+        );
+        // 设置/清除标题。
+        panel.set_tab_custom_title(1, Some("  ".to_string()));
+        assert_eq!(panel.tab_custom_title(1), None, "空白标题按清除");
+        panel.set_tab_custom_title(1, Some("临时".to_string()));
+        assert_eq!(panel.tab_title(1), "临时");
+        // 快照往返保留锁定/标题（切走再切回）。
+        panel.switch_tab(1);
+        panel.switch_tab(0);
+        assert!(panel.tab_locked(0));
+        assert_eq!(panel.tab_title(0), "工作");
     }
 
     /// fm_columns 解析/序列化（阶段 V）：未知 kind 丢弃、宽度 clamp、

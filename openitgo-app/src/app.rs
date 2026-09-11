@@ -475,6 +475,7 @@ impl Default for ReaderApp {
         );
         file_manager_view.set_saved_filters(&settings.fm_saved_filters);
         file_manager_view.set_button_bar(&settings.fm_button_bar);
+        file_manager_view.set_tab_groups(&settings.fm_tab_groups);
         // 视图模式全局单值（同 fm_sort_key 先例），恢复时两栏同用。
         let fm_view_mode = PanelViewMode::from_setting(&settings.fm_view_mode);
         for panel in &mut file_manager_view.panels {
@@ -2541,11 +2542,24 @@ impl ReaderApp {
                     let dir = resolve_fm_dir(saved_dir);
                     self.file_manager_view.panels[idx].navigate_to(dir);
                 } else {
-                    let dirs: Vec<PathBuf> = saved_tabs
+                    // 阶段 AI：FmTabEntry 归一化为 (目录, 锁定, 自定义标题)
+                    // （旧格式纯目录字符串 → 未锁定/无标题）。
+                    let tabs: Vec<(PathBuf, bool, Option<String>)> = saved_tabs
                         .iter()
-                        .map(|s| fallback_existing_dir(PathBuf::from(s)))
+                        .map(|e| {
+                            let s = e.to_state();
+                            (
+                                fallback_existing_dir(PathBuf::from(&s.dir)),
+                                s.locked,
+                                if s.custom_title.is_empty() {
+                                    None
+                                } else {
+                                    Some(s.custom_title)
+                                },
+                            )
+                        })
                         .collect();
-                    self.file_manager_view.panels[idx].restore_tabs(dirs, active_tab);
+                    self.file_manager_view.panels[idx].restore_tabs_full(tabs, active_tab);
                 }
             }
         }
@@ -3770,10 +3784,19 @@ impl ReaderApp {
         self.settings.fm_dir_right = snapshot.dir_right.clone();
         self.settings.fm_bookmark_groups = snapshot.bookmark_groups.clone();
         self.settings.fm_saved_filters = snapshot.saved_filters.clone();
-        self.settings.fm_tabs_left = snapshot.tabs_left.clone();
-        self.settings.fm_tabs_right = snapshot.tabs_right.clone();
+        self.settings.fm_tabs_left = snapshot
+            .tabs_left
+            .iter()
+            .map(|s| openitgo_storage::models::FmTabEntry::Full(s.clone()))
+            .collect();
+        self.settings.fm_tabs_right = snapshot
+            .tabs_right
+            .iter()
+            .map(|s| openitgo_storage::models::FmTabEntry::Full(s.clone()))
+            .collect();
         self.settings.fm_active_tab_left = snapshot.active_tab_left;
         self.settings.fm_active_tab_right = snapshot.active_tab_right;
+        self.settings.fm_tab_groups = snapshot.tab_groups.clone();
         self.settings.fm_col_size_width = snapshot.col_size_width;
         self.settings.fm_col_mtime_width = snapshot.col_mtime_width;
         self.settings.fm_col_shift = snapshot.col_shift;
@@ -5582,6 +5605,7 @@ mod tests {
             );
             file_manager_view.set_saved_filters(&settings.fm_saved_filters);
             file_manager_view.set_button_bar(&settings.fm_button_bar);
+            file_manager_view.set_tab_groups(&settings.fm_tab_groups);
             Self {
                 current_view: View::Library,
                 last_view: View::Library,

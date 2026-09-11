@@ -685,6 +685,26 @@ cargo clippy --workspace --all-targets -- -D warnings
   关闭；键盘移动/打开置 `tree_reveal` 渲染时对光标行 scroll_to_me
   一次（不每帧钉住）。树栏不做外部拖入落点、点击不切活动栏
   （panel_drop_rects/点击激活同快览跳过逻辑）。
+  **标签增强（阶段 AI）**：① 锁定——`PanelTabSnapshot.locked`，标签
+  右键「锁定标签/解除锁定」（LOCK/LOCK_OPEN），锁定标签前缀小锁图标；
+  活动标签锁定时 `navigate_to`/`go_back`/`go_forward`/
+  `navigate_history_to`（「..」/Backspace 经 navigate_to 同规则）自动
+  改 `new_tab_to`（目标开新标签，原标签不动；新标签不继承锁定/标题/
+  选中/过滤，历史在锁定标签内不移动——从简）。② 重命名——双击标签或
+  右键「重命名标签」小对话框（`tab_rename`），`custom_title: Option<
+  String>` 显示优先于 basename（`tab_title`，截断走
+  `truncate_tab_title`），右键「清除自定义标题」；锁定/标题随
+  `snapshot_tab` 往返（存 tabs[active_tab]，回写原样带出）。③ 标签组
+  ——settings `fm_tab_groups: Vec<FmTabGroup{name, dirs, active}>`
+  （clamp 空名修「未命名」/组内去空去重/active clamp）；标签条右侧
+  FOLDERS 组菜单：保存当前栏（全部标签目录 + 活动索引，命名小对话框
+  `tab_group_save`）/应用（`fallback_existing_dir` 逐个回退 +
+  `restore_tabs`）/✕ 删除；view 持权威副本（`set_tab_groups` 注入），
+  `FmStateSnapshot.tab_groups` diff 写回。**持久化格式**：fm_tabs_*
+  条目扩展为 untagged `FmTabEntry`（旧纯目录字符串 = Dir 兼容读入，
+  写出恒 Full{dir, locked, custom_title}）；快照侧
+  `tabs_left/right: Vec<FmTabState>`；启动恢复走 `restore_tabs_full`
+  （标签组应用走 `restore_tabs` 不恢复锁定）。
   **全局「← 返回」**：顶栏按钮 + `ReaderApp.previous_view: Option<View>`
   **单层**回退落点（非栈）——仅 `render_file_manager` 打开动作使视图真的离开
   FM 时记录 `Some(FileManager)`（打开失败留在 FM 不记）；`sync_previous_view`

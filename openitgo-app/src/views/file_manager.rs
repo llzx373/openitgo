@@ -43,7 +43,7 @@ use crate::views::preview_bytes::{
 };
 use egui_phosphor_icons::{icons, Icon};
 use openitgo_parser::archive::archive_kind;
-use openitgo_storage::models::{FmBookmarkGroup, FmButton};
+use openitgo_storage::models::{FmBookmarkGroup, FmButton, FmTabGroup, FmTabState};
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -260,13 +260,15 @@ pub struct FmStateSnapshot {
     pub bookmark_groups: Vec<FmBookmarkGroup>,
     /// 保存的过滤方案（两栏共享；过滤框下拉「保存当前过滤」追加）。
     pub saved_filters: Vec<String>,
-    /// 两栏标签页目录（活动标签 = 实时目录；只存目录路径，选中/焦点/过滤/
-    /// 滚动不持久化）与活动标签索引。旧 settings 无此数据时恢复端回退
-    /// dir_left/dir_right 的单标签行为。
-    pub tabs_left: Vec<String>,
-    pub tabs_right: Vec<String>,
+    /// 两栏标签页状态（活动标签 = 实时目录；选中/焦点/过滤/滚动不持久化）
+    /// 与活动标签索引。旧 settings 无此数据时恢复端回退 dir_left/dir_right
+    /// 的单标签行为；旧格式（纯目录字符串）由 FmTabEntry 读入归一化。
+    pub tabs_left: Vec<FmTabState>,
+    pub tabs_right: Vec<FmTabState>,
     pub active_tab_left: usize,
     pub active_tab_right: usize,
+    /// 标签组（阶段 AI；两栏共享，权威在 settings.fm_tab_groups）。
+    pub tab_groups: Vec<FmTabGroup>,
     /// 大小/时间列宽与列块平移量（≤0，0 = 列块贴右缘）：全局单值取活动栏
     /// （取舍同 sort_key——双栏各自拖过会不同，持久化活动栏的，恢复时
     /// 两栏同用）。阶段 V 起为旧字段兼容层：权威列配置在 `columns`，
@@ -350,6 +352,13 @@ pub struct FileManagerView {
     /// 保存的过滤方案（两栏共享，权威走快照写回 settings.fm_saved_filters；
     /// 构造后经 `set_saved_filters` 注入）。
     saved_filters: Vec<String>,
+    /// 标签组（阶段 AI；两栏共享，权威走快照写回 settings.fm_tab_groups；
+    /// 构造后经 `set_tab_groups` 注入）。
+    tab_groups: Vec<FmTabGroup>,
+    /// 标签重命名小对话框（阶段 AI）：(栏, 标签索引, 编辑中文本)。
+    tab_rename: Option<(usize, usize, String)>,
+    /// 「保存当前标签为一组…」命名小对话框（阶段 AI）：(栏, 编辑中名称)。
+    tab_group_save: Option<(usize, String)>,
     /// 过滤会话历史（最近使用在前，去重，上限 8；不落盘）。
     filter_history: Vec<String>,
     /// Ctrl+S 的一次性请求：下一帧 render_filter_bar 聚焦过滤框
@@ -831,20 +840,15 @@ fn row_hover_tip(entry: Option<&FsEntry>, branch: bool, comment: Option<&str>) -
     }
 }
 
-/// 标签条标题：目录 basename；根目录（如 `C:\`）无 basename 时显示完整
-/// 路径。超 20 字符截断 + 省略号（完整路径走悬停 tooltip）。
-fn tab_label(dir: &Path) -> String {
+/// 标签标题截断（阶段 AI：自定义标题与目录 basename 共用同一截断；
+/// 超 20 字符 + 省略号，完整路径走悬停 tooltip）。
+fn truncate_tab_title(name: &str) -> String {
     const MAX_CHARS: usize = 20;
-    let name = dir
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| dir.display().to_string());
     if name.chars().count() > MAX_CHARS {
         let truncated: String = name.chars().take(MAX_CHARS - 1).collect();
         format!("{truncated}…")
     } else {
-        name
+        name.to_string()
     }
 }
 
@@ -908,6 +912,9 @@ impl FileManagerView {
             bookmark_groups: bookmark_groups.to_vec(),
             button_bar: Vec::new(),
             saved_filters: Vec::new(),
+            tab_groups: Vec::new(),
+            tab_rename: None,
+            tab_group_save: None,
             filter_history: Vec::new(),
             filter_focus_request: false,
             filter_esc_handled: false,
@@ -989,10 +996,11 @@ impl FileManagerView {
             dir_right: self.panels[1].dir.display().to_string(),
             bookmark_groups: self.bookmark_groups.clone(),
             saved_filters: self.saved_filters.clone(),
-            tabs_left: self.panel_tab_dirs(0),
-            tabs_right: self.panel_tab_dirs(1),
+            tabs_left: self.panel_tab_states(0),
+            tabs_right: self.panel_tab_states(1),
             active_tab_left: self.panels[0].active_tab(),
             active_tab_right: self.panels[1].active_tab(),
+            tab_groups: self.tab_groups.clone(),
             col_size_width,
             col_mtime_width,
             col_shift: panel.col_shift,
@@ -1001,11 +1009,23 @@ impl FileManagerView {
         }
     }
 
-    /// 栏内全部标签的目录字符串（活动标签 = 实时 dir）。
-    fn panel_tab_dirs(&self, idx: usize) -> Vec<String> {
+    /// 栏内全部标签的持久化状态（活动标签 = 实时 dir；阶段 AI 含
+    /// 锁定/自定义标题）。
+    fn panel_tab_states(&self, idx: usize) -> Vec<FmTabState> {
         (0..self.panels[idx].tab_count())
-            .map(|i| self.panels[idx].tab_dir(i).display().to_string())
+            .map(|i| FmTabState {
+                dir: self.panels[idx].tab_dir(i).display().to_string(),
+                locked: self.panels[idx].tab_locked(i),
+                custom_title: self.panels[idx].tab_custom_title(i).unwrap_or_default(),
+            })
             .collect()
+    }
+
+    /// 注入/同步标签组（阶段 AI）：构造后由 app 从 settings 喂入；
+    /// 标签条组菜单的增删直接改 view 副本，快照 diff 写回 settings
+    /// （同 saved_filters 模式）。
+    pub fn set_tab_groups(&mut self, groups: &[FmTabGroup]) {
+        self.tab_groups = groups.to_vec();
     }
 
     /// 注入保存的过滤方案（构造后由 app 从 settings 喂入）。
@@ -1488,6 +1508,8 @@ impl FileManagerView {
         self.render_selection_dialog(ui.ctx());
         self.render_comment_dialog(ui.ctx());
         self.render_button_dialog(ui.ctx());
+        // 标签重命名/保存标签组小对话框（阶段 AI；非模态 egui::Window）。
+        self.render_tab_dialogs(ui.ctx());
         // 任务面板 + 错误汇总窗（阶段 AA；非模态 egui::Window）。
         self.render_task_panel(ui.ctx());
         self.render_op_error_report(ui.ctx());
@@ -2323,6 +2345,16 @@ impl FileManagerView {
             Switch(usize),
             Close(usize),
             New,
+            /// 锁定/解锁（阶段 AI）。
+            ToggleLock(usize),
+            /// 重命名（双击/右键菜单同入口）。
+            Rename(usize),
+            /// 清除自定义标题（阶段 AI）。
+            ClearTitle(usize),
+            /// 标签组（阶段 AI）：保存当前栏为一组 / 应用一组 / 删除一组。
+            SaveGroup,
+            ApplyGroup(usize),
+            DeleteGroup(usize),
         }
         let mut action = None;
         egui::ScrollArea::horizontal()
@@ -2335,8 +2367,16 @@ impl FileManagerView {
                     let active_tab = self.panels[idx].active_tab();
                     for i in 0..count {
                         let dir = self.panels[idx].tab_dir(i).to_path_buf();
+                        let locked = self.panels[idx].tab_locked(i);
+                        let title = truncate_tab_title(&self.panels[idx].tab_title(i));
+                        // 锁定标签前缀小锁图标（阶段 AI，TC 语义）。
+                        let label = if locked {
+                            format!("{} {}", icons::LOCK.as_str(), title)
+                        } else {
+                            title
+                        };
                         let resp = ui
-                            .add(egui::Button::new(tab_label(&dir)).selected(i == active_tab))
+                            .add(egui::Button::new(label).selected(i == active_tab))
                             .on_hover_text(dir.display().to_string());
                         // 拖放落点 rect（阶段 Z）：非当前标签才记（当前标签 =
                         // 本栏目录，拖上没有意义）。
@@ -2346,9 +2386,47 @@ impl FileManagerView {
                         if resp.clicked() {
                             action = Some(TabAction::Switch(i));
                         }
+                        if resp.double_clicked() {
+                            action = Some(TabAction::Rename(i));
+                        }
                         if resp.middle_clicked() && count > 1 {
                             action = Some(TabAction::Close(i));
                         }
+                        // 标签右键菜单（阶段 AI）：锁定/重命名/清除标题/关闭。
+                        resp.context_menu(|ui| {
+                            let lock_label = if locked {
+                                " 解除锁定"
+                            } else {
+                                " 锁定标签"
+                            };
+                            let lock_icon = if locked {
+                                icons::LOCK_OPEN
+                            } else {
+                                icons::LOCK
+                            };
+                            if ui.button((lock_icon, lock_label)).clicked() {
+                                action = Some(TabAction::ToggleLock(i));
+                                ui.close();
+                            }
+                            if ui.button((icons::PENCIL_SIMPLE, " 重命名标签")).clicked() {
+                                action = Some(TabAction::Rename(i));
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    self.panels[idx].tab_custom_title(i).is_some(),
+                                    egui::Button::new((icons::X, " 清除自定义标题")),
+                                )
+                                .clicked()
+                            {
+                                action = Some(TabAction::ClearTitle(i));
+                                ui.close();
+                            }
+                            if count > 1 && ui.button((icons::TRASH, " 关闭标签")).clicked() {
+                                action = Some(TabAction::Close(i));
+                                ui.close();
+                            }
+                        });
                     }
                     if ui
                         .add(egui::Button::new(icons::PLUS.as_str()).frame(false))
@@ -2357,13 +2435,75 @@ impl FileManagerView {
                     {
                         action = Some(TabAction::New);
                     }
+                    // 标签组菜单（阶段 AI）：保存当前栏标签为一组 / 应用 /
+                    // 删除；组数据两栏共享（权威 settings.fm_tab_groups）。
+                    ui.menu_button(icons::FOLDERS.as_str(), |ui| {
+                        ui.set_min_width(200.0);
+                        if ui
+                            .button((icons::FLOPPY_DISK, " 保存当前标签为一组…"))
+                            .clicked()
+                        {
+                            action = Some(TabAction::SaveGroup);
+                            ui.close();
+                        }
+                        if !self.tab_groups.is_empty() {
+                            ui.separator();
+                        }
+                        for (gi, group) in self.tab_groups.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let label =
+                                    format!("{}（{} 个标签）", group.name, group.dirs.len());
+                                if ui.button(label).clicked() {
+                                    action = Some(TabAction::ApplyGroup(gi));
+                                    ui.close();
+                                }
+                                if ui
+                                    .button(icons::X.as_str())
+                                    .on_hover_text("删除该标签组")
+                                    .clicked()
+                                {
+                                    action = Some(TabAction::DeleteGroup(gi));
+                                    ui.close();
+                                }
+                            });
+                        }
+                    })
+                    .response
+                    .on_hover_text("标签组");
                 });
             });
         match action {
             Some(TabAction::Switch(i)) => self.panels[idx].switch_tab(i),
             Some(TabAction::Close(i)) => self.panels[idx].close_tab(i),
             Some(TabAction::New) => self.panels[idx].new_tab(),
-            None => {}
+            Some(TabAction::ToggleLock(i)) => {
+                let locked = self.panels[idx].tab_locked(i);
+                self.panels[idx].set_tab_locked(i, !locked);
+            }
+            Some(TabAction::Rename(i)) => {
+                let current = self.panels[idx]
+                    .tab_custom_title(i)
+                    .unwrap_or_else(|| self.panels[idx].tab_title(i));
+                self.tab_rename = Some((idx, i, current));
+            }
+            Some(TabAction::ClearTitle(i)) => self.panels[idx].set_tab_custom_title(i, None),
+            Some(TabAction::SaveGroup) => {
+                self.tab_group_save = Some((idx, String::new()));
+            }
+            Some(TabAction::ApplyGroup(gi)) => {
+                if let Some(group) = self.tab_groups.get(gi).cloned() {
+                    let dirs: Vec<PathBuf> = group
+                        .dirs
+                        .iter()
+                        .map(|d| fallback_existing_dir(PathBuf::from(d)))
+                        .collect();
+                    self.panels[idx].restore_tabs(dirs, group.active);
+                }
+            }
+            Some(TabAction::DeleteGroup(gi)) if gi < self.tab_groups.len() => {
+                self.tab_groups.remove(gi);
+            }
+            Some(TabAction::DeleteGroup(_)) | None => {}
         }
     }
 
@@ -2831,6 +2971,100 @@ impl FileManagerView {
             }
         } else if !cancelled && open {
             self.group_dialog = Some(dialog);
+        }
+    }
+
+    /// 标签小对话框（阶段 AI）：标签重命名 + 「保存当前标签为一组…」
+    /// 命名（take/reinsert 模式同 render_group_dialog）。
+    fn render_tab_dialogs(&mut self, ctx: &egui::Context) {
+        // 标签重命名：Enter/确定提交（空白 = 清除自定义标题回退 basename），
+        // Esc/取消放弃。
+        if let Some((idx, tab, mut text)) = self.tab_rename.take() {
+            let mut open = true;
+            let mut confirm = false;
+            let mut cancelled = false;
+            egui::Window::new("重命名标签")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("标题：");
+                        let response =
+                            ui.add(egui::TextEdit::singleline(&mut text).desired_width(220.0));
+                        if ui.ctx().input(|i| i.key_pressed(egui::Key::Enter))
+                            && response.lost_focus()
+                        {
+                            confirm = true;
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.weak("留空 = 清除自定义标题（回退目录名）");
+                    ui.horizontal(|ui| {
+                        if ui.button("确定").clicked() {
+                            confirm = true;
+                        }
+                        if ui.button("取消").clicked() {
+                            cancelled = true;
+                        }
+                    });
+                });
+            if confirm {
+                self.panels[idx].set_tab_custom_title(tab, Some(text.trim().to_string()));
+            } else if !cancelled && open {
+                self.tab_rename = Some((idx, tab, text));
+            }
+        }
+        // 保存标签组命名：当前栏全部标签目录 + 活动索引存为一组。
+        if let Some((idx, mut name)) = self.tab_group_save.take() {
+            let mut open = true;
+            let mut confirm = false;
+            let mut cancelled = false;
+            egui::Window::new("保存标签组")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("组名：");
+                        let response =
+                            ui.add(egui::TextEdit::singleline(&mut name).desired_width(220.0));
+                        if ui.ctx().input(|i| i.key_pressed(egui::Key::Enter))
+                            && response.lost_focus()
+                        {
+                            confirm = true;
+                        }
+                    });
+                    let trimmed = name.trim();
+                    if trimmed.is_empty() {
+                        ui.colored_label(ui.visuals().error_fg_color, "名称不能为空");
+                    }
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(!trimmed.is_empty(), egui::Button::new("确定"))
+                            .clicked()
+                        {
+                            confirm = true;
+                        }
+                        if ui.button("取消").clicked() {
+                            cancelled = true;
+                        }
+                    });
+                });
+            if confirm {
+                let dirs: Vec<String> = (0..self.panels[idx].tab_count())
+                    .map(|i| self.panels[idx].tab_dir(i).display().to_string())
+                    .collect();
+                self.tab_groups.push(FmTabGroup {
+                    name: name.trim().to_string(),
+                    dirs,
+                    active: self.panels[idx].active_tab(),
+                });
+            } else if !cancelled && open {
+                self.tab_group_save = Some((idx, name));
+            }
         }
     }
 
@@ -5607,6 +5841,8 @@ impl FileManagerView {
             || self.selection_dialog.is_some()
             || self.comment_dialog.is_some()
             || self.button_dialog.is_some()
+            || self.tab_rename.is_some()
+            || self.tab_group_save.is_some()
         {
             return;
         }
