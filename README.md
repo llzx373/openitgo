@@ -146,6 +146,23 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+## 打包（Windows）
+
+```powershell
+# 首次构建先准备 vendor/mpv（mpv.lib + libmpv-2.dll）
+powershell -ExecutionPolicy Bypass -File scripts/setup-windows.ps1
+
+# release 构建 + 便携 zip + 安装包
+powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1
+```
+
+产物位于 `dist/`：
+
+- `OpenItGo-<version>-setup.exe`：安装包，可选「仅为我安装」或「为所有用户安装」，包含开始菜单快捷方式与卸载器。
+- `openitgo-windows-x86_64-portable.zip`：解压即用的便携包。
+
+安装包由 [Inno Setup 6](https://jrsoftware.org/isinfo.php) 编译（脚本为 `scripts/openitgo.iss`）。未检测到 `ISCC.exe` 时会跳过安装包，只产出便携 zip；也可用 `-NoInstaller` 显式跳过。安装包未做代码签名，首次运行可能出现 SmartScreen 提示。
+
 ## 许可证
 
 [MIT](LICENSE)

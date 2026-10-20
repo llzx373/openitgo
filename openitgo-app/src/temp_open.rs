@@ -114,12 +114,40 @@ pub(crate) fn open_with_os(path: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn open_with_os_impl(path: &Path) -> std::io::Result<()> {
-    // start 的第一个引号参数是窗口标题，必须给空串，否则路径被当标题吞掉。
-    std::process::Command::new("cmd")
-        .args(["/c", "start", ""])
-        .arg(path)
-        .spawn()?;
-    Ok(())
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    // 不能走 `cmd /c start`：GUI 子系统的进程 spawn cmd 会弹出一闪而过的
+    // 控制台窗口。ShellExecuteW 由 Shell 直接拉起默认程序，控制台窗口
+    // 只在该文件本身的默认程序是控制台程序时才会出现。
+    let verb: Vec<u16> = "open\0".encode_utf16().collect();
+    let target: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: verb/target 指向本函数内有效的 NUL 结尾 UTF-16 缓冲区，
+    // 调用期间不被释放；hwnd/参数/目录为 NULL 合法。返回值 > 32 表示成功。
+    let ret = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if (ret as isize) > 32 {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "ShellExecuteW 打开失败（错误码 {}）: {}",
+            ret as isize,
+            path.display()
+        )))
+    }
 }
 
 #[cfg(target_os = "macos")]

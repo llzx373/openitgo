@@ -145,7 +145,9 @@ cargo clippy --workspace --all-targets -- -D warnings
   `open_archive_auto` + `poll_archive_router` 启发式分流（Comic → 漫画链路，Files → Archive
   视图，列目录错误含密码错误回落漫画链路）；显式动作跳过启发式。双击图片条目 →
   `open_entry_as_comic`（同漫画已开则直接跳页）；双击其他条目 → `temp_open::open_entry_external`
-  （提取到 temp_dir 后 `cmd /c start`，启动时 `clean_stale` 回收 24h 前目录）。
+  （提取到 temp_dir 后经核心 `temp_open::open_with_os` 用 `ShellExecuteW` 打开，启动时
+  `clean_stale` 回收 24h 前目录）。**勿改回 `cmd /c start`**：GUI 进程 spawn cmd 会弹出
+  一闪而过的控制台窗口（解压完成打开目标文件夹、外部打开都会中招）。
 - **拖出解压（Windows only）**：`DragOutState` 状态机 → `platform::drag_out::do_drag_drop`
   （OLE HDROP，COPY-only，模态）；松开未进 DoDragDrop = 取消并清理暂存目录。
 - **多卷 RAR 归一**：`open_path` 最前面经 `normalize_rar_volume_path` 把 partN.rar/.r00/.r01

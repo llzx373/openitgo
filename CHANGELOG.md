@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Windows 安装包：`scripts/package-windows.ps1` 在便携 zip 之外同时用 Inno Setup 产出 `dist/OpenItGo-<version>-setup.exe`（按用户/所有用户安装、开始菜单快捷方式、卸载器）；简体中文安装界面语言文件随仓库提供（`scripts/languages/ChineseSimplified.isl`）。
 - Markdown 目录树：按 h1–h6 每级标题分章（pulldown-cmark 标题事件驱动，fenced code 内 `#` 不误判，支持 setext 标题，跳级归一化嵌套深度）；目录面板树形展示（按层级缩进 + 折叠三角）。EPUB 目录同样记录 navpoint 嵌套深度并树形展示；`EbookChapter` 新增 `level` 字段。
 - Markdown 渲染增强：相对路径图片经 `/file/` 协议通道从 md 文件同目录提供（限制在书目录子树内）；fenced code block 经 syntect 语法高亮（Rust 侧预处理，深色代码块）；表格边框、行内代码、引用块阅读样式（颜色跟随阅读主题）。
 
