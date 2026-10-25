@@ -211,7 +211,7 @@ impl SharedRawCache {
         result
     }
 
-    fn insert(&self, key: RawCacheKey, bytes: Vec<u8>) {
+    fn insert(&self, key: RawCacheKey, bytes: Vec<u8>) -> Arc<Vec<u8>> {
         let len = bytes.len();
         if let Some(perf) = &self.perf {
             perf.record(if key.zip_index.is_some() {
@@ -221,9 +221,10 @@ impl SharedRawCache {
             });
             perf.record_value(LoaderPerfEvent::SourceBytesRead, len as u64);
         }
+        let data = Arc::new(bytes);
         let mut inner = self.inner.write().unwrap();
         if len > inner.max_bytes {
-            return;
+            return data;
         }
         if let Some(old) = inner.map.remove(&key) {
             inner.bytes = inner.bytes.saturating_sub(old.len());
@@ -237,7 +238,8 @@ impl SharedRawCache {
         }
         inner.bytes += len;
         inner.order.push_back(key.clone());
-        inner.map.insert(key, Arc::new(bytes));
+        inner.map.insert(key, data.clone());
+        data
     }
 
     #[cfg(test)]
@@ -426,7 +428,7 @@ struct DecodeJob {
     epoch: Epoch,
     page_index: usize,
     thumbnail: bool,
-    bytes: Vec<u8>,
+    bytes: Arc<Vec<u8>>,
     format_hint: Option<String>,
 }
 
@@ -1005,7 +1007,7 @@ fn read_zip_entry(
     archive_path: &std::path::Path,
     index: usize,
     password: Option<&str>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Arc<Vec<u8>>, String> {
     let key = RawCacheKey::zip(archive_path, index);
     if let Some(cached) = raw_cache.get(&key) {
         timing::log(&format!(
@@ -1013,7 +1015,7 @@ fn read_zip_entry(
             index,
             cached.len()
         ));
-        return Ok(cached.to_vec());
+        return Ok(cached);
     }
 
     let first_attempt = timing::time("read_zip_entry (cached)", || -> Result<Vec<u8>, String> {
@@ -1039,8 +1041,7 @@ fn read_zip_entry(
                 index,
                 bytes.len()
             ));
-            raw_cache.insert(key, bytes.clone());
-            Ok(bytes)
+            Ok(raw_cache.insert(key, bytes))
         }
         Err(_) => {
             // File may have been modified/deleted externally. Drop cache and retry once.
@@ -1066,8 +1067,7 @@ fn read_zip_entry(
                 index,
                 bytes.len()
             ));
-            raw_cache.insert(key, bytes.clone());
-            Ok(bytes)
+            Ok(raw_cache.insert(key, bytes))
         }
     }
 }
@@ -1092,7 +1092,7 @@ fn read_page_bytes(
     raw_cache: &SharedRawCache,
     password: Option<&str>,
     perf: &LoaderPerf,
-) -> Result<(Vec<u8>, Option<String>), String> {
+) -> Result<(Arc<Vec<u8>>, Option<String>), String> {
     match source {
         PageSource::PdfPage { .. } => Err("PDF should be rendered on IO thread".to_string()),
         PageSource::File(path) => {
@@ -1103,7 +1103,7 @@ fn read_page_bytes(
             let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
             perf.record(LoaderPerfEvent::FileRead);
             perf.record_value(LoaderPerfEvent::SourceBytesRead, bytes.len() as u64);
-            Ok((bytes, hint))
+            Ok((Arc::new(bytes), hint))
         }
         PageSource::ZipEntry {
             archive,
@@ -1138,7 +1138,7 @@ fn read_rar_entry(
     name: &str,
     header_position: usize,
     password: Option<&str>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Arc<Vec<u8>>, String> {
     let key = RawCacheKey::rar(archive_path, name);
     if let Some(cached) = raw_cache.get(&key) {
         timing::log(&format!(
@@ -1146,7 +1146,7 @@ fn read_rar_entry(
             name,
             cached.len()
         ));
-        return Ok(cached.to_vec());
+        return Ok(cached);
     }
 
     let builder = match password {
@@ -1170,8 +1170,7 @@ fn read_rar_entry(
         if current_position >= header_position {
             if entry.entry().filename.to_string_lossy() == name {
                 let (bytes, _archive) = entry.read().map_err(rar_password_error_message)?;
-                raw_cache.insert(key, bytes.clone());
-                return Ok(bytes);
+                return Ok(raw_cache.insert(key, bytes));
             }
             archive = entry.skip().map_err(rar_password_error_message)?;
         } else {
@@ -2143,8 +2142,9 @@ mod tests {
         perf.set_enabled(true);
         let raw_cache = SharedRawCache::with_perf(1024 * 1024, Some(perf.clone()));
         let mut zip_cache = ZipCache::new();
-        read_zip_entry(&mut zip_cache, &raw_cache, &path, 0, None).unwrap();
-        read_zip_entry(&mut zip_cache, &raw_cache, &path, 0, None).unwrap();
+        let first = read_zip_entry(&mut zip_cache, &raw_cache, &path, 0, None).unwrap();
+        let second = read_zip_entry(&mut zip_cache, &raw_cache, &path, 0, None).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
 
         let snapshot = perf.snapshot();
         assert_eq!(snapshot.zip_entry_reads, 1);
@@ -2183,7 +2183,7 @@ mod tests {
         let raw_cache = SharedRawCache::new(1024 * 1024);
         let mut zip_cache = ZipCache::new();
         let bytes = read_zip_entry(&mut zip_cache, &raw_cache, &path, 0, Some("s3cret")).unwrap();
-        assert_eq!(bytes, b"fake-png");
+        assert_eq!(bytes.as_slice(), b"fake-png");
     }
 
     #[test]
@@ -2233,6 +2233,19 @@ mod tests {
         );
         assert_eq!(cache.bytes_used(), 0);
         assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn shared_raw_cache_eviction_preserves_inflight_bytes() {
+        let cache = SharedRawCache::new(100);
+        let key_a = RawCacheKey::zip(std::path::Path::new("/a.cbz"), 0);
+        let key_b = RawCacheKey::zip(std::path::Path::new("/b.cbz"), 0);
+        let inflight = cache.insert(key_a.clone(), vec![1u8; 100]);
+        cache.insert(key_b, vec![2u8; 100]);
+
+        assert!(cache.get(&key_a).is_none());
+        assert_eq!(inflight.as_slice(), vec![1u8; 100].as_slice());
+        assert_eq!(Arc::strong_count(&inflight), 1);
     }
 
     #[test]
