@@ -1,5 +1,7 @@
 use crate::timing;
-use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
+#[cfg(test)]
+use crossbeam_channel::unbounded;
+use crossbeam_channel::{bounded, select, Receiver, Sender};
 use egui::ColorImage;
 use openitgo_core::models::PageSource;
 use pdf_render::pdf_interpret::pdf_syntax::Pdf;
@@ -16,6 +18,7 @@ use std::thread;
 
 /// Default PDF document cache budget (256 MiB).
 const PDF_DOCUMENT_CACHE_DEFAULT_MAX_BYTES: usize = 256 * 1024 * 1024;
+const RESULT_QUEUE_CAPACITY: usize = 256;
 
 /// Cache of parsed PDF documents, keyed by file path.
 ///
@@ -663,9 +666,10 @@ impl PageLoader {
         let (high_sender, high_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) =
             bounded(64);
         let (low_sender, low_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) = bounded(64);
-        // Use an unbounded result channel so completed decode results are never
-        // dropped just because the UI thread is temporarily behind.
-        let (result_sender, receiver): (Sender<LoadResult>, Receiver<LoadResult>) = unbounded();
+        // Backpressure only blocks background workers; completed high-priority
+        // results are never dropped when the UI is temporarily behind.
+        let (result_sender, receiver): (Sender<LoadResult>, Receiver<LoadResult>) =
+            bounded(RESULT_QUEUE_CAPACITY);
         let (high_decode_sender, high_decode_receiver): (Sender<DecodeJob>, Receiver<DecodeJob>) =
             bounded(64);
         // Separate low-priority queues so heavy full-image decodes cannot starve
@@ -1240,15 +1244,18 @@ fn process_io_request(
                         (LoadPriority::Low, true) => low_thumb_decode_sender,
                         (LoadPriority::Low, false) => low_full_decode_sender,
                     };
-                    if sender.try_send(job).is_err() {
+                    let send_failed = match priority {
+                        LoadPriority::High => sender.send(job).is_err(),
+                        LoadPriority::Low => sender.try_send(job).is_err(),
+                    };
+                    if send_failed {
                         perf.record(LoaderPerfEvent::DecodeQueueFull);
                         timing::log(&format!(
-                            "IO dropped decode job page {} ({} queue full)",
+                            "IO dropped decode job page {} ({} queue disconnected)",
                             key.page_index, priority_label
                         ));
-                        // High-priority failures are real errors the UI should surface.
-                        // Low-priority (preload/thumbnail) failures are transient backpressure;
-                        // tell the UI to drop the pending marker so it can retry later.
+                        // Low-priority backpressure is transient; tell the UI to
+                        // clear the pending marker so it can retry later.
                         let dropped = priority == LoadPriority::Low;
                         finish_request(requests, &req.control);
                         if req.control.is_cancelled() {
@@ -2025,6 +2032,59 @@ mod tests {
     }
 
     #[test]
+    fn test_result_queue_backpressure_preserves_all_high_results() {
+        const TOTAL: usize = 1000;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("backpressure.png");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .unwrap();
+
+        let loader = PageLoader::new_with_compress(false, 1);
+        loader.set_perf_enabled(true);
+        let epoch = loader.next_epoch();
+        let source = PageSource::File(path);
+        let mut received = 0;
+        for page_index in 0..TOTAL {
+            while !loader.request_high(epoch, page_index, source.clone()) {
+                if let Some(result) = loader.try_recv() {
+                    result.image.expect("high result should decode");
+                    received += 1;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        let start = Instant::now();
+        while loader.receiver.len() < RESULT_QUEUE_CAPACITY {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "queue did not fill: received={received} queued={} pending={} snapshot={:?}",
+                loader.receiver.len(),
+                loader.requests.lock().unwrap().len(),
+                loader.perf_snapshot(),
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(loader.receiver.capacity(), Some(RESULT_QUEUE_CAPACITY));
+
+        while received < TOTAL * 2 {
+            if let Some(result) = loader.try_recv() {
+                result.image.expect("high result should decode");
+                received += 1;
+            }
+            assert!(start.elapsed() < Duration::from_secs(10));
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let snapshot = loader.perf_snapshot();
+        assert_eq!(snapshot.full_results, TOTAL as u64);
+        assert_eq!(snapshot.thumbnail_results, TOTAL as u64);
+        assert_eq!(snapshot.error_results, 0);
+        assert_eq!(snapshot.dropped_results, 0);
+    }
+
+    #[test]
     fn test_low_full_upgrade_before_io_executes_once() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("upgrade.png");
@@ -2444,15 +2504,15 @@ mod tests {
     }
 
     #[test]
-    fn test_io_sends_error_when_decode_queue_full() {
+    fn test_io_sends_error_when_decode_queue_is_disconnected() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("sample.png");
         let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 255]));
         img.save(&path).unwrap();
 
         let (result_sender, result_receiver) = unbounded();
-        // Zero-capacity decode queues guarantee try_send will fail.
-        let (high_decode_sender, _high_decode_receiver) = bounded(0);
+        let (high_decode_sender, high_decode_receiver) = bounded(1);
+        drop(high_decode_receiver);
         let (low_thumb_decode_sender, _low_thumb_decode_receiver) = bounded(0);
         let (low_full_decode_sender, _low_full_decode_receiver) = bounded(0);
         let mut zip_cache = ZipCache::new();
