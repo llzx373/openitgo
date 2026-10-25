@@ -13,7 +13,6 @@ egui_phosphor_icons = "0.4"
 bcdec_rs = "0.2"
 bytemuck = "1.25"
 image = { workspace = true }
-jpeg-decoder = "0.3.2"
 texpresso = "2.0"
 pdf-render = "1.0.0-beta.9"
 rfd = "0.15"
