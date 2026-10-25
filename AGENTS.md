@@ -343,10 +343,16 @@ dirs_first 逐栏下发，RowsKey 自动失效。
   `request_page_thumbnail` 高优先级 + 按方向低优先预取 8 页；不再后台生成全书缩略图；
   webp 走 `webp_thumb.rs`，失败回退 image crate。
 - **PageCache**：GPU textures；`size_bytes` 为整页 CPU/GPU 内存估算；上传后尽快释放 CPU 侧
-  `ColorImage`。缩略图另有 64MiB LRU 预算（`thumbnail_total_size_bytes`），上传后释放 CPU 图，
-  full 淘汰必须同时检查 thumbnail CPU 与 GPU handle，避免误删已上传纹理。`dimensions_version`
-  驱动 Webtoon 布局缓存：仅尺寸/旋转/视口/zoom 变化时更新，尺寸变化从首个变化页重算后缀，
-  可见范围二分查找；Webtoon 当前可见页加入淘汰保护。
+  `ColorImage`。原生 BC3 仅在设备支持 `TEXTURE_COMPRESSION_BC` 时上传，否则回退 CPU 解码；
+  RenderState 在 `ReaderApp::ui` 的 Frame 中安装（CreationContext 创建期为 None）。`native_texture`
+  持有纹理所有权直至淘汰。注册顺序为 1×1 占位 Managed ID → `update_texture` →
+  `update_egui_texture_from_wgpu_texture`；勿改回单纯 `register_native_texture` 或缺省 ID 分配。
+  `bc3_smoke` 用真实 GPU 读回压缩块并校验解码像素。BC3 按 4 像素块行分条并行编码，单图最多
+  4 线程、小图单线程，避免首屏延迟回退。缩略图另有 64MiB LRU 预算
+  （`thumbnail_total_size_bytes`），上传后释放 CPU 图，full 淘汰必须同时检查 thumbnail CPU 与
+  GPU handle，避免误删已上传纹理。`dimensions_version` 驱动 Webtoon 布局缓存：仅尺寸/旋转/
+  视口/zoom 变化时更新，尺寸变化从首个变化页重算后缀，可见范围二分查找；Webtoon 当前可见页
+  加入淘汰保护。
 - **EbookRenderer**：wry child webview + 自定义 `ebook://` 协议；章节经
   `openitgo_parser::html::render_chapter_html` 渲染；分页用 CSS `columns`。Pagination
   transforms 只能加在 `#column-content` 上（`#column-view` 是事件容器不可平移）。**WebView2

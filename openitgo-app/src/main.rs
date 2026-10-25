@@ -103,6 +103,7 @@ fn main() -> eframe::Result<()> {
         // eframe 0.35 removed `hardware_acceleration`; the wgpu adapter default
         // power preference is already HighPerformance (see egui-wgpu setup.rs).
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options: openitgo_app::cache::wgpu_options_with_bc3(),
         ..Default::default()
     };
     eframe::run_native(

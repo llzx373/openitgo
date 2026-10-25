@@ -1,6 +1,126 @@
 use crate::loader::LoadedImage;
 use crate::timing;
+use eframe::wgpu;
 use egui::{Context, TextureHandle};
+use std::sync::Arc;
+
+const WGPU_RENDER_STATE_KEY: &str = "openitgo_wgpu_render_state";
+
+#[allow(dead_code)]
+pub fn wgpu_options_with_bc3() -> eframe::egui_wgpu::WgpuConfiguration {
+    let mut options = eframe::egui_wgpu::WgpuConfiguration::default();
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(create) = &mut options.wgpu_setup {
+        let base_descriptor = create.device_descriptor.clone();
+        create.device_descriptor = Arc::new(move |adapter| {
+            let mut descriptor = base_descriptor(adapter);
+            if adapter
+                .features()
+                .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+            {
+                descriptor
+                    .required_features
+                    .insert(wgpu::Features::TEXTURE_COMPRESSION_BC);
+            }
+            descriptor
+        });
+    }
+    options
+}
+
+pub fn install_wgpu_render_state(
+    ctx: &Context,
+    render_state: Option<eframe::egui_wgpu::RenderState>,
+) {
+    ctx.data_mut(|data| {
+        data.insert_temp(egui::Id::new(WGPU_RENDER_STATE_KEY), render_state);
+    });
+}
+
+fn wgpu_render_state(ctx: &Context) -> Option<eframe::egui_wgpu::RenderState> {
+    ctx.data(|data| {
+        data.get_temp(egui::Id::new(WGPU_RENDER_STATE_KEY))
+            .unwrap_or_default()
+    })
+}
+fn upload_bc3_texture(
+    ctx: &Context,
+    page_index: usize,
+    data: &[u8],
+    gpu_size: [u32; 2],
+) -> Option<(TextureHandle, wgpu::Texture)> {
+    let render_state = wgpu_render_state(ctx)?;
+    if !render_state
+        .device
+        .features()
+        .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+    {
+        return None;
+    }
+    let texture = render_state
+        .device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some(&format!("page_{page_index}_bc3")),
+            size: wgpu::Extent3d {
+                width: gpu_size[0],
+                height: gpu_size[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Bc3RgbaUnorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+    render_state.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(gpu_size[0] * 4),
+            rows_per_image: Some(gpu_size[1]),
+        },
+        wgpu::Extent3d {
+            width: gpu_size[0],
+            height: gpu_size[1],
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let handle = ctx.load_texture(
+        format!("page_{page_index}_bc3"),
+        egui::ColorImage::filled([1, 1], egui::Color32::TRANSPARENT),
+        egui::TextureOptions::LINEAR,
+    );
+    let id = handle.id();
+    render_state.renderer.write().update_texture(
+        &render_state.device,
+        &render_state.queue,
+        id,
+        &eframe::epaint::ImageDelta::full(
+            egui::ColorImage::filled([1, 1], egui::Color32::TRANSPARENT),
+            egui::TextureOptions::LINEAR,
+        ),
+    );
+    render_state
+        .renderer
+        .write()
+        .update_egui_texture_from_wgpu_texture(
+            &render_state.device,
+            &view,
+            wgpu::FilterMode::Linear,
+            id,
+        );
+    Some((handle, texture))
+}
+
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -14,6 +134,7 @@ struct CacheEntry {
     /// The full-resolution image (counts toward the memory budget).
     image: Option<LoadedImage>,
     handle: Option<TextureHandle>,
+    native_texture: Option<wgpu::Texture>,
     last_accessed: Instant,
     size_bytes: usize,
     thumbnail_size_bytes: usize,
@@ -27,6 +148,7 @@ impl CacheEntry {
             thumbnail_handle: None,
             image: None,
             handle: None,
+            native_texture: None,
             last_accessed: Instant::now(),
             size_bytes: 0,
             thumbnail_size_bytes: 0,
@@ -63,6 +185,16 @@ impl PageCache {
     #[allow(dead_code)]
     pub fn thumbnail_total_size_bytes(&self) -> usize {
         self.thumbnail_total_size_bytes
+    }
+
+    #[allow(dead_code)]
+    pub fn native_texture(&self, page_index: usize) -> Option<(&wgpu::Texture, [u32; 2])> {
+        let entry = self.textures.get(&page_index)?;
+        let texture = entry.native_texture.as_ref()?;
+        let LoadedImage::Compressed { gpu_size, .. } = entry.image.as_ref()? else {
+            return None;
+        };
+        Some((texture, *gpu_size))
     }
 
     pub fn contains_full(&self, page_index: usize) -> bool {
@@ -117,6 +249,15 @@ impl PageCache {
         }
         if let Some(image) = entry.image.as_ref() {
             timing::log(&format!("cache upload full page {}", page_index));
+            if let LoadedImage::Compressed { data, gpu_size, .. } = image {
+                if let Some((handle, texture)) =
+                    upload_bc3_texture(ctx, page_index, data, *gpu_size)
+                {
+                    entry.handle = Some(handle.clone());
+                    entry.native_texture = Some(texture);
+                    return Some(handle);
+                }
+            }
             let is_color = matches!(image, LoadedImage::Color(_));
             let color = timing::time("cache full decompress+upload", || {
                 image.to_color_image().ok()
@@ -188,6 +329,7 @@ impl PageCache {
             self.total_size_bytes -= entry.size_bytes;
             entry.image = None;
             entry.handle = None;
+            entry.native_texture = None;
             entry.size_bytes = 0;
         }
 
@@ -326,6 +468,7 @@ impl PageCache {
                 self.total_size_bytes -= entry.size_bytes;
                 entry.image = None;
                 entry.handle = None;
+                entry.native_texture = None;
                 entry.size_bytes = 0;
                 if entry.thumbnail.is_none() && entry.thumbnail_handle.is_none() {
                     self.textures.remove(&key);

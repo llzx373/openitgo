@@ -18,6 +18,7 @@ fn main() -> eframe::Result<()> {
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
     let mut app = ReaderApp::default();
+    app.settings.compress_images = std::env::var_os("OPENITGO_COMPRESS").is_some();
     app.page_loader = openitgo_app::loader::PageLoader::new_with_compress(
         app.settings.compress_images,
         decode_threads,
@@ -31,6 +32,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options: openitgo_app::cache::wgpu_options_with_bc3(),
         ..Default::default()
     };
 
@@ -38,6 +40,10 @@ fn main() -> eframe::Result<()> {
         "OpenItGo profile open",
         options,
         Box::new(|cc| {
+            openitgo_app::cache::install_wgpu_render_state(
+                &cc.egui_ctx,
+                cc.wgpu_render_state.clone(),
+            );
             openitgo_app::fonts::setup_fonts(&cc.egui_ctx);
             Ok(Box::new(ProfileApp {
                 app,
@@ -113,6 +119,8 @@ impl eframe::App for ProfileApp {
                     "total": total,
                     "thumbnails": thumbs,
                     "full_images": fulls,
+                    "cache_bytes": reader.cache.total_size_bytes(),
+                    "thumbnail_cache_bytes": reader.cache.thumbnail_total_size_bytes(),
                     "reader": reader.perf_snapshot(),
                     "loader": self.app.page_loader.perf_snapshot(),
                     "suspend_before": self.suspend_before,

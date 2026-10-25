@@ -308,7 +308,7 @@ impl SettingsView {
 
         ui.checkbox(
             &mut settings.compress_images,
-            "DXT5 纹理压缩（节省显存，但打开时 CPU 占用高）",
+            "DXT5/BC3 纹理压缩（原生 GPU 格式，打开时 CPU 占用高）",
         );
 
         ui.horizontal(|ui| {

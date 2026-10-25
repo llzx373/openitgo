@@ -1774,21 +1774,14 @@ fn compress_dxt5(image: image::DynamicImage) -> Result<LoadedImage, String> {
         pad_rgba(&rgba, original_w, original_h, gpu_w, gpu_h)
     };
 
-    let mut output =
-        vec![0u8; texpresso::Format::Bc3.compressed_size(gpu_w as usize, gpu_h as usize)];
-    // RangeFit is much faster than ClusterFit/IterativeClusterFit and is good
-    // enough for comic pages. ClusterFit was taking ~18 s for a 1920x1530 image.
-    texpresso::Format::Bc3.compress(
-        &pixels,
-        gpu_w as usize,
-        gpu_h as usize,
-        texpresso::Params {
-            algorithm: texpresso::Algorithm::RangeFit,
-            weights: texpresso::COLOUR_WEIGHTS_PERCEPTUAL,
-            weigh_colour_by_alpha: false,
-        },
-        &mut output,
-    );
+    let threads = if pixels.len() >= 512 * 512 * 4 {
+        std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(4)
+    } else {
+        1
+    };
+    let output = compress_bc3(&pixels, gpu_w as usize, gpu_h as usize, threads);
     timing::log(&format!(
         "compress_dxt5 done: {}x{} -> {} bytes",
         original_w,
@@ -1801,6 +1794,52 @@ fn compress_dxt5(image: image::DynamicImage) -> Result<LoadedImage, String> {
         original_size: [original_w, original_h],
         gpu_size: [gpu_w, gpu_h],
     })
+}
+
+fn compress_bc3(pixels: &[u8], width: usize, height: usize, max_threads: usize) -> Vec<u8> {
+    debug_assert_eq!(width % 4, 0);
+    debug_assert_eq!(height % 4, 0);
+    let block_rows = height / 4;
+    let threads = max_threads.clamp(1, block_rows);
+    let mut output = vec![0u8; texpresso::Format::Bc3.compressed_size(width, height)];
+    if threads == 1 {
+        compress_bc3_strip(pixels, width, height, &mut output);
+        return output;
+    }
+
+    let row_bytes = width * 4;
+    let block_row_bytes = texpresso::Format::Bc3.compressed_size(width, 4);
+    std::thread::scope(|scope| {
+        let mut remaining = output.as_mut_slice();
+        for thread_index in 0..threads {
+            let start_row = block_rows * thread_index / threads * 4;
+            let end_row = block_rows * (thread_index + 1) / threads * 4;
+            let strip_height = end_row - start_row;
+            let input = &pixels[start_row * row_bytes..end_row * row_bytes];
+            let (strip_output, rest) = remaining.split_at_mut(strip_height / 4 * block_row_bytes);
+            remaining = rest;
+            scope.spawn(move || {
+                compress_bc3_strip(input, width, strip_height, strip_output);
+            });
+        }
+    });
+    output
+}
+
+fn compress_bc3_strip(pixels: &[u8], width: usize, height: usize, output: &mut [u8]) {
+    // RangeFit is much faster than ClusterFit/IterativeClusterFit and is good
+    // enough for comic pages. ClusterFit was taking ~18 s for a 1920x1530 image.
+    texpresso::Format::Bc3.compress(
+        pixels,
+        width,
+        height,
+        texpresso::Params {
+            algorithm: texpresso::Algorithm::RangeFit,
+            weights: texpresso::COLOUR_WEIGHTS_PERCEPTUAL,
+            weigh_colour_by_alpha: false,
+        },
+        output,
+    );
 }
 
 pub fn dxt5_padded_size(width: u32, height: u32) -> (u32, u32) {
@@ -2845,6 +2884,24 @@ mod tests {
         assert!((128i32 - pixel.g() as i32).abs() <= 2);
         assert!((64i32 - pixel.b() as i32).abs() <= 2);
         assert_eq!(pixel.a(), 255);
+    }
+
+    #[test]
+    fn test_dxt5_red_roundtrip() {
+        let original = image::RgbaImage::from_pixel(5, 7, image::Rgba([255, 0, 0, 255]));
+        let loaded = compress_dxt5(image::DynamicImage::ImageRgba8(original)).unwrap();
+        let color = loaded.to_color_image().unwrap();
+        assert_eq!(color.pixels[0], egui::Color32::RED);
+    }
+
+    #[test]
+    fn test_parallel_dxt5_matches_single_thread() {
+        let original = image::RgbaImage::from_fn(20, 20, |x, y| {
+            image::Rgba([(x * 11) as u8, (y * 13) as u8, (x * y) as u8, 255])
+        });
+        let single = compress_bc3(original.as_raw(), 20, 20, 1);
+        let parallel = compress_bc3(original.as_raw(), 20, 20, 4);
+        assert_eq!(parallel, single);
     }
 
     #[test]

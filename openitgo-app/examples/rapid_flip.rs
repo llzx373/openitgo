@@ -19,7 +19,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
-    let loader = PageLoader::new_with_compress(false, decode_threads);
+    let compress = std::env::var_os("OPENITGO_COMPRESS").is_some();
+    let loader = PageLoader::new_with_compress(compress, decode_threads);
     loader.set_perf_enabled(true);
     let epoch = loader.next_epoch();
 
@@ -38,6 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let timeout = Duration::from_secs(30);
     let mut received = 0;
     let mut errors = 0;
+    let mut full_image_bytes = 0usize;
     let mut latencies = Vec::with_capacity(total);
     while received < total && start.elapsed() < timeout {
         if let Some(result) = loader.try_recv() {
@@ -52,6 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             latencies.push(t.elapsed());
                         }
+                        full_image_bytes += img.size_bytes();
                         println!(
                             "[rapid] page {} OK size {:?}",
                             result.page_index,
@@ -78,11 +81,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = serde_json::json!({
         "scenario": "rapid_flip",
         "decode_threads": decode_threads,
+        "compress": compress,
         "source": path,
         "total": total,
         "received": received,
         "errors": errors,
         "timed_out": received < total,
+        "full_image_bytes": full_image_bytes,
         "latency_samples": latency_us.len(),
         "latency_p50_us": percentile(&latency_us, 50),
         "latency_p95_us": percentile(&latency_us, 95),

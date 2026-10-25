@@ -609,6 +609,7 @@ impl eframe::App for ReaderApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        crate::cache::install_wgpu_render_state(&ctx, frame.wgpu_render_state().cloned());
         if matches!(self.last_view, View::Reader) && !matches!(self.current_view, View::Reader) {
             self.record_reader_history();
             self.persist_history_bookmarks();
@@ -811,6 +812,7 @@ fn fm_behavior_options(settings: &Settings) -> FmBehaviorOptions {
 impl ReaderApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut app = Self::default();
+        crate::cache::install_wgpu_render_state(&cc.egui_ctx, cc.wgpu_render_state.clone());
         // Install Gallery Immersive visuals on startup even when theme is
         // already System (the settings≠current_theme guard would otherwise skip).
         app.apply_theme(&cc.egui_ctx);
