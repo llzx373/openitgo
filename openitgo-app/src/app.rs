@@ -2067,7 +2067,7 @@ impl ReaderApp {
                         if let Some(reader) = self.reader_view.open.as_mut() {
                             if target != reader.state.current_page {
                                 reader.state.go_to_page(target, total_pages);
-                                reader.mark_page_turn();
+                                reader.mark_page_turn(None);
                             }
                         }
                     }

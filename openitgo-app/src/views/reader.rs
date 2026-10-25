@@ -172,6 +172,8 @@ pub struct OpenReader {
     /// When the user last turned a page. Used to pause preloads briefly so
     /// rapid flips don't get stuck behind background preload decoding.
     pub last_page_turn: Instant,
+    /// Actual direction of the last discrete turn; jumps leave this as None.
+    pub last_turn_direction: Option<TurnDirection>,
     /// Vertical scroll offset for Webtoon mode, measured from the top of page 0.
     pub webtoon_scroll_offset: f32,
     /// The last `current_page` used to sync Webtoon scroll after keyboard nav.
@@ -219,15 +221,16 @@ impl OpenReader {
         self.pending_fit = Some(FitMode::Page);
     }
 
-    pub(crate) fn mark_page_turn(&mut self) {
+    pub(crate) fn mark_page_turn(&mut self, direction: Option<TurnDirection>) {
         self.last_page_turn = Instant::now();
+        self.last_turn_direction = direction;
     }
 
     pub fn first_page(&mut self) {
         let total = self.total_pages();
         if total > 0 {
             self.state.go_to_page(0, total);
-            self.mark_page_turn();
+            self.mark_page_turn(None);
         }
     }
 
@@ -235,7 +238,7 @@ impl OpenReader {
         let total = self.total_pages();
         if total > 0 {
             self.state.go_to_page(total - 1, total);
-            self.mark_page_turn();
+            self.mark_page_turn(None);
         }
     }
 
@@ -267,7 +270,7 @@ impl OpenReader {
             self.state.next_page(total);
         }
         let to = self.state.current_page;
-        self.mark_page_turn();
+        self.mark_page_turn(Some(TurnDirection::Next));
         self.start_turn_animation(from, to);
     }
 
@@ -290,7 +293,7 @@ impl OpenReader {
             self.state.prev_page();
         }
         let to = self.state.current_page;
-        self.mark_page_turn();
+        self.mark_page_turn(Some(TurnDirection::Prev));
         self.start_turn_animation(from, to);
     }
 
@@ -626,6 +629,7 @@ impl ReaderView {
             perf: ReaderPerf::new(),
             page_animation: None,
             last_page_turn: Instant::now(),
+            last_turn_direction: None,
             webtoon_scroll_offset: 0.0,
             webtoon_last_page: state.current_page,
             last_available_size: None,
@@ -788,42 +792,18 @@ impl ReaderView {
                 }
             };
 
-            match reader.state.mode {
-                ReadingMode::Ltr | ReadingMode::Webtoon => {
-                    for offset in 1..=max_offset {
-                        if enqueued >= MAX_PRELOADS_PER_FRAME {
-                            break;
-                        }
-                        if try_preload(current.saturating_add(offset)) {
-                            enqueued += 1;
-                        }
-                    }
-                    for offset in 1..=max_offset {
-                        if enqueued >= MAX_PRELOADS_PER_FRAME {
-                            break;
-                        }
-                        if try_preload(current.saturating_sub(offset)) {
-                            enqueued += 1;
-                        }
-                    }
+            for index in directional_preload_indices(
+                current,
+                total,
+                max_offset,
+                reader.state.mode,
+                reader.last_turn_direction,
+            ) {
+                if enqueued >= MAX_PRELOADS_PER_FRAME {
+                    break;
                 }
-                ReadingMode::Rtl => {
-                    for offset in 1..=max_offset {
-                        if enqueued >= MAX_PRELOADS_PER_FRAME {
-                            break;
-                        }
-                        if try_preload(current.saturating_sub(offset)) {
-                            enqueued += 1;
-                        }
-                    }
-                    for offset in 1..=max_offset {
-                        if enqueued >= MAX_PRELOADS_PER_FRAME {
-                            break;
-                        }
-                        if try_preload(current.saturating_add(offset)) {
-                            enqueued += 1;
-                        }
-                    }
+                if try_preload(index) {
+                    enqueued += 1;
                 }
             }
         });
@@ -1228,7 +1208,7 @@ impl ReaderView {
                 let target = page_at_x(pos.x, response.rect, total_pages);
                 if target != current_page {
                     reader.state.go_to_page(target, total_pages);
-                    reader.mark_page_turn();
+                    reader.mark_page_turn(None);
                     reader.left_page = None;
                     reader.right_page = None;
                 }
@@ -1284,6 +1264,33 @@ impl ReaderView {
             pointer_pos,
         ))
     }
+}
+
+fn directional_preload_indices(
+    current: usize,
+    total: usize,
+    max_offset: usize,
+    mode: ReadingMode,
+    direction: Option<TurnDirection>,
+) -> Vec<usize> {
+    let forward_first = match direction {
+        Some(TurnDirection::Prev) => matches!(mode, ReadingMode::Rtl),
+        _ => !matches!(mode, ReadingMode::Rtl),
+    };
+    let mut out = Vec::with_capacity(max_offset.saturating_mul(2));
+    for forward_pass in [forward_first, !forward_first] {
+        for offset in 1..=max_offset {
+            let index = if forward_pass {
+                current.checked_add(offset)
+            } else {
+                current.checked_sub(offset)
+            };
+            if let Some(index) = index.filter(|&index| index < total) {
+                out.push(index);
+            }
+        }
+    }
+    out
 }
 
 /// Pages to prefetch thumbnails for when hovering the progress bar: up to 8
@@ -1629,6 +1636,7 @@ mod tests {
             perf: ReaderPerf::new(),
             page_animation: None,
             last_page_turn: Instant::now(),
+            last_turn_direction: None,
             webtoon_scroll_offset: 0.0,
             webtoon_last_page: 0,
             last_available_size: None,
@@ -1691,6 +1699,38 @@ mod tests {
 
         assert_eq!(loader.perf_snapshot().low_full_requests, 3);
         assert_eq!(view.open.as_ref().unwrap().pending_pages.len(), 3);
+    }
+
+    #[test]
+    fn test_directional_preload_indices_follow_actual_turn() {
+        assert_eq!(
+            directional_preload_indices(4, 10, 3, ReadingMode::Ltr, Some(TurnDirection::Next)),
+            [5, 6, 7, 3, 2, 1]
+        );
+        assert_eq!(
+            directional_preload_indices(4, 10, 3, ReadingMode::Ltr, Some(TurnDirection::Prev)),
+            [3, 2, 1, 5, 6, 7]
+        );
+        assert_eq!(
+            directional_preload_indices(4, 10, 3, ReadingMode::Rtl, Some(TurnDirection::Next)),
+            [3, 2, 1, 5, 6, 7]
+        );
+        assert_eq!(
+            directional_preload_indices(0, 10, 3, ReadingMode::Ltr, Some(TurnDirection::Prev)),
+            [1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn test_page_turn_records_actual_direction_and_jump_clears_it() {
+        let mut reader = dummy_reader();
+        reader.state.set_double_page(false, 10);
+        reader.next_page_with_animation();
+        assert_eq!(reader.last_turn_direction, Some(TurnDirection::Next));
+        reader.prev_page_with_animation();
+        assert_eq!(reader.last_turn_direction, Some(TurnDirection::Prev));
+        reader.first_page();
+        assert_eq!(reader.last_turn_direction, None);
     }
 
     #[test]
