@@ -237,6 +237,76 @@ pub enum LoadPriority {
     Low,
 }
 
+const LOADER_PERF_EVENT_COUNT: usize = 9;
+
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum LoaderPerfEvent {
+    HighFullRequest = 0,
+    HighThumbnailRequest,
+    LowFullRequest,
+    LowThumbnailRequest,
+    RequestQueueFull,
+    FullResult,
+    ThumbnailResult,
+    DroppedResult,
+    ErrorResult,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LoaderPerfSnapshot {
+    pub high_full_requests: u64,
+    pub high_thumbnail_requests: u64,
+    pub low_full_requests: u64,
+    pub low_thumbnail_requests: u64,
+    pub request_queue_full: u64,
+    pub full_results: u64,
+    pub thumbnail_results: u64,
+    pub dropped_results: u64,
+    pub error_results: u64,
+}
+
+struct LoaderPerf {
+    enabled: AtomicBool,
+    counters: [AtomicU64; LOADER_PERF_EVENT_COUNT],
+}
+
+#[allow(dead_code)]
+impl LoaderPerf {
+    fn new() -> Self {
+        Self {
+            enabled: AtomicBool::new(std::env::var_os("OPENITGO_PERF").is_some()),
+            counters: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    fn record(&self, event: LoaderPerfEvent) {
+        if self.enabled.load(Ordering::Relaxed) {
+            self.counters[event as usize].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn snapshot(&self) -> LoaderPerfSnapshot {
+        let get = |event: LoaderPerfEvent| self.counters[event as usize].load(Ordering::Relaxed);
+        LoaderPerfSnapshot {
+            high_full_requests: get(LoaderPerfEvent::HighFullRequest),
+            high_thumbnail_requests: get(LoaderPerfEvent::HighThumbnailRequest),
+            low_full_requests: get(LoaderPerfEvent::LowFullRequest),
+            low_thumbnail_requests: get(LoaderPerfEvent::LowThumbnailRequest),
+            request_queue_full: get(LoaderPerfEvent::RequestQueueFull),
+            full_results: get(LoaderPerfEvent::FullResult),
+            thumbnail_results: get(LoaderPerfEvent::ThumbnailResult),
+            dropped_results: get(LoaderPerfEvent::DroppedResult),
+            error_results: get(LoaderPerfEvent::ErrorResult),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum LoadedImage {
     Compressed {
@@ -306,6 +376,7 @@ pub struct PageLoader {
     epoch: Arc<AtomicU64>,
     compress: Arc<AtomicBool>,
     passwords: SharedPasswords,
+    perf: LoaderPerf,
     _io_workers: Vec<thread::JoinHandle<()>>,
     _decode_workers: Vec<thread::JoinHandle<()>>,
 }
@@ -584,6 +655,7 @@ impl PageLoader {
             epoch: Arc::new(AtomicU64::new(1)),
             compress,
             passwords,
+            perf: LoaderPerf::new(),
             _io_workers: io_workers,
             _decode_workers: decode_workers,
         }
@@ -610,44 +682,87 @@ impl PageLoader {
         }
     }
 
+    #[allow(dead_code)]
+    pub fn set_perf_enabled(&self, enabled: bool) {
+        self.perf.set_enabled(enabled);
+    }
+
+    #[allow(dead_code)]
+    pub fn perf_snapshot(&self) -> LoaderPerfSnapshot {
+        self.perf.snapshot()
+    }
+
     pub fn next_epoch(&self) -> Epoch {
         self.epoch.fetch_add(1, Ordering::SeqCst)
     }
 
-    pub fn request_high(&self, epoch: Epoch, page_index: usize, source: PageSource) -> bool {
-        // Use try_send so the UI thread never blocks waiting for the IO worker.
-        self.high_sender
+    fn record_request(&self, priority: LoadPriority, thumbnail: bool, sent: bool) {
+        if !sent {
+            self.perf.record(LoaderPerfEvent::RequestQueueFull);
+            return;
+        }
+        let event = match (priority, thumbnail) {
+            (LoadPriority::High, false) => LoaderPerfEvent::HighFullRequest,
+            (LoadPriority::High, true) => LoaderPerfEvent::HighThumbnailRequest,
+            (LoadPriority::Low, false) => LoaderPerfEvent::LowFullRequest,
+            (LoadPriority::Low, true) => LoaderPerfEvent::LowThumbnailRequest,
+        };
+        self.perf.record(event);
+    }
+
+    fn send_request(
+        &self,
+        sender: &Sender<LoadRequest>,
+        priority: LoadPriority,
+        epoch: Epoch,
+        page_index: usize,
+        thumbnail: bool,
+        source: PageSource,
+    ) -> bool {
+        let sent = sender
             .try_send(LoadRequest {
                 epoch,
                 page_index,
-                thumbnail: false,
+                thumbnail,
                 source,
             })
-            .is_ok()
+            .is_ok();
+        self.record_request(priority, thumbnail, sent);
+        sent
+    }
+
+    pub fn request_high(&self, epoch: Epoch, page_index: usize, source: PageSource) -> bool {
+        self.send_request(
+            &self.high_sender,
+            LoadPriority::High,
+            epoch,
+            page_index,
+            false,
+            source,
+        )
     }
 
     pub fn request_low(&self, epoch: Epoch, page_index: usize, source: PageSource) -> bool {
-        // Use try_send so preload loops cannot block the UI thread.
-        self.low_sender
-            .try_send(LoadRequest {
-                epoch,
-                page_index,
-                thumbnail: false,
-                source,
-            })
-            .is_ok()
+        self.send_request(
+            &self.low_sender,
+            LoadPriority::Low,
+            epoch,
+            page_index,
+            false,
+            source,
+        )
     }
 
     /// Request a low-priority thumbnail decode in the background.
     pub fn request_thumbnail(&self, epoch: Epoch, page_index: usize, source: PageSource) -> bool {
-        self.low_sender
-            .try_send(LoadRequest {
-                epoch,
-                page_index,
-                thumbnail: true,
-                source,
-            })
-            .is_ok()
+        self.send_request(
+            &self.low_sender,
+            LoadPriority::Low,
+            epoch,
+            page_index,
+            true,
+            source,
+        )
     }
 
     /// Request a high-priority thumbnail decode (used when the visible page
@@ -658,18 +773,30 @@ impl PageLoader {
         page_index: usize,
         source: PageSource,
     ) -> bool {
-        self.high_sender
-            .try_send(LoadRequest {
-                epoch,
-                page_index,
-                thumbnail: true,
-                source,
-            })
-            .is_ok()
+        self.send_request(
+            &self.high_sender,
+            LoadPriority::High,
+            epoch,
+            page_index,
+            true,
+            source,
+        )
     }
 
     pub fn try_recv(&self) -> Option<LoadResult> {
-        self.receiver.try_recv().ok()
+        let result = self.receiver.try_recv().ok()?;
+        self.perf.record(if result.thumbnail {
+            LoaderPerfEvent::ThumbnailResult
+        } else {
+            LoaderPerfEvent::FullResult
+        });
+        if result.dropped {
+            self.perf.record(LoaderPerfEvent::DroppedResult);
+        }
+        if result.image.is_err() {
+            self.perf.record(LoaderPerfEvent::ErrorResult);
+        }
+        Some(result)
     }
 }
 
@@ -1456,6 +1583,48 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn test_loader_perf_disabled_does_not_record_requests() {
+        let loader = PageLoader::new();
+        loader.set_perf_enabled(false);
+        loader.record_request(LoadPriority::High, false, true);
+        loader.record_request(LoadPriority::Low, false, false);
+        assert_eq!(loader.perf_snapshot(), LoaderPerfSnapshot::default());
+    }
+
+    #[test]
+    fn test_loader_perf_records_successful_request_and_delivered_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("perf.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .unwrap();
+
+        let loader = PageLoader::new();
+        loader.set_perf_enabled(true);
+        let epoch = loader.next_epoch();
+        assert!(loader.request_high(epoch, 0, PageSource::File(path)));
+
+        let start = Instant::now();
+        loop {
+            if let Some(result) = loader.try_recv() {
+                if result.epoch == epoch && result.page_index == 0 && !result.thumbnail {
+                    result.image.expect("full image should decode");
+                    break;
+                }
+            }
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let snapshot = loader.perf_snapshot();
+        assert_eq!(snapshot.high_full_requests, 1);
+        assert_eq!(snapshot.full_results, 1);
+        assert_eq!(snapshot.request_queue_full, 0);
+        assert_eq!(snapshot.dropped_results, 0);
+        assert_eq!(snapshot.error_results, 0);
     }
 
     #[test]
