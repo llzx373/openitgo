@@ -1,6 +1,6 @@
 use openitgo_app::app::{ReaderApp, View};
 use openitgo_app::opener::AsyncOpener;
-use openitgo_core::models::Comic;
+use openitgo_core::models::{Comic, ReadingMode};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -37,6 +37,7 @@ fn main() -> eframe::Result<()> {
                 reported: false,
                 test_suspend: std::env::var_os("OPENITGO_TEST_SUSPEND").is_some(),
                 suspend_before: None,
+                webtoon: std::env::var_os("OPENITGO_WEBTOON").is_some(),
             }))
         }),
     )
@@ -46,6 +47,7 @@ struct ProfileApp {
     app: ReaderApp,
     start: Instant,
     reported: bool,
+    webtoon: bool,
     test_suspend: bool,
     suspend_before: Option<openitgo_app::loader::LoaderPerfSnapshot>,
 }
@@ -55,6 +57,15 @@ impl eframe::App for ProfileApp {
         self.app.ui(ui, frame);
         // Keep polling while idle so the snapshot timer fires headless.
         ui.ctx().request_repaint_after(Duration::from_millis(100));
+
+        if self.webtoon {
+            if let Some(reader) = self.app.reader_view.open.as_mut() {
+                if reader.state.mode != ReadingMode::Webtoon {
+                    let total = reader.total_pages();
+                    reader.state.set_mode(ReadingMode::Webtoon, total);
+                }
+            }
+        }
 
         if self.test_suspend
             && self.suspend_before.is_none()
@@ -97,6 +108,15 @@ impl eframe::App for ProfileApp {
                     "suspend_after": suspend_after,
                 });
                 write_report(&report).expect("performance report should be written");
+                if self.webtoon {
+                    assert!(
+                        reader
+                            .webtoon_visible_pages
+                            .iter()
+                            .all(|&page| reader.cache.contains_full(page)),
+                        "visible Webtoon pages are not fully cached"
+                    );
+                }
                 if let (Some(before), Some(after)) = (self.suspend_before, suspend_after) {
                     assert_eq!(after, before, "Reader work continued after suspension");
                 }

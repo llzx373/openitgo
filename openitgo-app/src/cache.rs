@@ -38,6 +38,7 @@ pub struct PageCache {
     textures: HashMap<usize, CacheEntry>,
     total_size_bytes: usize,
     thumbnail_total_size_bytes: usize,
+    dimensions_version: u64,
 }
 
 impl PageCache {
@@ -46,7 +47,12 @@ impl PageCache {
             textures: HashMap::new(),
             total_size_bytes: 0,
             thumbnail_total_size_bytes: 0,
+            dimensions_version: 0,
         }
+    }
+
+    pub fn dimensions_version(&self) -> u64 {
+        self.dimensions_version
     }
 
     #[allow(dead_code)]
@@ -98,6 +104,7 @@ impl PageCache {
             .entry(page_index)
             .or_insert_with(|| CacheEntry::empty(dimensions));
         entry.original_size = dimensions;
+        self.dimensions_version += 1;
     }
 
     /// Returns the full texture if available, otherwise the thumbnail texture.
@@ -208,6 +215,7 @@ impl PageCache {
         entry.size_bytes = new_size;
         entry.last_accessed = Instant::now();
         self.total_size_bytes += new_size;
+        self.dimensions_version += 1;
     }
 
     pub fn insert_thumbnail(
@@ -258,6 +266,7 @@ impl PageCache {
         entry.original_size = original_size;
         entry.last_accessed = Instant::now();
         self.thumbnail_total_size_bytes += new_size;
+        self.dimensions_version += 1;
     }
 
     pub fn enforce_budget_with_protected(
@@ -276,6 +285,7 @@ impl PageCache {
         self.textures.clear();
         self.total_size_bytes = 0;
         self.thumbnail_total_size_bytes = 0;
+        self.dimensions_version += 1;
     }
 
     fn evict_lru_thumbnail_excluding(&mut self, excluded: usize) -> bool {

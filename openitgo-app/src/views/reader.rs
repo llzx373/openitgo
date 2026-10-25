@@ -101,6 +101,125 @@ fn percentile_nearest_rank(sorted: &[u64], percentile: usize) -> u64 {
     sorted[rank.min(sorted.len()) - 1]
 }
 
+#[derive(Clone, Copy, PartialEq)]
+struct WebtoonLayoutKey {
+    dimensions_version: u64,
+    rotation: u16,
+    zoom: f32,
+    viewport_size: Vec2,
+    total: usize,
+}
+
+#[derive(Default)]
+struct WebtoonLayoutCache {
+    key: Option<WebtoonLayoutKey>,
+    page_sizes: Vec<Vec2>,
+    layouts: Vec<layout::PageLayout>,
+    full_rebuilds: u64,
+    incremental_updates: u64,
+}
+
+impl WebtoonLayoutCache {
+    fn clear(&mut self) {
+        self.key = None;
+        self.page_sizes.clear();
+        self.layouts.clear();
+        self.full_rebuilds = 0;
+        self.incremental_updates = 0;
+    }
+
+    fn sync(
+        cache: &mut Self,
+        total: usize,
+        page_cache: &PageCache,
+        state: &ReadingState,
+        viewport_size: Vec2,
+        layouts: &mut Vec<layout::PageLayout>,
+    ) {
+        let key = WebtoonLayoutKey {
+            dimensions_version: page_cache.dimensions_version(),
+            rotation: state.rotation,
+            zoom: state.zoom,
+            viewport_size,
+            total,
+        };
+        if cache.key == Some(key) && layouts.len() == total {
+            return;
+        }
+        let structural_change = cache.key.is_none_or(|old| {
+            old.rotation != key.rotation
+                || old.zoom != key.zoom
+                || old.viewport_size != key.viewport_size
+                || old.total != key.total
+        });
+        let old_sizes = std::mem::take(&mut cache.page_sizes);
+        cache.page_sizes = (0..total)
+            .map(|idx| {
+                page_cache
+                    .get_original_size(idx)
+                    .map(|size| openitgo_core::state::rotate_size(size, state.rotation))
+                    .map(|size| Vec2::new(size[0] as f32, size[1] as f32))
+                    .unwrap_or_else(|| Vec2::new(FALLBACK_PAGE_SIZE.x, FALLBACK_PAGE_SIZE.y))
+            })
+            .collect();
+        cache.key = Some(key);
+        if structural_change || layouts.len() != total {
+            *layouts = layout::compute_layout(
+                ReadingMode::Webtoon,
+                viewport_size,
+                &cache.page_sizes,
+                state.zoom,
+            );
+            cache.full_rebuilds += 1;
+            return;
+        }
+
+        let first_changed = cache
+            .page_sizes
+            .iter()
+            .zip(old_sizes.iter())
+            .position(|(new, old)| new != old)
+            .unwrap_or(total);
+        for idx in first_changed..total {
+            let scaled = layout::scale_to_fit(
+                cache.page_sizes[idx],
+                viewport_size,
+                openitgo_core::models::FitMode::Width,
+            ) * key.zoom;
+            let y = if idx == 0 {
+                0.0
+            } else {
+                layouts[idx - 1].rect.min.y + layouts[idx - 1].rect.size.y
+            };
+            layouts[idx] = layout::PageLayout {
+                rect: layout::Rect::from_min_size(
+                    Vec2::new((viewport_size.x - scaled.x) / 2.0, y),
+                    scaled,
+                ),
+                page_index: idx,
+            };
+        }
+        cache.incremental_updates += 1;
+    }
+}
+
+fn webtoon_visible_range(layouts: &[layout::PageLayout], top: f32, bottom: f32) -> (usize, usize) {
+    if layouts.is_empty() || bottom <= top {
+        return (0, 0);
+    }
+    let first = layouts.partition_point(|entry| entry.rect.min.y + entry.rect.size.y <= top);
+    let last = layouts.partition_point(|entry| entry.rect.min.y < bottom);
+    (first, last)
+}
+
+fn webtoon_page_at_y(layouts: &[layout::PageLayout], y: f32) -> Option<usize> {
+    let index = layouts.partition_point(|entry| entry.rect.min.y + entry.rect.size.y <= y);
+    layouts
+        .get(index)
+        .filter(|entry| entry.rect.min.y <= y)
+        .map(|entry| entry.page_index)
+}
+
 #[derive(Default)]
 pub struct ReaderView {
     pub open: Option<OpenReader>,
@@ -178,6 +297,7 @@ pub struct OpenReader {
     pub webtoon_last_page: usize,
     /// Pages intersecting the current Webtoon viewport, protected from eviction.
     pub webtoon_visible_pages: HashSet<usize>,
+    webtoon_layout: WebtoonLayoutCache,
     /// Last seen viewport size, used to re-apply the current fit on resize.
     pub last_available_size: Option<egui::Vec2>,
     /// Last committed spread size used for fit. Rising edge / dimension
@@ -425,6 +545,7 @@ impl OpenReader {
         self.right_page = None;
         self.last_spread_size = None;
         self.webtoon_visible_pages.clear();
+        self.webtoon_layout.clear();
         self.perf.reset();
     }
 
@@ -635,6 +756,7 @@ impl ReaderView {
             webtoon_scroll_offset: 0.0,
             webtoon_last_page: state.current_page,
             webtoon_visible_pages: HashSet::new(),
+            webtoon_layout: WebtoonLayoutCache::default(),
             last_available_size: None,
             last_spread_size: None,
             wide_page_threshold,
@@ -987,20 +1109,14 @@ impl ReaderView {
 
         let available = ui.available_rect_before_wrap();
         let viewport_size = Vec2::new(available.width(), available.height());
-        let page_sizes: Vec<Vec2> = (0..total)
-            .map(|idx| {
-                reader
-                    .effective_size(idx)
-                    .map(|s| Vec2::new(s[0] as f32, s[1] as f32))
-                    .unwrap_or_else(|| Vec2::new(FALLBACK_PAGE_SIZE.x, FALLBACK_PAGE_SIZE.y))
-            })
-            .collect();
-
-        let layouts = layout::compute_layout(
-            ReadingMode::Webtoon,
+        let mut layouts = std::mem::take(&mut reader.webtoon_layout.layouts);
+        WebtoonLayoutCache::sync(
+            &mut reader.webtoon_layout,
+            total,
+            &reader.cache,
+            &reader.state,
             viewport_size,
-            &page_sizes,
-            reader.state.zoom,
+            &mut layouts,
         );
         let content_height = layouts
             .last()
@@ -1026,32 +1142,21 @@ impl ReaderView {
 
         // Update current_page based on what is centered in the viewport.
         let center_y = reader.webtoon_scroll_offset + available.height() / 2.0;
-        if let Some(layout) = layouts
-            .iter()
-            .find(|l| l.rect.min.y <= center_y && l.rect.min.y + l.rect.size.y > center_y)
-        {
-            reader.state.current_page = layout.page_index;
-            reader.webtoon_last_page = layout.page_index;
+        if let Some(page_index) = webtoon_page_at_y(&layouts, center_y) {
+            reader.state.current_page = page_index;
+            reader.webtoon_last_page = page_index;
         }
 
         let top = reader.webtoon_scroll_offset;
         let bottom = top + available.height();
-        let visible_indices: Vec<usize> = layouts
-            .iter()
-            .filter(|l| {
-                let page_top = l.rect.min.y;
-                let page_bottom = page_top + l.rect.size.y;
-                page_bottom > top && page_top < bottom
-            })
-            .map(|l| l.page_index)
-            .collect();
+        let (first_visible, last_visible) = webtoon_visible_range(&layouts, top, bottom);
         reader.webtoon_visible_pages.clear();
         reader
             .webtoon_visible_pages
-            .extend(visible_indices.iter().copied());
+            .extend(first_visible..last_visible);
 
         // Request thumbnails and full-resolution images for visible pages.
-        for &idx in &visible_indices {
+        for idx in first_visible..last_visible {
             if !reader.cache.contains_full(idx) {
                 request_page(loader, reader, idx);
             }
@@ -1063,8 +1168,8 @@ impl ReaderView {
         }
 
         let mut combined_response: Option<egui::Response> = None;
-        for idx in visible_indices {
-            let layout = &layouts[idx];
+        for layout in layouts.iter().take(last_visible).skip(first_visible) {
+            let idx = layout.page_index;
             let rect = egui::Rect::from_min_size(
                 egui::pos2(
                     available.min.x + layout.rect.min.x,
@@ -1081,6 +1186,7 @@ impl ReaderView {
             });
         }
 
+        reader.webtoon_layout.layouts = layouts;
         combined_response
     }
 
@@ -1619,6 +1725,7 @@ mod tests {
             webtoon_scroll_offset: 0.0,
             webtoon_last_page: 0,
             webtoon_visible_pages: HashSet::new(),
+            webtoon_layout: WebtoonLayoutCache::default(),
             last_available_size: None,
             last_spread_size: None,
             wide_page_threshold: 1.4,
@@ -1876,6 +1983,67 @@ mod tests {
         assert!(reader.cache.contains_full(0));
         assert!(reader.cache.contains_full(1));
         assert!(!reader.cache.contains_full(2));
+    }
+
+    #[test]
+    fn test_webtoon_layout_cache_reuses_and_updates_only_suffix() {
+        let mut reader = dummy_reader();
+        reader.cache.insert_dimensions(0, [800, 1200]);
+        reader.cache.insert_dimensions(1, [800, 1200]);
+        reader.cache.insert_dimensions(2, [800, 1200]);
+        let viewport = Vec2::new(800.0, 600.0);
+        let mut cache = WebtoonLayoutCache::default();
+        let mut layouts = Vec::new();
+        WebtoonLayoutCache::sync(
+            &mut cache,
+            reader.total_pages(),
+            &reader.cache,
+            &reader.state,
+            viewport,
+            &mut layouts,
+        );
+        assert_eq!(cache.full_rebuilds, 1);
+        let page0_y = layouts[0].rect.min.y;
+        let page1_y = layouts[1].rect.min.y;
+        let page2_y = layouts[2].rect.min.y;
+
+        WebtoonLayoutCache::sync(
+            &mut cache,
+            reader.total_pages(),
+            &reader.cache,
+            &reader.state,
+            viewport,
+            &mut layouts,
+        );
+        assert_eq!(cache.full_rebuilds, 1);
+        assert_eq!(cache.incremental_updates, 0);
+
+        reader.cache.insert_dimensions(1, [800, 1800]);
+        WebtoonLayoutCache::sync(
+            &mut cache,
+            reader.total_pages(),
+            &reader.cache,
+            &reader.state,
+            viewport,
+            &mut layouts,
+        );
+        assert_eq!(cache.full_rebuilds, 1);
+        assert_eq!(cache.incremental_updates, 1);
+        assert_eq!(layouts[0].rect.min.y, page0_y);
+        assert_eq!(layouts[1].rect.min.y, page1_y);
+        assert!(layouts[2].rect.min.y > page2_y);
+    }
+
+    #[test]
+    fn test_webtoon_binary_visibility_helpers() {
+        let sizes = [Vec2::new(800.0, 1200.0), Vec2::new(800.0, 1200.0)];
+        let layouts =
+            layout::compute_layout(ReadingMode::Webtoon, Vec2::new(800.0, 600.0), &sizes, 1.0);
+        assert_eq!(webtoon_visible_range(&layouts, 100.0, 1300.0), (0, 2));
+        assert_eq!(webtoon_visible_range(&layouts, 1200.0, 1300.0), (1, 2));
+        assert_eq!(webtoon_page_at_y(&layouts, 100.0), Some(0));
+        assert_eq!(webtoon_page_at_y(&layouts, 1250.0), Some(1));
+        assert_eq!(webtoon_visible_range(&layouts, 10.0, 10.0), (0, 0));
     }
 
     #[test]
