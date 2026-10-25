@@ -336,7 +336,9 @@ dirs_first 逐栏下发，RowsKey 自动失效。
 
 - **PageLoader**：后台 IO + decode worker threads + channels；独立 `cover_loader` 负责库封面。
   RAR 请求路由到单独 IO worker，按 archive+password 保留顺序游标；回退、换包或读错误时重开，
-  raw cache 命中不重开。ZIP/文件/PDF 仍走并行 IO worker。
+  raw cache 命中不重开。ZIP/文件/PDF 仍走并行 IO worker。末两页经 `maybe_prewarm_next_comic`
+  解析下一卷并用独立 prewarm worker 只读取首页/首个 spread 到 raw cache（不解码、独立结果
+  channel、epoch 可取消）；正式打开复用字节，不影响当前书结果队列。
   **进度条悬停缩略图**：全尺寸解码且 compress=false 时顺产生成 256px 缩略图；悬停时
   `request_page_thumbnail` 高优先级 + 按方向低优先预取 8 页；不再后台生成全书缩略图；
   webp 走 `webp_thumb.rs`，失败回退 image crate。

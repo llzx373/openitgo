@@ -937,9 +937,14 @@ impl PageLoader {
                 let mut zip_cache = ZipCache::new();
                 let mut rar_cursor = RarCursor::new();
                 while let Ok(request) = prewarm_receiver.recv() {
+                    timing::log(&format!(
+                        "prewarm request epoch {} current {}",
+                        request.epoch,
+                        prewarm_epoch.load(Ordering::Acquire)
+                    ));
                     let mut result = Ok(());
                     for source in request.sources {
-                        if request.epoch != prewarm_epoch.load(Ordering::Acquire) {
+                        if request.epoch.wrapping_add(1) != prewarm_epoch.load(Ordering::Acquire) {
                             break;
                         }
                         let archive = match &source {

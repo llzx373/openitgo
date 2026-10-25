@@ -65,6 +65,16 @@ struct PendingOpenOptions {
     force_single_page: bool,
 }
 
+struct ComicPrewarm {
+    from_path: PathBuf,
+    opener: Option<AsyncOpener<Comic>>,
+    request_epoch: Option<crate::loader::Epoch>,
+}
+
+fn should_prewarm_next_comic(current_page: usize, total_pages: usize) -> bool {
+    total_pages > 0 && current_page + 2 >= total_pages
+}
+
 /// 计算打开媒体时的 resume 毫秒：自动续播强制从头，手动打开沿用历史进度。
 fn media_resume_ms(force_start: bool, history_ms: Option<u64>) -> Option<u64> {
     if force_start {
@@ -357,6 +367,8 @@ pub struct ReaderApp {
     pub cover_loader: PageLoader,
     pub opener: Option<AsyncOpener<Comic>>,
     pub ebook_opener: Option<AsyncOpener<Ebook>>,
+    prewarm: Option<ComicPrewarm>,
+    prewarm_attempted: Option<PathBuf>,
     /// zip/cbz/rar/cbr 打开时的启发式分流任务：后台列条目，
     /// 按图片占比决定进漫画链路还是压缩包浏览视图。
     archive_router: Option<(PathBuf, AsyncOpener<Vec<ArchiveEntry>>)>,
@@ -521,6 +533,8 @@ impl Default for ReaderApp {
             cover_loader,
             opener: None,
             ebook_opener: None,
+            prewarm: None,
+            prewarm_attempted: None,
             archive_router: None,
             pending_external_open: None,
             pending_media_open: None,
@@ -631,6 +645,8 @@ impl eframe::App for ReaderApp {
             self.handle_open_paths(dock_paths);
         }
         self.poll_opener(&ctx);
+        self.maybe_prewarm_next_comic();
+        self.poll_prewarm();
         self.poll_archive_router(&ctx);
         self.poll_external_open(&ctx);
         self.poll_password_probe(&ctx);
@@ -820,6 +836,101 @@ impl ReaderApp {
         // 启动时回收临时打开/拖出目录中的陈旧文件（24h，失败静默）。
         crate::temp_open::clean_stale(crate::temp_open::STALE_MAX_AGE);
         app
+    }
+
+    fn maybe_prewarm_next_comic(&mut self) {
+        if !matches!(self.current_view, View::Reader) || self.prewarm.is_some() {
+            return;
+        }
+        let Some(reader) = self.reader_view.open.as_ref() else {
+            return;
+        };
+        let total = reader.total_pages();
+        if !should_prewarm_next_comic(reader.state.current_page, total) {
+            return;
+        }
+        let Some(next_path) = next_comic_sibling(&reader.comic.path) else {
+            return;
+        };
+        if self.prewarm_attempted.as_ref() == Some(&next_path) {
+            return;
+        }
+        let password = self.passwords.get(&next_path).cloned();
+        let opener = AsyncOpener::open(next_path.clone(), move |path| {
+            openitgo_parser::parse_with_password(path, password.as_deref())
+                .map_err(|err| err.to_string())
+        });
+        self.prewarm_attempted = Some(next_path);
+        self.prewarm = Some(ComicPrewarm {
+            from_path: reader.comic.path.clone(),
+            opener: Some(opener),
+            request_epoch: None,
+        });
+    }
+
+    fn poll_prewarm(&mut self) {
+        let Some(mut prewarm) = self.prewarm.take() else {
+            return;
+        };
+        let current_path = if matches!(self.current_view, View::Reader) {
+            self.reader_view
+                .open
+                .as_ref()
+                .map(|reader| reader.comic.path.clone())
+        } else {
+            None
+        };
+        if current_path.as_ref() != Some(&prewarm.from_path) {
+            return;
+        }
+
+        if let Some(mut opener) = prewarm.opener.take() {
+            match opener.poll() {
+                OpenStatus::Loading => {
+                    prewarm.opener = Some(opener);
+                    self.prewarm = Some(prewarm);
+                    return;
+                }
+                OpenStatus::Ready(Err(_)) => return,
+                OpenStatus::Ready(Ok(comic)) => {
+                    let mut sources = Vec::new();
+                    if let Some(source) = comic.page_source(0) {
+                        sources.push(source.clone());
+                    }
+                    let double_page = self
+                        .reader_view
+                        .open
+                        .as_ref()
+                        .is_some_and(|reader| reader.state.is_double_page());
+                    if double_page && comic.total_pages() > 1 {
+                        if let Some(source) = comic.page_source(1) {
+                            sources.push(source.clone());
+                        }
+                    }
+                    timing::log(&format!("prewarm schedule {} sources", sources.len()));
+                    let Some(epoch) = self.page_loader.prewarm(sources) else {
+                        return;
+                    };
+                    prewarm.request_epoch = Some(epoch);
+                }
+            }
+        }
+
+        if let Some(epoch) = prewarm.request_epoch {
+            let mut finished = false;
+            while let Some((result_epoch, result)) = self.page_loader.try_recv_prewarm() {
+                if result_epoch == epoch {
+                    if let Err(err) = result {
+                        timing::log(&format!("prewarm failed: {err}"));
+                    }
+                    finished = true;
+                    break;
+                }
+            }
+            if !finished {
+                self.prewarm = Some(prewarm);
+            }
+        }
     }
 
     fn poll_opener(&mut self, ctx: &egui::Context) {
@@ -5701,6 +5812,8 @@ mod tests {
                 cover_loader,
                 opener: None,
                 ebook_opener: None,
+                prewarm: None,
+                prewarm_attempted: None,
                 archive_router: None,
                 pending_external_open: None,
                 pending_media_open: None,
@@ -7742,6 +7855,55 @@ mod tests {
         assert_eq!(next_media_in_dir(&dir.join("c.mkv")), None);
         // 漫画文件不算媒体
         assert_eq!(next_media_in_dir(&dir.join("d.cbz")), None);
+    }
+
+    #[test]
+    fn prewarm_only_starts_near_comic_end() {
+        assert!(!should_prewarm_next_comic(0, 0));
+        assert!(!should_prewarm_next_comic(7, 10));
+        assert!(should_prewarm_next_comic(8, 10));
+        assert!(should_prewarm_next_comic(9, 10));
+    }
+
+    #[test]
+    fn prewarm_next_comic_loads_only_first_entry_once() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("vol01.cbz");
+        let second = dir.path().join("vol02.cbz");
+        write_zip_with_entries(&first, &["01.png"]);
+        write_zip_with_entries(&second, &["01.png", "02.png"]);
+        app.settings.double_page = false;
+        app.page_loader.set_perf_enabled(true);
+        app.open_comic(first.clone());
+        let ctx = egui::Context::default();
+        for _ in 0..200 {
+            app.poll_opener(&ctx);
+            if app.reader_view.open.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let reader = app.reader_view.open.as_mut().unwrap();
+        reader.state.current_page = reader.total_pages() - 1;
+
+        app.maybe_prewarm_next_comic();
+        assert!(app.prewarm.is_some());
+        assert_eq!(app.prewarm_attempted, Some(second));
+        app.maybe_prewarm_next_comic();
+        assert!(app.prewarm.is_some());
+
+        for _ in 0..200 {
+            app.poll_prewarm();
+            if app.prewarm.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(app.prewarm.is_none());
+        let snapshot = app.page_loader.perf_snapshot();
+        assert_eq!(snapshot.zip_entry_reads, 1);
+        assert_eq!(snapshot.decode_full_jobs, 0);
     }
 
     #[test]
