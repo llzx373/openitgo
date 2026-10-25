@@ -20,6 +20,87 @@ const PRELOAD_COOLDOWN_AFTER_TURN: Duration = Duration::from_millis(100);
 /// was lost and allow a retry.
 const PENDING_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReaderPerfSnapshot {
+    pub visible_results: u64,
+    pub visible_latency_p50_us: u64,
+    pub visible_latency_p95_us: u64,
+    pub visible_latency_max_us: u64,
+    pub stale_results: u64,
+}
+
+struct ReaderPerf {
+    enabled: bool,
+    visible_requests: HashMap<(u64, usize), Instant>,
+    visible_latencies_us: Vec<u64>,
+    stale_results: u64,
+}
+
+impl ReaderPerf {
+    fn new() -> Self {
+        Self {
+            enabled: std::env::var_os("OPENITGO_PERF").is_some(),
+            visible_requests: HashMap::new(),
+            visible_latencies_us: Vec::new(),
+            stale_results: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.visible_requests.clear();
+        self.visible_latencies_us.clear();
+        self.stale_results = 0;
+    }
+
+    fn request_visible(&mut self, epoch: u64, page_index: usize) {
+        if self.enabled {
+            self.visible_requests
+                .entry((epoch, page_index))
+                .or_insert_with(Instant::now);
+        }
+    }
+
+    fn finish_full(&mut self, epoch: u64, page_index: usize, visible: bool, succeeded: bool) {
+        if !self.enabled {
+            return;
+        }
+        let started = self.visible_requests.remove(&(epoch, page_index));
+        if visible && succeeded {
+            if let Some(started) = started {
+                self.visible_latencies_us
+                    .push(started.elapsed().as_micros() as u64);
+            }
+        }
+    }
+
+    fn record_stale(&mut self) {
+        if self.enabled {
+            self.stale_results += 1;
+        }
+    }
+
+    fn snapshot(&self) -> ReaderPerfSnapshot {
+        let mut sorted = self.visible_latencies_us.clone();
+        sorted.sort_unstable();
+        ReaderPerfSnapshot {
+            visible_results: sorted.len() as u64,
+            visible_latency_p50_us: percentile_nearest_rank(&sorted, 50),
+            visible_latency_p95_us: percentile_nearest_rank(&sorted, 95),
+            visible_latency_max_us: sorted.last().copied().unwrap_or(0),
+            stale_results: self.stale_results,
+        }
+    }
+}
+
+fn percentile_nearest_rank(sorted: &[u64], percentile: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = (sorted.len() * percentile).div_ceil(100).max(1);
+    sorted[rank.min(sorted.len()) - 1]
+}
+
 #[derive(Default)]
 pub struct ReaderView {
     pub open: Option<OpenReader>,
@@ -86,6 +167,7 @@ pub struct OpenReader {
     pub page_error_retries: HashMap<usize, PageErrorRetry>,
     pub thumbnail_errors: HashMap<usize, ThumbnailError>,
     pub cache: PageCache,
+    perf: ReaderPerf,
     pub page_animation: Option<PageAnimation>,
     /// When the user last turned a page. Used to pause preloads briefly so
     /// rapid flips don't get stuck behind background preload decoding.
@@ -110,6 +192,11 @@ pub struct OpenReader {
 impl OpenReader {
     pub fn total_pages(&self) -> usize {
         self.comic.total_pages()
+    }
+
+    #[allow(dead_code)]
+    pub fn perf_snapshot(&self) -> ReaderPerfSnapshot {
+        self.perf.snapshot()
     }
 
     pub fn zoom_in(&mut self) {
@@ -334,6 +421,7 @@ impl OpenReader {
         self.left_page = None;
         self.right_page = None;
         self.last_spread_size = None;
+        self.perf.reset();
     }
 
     /// Eagerly seed the page cache with the dimensions of the spread that will
@@ -389,6 +477,7 @@ impl OpenReader {
             || {
                 while let Some(result) = loader.try_recv() {
                     if result.epoch != self.current_epoch {
+                        self.perf.record_stale();
                         timing::log(&format!(
                             "reader dropped stale result page {} epoch {} (current {})",
                             result.page_index, result.epoch, self.current_epoch
@@ -405,6 +494,14 @@ impl OpenReader {
                         self.pending_thumbnails.remove(&result.page_index);
                     } else {
                         self.pending_pages.remove(&result.page_index);
+                        let visible = self.perf.enabled
+                            && self.protected_page_indices().contains(&result.page_index);
+                        self.perf.finish_full(
+                            result.epoch,
+                            result.page_index,
+                            visible,
+                            !result.dropped && result.image.is_ok(),
+                        );
                     }
 
                     // Transient backpressure: the job was dropped before decoding.
@@ -525,6 +622,7 @@ impl ReaderView {
             page_error_retries: HashMap::new(),
             thumbnail_errors: HashMap::new(),
             cache: PageCache::new(),
+            perf: ReaderPerf::new(),
             page_animation: None,
             last_page_turn: Instant::now(),
             webtoon_scroll_offset: 0.0,
@@ -1215,6 +1313,9 @@ fn request_page(loader: &PageLoader, reader: &mut OpenReader, page_index: usize)
     if page_index >= total {
         return;
     }
+    reader
+        .perf
+        .request_visible(reader.current_epoch, page_index);
     if let Some(&since) = reader.pending_pages.get(&page_index) {
         if since.elapsed() < PENDING_TIMEOUT {
             return;
@@ -1514,6 +1615,7 @@ mod tests {
             page_error_retries: HashMap::new(),
             thumbnail_errors: HashMap::new(),
             cache: PageCache::new(),
+            perf: ReaderPerf::new(),
             page_animation: None,
             last_page_turn: Instant::now(),
             webtoon_scroll_offset: 0.0,
@@ -1523,6 +1625,62 @@ mod tests {
             wide_page_threshold: 1.4,
             enable_page_animation: true,
         }
+    }
+
+    #[test]
+    fn test_percentile_nearest_rank() {
+        let sorted = [1, 2, 3, 4, 100];
+        assert_eq!(percentile_nearest_rank(&sorted, 50), 3);
+        assert_eq!(percentile_nearest_rank(&sorted, 95), 100);
+        assert_eq!(percentile_nearest_rank(&[], 95), 0);
+    }
+
+    #[test]
+    fn test_reader_perf_excludes_non_visible_and_failed_results() {
+        let mut perf = ReaderPerf::new();
+        perf.enabled = true;
+        perf.request_visible(1, 0);
+        perf.finish_full(1, 0, true, true);
+        perf.request_visible(1, 1);
+        perf.finish_full(1, 1, false, true);
+        perf.request_visible(1, 2);
+        perf.finish_full(1, 2, true, false);
+        perf.finish_full(1, 3, true, true);
+        perf.record_stale();
+
+        let snapshot = perf.snapshot();
+        assert_eq!(snapshot.visible_results, 1);
+        assert_eq!(snapshot.stale_results, 1);
+        perf.reset();
+        assert_eq!(perf.snapshot(), ReaderPerfSnapshot::default());
+    }
+
+    #[test]
+    fn test_reader_perf_measures_real_visible_page_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("page0.png");
+        image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .unwrap();
+
+        let mut reader = dummy_reader();
+        reader.comic.volumes[0].pages[0].source = PageSource::File(path);
+        reader.perf.enabled = true;
+        let loader = PageLoader::new();
+        reader.current_epoch = loader.next_epoch();
+        request_page(&loader, &mut reader, 0);
+
+        let ctx = egui::Context::default();
+        let start = Instant::now();
+        while !reader.cache.contains_full(0) {
+            reader.update(&ctx, &loader, 64 * 1024 * 1024);
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let snapshot = reader.perf_snapshot();
+        assert_eq!(snapshot.visible_results, 1);
+        assert_eq!(snapshot.stale_results, 0);
     }
 
     #[test]
