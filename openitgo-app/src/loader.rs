@@ -1410,10 +1410,9 @@ pub(crate) const THUMBNAIL_MAX_DIMENSION: u32 = 256;
 /// preserving aspect ratio. Small images are kept at their original size
 /// (image's `thumbnail` would upscale them; the macOS ImageIO path does not,
 /// and the tests assert parity).
+#[cfg(test)]
 fn make_thumbnail(image: image::DynamicImage) -> (ColorImage, [u32; 2]) {
     let original_size = [image.width(), image.height()];
-    // Use image's optimized fast thumbnail path instead of Lanczos3: it is
-    // much cheaper on CPU and the quality loss is acceptable at 256px.
     let thumb =
         if image.width() <= THUMBNAIL_MAX_DIMENSION && image.height() <= THUMBNAIL_MAX_DIMENSION {
             image
@@ -1430,21 +1429,42 @@ fn make_thumbnail(image: image::DynamicImage) -> (ColorImage, [u32; 2]) {
     )
 }
 
+fn thumbnail_dimensions(width: u32, height: u32) -> (u32, u32) {
+    if width <= THUMBNAIL_MAX_DIMENSION && height <= THUMBNAIL_MAX_DIMENSION {
+        return (width, height);
+    }
+    let ratio = (THUMBNAIL_MAX_DIMENSION as f64 / width as f64)
+        .min(THUMBNAIL_MAX_DIMENSION as f64 / height as f64);
+    (
+        ((width as f64 * ratio).round() as u32).max(1),
+        ((height as f64 * ratio).round() as u32).max(1),
+    )
+}
+
 /// Build a thumbnail from any loaded image (Color or Compressed).
 fn make_thumbnail_from_loaded(loaded: &LoadedImage) -> Result<(ColorImage, [u32; 2]), String> {
     let color = match loaded {
         LoadedImage::Color(color) => Cow::Borrowed(color),
         LoadedImage::Compressed { .. } => Cow::Owned(loaded.to_color_image()?),
     };
-    let (w, h) = (color.size[0] as u32, color.size[1] as u32);
-    let bytes: Vec<u8> = color
-        .pixels
-        .iter()
-        .flat_map(|p| [p.r(), p.g(), p.b(), p.a()])
-        .collect();
-    let rgba_image = image::RgbaImage::from_raw(w, h, bytes)
+    let (width, height) = (color.size[0] as u32, color.size[1] as u32);
+    let bytes: &[u8] = bytemuck::cast_slice(&color.pixels);
+    let source = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(width, height, bytes)
         .ok_or_else(|| "invalid RGBA buffer for thumbnail".to_string())?;
-    Ok(make_thumbnail(image::DynamicImage::ImageRgba8(rgba_image)))
+    let (thumb_width, thumb_height) = thumbnail_dimensions(width, height);
+    let rgba = if (thumb_width, thumb_height) == (width, height) {
+        image::RgbaImage::from_raw(width, height, bytes.to_vec())
+            .ok_or_else(|| "invalid RGBA buffer for thumbnail".to_string())?
+    } else {
+        image::imageops::thumbnail(&source, thumb_width, thumb_height)
+    };
+    Ok((
+        ColorImage::from_rgba_unmultiplied(
+            [thumb_width as usize, thumb_height as usize],
+            rgba.as_raw(),
+        ),
+        [width, height],
+    ))
 }
 
 /// Try to read the original image dimensions without decoding pixels.
@@ -1756,6 +1776,15 @@ mod tests {
         assert_eq!(actual.size, [256, 128]);
         assert_eq!(actual.pixels, reference.0.pixels);
         assert_eq!(loaded.original_size(), [512, 256]);
+    }
+
+    #[test]
+    fn test_thumbnail_dimensions_never_upscale_and_keep_one_pixel() {
+        assert_eq!(thumbnail_dimensions(1, 1), (1, 1));
+        assert_eq!(thumbnail_dimensions(255, 256), (255, 256));
+        assert_eq!(thumbnail_dimensions(512, 256), (256, 128));
+        assert_eq!(thumbnail_dimensions(500, 800), (160, 256));
+        assert_eq!(thumbnail_dimensions(1, 10_000), (1, 256));
     }
 
     #[test]
