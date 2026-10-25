@@ -413,6 +413,7 @@ impl OpenReader {
     }
 
     pub fn bump_epoch(&mut self, loader: &PageLoader) {
+        loader.cancel_pending();
         self.current_epoch = loader.next_epoch();
         self.pending_pages.clear();
         self.pending_thumbnails.clear();
@@ -1796,6 +1797,31 @@ mod tests {
             since.elapsed() < Duration::from_secs(1),
             "pending timestamp should be fresh"
         );
+    }
+
+    #[test]
+    fn test_bump_epoch_cancels_previous_loader_requests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bump.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .unwrap();
+
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let (processed_sender, _processed_receiver) = crossbeam_channel::unbounded();
+        let loader = PageLoader::new_with_io_gate(gate.clone(), processed_sender);
+        loader.set_perf_enabled(true);
+        let old_epoch = loader.next_epoch();
+        assert!(loader.request_low(old_epoch, 0, PageSource::File(path)));
+        let mut reader = dummy_reader();
+        reader.current_epoch = old_epoch;
+
+        reader.bump_epoch(&loader);
+
+        assert_ne!(reader.current_epoch, old_epoch);
+        assert_eq!(loader.perf_snapshot().cancelled_requests, 1);
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
     }
 
     #[test]

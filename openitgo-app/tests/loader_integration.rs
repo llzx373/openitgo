@@ -62,12 +62,16 @@ fn test_loader_epoch_isolation() {
     assert!(loader.request_high(new_epoch, 0, source));
 
     let start = Instant::now();
+    let mut received_old = false;
     let mut received_new = false;
-    while !received_new {
+    while !received_old || !received_new {
         if let Some(result) = loader.try_recv() {
-            if result.epoch == new_epoch {
-                received_new = true;
+            if result.thumbnail {
+                continue;
             }
+            result.image.expect("both epochs should decode");
+            received_old |= result.epoch == old_epoch;
+            received_new |= result.epoch == new_epoch;
         }
         if start.elapsed() > Duration::from_secs(10) {
             panic!("timed out waiting for loader result");

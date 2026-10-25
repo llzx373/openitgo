@@ -324,7 +324,7 @@ pub enum LoadPriority {
     Low,
 }
 
-const LOADER_PERF_EVENT_COUNT: usize = 22;
+const LOADER_PERF_EVENT_COUNT: usize = 23;
 
 #[derive(Clone, Copy)]
 #[repr(usize)]
@@ -351,6 +351,7 @@ enum LoaderPerfEvent {
     RawCacheJoined,
     SourceBytesRead,
     PriorityUpgrade,
+    CancelledRequest,
 }
 
 #[allow(dead_code)]
@@ -378,6 +379,7 @@ pub struct LoaderPerfSnapshot {
     pub raw_cache_joined: u64,
     pub source_bytes_read: u64,
     pub priority_upgrades: u64,
+    pub cancelled_requests: u64,
 }
 
 struct LoaderPerf {
@@ -433,6 +435,7 @@ impl LoaderPerf {
             raw_cache_joined: get(LoaderPerfEvent::RawCacheJoined),
             source_bytes_read: get(LoaderPerfEvent::SourceBytesRead),
             priority_upgrades: get(LoaderPerfEvent::PriorityUpgrade),
+            cancelled_requests: get(LoaderPerfEvent::CancelledRequest),
         }
     }
 }
@@ -497,6 +500,7 @@ struct RequestControl {
     priority: AtomicU8,
     io_claimed: AtomicBool,
     high_wakeup_pending: AtomicBool,
+    cancelled: AtomicBool,
     completed: AtomicBool,
 }
 
@@ -524,6 +528,7 @@ impl RequestControl {
             }),
             io_claimed: AtomicBool::new(false),
             high_wakeup_pending: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
             completed: AtomicBool::new(false),
         }
     }
@@ -541,12 +546,18 @@ impl RequestControl {
             .is_ok()
     }
 
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
     fn claim_io(&self) -> bool {
-        !self.completed.load(Ordering::Acquire)
-            && self
-                .io_claimed
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
+        if self.completed.load(Ordering::Acquire) || self.is_cancelled() {
+            return false;
+        }
+        self.io_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+            && !self.is_cancelled()
     }
 }
 
@@ -809,6 +820,10 @@ impl PageLoader {
                     perf: &LoaderPerf,
                     requests: &RequestRegistry,
                 ) {
+                    if job.control.is_cancelled() {
+                        finish_request(requests, &job.control);
+                        return;
+                    }
                     let key = job.control.key;
                     perf.record(if key.thumbnail {
                         LoaderPerfEvent::DecodeThumbnailJob
@@ -839,7 +854,7 @@ impl PageLoader {
                                 // Skipped when DXT5 compression is on — a compressed image
                                 // would need an expensive decompress_dxt5 first; the idle
                                 // thumbnail batch covers those instead.
-                                if !compress {
+                                if !compress && !job.control.is_cancelled() {
                                     if let Ok((thumb, _)) = make_thumbnail_from_loaded(&image) {
                                         let _ = result_sender.send(LoadResult {
                                             epoch: key.epoch,
@@ -870,6 +885,10 @@ impl PageLoader {
                         original_size: [0, 0],
                         image: Err(e),
                     });
+                    if job.control.is_cancelled() {
+                        finish_request(requests, &job.control);
+                        return;
+                    }
                     finish_request(requests, &job.control);
                     let _ = result_sender.send(result);
                 }
@@ -977,6 +996,18 @@ impl PageLoader {
 
     pub fn next_epoch(&self) -> Epoch {
         self.epoch.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub fn cancel_pending(&self) {
+        let mut requests = self.requests.lock().unwrap();
+        let count = requests.len() as u64;
+        for control in requests.values() {
+            control.cancelled.store(true, Ordering::Release);
+        }
+        requests.clear();
+        drop(requests);
+        self.perf
+            .record_value(LoaderPerfEvent::CancelledRequest, count);
     }
 
     fn record_request(&self, priority: LoadPriority, thumbnail: bool, sent: bool) {
@@ -1172,6 +1203,10 @@ fn process_io_request(
                     original_size: [0, 0],
                     image: Err(e),
                 });
+            if req.control.is_cancelled() {
+                finish_request(requests, &req.control);
+                return;
+            }
             finish_request(requests, &req.control);
             let _ = result_sender.send(result);
         }
@@ -1186,6 +1221,10 @@ fn process_io_request(
             };
             match read_page_bytes(source, zip_cache, raw_cache, password.as_deref(), perf) {
                 Ok((bytes, format_hint)) => {
+                    if req.control.is_cancelled() {
+                        finish_request(requests, &req.control);
+                        return;
+                    }
                     let priority = req.control.priority();
                     let priority_label = match priority {
                         LoadPriority::High => "high",
@@ -1212,6 +1251,9 @@ fn process_io_request(
                         // tell the UI to drop the pending marker so it can retry later.
                         let dropped = priority == LoadPriority::Low;
                         finish_request(requests, &req.control);
+                        if req.control.is_cancelled() {
+                            return;
+                        }
                         let _ = result_sender.send(LoadResult {
                             epoch: key.epoch,
                             page_index: key.page_index,
@@ -1226,6 +1268,10 @@ fn process_io_request(
                     }
                 }
                 Err(e) => {
+                    if req.control.is_cancelled() {
+                        finish_request(requests, &req.control);
+                        return;
+                    }
                     finish_request(requests, &req.control);
                     let _ = result_sender.send(LoadResult {
                         epoch: key.epoch,
@@ -2021,6 +2067,38 @@ mod tests {
         assert_eq!(snapshot.decode_full_jobs, 1);
         assert_eq!(snapshot.file_reads, 1);
         assert_eq!(snapshot.error_results, 0);
+    }
+
+    #[test]
+    fn test_cancel_pending_skips_queued_io() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cancel.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .unwrap();
+
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let (processed_sender, processed_receiver) = unbounded();
+        let loader = PageLoader::new_with_io_gate(gate.clone(), processed_sender);
+        loader.set_perf_enabled(true);
+        let epoch = loader.next_epoch();
+        assert!(loader.request_low(epoch, 0, PageSource::File(path)));
+        loader.cancel_pending();
+        assert_eq!(loader.perf_snapshot().cancelled_requests, 1);
+        assert!(loader.requests.lock().unwrap().is_empty());
+
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        assert!(matches!(
+            processed_receiver.recv_timeout(Duration::from_secs(5)),
+            Ok(LoadPriority::Low)
+        ));
+        assert!(loader.try_recv().is_none());
+        let snapshot = loader.perf_snapshot();
+        assert_eq!(snapshot.io_full_jobs, 0);
+        assert_eq!(snapshot.decode_full_jobs, 0);
+        assert_eq!(snapshot.file_reads, 0);
+        assert_eq!(snapshot.full_results, 0);
     }
 
     #[test]
