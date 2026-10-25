@@ -336,9 +336,8 @@ dirs_first 逐栏下发，RowsKey 自动失效。
 
 - **PageLoader**：后台 IO + decode worker threads + channels；独立 `cover_loader` 负责库封面。
   **进度条悬停缩略图**：全尺寸解码且 compress=false 时顺产生成 256px 缩略图；悬停时
-  `request_page_thumbnail` 高优先级 + 按方向低优先预取 8 页；批量经
-  `THUMBNAIL_BATCH_MAX_INFLIGHT=2` 节流，翻页冷却期暂停；webp 走 `webp_thumb.rs`，失败回退
-  image crate。
+  `request_page_thumbnail` 高优先级 + 按方向低优先预取 8 页；不再后台生成全书缩略图；
+  webp 走 `webp_thumb.rs`，失败回退 image crate。
 - **PageCache**：GPU textures；`size_bytes` 为 CPU/GPU 内存估算；上传后尽快释放 CPU 侧
   `ColorImage`。
 - **EbookRenderer**：wry child webview + 自定义 `ebook://` 协议；章节经

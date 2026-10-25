@@ -158,8 +158,6 @@ pub struct OpenReader {
     pub pending_pages: HashMap<usize, Instant>,
     /// Thumbnail requests that are currently in flight.
     pub pending_thumbnails: HashSet<usize>,
-    /// Next page index to request during the background thumbnail batch.
-    pub thumbnail_batch_next: usize,
     /// Last progress-bar page the pointer hovered, used to prefetch thumbnails
     /// in the direction the pointer is moving.
     pub last_hover_thumb_page: Option<usize>,
@@ -420,7 +418,6 @@ impl OpenReader {
         self.current_epoch = loader.next_epoch();
         self.pending_pages.clear();
         self.pending_thumbnails.clear();
-        self.thumbnail_batch_next = 0;
         self.page_errors.clear();
         self.left_page = None;
         self.right_page = None;
@@ -620,7 +617,6 @@ impl ReaderView {
             current_epoch: 0,
             pending_pages: HashMap::new(),
             pending_thumbnails: HashSet::new(),
-            thumbnail_batch_next: 0,
             last_hover_thumb_page: None,
             page_errors: HashMap::new(),
             page_error_retries: HashMap::new(),
@@ -660,12 +656,7 @@ impl ReaderView {
         let budget = cache_size_mb * 1024 * 1024;
         if let Some(reader) = &mut self.open {
             reader.update(ctx, loader, budget);
-            // While the throttled thumbnail batch is in flight, keep polling so
-            // results drain and the batch advances even when the app is idle
-            // (same pattern as the password probe in app.rs). Note update() runs
-            // before request_preloads() in the frame, so this must not depend on
-            // pending_thumbnails — they are only populated later in the frame.
-            if reader.thumbnail_batch_next < reader.total_pages() {
+            if !reader.pending_pages.is_empty() || !reader.pending_thumbnails.is_empty() {
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
         }
@@ -703,37 +694,6 @@ impl ReaderView {
             let total = reader.total_pages();
             if total == 0 {
                 return;
-            }
-
-            // Background batch: generate thumbnails for every page, throttled by
-            // an in-flight cap so opening a comic never floods all decode workers
-            // (the previous 32-per-frame enqueue caused a full-core CPU burst).
-            // Hover requests share the same pending set, so scrubbing the
-            // progress bar naturally pauses the batch.
-            const THUMBNAIL_BATCH_MAX_INFLIGHT: usize = 2;
-            if reader.last_page_turn.elapsed() >= PRELOAD_COOLDOWN_AFTER_TURN {
-                while reader.thumbnail_batch_next < total
-                    && reader.pending_thumbnails.len() < THUMBNAIL_BATCH_MAX_INFLIGHT
-                {
-                    let idx = reader.thumbnail_batch_next;
-                    reader.thumbnail_batch_next += 1;
-                    if reader.cache.contains_thumbnail(idx)
-                        || reader.cache.contains_full(idx)
-                        || reader.pending_thumbnails.contains(&idx)
-                    {
-                        continue;
-                    }
-                    let Some(source) = reader.comic.page_source(idx).cloned() else {
-                        continue;
-                    };
-                    if loader.request_thumbnail(reader.current_epoch, idx, source) {
-                        reader.pending_thumbnails.insert(idx);
-                    } else {
-                        // Channel is full; retry next frame from the same index.
-                        reader.thumbnail_batch_next = idx;
-                        break;
-                    }
-                }
             }
 
             // Don't preload full-resolution pages until every page in the visible
@@ -1627,7 +1587,6 @@ mod tests {
             current_epoch: 0,
             pending_pages: HashMap::new(),
             pending_thumbnails: HashSet::new(),
-            thumbnail_batch_next: 0,
             last_hover_thumb_page: None,
             page_errors: HashMap::new(),
             page_error_retries: HashMap::new(),
@@ -1719,6 +1678,34 @@ mod tests {
             directional_preload_indices(0, 10, 3, ReadingMode::Ltr, Some(TurnDirection::Prev)),
             [1, 2, 3]
         );
+    }
+
+    #[test]
+    fn test_preloads_do_not_start_full_book_thumbnail_batch() {
+        let loader = PageLoader::new();
+        loader.set_perf_enabled(true);
+        let mut reader = dummy_reader();
+        reader.current_epoch = loader.next_epoch();
+        reader.last_page_turn = Instant::now() - Duration::from_secs(1);
+        insert_test_full(&mut reader, 0);
+        let mut view = ReaderView { open: Some(reader) };
+
+        view.request_preloads(&loader, 96, 32);
+
+        assert_eq!(loader.perf_snapshot().low_thumbnail_requests, 0);
+    }
+
+    #[test]
+    fn test_pending_reader_requests_schedule_result_polling() {
+        let loader = PageLoader::new();
+        let mut reader = dummy_reader();
+        reader.pending_pages.insert(0, Instant::now());
+        let mut view = ReaderView { open: Some(reader) };
+        let ctx = egui::Context::default();
+
+        view.update(&ctx, &loader, 96);
+
+        assert!(ctx.has_requested_repaint());
     }
 
     #[test]
