@@ -1317,11 +1317,10 @@ fn request_page(loader: &PageLoader, reader: &mut OpenReader, page_index: usize)
         .perf
         .request_visible(reader.current_epoch, page_index);
     if let Some(&since) = reader.pending_pages.get(&page_index) {
-        if since.elapsed() < PENDING_TIMEOUT {
-            return;
+        if since.elapsed() >= PENDING_TIMEOUT {
+            // Timed out: drop the stale pending entry so we can retry immediately.
+            reader.pending_pages.remove(&page_index);
         }
-        // Timed out: drop the stale pending entry so we can retry immediately.
-        reader.pending_pages.remove(&page_index);
     }
     let Some(source) = reader.comic.page_source(page_index).cloned() else {
         return;
@@ -1331,7 +1330,10 @@ fn request_page(loader: &PageLoader, reader: &mut OpenReader, page_index: usize)
         page_index, reader.current_epoch
     ));
     if loader.request_high(reader.current_epoch, page_index, source) {
-        reader.pending_pages.insert(page_index, Instant::now());
+        reader
+            .pending_pages
+            .entry(page_index)
+            .or_insert_with(Instant::now);
         reader.page_errors.remove(&page_index);
     }
 }
@@ -1794,6 +1796,43 @@ mod tests {
             since.elapsed() < Duration::from_secs(1),
             "pending timestamp should be fresh"
         );
+    }
+
+    #[test]
+    fn test_pending_page_is_upgraded_to_high() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("pending.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .unwrap();
+
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let (processed_sender, _processed_receiver) = crossbeam_channel::unbounded();
+        let loader = PageLoader::new_with_io_gate(gate.clone(), processed_sender);
+        loader.set_perf_enabled(true);
+        let mut reader = dummy_reader();
+        reader.comic.volumes[0].pages[0].source = PageSource::File(path.clone());
+        reader.current_epoch = loader.next_epoch();
+        assert!(loader.request_low(reader.current_epoch, 0, PageSource::File(path)));
+        let pending_since = Instant::now();
+        reader.pending_pages.insert(0, pending_since);
+
+        request_page(&loader, &mut reader, 0);
+
+        let snapshot = loader.perf_snapshot();
+        assert_eq!(snapshot.priority_upgrades, 1);
+        assert_eq!(snapshot.high_full_requests, 1);
+        assert_eq!(reader.pending_pages.get(&0), Some(&pending_since));
+
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        let ctx = egui::Context::default();
+        let start = Instant::now();
+        while !reader.cache.contains_full(0) {
+            reader.update(&ctx, &loader, 64 * 1024 * 1024);
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]

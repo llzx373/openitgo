@@ -10,8 +10,8 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 
 /// Default PDF document cache budget (256 MiB).
@@ -324,7 +324,7 @@ pub enum LoadPriority {
     Low,
 }
 
-const LOADER_PERF_EVENT_COUNT: usize = 21;
+const LOADER_PERF_EVENT_COUNT: usize = 22;
 
 #[derive(Clone, Copy)]
 #[repr(usize)]
@@ -350,6 +350,7 @@ enum LoaderPerfEvent {
     RawCacheMiss,
     RawCacheJoined,
     SourceBytesRead,
+    PriorityUpgrade,
 }
 
 #[allow(dead_code)]
@@ -376,6 +377,7 @@ pub struct LoaderPerfSnapshot {
     pub raw_cache_misses: u64,
     pub raw_cache_joined: u64,
     pub source_bytes_read: u64,
+    pub priority_upgrades: u64,
 }
 
 struct LoaderPerf {
@@ -430,6 +432,7 @@ impl LoaderPerf {
             raw_cache_misses: get(LoaderPerfEvent::RawCacheMiss),
             raw_cache_joined: get(LoaderPerfEvent::RawCacheJoined),
             source_bytes_read: get(LoaderPerfEvent::SourceBytesRead),
+            priority_upgrades: get(LoaderPerfEvent::PriorityUpgrade),
         }
     }
 }
@@ -481,25 +484,123 @@ pub struct LoadResult {
     pub image: Result<LoadedImage, String>,
 }
 
-pub struct LoadRequest {
-    pub epoch: Epoch,
-    pub page_index: usize,
-    pub thumbnail: bool,
-    pub source: PageSource,
-}
-
-struct DecodeJob {
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct RequestKey {
     epoch: Epoch,
     page_index: usize,
     thumbnail: bool,
+}
+
+struct RequestControl {
+    key: RequestKey,
+    source: PageSource,
+    priority: AtomicU8,
+    io_claimed: AtomicBool,
+    high_wakeup_pending: AtomicBool,
+    completed: AtomicBool,
+}
+
+impl RequestControl {
+    const LOW: u8 = 0;
+    const HIGH: u8 = 1;
+
+    fn new(
+        priority: LoadPriority,
+        epoch: Epoch,
+        page_index: usize,
+        thumbnail: bool,
+        source: PageSource,
+    ) -> Self {
+        Self {
+            key: RequestKey {
+                epoch,
+                page_index,
+                thumbnail,
+            },
+            source,
+            priority: AtomicU8::new(match priority {
+                LoadPriority::High => Self::HIGH,
+                LoadPriority::Low => Self::LOW,
+            }),
+            io_claimed: AtomicBool::new(false),
+            high_wakeup_pending: AtomicBool::new(false),
+            completed: AtomicBool::new(false),
+        }
+    }
+
+    fn priority(&self) -> LoadPriority {
+        match self.priority.load(Ordering::Acquire) {
+            Self::HIGH => LoadPriority::High,
+            _ => LoadPriority::Low,
+        }
+    }
+
+    fn upgrade_to_high(&self) -> bool {
+        self.priority
+            .compare_exchange(Self::LOW, Self::HIGH, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn claim_io(&self) -> bool {
+        !self.completed.load(Ordering::Acquire)
+            && self
+                .io_claimed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
+}
+
+type RequestRegistry = Arc<Mutex<HashMap<RequestKey, Arc<RequestControl>>>>;
+
+fn finish_request(requests: &RequestRegistry, control: &Arc<RequestControl>) {
+    control.completed.store(true, Ordering::Release);
+    let mut requests = requests.lock().unwrap();
+    if requests
+        .get(&control.key)
+        .is_some_and(|current| Arc::ptr_eq(current, control))
+    {
+        requests.remove(&control.key);
+    }
+}
+
+struct LoadRequest {
+    control: Arc<RequestControl>,
+}
+
+struct DecodeJob {
+    control: Arc<RequestControl>,
     bytes: Arc<Vec<u8>>,
     format_hint: Option<String>,
+}
+
+#[derive(Default)]
+struct IoWorkerHook {
+    gate: Option<Arc<(Mutex<bool>, Condvar)>>,
+    processed: Option<Sender<LoadPriority>>,
+}
+
+impl IoWorkerHook {
+    fn wait(&self) {
+        if let Some((lock, condvar)) = self.gate.as_deref() {
+            let mut open = lock.lock().unwrap();
+            while !*open {
+                open = condvar.wait(open).unwrap();
+            }
+        }
+    }
+
+    fn processed(&self, priority: LoadPriority) {
+        if let Some(sender) = &self.processed {
+            let _ = sender.send(priority);
+        }
+    }
 }
 
 pub struct PageLoader {
     high_sender: Sender<LoadRequest>,
     low_sender: Sender<LoadRequest>,
     receiver: Receiver<LoadResult>,
+    requests: RequestRegistry,
     epoch: Arc<AtomicU64>,
     compress: Arc<AtomicBool>,
     passwords: SharedPasswords,
@@ -525,6 +626,29 @@ impl PageLoader {
     /// `decode_threads` is the number of background decode workers. `0` means
     /// use the system's reported parallelism (the previous default).
     pub fn new_with_compress(compress: bool, decode_threads: usize) -> Self {
+        Self::new_with_compress_and_io_hook(compress, decode_threads, IoWorkerHook::default())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_io_gate(
+        gate: Arc<(Mutex<bool>, Condvar)>,
+        processed: Sender<LoadPriority>,
+    ) -> Self {
+        Self::new_with_compress_and_io_hook(
+            false,
+            1,
+            IoWorkerHook {
+                gate: Some(gate),
+                processed: Some(processed),
+            },
+        )
+    }
+
+    fn new_with_compress_and_io_hook(
+        compress: bool,
+        decode_threads: usize,
+        io_hook: IoWorkerHook,
+    ) -> Self {
         let (high_sender, high_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) =
             bounded(64);
         let (low_sender, low_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) = bounded(64);
@@ -563,6 +687,7 @@ impl PageLoader {
         let raw_cache = SharedRawCache::with_perf(512 * 1024 * 1024, Some(perf.clone()));
         let pdf_cache = PdfDocumentCache::new();
         let passwords: SharedPasswords = Arc::new(RwLock::new(HashMap::new()));
+        let requests: RequestRegistry = Arc::new(Mutex::new(HashMap::new()));
         let io_thread_count = worker_count;
         let mut io_workers = Vec::with_capacity(io_thread_count);
         for _ in 0..io_thread_count {
@@ -576,11 +701,17 @@ impl PageLoader {
             let pdf_cache = pdf_cache.clone();
             let passwords = passwords.clone();
             let perf = perf.clone();
+            let requests = requests.clone();
+            let io_hook = IoWorkerHook {
+                gate: io_hook.gate.clone(),
+                processed: io_hook.processed.clone(),
+            };
             io_workers.push(thread::spawn(move || {
                 let mut zip_cache = ZipCache::new();
                 let mut high_disconnected = false;
                 let mut low_disconnected = false;
                 loop {
+                    io_hook.wait();
                     // Drain every pending high-priority IO request before considering
                     // a low-priority one. This keeps rapid page turns responsive even
                     // when an IO worker is busy reading preload entries.
@@ -597,6 +728,8 @@ impl PageLoader {
                             &pdf_cache,
                             &perf,
                             &passwords,
+                            &requests,
+                            &io_hook,
                         );
                     }
                     select! {
@@ -612,8 +745,10 @@ impl PageLoader {
                                     &mut zip_cache,
                                     &raw_cache,
                                     &pdf_cache,
-                            &perf,
+                                    &perf,
                                     &passwords,
+                                    &requests,
+                                    &io_hook,
                                 );
                             } else {
                                 high_disconnected = true;
@@ -634,8 +769,10 @@ impl PageLoader {
                                     &mut zip_cache,
                                     &raw_cache,
                                     &pdf_cache,
-                            &perf,
+                                    &perf,
                                     &passwords,
+                                    &requests,
+                                    &io_hook,
                                 );
                             } else {
                                 low_disconnected = true;
@@ -663,23 +800,26 @@ impl PageLoader {
             let result_sender = result_sender.clone();
             let compress = compress.clone();
             let perf = perf.clone();
+            let requests = requests.clone();
             decode_workers.push(thread::spawn(move || {
                 fn process_job(
                     job: DecodeJob,
                     compress: bool,
                     result_sender: &Sender<LoadResult>,
                     perf: &LoaderPerf,
+                    requests: &RequestRegistry,
                 ) {
-                    perf.record(if job.thumbnail {
+                    let key = job.control.key;
+                    perf.record(if key.thumbnail {
                         LoaderPerfEvent::DecodeThumbnailJob
                     } else {
                         LoaderPerfEvent::DecodeFullJob
                     });
-                    let result = if job.thumbnail {
+                    let result = if key.thumbnail {
                         decode_thumbnail_bytes(&job.bytes, job.format_hint.as_deref()).map(
                             |(thumb, original_size)| LoadResult {
-                                epoch: job.epoch,
-                                page_index: job.page_index,
+                                epoch: key.epoch,
+                                page_index: key.page_index,
                                 thumbnail: true,
                                 dropped: false,
                                 original_size,
@@ -702,8 +842,8 @@ impl PageLoader {
                                 if !compress {
                                     if let Ok((thumb, _)) = make_thumbnail_from_loaded(&image) {
                                         let _ = result_sender.send(LoadResult {
-                                            epoch: job.epoch,
-                                            page_index: job.page_index,
+                                            epoch: key.epoch,
+                                            page_index: key.page_index,
                                             thumbnail: true,
                                             dropped: false,
                                             original_size,
@@ -712,8 +852,8 @@ impl PageLoader {
                                     }
                                 }
                                 LoadResult {
-                                    epoch: job.epoch,
-                                    page_index: job.page_index,
+                                    epoch: key.epoch,
+                                    page_index: key.page_index,
                                     thumbnail: false,
                                     dropped: false,
                                     original_size,
@@ -722,14 +862,16 @@ impl PageLoader {
                             },
                         )
                     };
-                    let _ = result_sender.send(result.unwrap_or_else(|e| LoadResult {
-                        epoch: job.epoch,
-                        page_index: job.page_index,
-                        thumbnail: job.thumbnail,
+                    let result = result.unwrap_or_else(|e| LoadResult {
+                        epoch: key.epoch,
+                        page_index: key.page_index,
+                        thumbnail: key.thumbnail,
                         dropped: false,
                         original_size: [0, 0],
                         image: Err(e),
-                    }));
+                    });
+                    finish_request(requests, &job.control);
+                    let _ = result_sender.send(result);
                 }
 
                 let mut high_disconnected = false;
@@ -739,13 +881,13 @@ impl PageLoader {
                     // Priority order: high (visible pages), low thumbnails,
                     // then low full-image preloads.
                     while let Ok(job) = high_decode_receiver.try_recv() {
-                        process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf);
+                        process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf, &requests);
                     }
                     while let Ok(job) = low_thumb_decode_receiver.try_recv() {
-                        process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf);
+                        process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf, &requests);
                     }
                     while let Ok(job) = low_full_decode_receiver.try_recv() {
-                        process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf);
+                        process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf, &requests);
                     }
 
                     if high_disconnected && thumb_disconnected && full_disconnected {
@@ -755,7 +897,7 @@ impl PageLoader {
                     select! {
                         recv(high_decode_receiver) -> job => {
                             if let Ok(job) = job {
-                                process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf);
+                                process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf, &requests);
                             } else {
                                 high_disconnected = true;
                                 if thumb_disconnected && full_disconnected {
@@ -765,7 +907,7 @@ impl PageLoader {
                         }
                         recv(low_thumb_decode_receiver) -> job => {
                             if let Ok(job) = job {
-                                process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf);
+                                process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf, &requests);
                             } else {
                                 thumb_disconnected = true;
                                 if high_disconnected && full_disconnected {
@@ -775,7 +917,7 @@ impl PageLoader {
                         }
                         recv(low_full_decode_receiver) -> job => {
                             if let Ok(job) = job {
-                                process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf);
+                                process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf, &requests);
                             } else {
                                 full_disconnected = true;
                                 if high_disconnected && thumb_disconnected {
@@ -792,6 +934,7 @@ impl PageLoader {
             high_sender,
             low_sender,
             receiver,
+            requests,
             epoch: Arc::new(AtomicU64::new(1)),
             compress,
             passwords,
@@ -859,15 +1002,46 @@ impl PageLoader {
         thumbnail: bool,
         source: PageSource,
     ) -> bool {
-        let sent = sender
-            .try_send(LoadRequest {
-                epoch,
-                page_index,
-                thumbnail,
-                source,
-            })
-            .is_ok();
+        let key = RequestKey {
+            epoch,
+            page_index,
+            thumbnail,
+        };
+        let mut requests = self.requests.lock().unwrap();
+        if let Some(control) = requests.get(&key).cloned() {
+            if priority == LoadPriority::High {
+                let upgraded = control.upgrade_to_high();
+                if upgraded {
+                    self.perf.record(LoaderPerfEvent::PriorityUpgrade);
+                }
+                let needs_wakeup = upgraded || control.high_wakeup_pending.load(Ordering::Acquire);
+                if needs_wakeup
+                    && !control.io_claimed.load(Ordering::Acquire)
+                    && !control.completed.load(Ordering::Acquire)
+                {
+                    let sent = self
+                        .high_sender
+                        .try_send(LoadRequest {
+                            control: control.clone(),
+                        })
+                        .is_ok();
+                    control.high_wakeup_pending.store(!sent, Ordering::Release);
+                    self.record_request(LoadPriority::High, thumbnail, sent);
+                    return sent;
+                }
+            }
+            return true;
+        }
+
+        let control = Arc::new(RequestControl::new(
+            priority, epoch, page_index, thumbnail, source,
+        ));
+        requests.insert(key, control.clone());
+        let sent = sender.try_send(LoadRequest { control }).is_ok();
         self.record_request(priority, thumbnail, sent);
+        if !sent {
+            requests.remove(&key);
+        }
         sent
     }
 
@@ -943,7 +1117,7 @@ impl PageLoader {
 #[allow(clippy::too_many_arguments)]
 fn process_io_request(
     req: LoadRequest,
-    priority: LoadPriority,
+    queue_priority: LoadPriority,
     result_sender: &Sender<LoadResult>,
     high_decode_sender: &Sender<DecodeJob>,
     low_thumb_decode_sender: &Sender<DecodeJob>,
@@ -953,59 +1127,56 @@ fn process_io_request(
     pdf_cache: &PdfDocumentCache,
     perf: &LoaderPerf,
     passwords: &SharedPasswords,
+    requests: &RequestRegistry,
+    io_hook: &IoWorkerHook,
 ) {
-    perf.record(if req.thumbnail {
+    let claimed = req.control.claim_io();
+    io_hook.processed(queue_priority);
+    if !claimed {
+        return;
+    }
+    let key = req.control.key;
+    perf.record(if key.thumbnail {
         LoaderPerfEvent::IoThumbnailJob
     } else {
         LoaderPerfEvent::IoFullJob
     });
-    let priority_label = match priority {
+    let priority_label = match req.control.priority() {
         LoadPriority::High => "high",
         LoadPriority::Low => "low",
     };
-    let kind = if req.thumbnail { "thumbnail" } else { "full" };
+    let kind = if key.thumbnail { "thumbnail" } else { "full" };
     timing::log(&format!(
         "IO request page {} (epoch {}) priority {} kind {}",
-        req.page_index, req.epoch, priority_label, kind
+        key.page_index, key.epoch, priority_label, kind
     ));
-    match req.source {
+    match &req.control.source {
         PageSource::PdfPage {
             document,
             page_number,
         } => {
-            let result = render_pdf_page_cached(&document, page_number, req.thumbnail, pdf_cache)
-                .map(|(image, full_size)| {
-                    if req.thumbnail {
-                        LoadResult {
-                            epoch: req.epoch,
-                            page_index: req.page_index,
-                            thumbnail: true,
-                            dropped: false,
-                            original_size: full_size,
-                            image: Ok(LoadedImage::Color(image)),
-                        }
-                    } else {
-                        LoadResult {
-                            epoch: req.epoch,
-                            page_index: req.page_index,
-                            thumbnail: false,
-                            dropped: false,
-                            original_size: full_size,
-                            image: Ok(LoadedImage::Color(image)),
-                        }
-                    }
+            let result = render_pdf_page_cached(document, *page_number, key.thumbnail, pdf_cache)
+                .map(|(image, full_size)| LoadResult {
+                    epoch: key.epoch,
+                    page_index: key.page_index,
+                    thumbnail: key.thumbnail,
+                    dropped: false,
+                    original_size: full_size,
+                    image: Ok(LoadedImage::Color(image)),
+                })
+                .unwrap_or_else(|e| LoadResult {
+                    epoch: key.epoch,
+                    page_index: key.page_index,
+                    thumbnail: key.thumbnail,
+                    dropped: false,
+                    original_size: [0, 0],
+                    image: Err(e),
                 });
-            let _ = result_sender.send(result.unwrap_or_else(|e| LoadResult {
-                epoch: req.epoch,
-                page_index: req.page_index,
-                thumbnail: req.thumbnail,
-                dropped: false,
-                original_size: [0, 0],
-                image: Err(e),
-            }));
+            finish_request(requests, &req.control);
+            let _ = result_sender.send(result);
         }
-        _ => {
-            let password = match &req.source {
+        source => {
+            let password = match source {
                 PageSource::ZipEntry { archive, .. } | PageSource::RarEntry { archive, .. } => {
                     let map = passwords.read().unwrap();
                     let key = archive.canonicalize().unwrap_or_else(|_| archive.clone());
@@ -1013,16 +1184,19 @@ fn process_io_request(
                 }
                 _ => None,
             };
-            match read_page_bytes(&req.source, zip_cache, raw_cache, password.as_deref(), perf) {
+            match read_page_bytes(source, zip_cache, raw_cache, password.as_deref(), perf) {
                 Ok((bytes, format_hint)) => {
+                    let priority = req.control.priority();
+                    let priority_label = match priority {
+                        LoadPriority::High => "high",
+                        LoadPriority::Low => "low",
+                    };
                     let job = DecodeJob {
-                        epoch: req.epoch,
-                        page_index: req.page_index,
-                        thumbnail: req.thumbnail,
+                        control: req.control.clone(),
                         bytes,
                         format_hint,
                     };
-                    let sender = match (priority, req.thumbnail) {
+                    let sender = match (priority, key.thumbnail) {
                         (LoadPriority::High, _) => high_decode_sender,
                         (LoadPriority::Low, true) => low_thumb_decode_sender,
                         (LoadPriority::Low, false) => low_full_decode_sender,
@@ -1031,30 +1205,32 @@ fn process_io_request(
                         perf.record(LoaderPerfEvent::DecodeQueueFull);
                         timing::log(&format!(
                             "IO dropped decode job page {} ({} queue full)",
-                            req.page_index, priority_label
+                            key.page_index, priority_label
                         ));
                         // High-priority failures are real errors the UI should surface.
                         // Low-priority (preload/thumbnail) failures are transient backpressure;
                         // tell the UI to drop the pending marker so it can retry later.
                         let dropped = priority == LoadPriority::Low;
+                        finish_request(requests, &req.control);
                         let _ = result_sender.send(LoadResult {
-                            epoch: req.epoch,
-                            page_index: req.page_index,
-                            thumbnail: req.thumbnail,
+                            epoch: key.epoch,
+                            page_index: key.page_index,
+                            thumbnail: key.thumbnail,
                             dropped,
                             original_size: [0, 0],
                             image: Err(format!(
                                 "{} decode queue full for page {}",
-                                priority_label, req.page_index
+                                priority_label, key.page_index
                             )),
                         });
                     }
                 }
                 Err(e) => {
+                    finish_request(requests, &req.control);
                     let _ = result_sender.send(LoadResult {
-                        epoch: req.epoch,
-                        page_index: req.page_index,
-                        thumbnail: req.thumbnail,
+                        epoch: key.epoch,
+                        page_index: key.page_index,
+                        thumbnail: key.thumbnail,
                         dropped: false,
                         original_size: [0, 0],
                         image: Err(e),
@@ -1743,6 +1919,19 @@ mod tests {
         }
     }
 
+    fn wait_for_full_result(loader: &PageLoader, epoch: Epoch, page_index: usize) -> LoadResult {
+        let start = Instant::now();
+        loop {
+            if let Some(result) = loader.try_recv() {
+                if result.epoch == epoch && result.page_index == page_index && !result.thumbnail {
+                    return result;
+                }
+            }
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn test_loader_perf_disabled_does_not_record_requests() {
         let loader = PageLoader::new();
@@ -1787,6 +1976,118 @@ mod tests {
         assert_eq!(snapshot.request_queue_full, 0);
         assert_eq!(snapshot.dropped_results, 0);
         assert_eq!(snapshot.error_results, 0);
+    }
+
+    #[test]
+    fn test_low_full_upgrade_before_io_executes_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("upgrade.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .unwrap();
+
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let (processed_sender, processed_receiver) = unbounded();
+        let loader = PageLoader::new_with_io_gate(gate.clone(), processed_sender);
+        loader.set_perf_enabled(true);
+        let epoch = loader.next_epoch();
+        let source = PageSource::File(path);
+        assert!(loader.request_low(epoch, 0, source.clone()));
+        assert!(loader.request_high(epoch, 0, source));
+        assert_eq!(loader.low_sender.len(), 1);
+        assert_eq!(loader.high_sender.len(), 1);
+
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        let result = wait_for_full_result(&loader, epoch, 0);
+        result.image.expect("upgraded image should decode");
+        loop {
+            if processed_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("IO worker should process the queued low request")
+                == LoadPriority::Low
+            {
+                break;
+            }
+        }
+
+        assert!(loader.try_recv().is_none());
+        let snapshot = loader.perf_snapshot();
+        assert_eq!(snapshot.low_full_requests, 1);
+        assert_eq!(snapshot.high_full_requests, 1);
+        assert_eq!(snapshot.priority_upgrades, 1);
+        assert_eq!(snapshot.full_results, 1);
+        assert_eq!(snapshot.io_full_jobs, 1);
+        assert_eq!(snapshot.decode_full_jobs, 1);
+        assert_eq!(snapshot.file_reads, 1);
+        assert_eq!(snapshot.error_results, 0);
+    }
+
+    #[test]
+    fn test_upgrade_wakeup_retries_after_high_queue_full() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("upgrade-retry.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .unwrap();
+
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let (processed_sender, _processed_receiver) = unbounded();
+        let mut loader = PageLoader::new_with_io_gate(gate.clone(), processed_sender);
+        loader.set_perf_enabled(true);
+        let epoch = loader.next_epoch();
+        let source = PageSource::File(path);
+        assert!(loader.request_low(epoch, 0, source.clone()));
+        loader.high_sender = bounded(0).0;
+
+        assert!(!loader.request_high(epoch, 0, source.clone()));
+        assert_eq!(loader.perf_snapshot().request_queue_full, 1);
+        assert_eq!(loader.perf_snapshot().priority_upgrades, 1);
+        assert_eq!(loader.perf_snapshot().high_full_requests, 0);
+
+        let (retry_sender, _retry_receiver) = bounded(1);
+        loader.high_sender = retry_sender;
+        assert!(loader.request_high(epoch, 0, source));
+        assert_eq!(loader.high_sender.len(), 1);
+        assert_eq!(loader.perf_snapshot().priority_upgrades, 1);
+        assert_eq!(loader.perf_snapshot().high_full_requests, 1);
+
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        let result = wait_for_full_result(&loader, epoch, 0);
+        result.image.expect("upgraded image should decode");
+    }
+
+    #[test]
+    fn test_repeated_high_request_does_not_requeue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("repeat.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .unwrap();
+
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let (processed_sender, _processed_receiver) = unbounded();
+        let loader = PageLoader::new_with_io_gate(gate.clone(), processed_sender);
+        loader.set_perf_enabled(true);
+        let epoch = loader.next_epoch();
+        let source = PageSource::File(path);
+        assert!(loader.request_high(epoch, 0, source.clone()));
+        assert!(loader.request_high(epoch, 0, source.clone()));
+        assert!(loader.request_high(epoch, 0, source));
+        assert_eq!(loader.high_sender.len(), 1);
+        assert_eq!(loader.perf_snapshot().high_full_requests, 1);
+        assert_eq!(loader.perf_snapshot().priority_upgrades, 0);
+
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        let result = wait_for_full_result(&loader, epoch, 0);
+        result.image.expect("image should decode");
+        let snapshot = loader.perf_snapshot();
+        assert_eq!(snapshot.io_full_jobs, 1);
+        assert_eq!(snapshot.decode_full_jobs, 1);
+        assert_eq!(snapshot.full_results, 1);
+        assert!(loader.requests.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -2082,14 +2383,21 @@ mod tests {
         let perf = LoaderPerf::new();
         perf.set_enabled(true);
         let passwords: SharedPasswords = Arc::new(RwLock::new(HashMap::new()));
+        let requests: RequestRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let control = Arc::new(RequestControl::new(
+            LoadPriority::High,
+            1,
+            7,
+            false,
+            PageSource::File(path),
+        ));
+        requests
+            .lock()
+            .unwrap()
+            .insert(control.key, control.clone());
 
         process_io_request(
-            LoadRequest {
-                epoch: 1,
-                page_index: 7,
-                thumbnail: false,
-                source: PageSource::File(path),
-            },
+            LoadRequest { control },
             LoadPriority::High,
             &result_sender,
             &high_decode_sender,
@@ -2100,6 +2408,8 @@ mod tests {
             &pdf_cache,
             &perf,
             &passwords,
+            &requests,
+            &IoWorkerHook::default(),
         );
 
         let result = result_receiver
@@ -2118,6 +2428,7 @@ mod tests {
         assert_eq!(snapshot.file_reads, 1);
         assert!(snapshot.source_bytes_read > 0);
         assert_eq!(snapshot.decode_queue_full, 1);
+        assert!(requests.lock().unwrap().is_empty());
     }
 
     #[test]
