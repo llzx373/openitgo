@@ -335,6 +335,8 @@ dirs_first 逐栏下发，RowsKey 自动失效。
 ### PageLoader / 缓存 / 电子书 / 媒体
 
 - **PageLoader**：后台 IO + decode worker threads + channels；独立 `cover_loader` 负责库封面。
+  RAR 请求路由到单独 IO worker，按 archive+password 保留顺序游标；回退、换包或读错误时重开，
+  raw cache 命中不重开。ZIP/文件/PDF 仍走并行 IO worker。
   **进度条悬停缩略图**：全尺寸解码且 compress=false 时顺产生成 256px 缩略图；悬停时
   `request_page_thumbnail` 高优先级 + 按方向低优先预取 8 页；不再后台生成全书缩略图；
   webp 走 `webp_thumb.rs`，失败回退 image crate。

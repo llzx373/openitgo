@@ -7,6 +7,36 @@ fn write_png_image(dir: &std::path::Path, name: &str, width: u32, height: u32) {
     img.save(dir.join(name)).unwrap();
 }
 
+fn wait_for_full_result(
+    loader: &PageLoader,
+    epoch: u64,
+    page_index: usize,
+) -> openitgo_app::loader::LoadResult {
+    let start = Instant::now();
+    loop {
+        if let Some(result) = loader.try_recv() {
+            if result.epoch == epoch && result.page_index == page_index && !result.thumbnail {
+                return result;
+            }
+        }
+        assert!(start.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn sample_cbr_sources() -> Vec<PageSource> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../openitgo-parser/tests/sample.cbr");
+    let comic = openitgo_parser::parse(&path).unwrap();
+    let sources: Vec<_> = comic.volumes[0]
+        .pages
+        .iter()
+        .map(|page| page.source.clone())
+        .collect();
+    assert_eq!(sources.len(), 2);
+    sources
+}
+
 #[test]
 fn test_loader_concurrent_image_loads() {
     let tmp = tempfile::tempdir().unwrap();
@@ -165,4 +195,75 @@ fn test_loader_zip_thumbnail_and_full_share_one_archive_read() {
     let snapshot = loader.perf_snapshot();
     assert_eq!(snapshot.zip_entry_reads, 1);
     assert_eq!(snapshot.error_results, 0);
+}
+
+#[test]
+fn test_loader_rar_sequential_reads_reuse_archive_and_raw_cache() {
+    let sources = sample_cbr_sources();
+    let loader = PageLoader::new_with_compress(false, 1);
+    loader.set_perf_enabled(true);
+    let epoch = loader.next_epoch();
+
+    assert!(loader.request_high(epoch, 0, sources[0].clone()));
+    let _ = wait_for_full_result(&loader, epoch, 0);
+    assert!(loader.request_high(epoch, 1, sources[1].clone()));
+    let _ = wait_for_full_result(&loader, epoch, 1);
+
+    let snapshot = loader.perf_snapshot();
+    assert_eq!(snapshot.rar_archive_opens, 1);
+    assert_eq!(snapshot.rar_header_skips, 0);
+    assert_eq!(snapshot.rar_entry_reads, 2);
+    assert_eq!(snapshot.raw_cache_misses, 2);
+
+    assert!(loader.request_high(epoch, 0, sources[0].clone()));
+    let _ = wait_for_full_result(&loader, epoch, 0);
+    let snapshot = loader.perf_snapshot();
+    assert_eq!(snapshot.rar_archive_opens, 1);
+    assert_eq!(snapshot.rar_entry_reads, 2);
+    assert_eq!(snapshot.raw_cache_hits, 1);
+}
+
+#[test]
+fn test_loader_rar_backward_read_reopens_and_repositions() {
+    let sources = sample_cbr_sources();
+    let loader = PageLoader::new_with_compress(false, 1);
+    loader.set_perf_enabled(true);
+    let epoch = loader.next_epoch();
+
+    assert!(loader.request_high(epoch, 1, sources[1].clone()));
+    let _ = wait_for_full_result(&loader, epoch, 1);
+    assert!(loader.request_high(epoch, 0, sources[0].clone()));
+    let _ = wait_for_full_result(&loader, epoch, 0);
+
+    let snapshot = loader.perf_snapshot();
+    assert_eq!(snapshot.rar_archive_opens, 2);
+    assert_eq!(snapshot.rar_header_skips, 1);
+    assert_eq!(snapshot.rar_entry_reads, 2);
+}
+
+#[test]
+fn test_loader_rar_wrong_password_does_not_reuse_cursor() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../openitgo-parser/tests/fixtures/encrypted-files-pw123.rar");
+    let comic = openitgo_parser::parse_with_password(&path, Some("pw123")).unwrap();
+    let source = comic.volumes[0].pages[0].source.clone();
+    let loader = PageLoader::new_with_compress(false, 1);
+    loader.set_perf_enabled(true);
+    let passwords = loader.passwords();
+    passwords
+        .write()
+        .unwrap()
+        .insert(path.clone(), "nope".to_string());
+    let epoch = loader.next_epoch();
+
+    assert!(loader.request_high(epoch, 0, source.clone()));
+    assert!(wait_for_full_result(&loader, epoch, 0).image.is_err());
+    assert_eq!(loader.perf_snapshot().rar_archive_opens, 1);
+
+    passwords.write().unwrap().insert(path, "pw123".to_string());
+    assert!(loader.request_high(epoch, 0, source));
+    let _ = wait_for_full_result(&loader, epoch, 0);
+    let snapshot = loader.perf_snapshot();
+    assert_eq!(snapshot.rar_archive_opens, 2);
+    assert_eq!(snapshot.rar_entry_reads, 1);
 }

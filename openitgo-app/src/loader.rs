@@ -164,8 +164,8 @@ impl RawCacheKey {
 ///
 /// Comic archives are often compressed, and the same page is usually read twice
 /// (once for a thumbnail and once for the full image). Caching the decompressed
-/// bytes across all IO workers avoids redundant decompression. This also helps
-/// RAR archives where each read currently re-opens the whole archive.
+/// bytes across all IO workers avoids redundant decompression and lets cached
+/// RAR pages bypass the dedicated worker's sequential archive cursor.
 ///
 /// The LRU order and total byte count share one lock so cache hits can refresh
 /// recency atomically with lookups and evictions.
@@ -327,7 +327,7 @@ pub enum LoadPriority {
     Low,
 }
 
-const LOADER_PERF_EVENT_COUNT: usize = 23;
+const LOADER_PERF_EVENT_COUNT: usize = 25;
 
 #[derive(Clone, Copy)]
 #[repr(usize)]
@@ -349,6 +349,8 @@ enum LoaderPerfEvent {
     FileRead,
     ZipEntryRead,
     RarEntryRead,
+    RarArchiveOpen,
+    RarHeaderSkip,
     RawCacheHit,
     RawCacheMiss,
     RawCacheJoined,
@@ -377,6 +379,8 @@ pub struct LoaderPerfSnapshot {
     pub file_reads: u64,
     pub zip_entry_reads: u64,
     pub rar_entry_reads: u64,
+    pub rar_archive_opens: u64,
+    pub rar_header_skips: u64,
     pub raw_cache_hits: u64,
     pub raw_cache_misses: u64,
     pub raw_cache_joined: u64,
@@ -433,6 +437,8 @@ impl LoaderPerf {
             file_reads: get(LoaderPerfEvent::FileRead),
             zip_entry_reads: get(LoaderPerfEvent::ZipEntryRead),
             rar_entry_reads: get(LoaderPerfEvent::RarEntryRead),
+            rar_archive_opens: get(LoaderPerfEvent::RarArchiveOpen),
+            rar_header_skips: get(LoaderPerfEvent::RarHeaderSkip),
             raw_cache_hits: get(LoaderPerfEvent::RawCacheHit),
             raw_cache_misses: get(LoaderPerfEvent::RawCacheMiss),
             raw_cache_joined: get(LoaderPerfEvent::RawCacheJoined),
@@ -613,6 +619,8 @@ impl IoWorkerHook {
 pub struct PageLoader {
     high_sender: Sender<LoadRequest>,
     low_sender: Sender<LoadRequest>,
+    rar_high_sender: Sender<LoadRequest>,
+    rar_low_sender: Sender<LoadRequest>,
     receiver: Receiver<LoadResult>,
     requests: RequestRegistry,
     epoch: Arc<AtomicU64>,
@@ -666,6 +674,10 @@ impl PageLoader {
         let (high_sender, high_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) =
             bounded(64);
         let (low_sender, low_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) = bounded(64);
+        let (rar_high_sender, rar_high_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) =
+            bounded(64);
+        let (rar_low_sender, rar_low_receiver): (Sender<LoadRequest>, Receiver<LoadRequest>) =
+            bounded(64);
         // Backpressure only blocks background workers; completed high-priority
         // results are never dropped when the UI is temporarily behind.
         let (result_sender, receiver): (Sender<LoadResult>, Receiver<LoadResult>) =
@@ -704,7 +716,7 @@ impl PageLoader {
         let passwords: SharedPasswords = Arc::new(RwLock::new(HashMap::new()));
         let requests: RequestRegistry = Arc::new(Mutex::new(HashMap::new()));
         let io_thread_count = worker_count;
-        let mut io_workers = Vec::with_capacity(io_thread_count);
+        let mut io_workers = Vec::with_capacity(io_thread_count + 1);
         for _ in 0..io_thread_count {
             let high_receiver = high_receiver.clone();
             let low_receiver = low_receiver.clone();
@@ -744,6 +756,7 @@ impl PageLoader {
                             &perf,
                             &passwords,
                             &requests,
+                            None,
                             &io_hook,
                         );
                     }
@@ -763,6 +776,7 @@ impl PageLoader {
                                     &perf,
                                     &passwords,
                                     &requests,
+                                    None,
                                     &io_hook,
                                 );
                             } else {
@@ -787,6 +801,7 @@ impl PageLoader {
                                     &perf,
                                     &passwords,
                                     &requests,
+                                    None,
                                     &io_hook,
                                 );
                             } else {
@@ -801,8 +816,97 @@ impl PageLoader {
             }));
         }
 
+        let result_sender_for_io = result_sender.clone();
+        let high_decode_sender_for_rar = high_decode_sender.clone();
+        let low_thumb_decode_sender_for_rar = low_thumb_decode_sender.clone();
+        let low_full_decode_sender_for_rar = low_full_decode_sender.clone();
+        let raw_cache_for_rar = raw_cache.clone();
+        let pdf_cache_for_rar = pdf_cache.clone();
+        let passwords_for_rar = passwords.clone();
+        let perf_for_rar = perf.clone();
+        let requests_for_rar = requests.clone();
+        io_workers.push(thread::spawn(move || {
+            let mut zip_cache = ZipCache::new();
+            let mut rar_cursor = RarCursor::new();
+            let mut high_disconnected = false;
+            let mut low_disconnected = false;
+            loop {
+                io_hook.wait();
+                while let Ok(req) = rar_high_receiver.try_recv() {
+                    process_io_request(
+                        req,
+                        LoadPriority::High,
+                        &result_sender_for_io,
+                        &high_decode_sender_for_rar,
+                        &low_thumb_decode_sender_for_rar,
+                        &low_full_decode_sender_for_rar,
+                        &mut zip_cache,
+                        &raw_cache_for_rar,
+                        &pdf_cache_for_rar,
+                        &perf_for_rar,
+                        &passwords_for_rar,
+                        &requests_for_rar,
+                        Some(&mut rar_cursor),
+                        &io_hook,
+                    );
+                }
+                select! {
+                    recv(rar_high_receiver) -> req => {
+                        if let Ok(req) = req {
+                            process_io_request(
+                                req,
+                                LoadPriority::High,
+                                &result_sender_for_io,
+                                &high_decode_sender_for_rar,
+                                &low_thumb_decode_sender_for_rar,
+                                &low_full_decode_sender_for_rar,
+                                &mut zip_cache,
+                                &raw_cache_for_rar,
+                                &pdf_cache_for_rar,
+                                &perf_for_rar,
+                                &passwords_for_rar,
+                                &requests_for_rar,
+                                Some(&mut rar_cursor),
+                                &io_hook,
+                            );
+                        } else {
+                            high_disconnected = true;
+                            if low_disconnected {
+                                break;
+                            }
+                        }
+                    }
+                    recv(rar_low_receiver) -> req => {
+                        if let Ok(req) = req {
+                            process_io_request(
+                                req,
+                                LoadPriority::Low,
+                                &result_sender_for_io,
+                                &high_decode_sender_for_rar,
+                                &low_thumb_decode_sender_for_rar,
+                                &low_full_decode_sender_for_rar,
+                                &mut zip_cache,
+                                &raw_cache_for_rar,
+                                &pdf_cache_for_rar,
+                                &perf_for_rar,
+                                &passwords_for_rar,
+                                &requests_for_rar,
+                                Some(&mut rar_cursor),
+                                &io_hook,
+                            );
+                        } else {
+                            low_disconnected = true;
+                            if high_disconnected {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+
         timing::log(&format!(
-            "PageLoader started with {} IO threads and {} decode workers (compress={})",
+            "PageLoader started with {} IO threads + 1 RAR IO thread and {} decode workers (compress={})",
             io_thread_count,
             worker_count,
             compress.load(Ordering::Relaxed)
@@ -956,6 +1060,8 @@ impl PageLoader {
         Self {
             high_sender,
             low_sender,
+            rar_high_sender,
+            rar_low_sender,
             receiver,
             requests,
             epoch: Arc::new(AtomicU64::new(1)),
@@ -1028,9 +1134,17 @@ impl PageLoader {
         self.perf.record(event);
     }
 
+    fn io_sender(&self, priority: LoadPriority, source: &PageSource) -> &Sender<LoadRequest> {
+        match (priority, matches!(source, PageSource::RarEntry { .. })) {
+            (LoadPriority::High, true) => &self.rar_high_sender,
+            (LoadPriority::Low, true) => &self.rar_low_sender,
+            (LoadPriority::High, false) => &self.high_sender,
+            (LoadPriority::Low, false) => &self.low_sender,
+        }
+    }
+
     fn send_request(
         &self,
-        sender: &Sender<LoadRequest>,
         priority: LoadPriority,
         epoch: Epoch,
         page_index: usize,
@@ -1055,7 +1169,7 @@ impl PageLoader {
                     && !control.completed.load(Ordering::Acquire)
                 {
                     let sent = self
-                        .high_sender
+                        .io_sender(LoadPriority::High, &control.source)
                         .try_send(LoadRequest {
                             control: control.clone(),
                         })
@@ -1072,7 +1186,10 @@ impl PageLoader {
             priority, epoch, page_index, thumbnail, source,
         ));
         requests.insert(key, control.clone());
-        let sent = sender.try_send(LoadRequest { control }).is_ok();
+        let sent = self
+            .io_sender(priority, &control.source)
+            .try_send(LoadRequest { control })
+            .is_ok();
         self.record_request(priority, thumbnail, sent);
         if !sent {
             requests.remove(&key);
@@ -1081,37 +1198,16 @@ impl PageLoader {
     }
 
     pub fn request_high(&self, epoch: Epoch, page_index: usize, source: PageSource) -> bool {
-        self.send_request(
-            &self.high_sender,
-            LoadPriority::High,
-            epoch,
-            page_index,
-            false,
-            source,
-        )
+        self.send_request(LoadPriority::High, epoch, page_index, false, source)
     }
 
     pub fn request_low(&self, epoch: Epoch, page_index: usize, source: PageSource) -> bool {
-        self.send_request(
-            &self.low_sender,
-            LoadPriority::Low,
-            epoch,
-            page_index,
-            false,
-            source,
-        )
+        self.send_request(LoadPriority::Low, epoch, page_index, false, source)
     }
 
     /// Request a low-priority thumbnail decode in the background.
     pub fn request_thumbnail(&self, epoch: Epoch, page_index: usize, source: PageSource) -> bool {
-        self.send_request(
-            &self.low_sender,
-            LoadPriority::Low,
-            epoch,
-            page_index,
-            true,
-            source,
-        )
+        self.send_request(LoadPriority::Low, epoch, page_index, true, source)
     }
 
     /// Request a high-priority thumbnail decode (used when the visible page
@@ -1122,14 +1218,7 @@ impl PageLoader {
         page_index: usize,
         source: PageSource,
     ) -> bool {
-        self.send_request(
-            &self.high_sender,
-            LoadPriority::High,
-            epoch,
-            page_index,
-            true,
-            source,
-        )
+        self.send_request(LoadPriority::High, epoch, page_index, true, source)
     }
 
     pub fn try_recv(&self) -> Option<LoadResult> {
@@ -1163,6 +1252,7 @@ fn process_io_request(
     perf: &LoaderPerf,
     passwords: &SharedPasswords,
     requests: &RequestRegistry,
+    rar_cursor: Option<&mut RarCursor>,
     io_hook: &IoWorkerHook,
 ) {
     let claimed = req.control.claim_io();
@@ -1223,7 +1313,14 @@ fn process_io_request(
                 }
                 _ => None,
             };
-            match read_page_bytes(source, zip_cache, raw_cache, password.as_deref(), perf) {
+            match read_page_bytes(
+                source,
+                zip_cache,
+                raw_cache,
+                password.as_deref(),
+                perf,
+                rar_cursor,
+            ) {
                 Ok((bytes, format_hint)) => {
                     if req.control.is_cancelled() {
                         finish_request(requests, &req.control);
@@ -1380,6 +1477,7 @@ fn read_page_bytes(
     raw_cache: &SharedRawCache,
     password: Option<&str>,
     perf: &LoaderPerf,
+    rar_cursor: Option<&mut RarCursor>,
 ) -> Result<(Arc<Vec<u8>>, Option<String>), String> {
     match source {
         PageSource::PdfPage { .. } => Err("PDF should be rendered on IO thread".to_string()),
@@ -1414,53 +1512,127 @@ fn read_page_bytes(
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(|s| s.to_lowercase());
-            let bytes = read_rar_entry(raw_cache, archive, name, *header_position, password)?;
+            let cursor = rar_cursor
+                .ok_or_else(|| "RAR entry should be read on the RAR IO thread".to_string())?;
+            let bytes =
+                cursor.read_entry(raw_cache, archive, name, *header_position, password, perf)?;
             Ok((bytes, hint))
         }
     }
 }
 
-fn read_rar_entry(
-    raw_cache: &SharedRawCache,
-    archive_path: &Path,
-    name: &str,
-    header_position: usize,
-    password: Option<&str>,
-) -> Result<Arc<Vec<u8>>, String> {
-    let key = RawCacheKey::rar(archive_path, name);
-    raw_cache.get_or_load(key, || {
-        let builder = match password {
-            Some(pw) => unrar::Archive::with_password(archive_path, pw),
-            None => unrar::Archive::new(archive_path),
-        };
-        let mut archive = builder
-            .open_for_processing()
-            .map_err(rar_password_error_message)?;
+#[derive(PartialEq, Eq)]
+struct RarCursorKey {
+    archive_path: PathBuf,
+    password: Option<String>,
+}
 
-        // Skip headers before the target position. For archives where pages are
-        // ordered by filename, this turns a linear scan into a small constant
-        // overhead once the parser has emitted header_position.
-        let mut current_position: usize = 0;
-        loop {
-            let maybe_entry = archive.read_header().map_err(rar_password_error_message)?;
-            let entry = match maybe_entry {
-                Some(e) => e,
-                None => break,
-            };
-            if current_position >= header_position {
-                if entry.entry().filename.to_string_lossy() == name {
-                    let (bytes, _archive) = entry.read().map_err(rar_password_error_message)?;
-                    return Ok(bytes);
-                }
-                archive = entry.skip().map_err(rar_password_error_message)?;
-            } else {
-                archive = entry.skip().map_err(rar_password_error_message)?;
-                current_position += 1;
-            }
+struct RarCursor {
+    key: Option<RarCursorKey>,
+    archive: Option<unrar::OpenArchive<unrar::Process, unrar::CursorBeforeHeader>>,
+    next_position: usize,
+    exhausted: bool,
+}
+
+impl RarCursor {
+    fn new() -> Self {
+        Self {
+            key: None,
+            archive: None,
+            next_position: 0,
+            exhausted: false,
         }
+    }
 
-        Err(format!("rar entry not found: {name}"))
-    })
+    fn reset(&mut self) {
+        self.key = None;
+        self.archive = None;
+        self.next_position = 0;
+        self.exhausted = false;
+    }
+
+    fn read_entry(
+        &mut self,
+        raw_cache: &SharedRawCache,
+        archive_path: &Path,
+        name: &str,
+        header_position: usize,
+        password: Option<&str>,
+        perf: &LoaderPerf,
+    ) -> Result<Arc<Vec<u8>>, String> {
+        let key = RawCacheKey::rar(archive_path, name);
+        raw_cache.get_or_load(key, || {
+            let key = RarCursorKey {
+                archive_path: archive_path.to_path_buf(),
+                password: password.map(str::to_owned),
+            };
+            if self.key.as_ref() != Some(&key) {
+                self.reset();
+                self.key = Some(key);
+            }
+            if self.archive.is_none() || self.exhausted || header_position < self.next_position {
+                self.archive = None;
+                self.next_position = 0;
+                self.exhausted = false;
+                perf.record(LoaderPerfEvent::RarArchiveOpen);
+                let builder = match password {
+                    Some(pw) => unrar::Archive::with_password(archive_path, pw),
+                    None => unrar::Archive::new(archive_path),
+                };
+                match builder.open_for_processing() {
+                    Ok(archive) => self.archive = Some(archive),
+                    Err(e) => {
+                        self.reset();
+                        return Err(rar_password_error_message(e));
+                    }
+                }
+            }
+
+            loop {
+                let Some(archive) = self.archive.take() else {
+                    self.reset();
+                    return Err("RAR cursor is not open".to_string());
+                };
+                let entry = match archive.read_header() {
+                    Ok(Some(entry)) => entry,
+                    Ok(None) => {
+                        self.exhausted = true;
+                        return Err(format!("rar entry not found: {name}"));
+                    }
+                    Err(e) => {
+                        self.reset();
+                        return Err(rar_password_error_message(e));
+                    }
+                };
+                if self.next_position >= header_position
+                    && entry.entry().filename.to_string_lossy() == name
+                {
+                    return match entry.read() {
+                        Ok((bytes, archive)) => {
+                            self.archive = Some(archive);
+                            self.next_position += 1;
+                            Ok(bytes)
+                        }
+                        Err(e) => {
+                            self.reset();
+                            Err(rar_password_error_message(e))
+                        }
+                    };
+                }
+                match entry.skip() {
+                    Ok(archive) => {
+                        self.archive = Some(archive);
+                        self.next_position += 1;
+                        perf.record(LoaderPerfEvent::RarHeaderSkip);
+                    }
+                    Err(e) => {
+                        self.reset();
+                        return Err(rar_password_error_message(e));
+                    }
+                }
+            }
+        })
+    }
 }
 
 fn rar_password_error_message(e: unrar::error::UnrarError) -> String {
@@ -2119,6 +2291,50 @@ mod tests {
     }
 
     #[test]
+    fn test_rar_upgrade_uses_dedicated_high_queue_and_claims_once() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../openitgo-parser/tests/sample.cbr");
+        let source = PageSource::RarEntry {
+            archive: path,
+            name: "01.png".to_string(),
+            header_position: 0,
+        };
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let (processed_sender, processed_receiver) = unbounded();
+        let loader = PageLoader::new_with_io_gate(gate.clone(), processed_sender);
+        loader.set_perf_enabled(true);
+        let epoch = loader.next_epoch();
+
+        assert!(loader.request_low(epoch, 0, source.clone()));
+        assert!(loader.request_high(epoch, 0, source));
+        assert_eq!(loader.low_sender.len(), 0);
+        assert_eq!(loader.high_sender.len(), 0);
+        assert_eq!(loader.rar_low_sender.len(), 1);
+        assert_eq!(loader.rar_high_sender.len(), 1);
+
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        let _ = wait_for_full_result(&loader, epoch, 0);
+        loop {
+            if processed_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("RAR worker should process the queued low request")
+                == LoadPriority::Low
+            {
+                break;
+            }
+        }
+
+        let snapshot = loader.perf_snapshot();
+        assert_eq!(snapshot.priority_upgrades, 1);
+        assert_eq!(snapshot.io_full_jobs, 1);
+        assert_eq!(snapshot.rar_archive_opens, 1);
+        assert_eq!(snapshot.rar_entry_reads, 1);
+        assert_eq!(snapshot.full_results, 1);
+        assert!(loader.try_recv().is_none());
+    }
+
+    #[test]
     fn test_cancel_pending_skips_queued_io() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("cancel.png");
@@ -2543,6 +2759,7 @@ mod tests {
             &perf,
             &passwords,
             &requests,
+            None,
             &IoWorkerHook::default(),
         );
 
