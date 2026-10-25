@@ -164,10 +164,8 @@ impl RawCacheKey {
 /// bytes across all IO workers avoids redundant decompression. This also helps
 /// RAR archives where each read currently re-opens the whole archive.
 ///
-/// We use a std::sync::RwLock rather than DashMap because the LRU order and the
-/// total byte count must remain globally consistent. Reads only take a read lock,
-/// so multiple IO workers can look up entries concurrently; only inserts take a
-/// write lock.
+/// The LRU order and total byte count share one lock so cache hits can refresh
+/// recency atomically with lookups and evictions.
 #[derive(Clone)]
 struct SharedRawCache {
     inner: Arc<RwLock<SharedRawCacheInner>>,
@@ -200,7 +198,18 @@ impl SharedRawCache {
     }
 
     fn get(&self, key: &RawCacheKey) -> Option<Arc<Vec<u8>>> {
-        let result = self.inner.read().unwrap().map.get(key).cloned();
+        let result = {
+            let mut inner = self.inner.write().unwrap();
+            let result = inner.map.get(key).cloned();
+            if result.is_some() {
+                if let Some(position) = inner.order.iter().position(|entry| entry == key) {
+                    if let Some(entry) = inner.order.remove(position) {
+                        inner.order.push_back(entry);
+                    }
+                }
+            }
+            result
+        };
         if let Some(perf) = &self.perf {
             perf.record(if result.is_some() {
                 LoaderPerfEvent::RawCacheHit
@@ -2246,6 +2255,23 @@ mod tests {
         assert!(cache.get(&key_a).is_none());
         assert_eq!(inflight.as_slice(), vec![1u8; 100].as_slice());
         assert_eq!(Arc::strong_count(&inflight), 1);
+    }
+
+    #[test]
+    fn shared_raw_cache_get_refreshes_lru_order() {
+        let cache = SharedRawCache::new(12);
+        let key_a = RawCacheKey::zip(std::path::Path::new("/a.cbz"), 0);
+        let key_b = RawCacheKey::zip(std::path::Path::new("/b.cbz"), 0);
+        let key_c = RawCacheKey::zip(std::path::Path::new("/c.cbz"), 0);
+        cache.insert(key_a.clone(), vec![1u8; 6]);
+        cache.insert(key_b.clone(), vec![2u8; 6]);
+        assert!(cache.get(&key_a).is_some());
+        cache.insert(key_c.clone(), vec![3u8; 6]);
+
+        assert!(cache.get(&key_a).is_some());
+        assert!(cache.get(&key_b).is_none());
+        assert!(cache.get(&key_c).is_some());
+        assert_eq!(cache.bytes_used(), 12);
     }
 
     #[test]
