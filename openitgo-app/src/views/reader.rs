@@ -732,9 +732,14 @@ impl ReaderView {
                 }
             }
 
-            // Don't preload full-resolution pages until the current page is ready,
-            // so preloads cannot delay the visible spread.
-            if !reader.cache.contains_full(current) {
+            // Don't preload full-resolution pages until every page in the visible
+            // spread is ready, so preloads cannot delay either visible page.
+            let (left, right) = reader.spread_pages();
+            if left
+                .into_iter()
+                .chain(right)
+                .any(|idx| !reader.cache.contains_full(idx))
+            {
                 return;
             }
 
@@ -763,8 +768,9 @@ impl ReaderView {
             // Direction-aware asymmetric preloading: spend decode resources on the
             // side the user is most likely to turn to next first. For Ltr that is
             // forward (current + offset); for Rtl it is backward (current - offset).
+            let mut remaining_budget = free_budget;
             let mut try_preload = |idx: usize| -> bool {
-                if idx >= total || idx == current {
+                if idx >= total || idx == current || remaining_budget < avg_full {
                     return false;
                 }
                 if reader.cache.contains_full(idx) || reader.pending_pages.contains_key(&idx) {
@@ -774,6 +780,7 @@ impl ReaderView {
                     return false;
                 };
                 if loader.request_low(reader.current_epoch, idx, source) {
+                    remaining_budget -= avg_full;
                     reader.pending_pages.insert(idx, Instant::now());
                     true
                 } else {
@@ -1583,6 +1590,7 @@ fn render_loading_placeholder(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Resp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::loader::LoadedImage;
     use openitgo_core::models::{Comic, Page, PageSource, Volume};
     use openitgo_core::state::ReadingState;
     use std::path::PathBuf;
@@ -1628,6 +1636,61 @@ mod tests {
             wide_page_threshold: 1.4,
             enable_page_animation: true,
         }
+    }
+
+    fn insert_test_full(reader: &mut OpenReader, page_index: usize) {
+        reader.cache.insert_full(
+            page_index,
+            LoadedImage::Color(egui::ColorImage::filled([1, 1], egui::Color32::RED)),
+            [1000, 2000],
+            usize::MAX,
+            &HashSet::new(),
+        );
+    }
+
+    #[test]
+    fn test_preload_waits_for_complete_visible_spread() {
+        let loader = PageLoader::new();
+        loader.set_perf_enabled(true);
+        let mut reader = dummy_reader();
+        reader.current_epoch = loader.next_epoch();
+        reader.state.set_double_page(true, 10);
+        reader.state.current_page = 1;
+        reader.last_page_turn = Instant::now() - Duration::from_secs(1);
+        insert_test_full(&mut reader, 1);
+        reader.cache.insert_dimensions(2, [1000, 2000]);
+        let mut view = ReaderView { open: Some(reader) };
+
+        view.request_preloads(&loader, 96, 32);
+        assert_eq!(loader.perf_snapshot().low_full_requests, 0);
+
+        insert_test_full(view.open.as_mut().unwrap(), 2);
+        view.request_preloads(&loader, 96, 32);
+        assert!(loader.perf_snapshot().low_full_requests > 0);
+    }
+
+    #[test]
+    fn test_preload_budget_is_shared_by_both_directions() {
+        let loader = PageLoader::new();
+        loader.set_perf_enabled(true);
+        let mut reader = dummy_reader();
+        reader.current_epoch = loader.next_epoch();
+        reader.state.set_double_page(false, 10);
+        reader.state.current_page = 0;
+        reader.last_page_turn = Instant::now() - Duration::from_secs(1);
+        reader.cache.insert_full(
+            0,
+            LoadedImage::Color(egui::ColorImage::filled([2048, 3072], egui::Color32::RED)),
+            [2048, 3072],
+            usize::MAX,
+            &HashSet::new(),
+        );
+        let mut view = ReaderView { open: Some(reader) };
+
+        view.request_preloads(&loader, 96, 32);
+
+        assert_eq!(loader.perf_snapshot().low_full_requests, 3);
+        assert_eq!(view.open.as_ref().unwrap().pending_pages.len(), 3);
     }
 
     #[test]
