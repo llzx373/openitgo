@@ -596,6 +596,13 @@ struct DecodeJob {
     format_hint: Option<String>,
 }
 
+struct PrewarmRequest {
+    epoch: Epoch,
+    sources: Vec<PageSource>,
+}
+
+pub type PrewarmResult = (Epoch, Result<(), String>);
+
 #[derive(Default)]
 struct IoWorkerHook {
     gate: Option<Arc<(Mutex<bool>, Condvar)>>,
@@ -632,6 +639,10 @@ pub struct PageLoader {
     perf: Arc<LoaderPerf>,
     raw_cache: SharedRawCache,
     pdf_cache: PdfDocumentCache,
+    prewarm_sender: Sender<PrewarmRequest>,
+    prewarm_result_receiver: Receiver<PrewarmResult>,
+    prewarm_epoch: Arc<AtomicU64>,
+    _prewarm_worker: thread::JoinHandle<()>,
     _io_workers: Vec<thread::JoinHandle<()>>,
     _decode_workers: Vec<thread::JoinHandle<()>>,
 }
@@ -687,6 +698,13 @@ impl PageLoader {
         // results are never dropped when the UI is temporarily behind.
         let (result_sender, receiver): (Sender<LoadResult>, Receiver<LoadResult>) =
             bounded(RESULT_QUEUE_CAPACITY);
+        let (prewarm_sender, prewarm_receiver): (Sender<PrewarmRequest>, Receiver<PrewarmRequest>) =
+            bounded(4);
+        let (prewarm_result_sender, prewarm_result_receiver): (
+            Sender<PrewarmResult>,
+            Receiver<PrewarmResult>,
+        ) = bounded(1);
+        let prewarm_epoch = Arc::new(AtomicU64::new(1));
         let (high_decode_sender, high_decode_receiver): (Sender<DecodeJob>, Receiver<DecodeJob>) =
             bounded(64);
         // Separate low-priority queues so heavy full-image decodes cannot starve
@@ -910,6 +928,50 @@ impl PageLoader {
             }
         }));
 
+        let prewarm_worker = {
+            let raw_cache = raw_cache.clone();
+            let passwords = passwords.clone();
+            let perf = perf.clone();
+            let prewarm_epoch = prewarm_epoch.clone();
+            thread::spawn(move || {
+                let mut zip_cache = ZipCache::new();
+                let mut rar_cursor = RarCursor::new();
+                while let Ok(request) = prewarm_receiver.recv() {
+                    let mut result = Ok(());
+                    for source in request.sources {
+                        if request.epoch != prewarm_epoch.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let archive = match &source {
+                            PageSource::ZipEntry { archive, .. }
+                            | PageSource::RarEntry { archive, .. } => archive,
+                            _ => {
+                                result = Err("prewarm only supports ZIP/RAR".to_string());
+                                break;
+                            }
+                        };
+                        let password = {
+                            let map = passwords.read().unwrap();
+                            let key = archive.canonicalize().unwrap_or_else(|_| archive.clone());
+                            map.get(&key).cloned().or_else(|| map.get(archive).cloned())
+                        };
+                        if let Err(err) = read_page_bytes(
+                            &source,
+                            &mut zip_cache,
+                            &raw_cache,
+                            password.as_deref(),
+                            &perf,
+                            Some(&mut rar_cursor),
+                        ) {
+                            result = Err(err);
+                            break;
+                        }
+                    }
+                    let _ = prewarm_result_sender.send((request.epoch, result));
+                }
+            })
+        };
+
         timing::log(&format!(
             "PageLoader started with {} IO threads + 1 RAR IO thread and {} decode workers (compress={})",
             io_thread_count,
@@ -1075,6 +1137,10 @@ impl PageLoader {
             perf,
             raw_cache,
             pdf_cache,
+            prewarm_sender,
+            prewarm_result_receiver,
+            prewarm_epoch,
+            _prewarm_worker: prewarm_worker,
             _io_workers: io_workers,
             _decode_workers: decode_workers,
         }
@@ -1120,7 +1186,32 @@ impl PageLoader {
         self.epoch.fetch_add(1, Ordering::SeqCst)
     }
 
+    #[allow(dead_code)]
+    pub fn prewarm(&self, sources: Vec<PageSource>) -> Option<Epoch> {
+        if sources.is_empty()
+            || !sources.iter().all(|source| {
+                matches!(
+                    source,
+                    PageSource::ZipEntry { .. } | PageSource::RarEntry { .. }
+                )
+            })
+        {
+            return None;
+        }
+        let epoch = self.prewarm_epoch.fetch_add(1, Ordering::SeqCst);
+        self.prewarm_sender
+            .try_send(PrewarmRequest { epoch, sources })
+            .is_ok()
+            .then_some(epoch)
+    }
+
+    #[allow(dead_code)]
+    pub fn try_recv_prewarm(&self) -> Option<PrewarmResult> {
+        self.prewarm_result_receiver.try_recv().ok()
+    }
+
     pub fn cancel_pending(&self) {
+        self.prewarm_epoch.fetch_add(1, Ordering::SeqCst);
         let mut requests = self.requests.lock().unwrap();
         let count = requests.len() as u64;
         for control in requests.values() {

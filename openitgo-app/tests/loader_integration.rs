@@ -198,6 +198,59 @@ fn test_loader_zip_thumbnail_and_full_share_one_archive_read() {
 }
 
 #[test]
+fn test_loader_prewarm_reuses_raw_bytes_without_decoding() {
+    use std::io::Write;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("prewarm.cbz");
+    {
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("page.png", options).unwrap();
+        let image = image::RgbaImage::from_pixel(64, 64, image::Rgba([0, 128, 255, 255]));
+        let mut bytes = Vec::new();
+        image
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        zip.write_all(&bytes).unwrap();
+        zip.finish().unwrap();
+    }
+
+    let loader = PageLoader::new_with_compress(false, 1);
+    loader.set_perf_enabled(true);
+    let source = PageSource::ZipEntry {
+        archive: path,
+        name: "page.png".to_string(),
+        index: 0,
+    };
+    let prewarm_epoch = loader.prewarm(vec![source.clone()]).unwrap();
+    let start = Instant::now();
+    loop {
+        if let Some((epoch, result)) = loader.try_recv_prewarm() {
+            assert_eq!(epoch, prewarm_epoch);
+            result.expect("prewarm should read source bytes");
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(loader.perf_snapshot().decode_full_jobs, 0);
+
+    let epoch = loader.next_epoch();
+    assert!(loader.request_high(epoch, 0, source));
+    let result = wait_for_full_result(&loader, epoch, 0);
+    result.image.expect("prewarmed image should decode");
+    let snapshot = loader.perf_snapshot();
+    assert_eq!(snapshot.zip_entry_reads, 1);
+    assert_eq!(snapshot.decode_full_jobs, 1);
+}
+
+#[test]
 fn test_loader_rar_sequential_reads_reuse_archive_and_raw_cache() {
     let sources = sample_cbr_sources();
     let loader = PageLoader::new_with_compress(false, 1);
