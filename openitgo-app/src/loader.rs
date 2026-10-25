@@ -1819,18 +1819,7 @@ fn load_pdf_cached(document: &Path, pdf_cache: &PdfDocumentCache) -> Result<Arc<
     Ok(data)
 }
 
-fn render_size_for_pdf_page(
-    data: Arc<Vec<u8>>,
-    page_number: usize,
-    max_width: f32,
-) -> Result<[u32; 2], String> {
-    let pdf = Pdf::new(Arc::clone(&data)).map_err(|e| format!("failed to parse PDF: {e:?}"))?;
-    let page = pdf
-        .pages()
-        .get(page_number)
-        .ok_or_else(|| format!("page index {page_number} out of bounds"))?;
-
-    let (page_width, page_height) = page.render_dimensions();
+fn render_size_for_pdf_page(page_width: f32, page_height: f32, max_width: f32) -> [u32; 2] {
     let dpi_scale = PDF_RENDER_DPI / PDF_BASE_DPI;
     let scale = if page_width > 0.0 {
         (max_width / page_width).min(dpi_scale)
@@ -1838,10 +1827,10 @@ fn render_size_for_pdf_page(
         1.0
     };
 
-    Ok([
+    [
         (page_width * scale).round() as u32,
         (page_height * scale).round() as u32,
-    ])
+    ]
 }
 
 fn render_pdf_page_cached(
@@ -1856,14 +1845,14 @@ fn render_pdf_page_cached(
     } else {
         PDF_MAX_RENDER_WIDTH
     };
-    let full_size = render_size_for_pdf_page(Arc::clone(&data), page_number, PDF_MAX_RENDER_WIDTH)?;
-    let pdf = Pdf::new(Arc::clone(&data)).map_err(|e| format!("failed to parse PDF: {e:?}"))?;
+    let pdf = Pdf::new(data).map_err(|e| format!("failed to parse PDF: {e:?}"))?;
     let page = pdf
         .pages()
         .get(page_number)
         .ok_or_else(|| format!("page index {page_number} out of bounds"))?;
 
-    let (page_width, _page_height) = page.render_dimensions();
+    let (page_width, page_height) = page.render_dimensions();
+    let full_size = render_size_for_pdf_page(page_width, page_height, PDF_MAX_RENDER_WIDTH);
     let dpi_scale = PDF_RENDER_DPI / PDF_BASE_DPI;
     let scale = if page_width > 0.0 {
         (max_width / page_width).min(dpi_scale)
@@ -2226,6 +2215,13 @@ mod tests {
         assert_eq!(snapshot.decode_full_jobs, 1);
         assert_eq!(snapshot.full_results, 1);
         assert!(loader.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_render_size_for_pdf_page_uses_dpi_limit_and_zero_guard() {
+        assert_eq!(render_size_for_pdf_page(100.0, 50.0, 200.0), [200, 100]);
+        assert_eq!(render_size_for_pdf_page(10.0, 10.0, 2048.0), [21, 21]);
+        assert_eq!(render_size_for_pdf_page(0.0, 0.0, 2048.0), [0, 0]);
     }
 
     #[test]
