@@ -89,7 +89,6 @@ impl PdfDocumentCache {
         inner.map.insert(path, data);
     }
 
-    #[cfg(test)]
     fn bytes_used(&self) -> usize {
         self.inner.lock().unwrap().bytes
     }
@@ -306,7 +305,6 @@ impl SharedRawCache {
         data
     }
 
-    #[cfg(test)]
     fn bytes_used(&self) -> usize {
         self.inner.read().unwrap().bytes
     }
@@ -387,6 +385,10 @@ pub struct LoaderPerfSnapshot {
     pub source_bytes_read: u64,
     pub priority_upgrades: u64,
     pub cancelled_requests: u64,
+    pub raw_cache_bytes: u64,
+    pub pdf_cache_bytes: u64,
+    pub pending_requests: u64,
+    pub result_queue_len: u64,
 }
 
 struct LoaderPerf {
@@ -445,6 +447,7 @@ impl LoaderPerf {
             source_bytes_read: get(LoaderPerfEvent::SourceBytesRead),
             priority_upgrades: get(LoaderPerfEvent::PriorityUpgrade),
             cancelled_requests: get(LoaderPerfEvent::CancelledRequest),
+            ..LoaderPerfSnapshot::default()
         }
     }
 }
@@ -627,6 +630,8 @@ pub struct PageLoader {
     compress: Arc<AtomicBool>,
     passwords: SharedPasswords,
     perf: Arc<LoaderPerf>,
+    raw_cache: SharedRawCache,
+    pdf_cache: PdfDocumentCache,
     _io_workers: Vec<thread::JoinHandle<()>>,
     _decode_workers: Vec<thread::JoinHandle<()>>,
 }
@@ -1068,6 +1073,8 @@ impl PageLoader {
             compress,
             passwords,
             perf,
+            raw_cache,
+            pdf_cache,
             _io_workers: io_workers,
             _decode_workers: decode_workers,
         }
@@ -1101,7 +1108,12 @@ impl PageLoader {
 
     #[allow(dead_code)]
     pub fn perf_snapshot(&self) -> LoaderPerfSnapshot {
-        self.perf.snapshot()
+        let mut snapshot = self.perf.snapshot();
+        snapshot.raw_cache_bytes = self.raw_cache.bytes_used() as u64;
+        snapshot.pdf_cache_bytes = self.pdf_cache.bytes_used() as u64;
+        snapshot.pending_requests = self.requests.lock().unwrap().len() as u64;
+        snapshot.result_queue_len = self.receiver.len() as u64;
+        snapshot
     }
 
     pub fn next_epoch(&self) -> Epoch {
@@ -2187,6 +2199,9 @@ mod tests {
         assert_eq!(snapshot.decode_full_jobs, 1);
         assert_eq!(snapshot.file_reads, 1);
         assert!(snapshot.source_bytes_read > 0);
+        assert_eq!(snapshot.raw_cache_bytes, 0);
+        assert_eq!(snapshot.pending_requests, 0);
+        assert_eq!(snapshot.result_queue_len, 0);
         assert_eq!(snapshot.request_queue_full, 0);
         assert_eq!(snapshot.dropped_results, 0);
         assert_eq!(snapshot.error_results, 0);
@@ -2453,6 +2468,29 @@ mod tests {
             }
             _ => panic!("PDF should produce a Color image"),
         }
+    }
+
+    #[test]
+    fn test_loader_perf_reports_pdf_cache_bytes() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../openitgo-parser/tests/sample.pdf");
+        let loader = PageLoader::new();
+        loader.set_perf_enabled(true);
+        let epoch = loader.next_epoch();
+        assert!(loader.request_high(
+            epoch,
+            0,
+            PageSource::PdfPage {
+                document: path,
+                page_number: 0,
+            }
+        ));
+        let result = wait_for_full_result(&loader, epoch, 0);
+        result.image.expect("PDF should render");
+        let snapshot = loader.perf_snapshot();
+        assert!(snapshot.pdf_cache_bytes > 0);
+        assert_eq!(snapshot.pending_requests, 0);
+        assert_eq!(snapshot.result_queue_len, 0);
     }
 
     #[test]
@@ -2929,6 +2967,7 @@ mod tests {
         assert_eq!(snapshot.source_bytes_read, 8);
         assert_eq!(snapshot.raw_cache_misses, 1);
         assert_eq!(snapshot.raw_cache_hits, 1);
+        assert_eq!(raw_cache.bytes_used(), 8);
     }
 
     #[test]
