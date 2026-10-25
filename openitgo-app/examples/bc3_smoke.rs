@@ -1,7 +1,7 @@
 use eframe::wgpu;
-use openitgo_app::app::{ReaderApp, View};
-use openitgo_app::opener::AsyncOpener;
-use openitgo_core::models::Comic;
+use openitgo_app::cache::PageCache;
+use openitgo_app::loader::{LoadedImage, PageLoader};
+use openitgo_core::models::PageSource;
 use std::time::{Duration, Instant};
 
 fn main() -> eframe::Result<()> {
@@ -12,13 +12,22 @@ fn main() -> eframe::Result<()> {
         .save(&path)
         .expect("write BC3 fixture");
 
-    let mut app = ReaderApp::default();
-    app.settings.compress_images = true;
-    app.page_loader = openitgo_app::loader::PageLoader::new_with_compress(true, 1);
-    app.opener = Some(AsyncOpener::<Comic>::open(tmp.path().to_path_buf(), |p| {
-        openitgo_parser::parse(p).map_err(|e| e.to_string())
-    }));
-    app.current_view = View::Loading(path);
+    let loader = PageLoader::new_with_compress(true, 1);
+    let epoch = loader.next_epoch();
+    assert!(loader.request_low(epoch, 0, PageSource::File(path)));
+    let start = Instant::now();
+    let image = loop {
+        if let Some(result) = loader.try_recv() {
+            if !result.thumbnail {
+                break result.image.expect("low-priority BC3 decode");
+            }
+        }
+        if start.elapsed() > Duration::from_secs(30) {
+            panic!("timed out waiting for low-priority BC3 image");
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert!(matches!(image, LoadedImage::Compressed { .. }));
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([640.0, 480.0]),
@@ -34,11 +43,10 @@ fn main() -> eframe::Result<()> {
                 &cc.egui_ctx,
                 cc.wgpu_render_state.clone(),
             );
-            openitgo_app::fonts::setup_fonts(&cc.egui_ctx);
             Ok(Box::new(SmokeApp {
-                app,
+                cache: PageCache::new(),
+                image: Some(image),
                 render_state: cc.wgpu_render_state.clone(),
-                start: Instant::now(),
                 finished: false,
             }))
         }),
@@ -46,9 +54,9 @@ fn main() -> eframe::Result<()> {
 }
 
 struct SmokeApp {
-    app: ReaderApp,
+    cache: PageCache,
+    image: Option<LoadedImage>,
     render_state: Option<eframe::egui_wgpu::RenderState>,
-    start: Instant,
     finished: bool,
 }
 
@@ -58,34 +66,29 @@ impl eframe::App for SmokeApp {
             ui.ctx(),
             frame.wgpu_render_state().cloned(),
         );
-        self.app.ui(ui, frame);
         let ctx = ui.ctx();
         ctx.request_repaint_after(Duration::from_millis(100));
 
         if self.finished {
             return;
         }
-        let Some(reader) = self.app.reader_view.open.as_mut() else {
-            if self.start.elapsed() > Duration::from_secs(30) {
-                panic!("timed out waiting for BC3 page");
-            }
-            return;
-        };
-        let current = reader.state.current_page;
-        if !reader.cache.contains_full(current) {
-            if self.start.elapsed() > Duration::from_secs(30) {
-                panic!("timed out waiting for BC3 texture");
-            }
-            return;
+        if let Some(image) = self.image.take() {
+            self.cache.insert_full(
+                0,
+                image,
+                [5, 7],
+                1024 * 1024,
+                &std::collections::HashSet::new(),
+            );
         }
-        let Some(handle) = reader.cache.get_texture(ctx, current) else {
+        let Some(handle) = self.cache.get_texture(ctx, 0) else {
             panic!("BC3 texture handle missing");
         };
-        let Some((texture, gpu_size)) = reader.cache.native_texture(current) else {
+        let Some((texture, gpu_size)) = self.cache.native_texture(0) else {
             panic!("native BC3 texture missing");
         };
         assert_eq!(gpu_size, [8, 8]);
-        let uv = reader.cache.texture_uv(current);
+        let uv = self.cache.texture_uv(0);
         assert_eq!(uv.max, egui::Pos2::new(5.0 / 8.0, 7.0 / 8.0));
         self.finished = true;
         let render_state = self.render_state.as_ref().expect("wgpu render state");

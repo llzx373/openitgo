@@ -339,9 +339,10 @@ dirs_first 逐栏下发，RowsKey 自动失效。
   raw cache 命中不重开。ZIP/文件/PDF 仍走并行 IO worker。末两页经 `maybe_prewarm_next_comic`
   解析下一卷并用独立 prewarm worker 只读取首页/首个 spread 到 raw cache（不解码、独立结果
   channel、epoch 可取消）；正式打开复用字节，不影响当前书结果队列。
-  **进度条悬停缩略图**：全尺寸解码且 compress=false 时顺产生成 256px 缩略图；悬停时
-  `request_page_thumbnail` 高优先级 + 按方向低优先预取 8 页；不再后台生成全书缩略图；
-  webp 走 `webp_thumb.rs`，失败回退 image crate。
+  **进度条悬停缩略图**：未压缩整页解码顺产生成 256px 缩略图；悬停时 `request_page_thumbnail`
+  高优先级 + 按方向低优先预取 8 页；不再后台生成全书缩略图；webp 走 `webp_thumb.rs`，失败回退
+  image crate。开启 BC3 时仅低优先级整页在 decode worker 编码；高优先级可见页直接返回 RGBA，
+  避免首屏/未预取翻页等待压缩，低优先级任务升级后同样跳过。
 - **PageCache**：GPU textures；`size_bytes` 为整页 CPU/GPU 内存估算；上传后尽快释放 CPU 侧
   `ColorImage`。原生 BC3 仅在设备支持 `TEXTURE_COMPRESSION_BC` 时上传，否则回退 CPU 解码；
   RenderState 在 `ReaderApp::ui` 的 Frame 中安装（CreationContext 创建期为 None）。`native_texture`

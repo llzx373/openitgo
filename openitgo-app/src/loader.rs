@@ -1027,8 +1027,14 @@ impl PageLoader {
                             },
                         )
                     } else {
-                        decode_image_bytes(&job.bytes, job.format_hint.as_deref(), compress).map(
-                            |image| {
+                        let compress_full =
+                            compress && job.control.priority() == LoadPriority::Low;
+                        decode_image_bytes(
+                            &job.bytes,
+                            job.format_hint.as_deref(),
+                            compress_full,
+                        )
+                        .map(|image| {
                                 // Prefer file-header dimensions for layout/fit.
                                 // Decoded pixels may be capped at MAX_IMAGE_DIMENSION.
                                 let decoded = image.original_size();
@@ -1036,10 +1042,10 @@ impl PageLoader {
                                     image_dimensions_from_bytes(&job.bytes).unwrap_or(decoded);
                                 // Piggyback: reuse the full decode instead of decoding
                                 // the same source again for pages that are being read.
-                                // Skipped when DXT5 compression is on — a compressed image
-                                // would need an expensive decompress_dxt5 first; the idle
-                                // thumbnail batch covers those instead.
-                                if !compress && !job.control.is_cancelled() {
+                                // Skipped when this result is DXT5-compressed — it would need
+                                // an expensive decompress_dxt5 first; a separate thumbnail
+                                // request covers those instead.
+                                if !compress_full && !job.control.is_cancelled() {
                                     if let Ok((thumb, _)) = make_thumbnail_from_loaded(&image) {
                                         let _ = result_sender.send(LoadResult {
                                             epoch: key.epoch,
@@ -2902,6 +2908,39 @@ mod tests {
         let single = compress_bc3(original.as_raw(), 20, 20, 1);
         let parallel = compress_bc3(original.as_raw(), 20, 20, 4);
         assert_eq!(parallel, single);
+    }
+
+    #[test]
+    fn test_bc3_compression_only_runs_for_low_priority_full_pages() {
+        let tmp = tempfile::tempdir().unwrap();
+        for page in 0..2 {
+            image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]))
+                .save(tmp.path().join(format!("{page}.png")))
+                .unwrap();
+        }
+        let loader = PageLoader::new_with_compress(true, 1);
+        let epoch = loader.next_epoch();
+        assert!(loader.request_low(epoch, 0, PageSource::File(tmp.path().join("0.png"))));
+        assert!(loader.request_high(epoch, 1, PageSource::File(tmp.path().join("1.png"))));
+
+        let start = Instant::now();
+        let mut received = 0;
+        while received < 2 && start.elapsed() < Duration::from_secs(5) {
+            let Some(result) = loader.try_recv() else {
+                std::thread::sleep(Duration::from_millis(2));
+                continue;
+            };
+            if result.thumbnail {
+                continue;
+            }
+            match (result.page_index, result.image.unwrap()) {
+                (0, LoadedImage::Compressed { .. }) => {}
+                (1, LoadedImage::Color(_)) => {}
+                (page, image) => panic!("unexpected image for page {page}: {image:?}"),
+            }
+            received += 1;
+        }
+        assert_eq!(received, 2);
     }
 
     #[test]
