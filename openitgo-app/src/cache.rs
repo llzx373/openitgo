@@ -4,6 +4,8 @@ use egui::{Context, TextureHandle};
 use std::collections::HashMap;
 use std::time::Instant;
 
+const THUMBNAIL_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 struct CacheEntry {
     /// The original page dimensions, used for layout before any full image is ready.
     original_size: [u32; 2],
@@ -13,8 +15,8 @@ struct CacheEntry {
     image: Option<LoadedImage>,
     handle: Option<TextureHandle>,
     last_accessed: Instant,
-    /// Size of the full-resolution image only; thumbnails are always retained.
     size_bytes: usize,
+    thumbnail_size_bytes: usize,
 }
 
 impl CacheEntry {
@@ -27,18 +29,7 @@ impl CacheEntry {
             handle: None,
             last_accessed: Instant::now(),
             size_bytes: 0,
-        }
-    }
-
-    fn with_thumbnail(image: LoadedImage, original_size: [u32; 2]) -> Self {
-        Self {
-            original_size,
-            thumbnail: Some(image),
-            thumbnail_handle: None,
-            image: None,
-            handle: None,
-            last_accessed: Instant::now(),
-            size_bytes: 0,
+            thumbnail_size_bytes: 0,
         }
     }
 }
@@ -46,6 +37,7 @@ impl CacheEntry {
 pub struct PageCache {
     textures: HashMap<usize, CacheEntry>,
     total_size_bytes: usize,
+    thumbnail_total_size_bytes: usize,
 }
 
 impl PageCache {
@@ -53,12 +45,18 @@ impl PageCache {
         Self {
             textures: HashMap::new(),
             total_size_bytes: 0,
+            thumbnail_total_size_bytes: 0,
         }
     }
 
     #[allow(dead_code)]
     pub fn total_size_bytes(&self) -> usize {
         self.total_size_bytes
+    }
+
+    #[allow(dead_code)]
+    pub fn thumbnail_total_size_bytes(&self) -> usize {
+        self.thumbnail_total_size_bytes
     }
 
     pub fn contains_full(&self, page_index: usize) -> bool {
@@ -83,7 +81,7 @@ impl PageCache {
     pub fn contains_thumbnail(&self, page_index: usize) -> bool {
         self.textures
             .get(&page_index)
-            .map(|e| e.thumbnail.is_some())
+            .map(|e| e.thumbnail.is_some() || e.thumbnail_handle.is_some())
             .unwrap_or(false)
     }
 
@@ -144,6 +142,7 @@ impl PageCache {
                 egui::TextureOptions::LINEAR,
             );
             entry.thumbnail_handle = Some(handle.clone());
+            entry.thumbnail = None;
             return Some(handle);
         }
 
@@ -217,16 +216,48 @@ impl PageCache {
         image: LoadedImage,
         original_size: [u32; 2],
     ) {
+        self.insert_thumbnail_impl(page_index, image, original_size, THUMBNAIL_CACHE_MAX_BYTES);
+    }
+
+    #[cfg(test)]
+    fn insert_thumbnail_with_budget(
+        &mut self,
+        page_index: usize,
+        image: LoadedImage,
+        original_size: [u32; 2],
+        max_size_bytes: usize,
+    ) {
+        self.insert_thumbnail_impl(page_index, image, original_size, max_size_bytes);
+    }
+
+    fn insert_thumbnail_impl(
+        &mut self,
+        page_index: usize,
+        image: LoadedImage,
+        original_size: [u32; 2],
+        max_size_bytes: usize,
+    ) {
         timing::log(&format!("cache insert thumbnail page {}", page_index));
+        let new_size = image.size_bytes();
+        if let Some(entry) = self.textures.get_mut(&page_index) {
+            self.thumbnail_total_size_bytes -= entry.thumbnail_size_bytes;
+            entry.thumbnail = None;
+            entry.thumbnail_handle = None;
+            entry.thumbnail_size_bytes = 0;
+        }
+        while self.thumbnail_total_size_bytes + new_size > max_size_bytes
+            && self.evict_lru_thumbnail_excluding(page_index)
+        {}
         let entry = self
             .textures
             .entry(page_index)
-            .or_insert_with(|| CacheEntry::with_thumbnail(image.clone(), original_size));
-
+            .or_insert_with(|| CacheEntry::empty(original_size));
         entry.thumbnail = Some(image);
         entry.thumbnail_handle = None;
+        entry.thumbnail_size_bytes = new_size;
         entry.original_size = original_size;
         entry.last_accessed = Instant::now();
+        self.thumbnail_total_size_bytes += new_size;
     }
 
     pub fn enforce_budget_with_protected(
@@ -244,6 +275,32 @@ impl PageCache {
     pub fn clear(&mut self) {
         self.textures.clear();
         self.total_size_bytes = 0;
+        self.thumbnail_total_size_bytes = 0;
+    }
+
+    fn evict_lru_thumbnail_excluding(&mut self, excluded: usize) -> bool {
+        let lru_key = self
+            .textures
+            .iter()
+            .filter(|(key, entry)| {
+                **key != excluded && (entry.thumbnail.is_some() || entry.thumbnail_handle.is_some())
+            })
+            .min_by(|(_, a), (_, b)| a.last_accessed.cmp(&b.last_accessed))
+            .map(|(&key, _)| key);
+        if let Some(key) = lru_key {
+            if let Some(entry) = self.textures.get_mut(&key) {
+                self.thumbnail_total_size_bytes -= entry.thumbnail_size_bytes;
+                entry.thumbnail = None;
+                entry.thumbnail_handle = None;
+                entry.thumbnail_size_bytes = 0;
+                if entry.image.is_none() && entry.handle.is_none() {
+                    self.textures.remove(&key);
+                }
+            }
+            true
+        } else {
+            false
+        }
     }
 
     fn evict_lru_full_excluding(&mut self, protected: &std::collections::HashSet<usize>) -> bool {
@@ -260,7 +317,7 @@ impl PageCache {
                 entry.image = None;
                 entry.handle = None;
                 entry.size_bytes = 0;
-                if entry.thumbnail.is_none() {
+                if entry.thumbnail.is_none() && entry.thumbnail_handle.is_none() {
                     self.textures.remove(&key);
                 }
             }
@@ -462,6 +519,43 @@ mod tests {
         assert!(cache.contains_thumbnail(0));
         assert_eq!(cache.get_original_size(0), Some([2, 2]));
         assert!(cache.get_texture(&ctx, 0).is_some());
+    }
+
+    #[test]
+    fn test_thumbnail_upload_releases_cpu_and_survives_full_eviction() {
+        let ctx = egui::Context::default();
+        let mut cache = PageCache::new();
+        cache.insert_thumbnail(0, make_image(2, 2), [2, 2]);
+        assert!(cache.get_texture(&ctx, 0).is_some());
+        let entry = cache.textures.get(&0).unwrap();
+        assert!(entry.thumbnail.is_none());
+        assert!(entry.thumbnail_handle.is_some());
+        assert!(cache.contains_thumbnail(0));
+
+        cache.insert_full(0, make_image(2, 2), [2, 2], 8, &HashSet::new());
+        cache.enforce_budget_with_protected(8, &HashSet::new());
+        assert!(!cache.contains_full(0));
+        assert!(cache.contains_thumbnail(0));
+        assert!(cache.get_texture(&ctx, 0).is_some());
+        assert_eq!(cache.thumbnail_total_size_bytes(), 16);
+    }
+
+    #[test]
+    fn test_thumbnail_budget_evicts_lru_and_reinsert_keeps_accounting() {
+        let ctx = egui::Context::default();
+        let mut cache = PageCache::new();
+        cache.insert_thumbnail_with_budget(0, make_image(2, 2), [2, 2], 32);
+        cache.insert_thumbnail_with_budget(1, make_image(2, 2), [2, 2], 32);
+        assert!(cache.get_texture(&ctx, 0).is_some());
+        cache.insert_thumbnail_with_budget(2, make_image(2, 2), [2, 2], 32);
+
+        assert!(cache.contains_thumbnail(0));
+        assert!(!cache.contains_thumbnail(1));
+        assert!(cache.contains_thumbnail(2));
+        assert_eq!(cache.thumbnail_total_size_bytes(), 32);
+
+        cache.insert_thumbnail_with_budget(2, make_image(2, 2), [2, 2], 32);
+        assert_eq!(cache.thumbnail_total_size_bytes(), 32);
     }
 
     #[test]
