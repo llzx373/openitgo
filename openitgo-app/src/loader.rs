@@ -647,6 +647,12 @@ pub struct PageLoader {
     _decode_workers: Vec<thread::JoinHandle<()>>,
 }
 
+const AUTO_WORKER_LIMIT: usize = 4;
+
+fn capped_worker_count(parallelism: usize) -> usize {
+    parallelism.clamp(1, AUTO_WORKER_LIMIT)
+}
+
 impl Default for PageLoader {
     fn default() -> Self {
         Self::new()
@@ -662,7 +668,7 @@ impl PageLoader {
     /// Create a loader with explicit compression and decode-thread limits.
     ///
     /// `decode_threads` is the number of background decode workers. `0` means
-    /// use the system's reported parallelism (the previous default).
+    /// use up to four workers, leaving CPU headroom for the UI and OS.
     pub fn new_with_compress(compress: bool, decode_threads: usize) -> Self {
         Self::new_with_compress_and_io_hook(compress, decode_threads, IoWorkerHook::default())
     }
@@ -722,9 +728,8 @@ impl PageLoader {
 
         let worker_count = if decode_threads == 0 {
             std::thread::available_parallelism()
-                .map(|n| n.get())
+                .map(|n| capped_worker_count(n.get()))
                 .unwrap_or(1)
-                .max(1)
         } else {
             decode_threads.max(1)
         };
@@ -2252,6 +2257,25 @@ mod tests {
             assert!(start.elapsed() < Duration::from_secs(5));
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn test_auto_worker_count_is_capped_but_explicit_count_is_preserved() {
+        assert_eq!(capped_worker_count(1), 1);
+        assert_eq!(capped_worker_count(2), 2);
+        assert_eq!(capped_worker_count(4), 4);
+        assert_eq!(capped_worker_count(32), 4);
+
+        let loader = PageLoader::new();
+        let expected = std::thread::available_parallelism()
+            .map(|n| capped_worker_count(n.get()))
+            .unwrap_or(1);
+        assert_eq!(loader._io_workers.len(), expected + 1);
+        assert_eq!(loader._decode_workers.len(), expected);
+
+        let explicit = PageLoader::new_with_compress(false, 8);
+        assert_eq!(explicit._io_workers.len(), 9);
+        assert_eq!(explicit._decode_workers.len(), 8);
     }
 
     #[test]
