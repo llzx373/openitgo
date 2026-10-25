@@ -21,7 +21,7 @@ const PRELOAD_COOLDOWN_AFTER_TURN: Duration = Duration::from_millis(100);
 const PENDING_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[allow(dead_code)]
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ReaderPerfSnapshot {
     pub visible_results: u64,
     pub visible_latency_p50_us: u64,

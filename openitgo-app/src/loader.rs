@@ -288,7 +288,7 @@ enum LoaderPerfEvent {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct LoaderPerfSnapshot {
     pub high_full_requests: u64,
     pub high_thumbnail_requests: u64,

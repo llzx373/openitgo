@@ -2,7 +2,7 @@ use openitgo_app::loader::PageLoader;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::env::set_var("OPENITGO_LOG", "1");
 
     let path = std::env::args_os()
@@ -16,27 +16,27 @@ fn main() {
     println!("[rapid] total pages: {}", total);
 
     let loader = PageLoader::new();
+    loader.set_perf_enabled(true);
     let epoch = loader.next_epoch();
 
-    // Simulate rapid flipping: request pages quickly, without waiting for each.
     let flip_interval = Duration::from_millis(80);
     let mut request_times = Vec::with_capacity(total);
     let start = Instant::now();
     for page_index in 0..total {
         let source = comic.page_source(page_index).cloned().unwrap();
-        loader.request_high(epoch, page_index, source);
+        if !loader.request_high(epoch, page_index, source) {
+            return Err(format!("high-priority queue full at page {page_index}").into());
+        }
         request_times.push((page_index, Instant::now()));
         std::thread::sleep(flip_interval);
     }
 
-    // Drain all results.
     let timeout = Duration::from_secs(30);
     let mut received = 0;
     let mut errors = 0;
     let mut latencies = Vec::with_capacity(total);
     while received < total && start.elapsed() < timeout {
         if let Some(result) = loader.try_recv() {
-            // Full decodes piggyback a thumbnail result; skip those.
             if result.thumbnail {
                 continue;
             }
@@ -66,13 +66,67 @@ fn main() {
         }
     }
 
-    if !latencies.is_empty() {
-        let avg = latencies.iter().sum::<Duration>() / latencies.len() as u32;
-        let max = latencies.iter().max().unwrap();
-        println!("[rapid] latencies: avg={:.1?} max={:.1?}", avg, max);
-    }
+    let mut latency_us: Vec<u64> = latencies
+        .iter()
+        .map(|latency| latency.as_micros() as u64)
+        .collect();
+    latency_us.sort_unstable();
+    let report = serde_json::json!({
+        "scenario": "rapid_flip",
+        "source": path,
+        "total": total,
+        "received": received,
+        "errors": errors,
+        "timed_out": received < total,
+        "latency_samples": latency_us.len(),
+        "latency_p50_us": percentile(&latency_us, 50),
+        "latency_p95_us": percentile(&latency_us, 95),
+        "latency_max_us": latency_us.last().copied().unwrap_or(0),
+        "loader": loader.perf_snapshot(),
+    });
+    write_report(&report)?;
     println!(
         "[rapid] done. total={} received={} errors={}",
         total, received, errors
     );
+    if received < total {
+        return Err("timed out waiting for all pages".into());
+    }
+    if errors > 0 {
+        return Err(format!("{errors} pages failed to decode").into());
+    }
+    Ok(())
+}
+
+fn percentile(sorted: &[u64], percentile: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = (sorted.len() * percentile).div_ceil(100).max(1);
+    sorted[rank.min(sorted.len()) - 1]
+}
+
+fn write_report(report: &serde_json::Value) -> Result<(), Box<dyn std::error::Error>> {
+    let json = serde_json::to_string_pretty(report)?;
+    println!("[perf] {json}");
+    if let Some(path) = std::env::var_os("OPENITGO_PERF_JSON") {
+        let path = PathBuf::from(path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, json)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percentile_uses_nearest_rank() {
+        assert_eq!(percentile(&[1, 2, 3, 4, 100], 50), 3);
+        assert_eq!(percentile(&[1, 2, 3, 4, 100], 95), 100);
+        assert_eq!(percentile(&[], 95), 0);
+    }
 }
