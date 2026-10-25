@@ -176,6 +176,8 @@ pub struct OpenReader {
     pub webtoon_scroll_offset: f32,
     /// The last `current_page` used to sync Webtoon scroll after keyboard nav.
     pub webtoon_last_page: usize,
+    /// Pages intersecting the current Webtoon viewport, protected from eviction.
+    pub webtoon_visible_pages: HashSet<usize>,
     /// Last seen viewport size, used to re-apply the current fit on resize.
     pub last_available_size: Option<egui::Vec2>,
     /// Last committed spread size used for fit. Rising edge / dimension
@@ -422,6 +424,7 @@ impl OpenReader {
         self.left_page = None;
         self.right_page = None;
         self.last_spread_size = None;
+        self.webtoon_visible_pages.clear();
         self.perf.reset();
     }
 
@@ -466,6 +469,9 @@ impl OpenReader {
         if let Some(a) = self.page_animation {
             set.insert(a.from_page);
             set.insert(a.to_page);
+        }
+        if self.state.mode.is_webtoon() {
+            set.extend(self.webtoon_visible_pages.iter().copied());
         }
         set
     }
@@ -628,6 +634,7 @@ impl ReaderView {
             last_turn_direction: None,
             webtoon_scroll_offset: 0.0,
             webtoon_last_page: state.current_page,
+            webtoon_visible_pages: HashSet::new(),
             last_available_size: None,
             last_spread_size: None,
             wide_page_threshold,
@@ -1038,6 +1045,10 @@ impl ReaderView {
             })
             .map(|l| l.page_index)
             .collect();
+        reader.webtoon_visible_pages.clear();
+        reader
+            .webtoon_visible_pages
+            .extend(visible_indices.iter().copied());
 
         // Request thumbnails and full-resolution images for visible pages.
         for &idx in &visible_indices {
@@ -1607,6 +1618,7 @@ mod tests {
             last_turn_direction: None,
             webtoon_scroll_offset: 0.0,
             webtoon_last_page: 0,
+            webtoon_visible_pages: HashSet::new(),
             last_available_size: None,
             last_spread_size: None,
             wide_page_threshold: 1.4,
@@ -1846,6 +1858,24 @@ mod tests {
 
         reader.state.current_page = 1;
         assert_eq!(reader.spread_pages(), (Some(1), Some(2)));
+    }
+
+    #[test]
+    fn test_webtoon_visible_pages_are_not_evicted() {
+        let mut reader = dummy_reader();
+        reader.state.mode = ReadingMode::Webtoon;
+        insert_test_full(&mut reader, 0);
+        insert_test_full(&mut reader, 1);
+        insert_test_full(&mut reader, 2);
+        reader.webtoon_visible_pages.extend([0, 1]);
+
+        reader
+            .cache
+            .enforce_budget_with_protected(1, &reader.protected_page_indices());
+
+        assert!(reader.cache.contains_full(0));
+        assert!(reader.cache.contains_full(1));
+        assert!(!reader.cache.contains_full(2));
     }
 
     #[test]
