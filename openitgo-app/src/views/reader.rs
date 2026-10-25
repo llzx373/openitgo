@@ -646,6 +646,15 @@ impl ReaderView {
         }
     }
 
+    /// Pause loading while another top-level view is active. A fresh epoch is
+    /// used when the reader resumes so cancelled results cannot reinsert pages.
+    pub fn suspend(&mut self, loader: &PageLoader) {
+        if let Some(reader) = self.open.as_mut() {
+            reader.bump_epoch(loader);
+        }
+        self.clear_cache();
+    }
+
     /// Fully close the reader: clear cache and drop the open comic.
     pub fn close(&mut self) {
         self.clear_cache();
@@ -1909,6 +1918,39 @@ mod tests {
         reader.bump_epoch(&loader);
 
         assert_ne!(reader.current_epoch, old_epoch);
+        assert_eq!(loader.perf_snapshot().cancelled_requests, 1);
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+    }
+
+    #[test]
+    fn test_suspend_cancels_and_resets_loading_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("suspend.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .unwrap();
+
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let (processed_sender, _processed_receiver) = crossbeam_channel::unbounded();
+        let loader = PageLoader::new_with_io_gate(gate.clone(), processed_sender);
+        loader.set_perf_enabled(true);
+        let old_epoch = loader.next_epoch();
+        assert!(loader.request_low(old_epoch, 0, PageSource::File(path)));
+        let mut reader = dummy_reader();
+        reader.current_epoch = old_epoch;
+        reader.pending_pages.insert(0, Instant::now());
+        reader.pending_thumbnails.insert(0);
+        insert_test_full(&mut reader, 0);
+        let mut view = ReaderView { open: Some(reader) };
+
+        view.suspend(&loader);
+
+        let reader = view.open.as_ref().unwrap();
+        assert_ne!(reader.current_epoch, old_epoch);
+        assert!(reader.pending_pages.is_empty());
+        assert!(reader.pending_thumbnails.is_empty());
+        assert!(!reader.cache.contains_full(0));
         assert_eq!(loader.perf_snapshot().cancelled_requests, 1);
         *gate.0.lock().unwrap() = true;
         gate.1.notify_all();

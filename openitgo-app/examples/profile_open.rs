@@ -35,6 +35,8 @@ fn main() -> eframe::Result<()> {
                 app,
                 start: Instant::now(),
                 reported: false,
+                test_suspend: std::env::var_os("OPENITGO_TEST_SUSPEND").is_some(),
+                suspend_before: None,
             }))
         }),
     )
@@ -44,6 +46,8 @@ struct ProfileApp {
     app: ReaderApp,
     start: Instant,
     reported: bool,
+    test_suspend: bool,
+    suspend_before: Option<openitgo_app::loader::LoaderPerfSnapshot>,
 }
 
 impl eframe::App for ProfileApp {
@@ -51,6 +55,14 @@ impl eframe::App for ProfileApp {
         self.app.ui(ui, frame);
         // Keep polling while idle so the snapshot timer fires headless.
         ui.ctx().request_repaint_after(Duration::from_millis(100));
+
+        if self.test_suspend
+            && self.suspend_before.is_none()
+            && self.start.elapsed() > Duration::from_secs(2)
+        {
+            self.app.current_view = View::Library;
+            self.suspend_before = Some(self.app.page_loader.perf_snapshot());
+        }
 
         if !self.reported && self.start.elapsed() > Duration::from_secs(10) {
             self.reported = true;
@@ -69,6 +81,9 @@ impl eframe::App for ProfileApp {
                     fulls,
                     self.start.elapsed().as_secs_f64()
                 );
+                let suspend_after = self
+                    .suspend_before
+                    .map(|_| self.app.page_loader.perf_snapshot());
                 let report = serde_json::json!({
                     "scenario": "profile_open",
                     "source": reader.comic.path,
@@ -78,8 +93,13 @@ impl eframe::App for ProfileApp {
                     "full_images": fulls,
                     "reader": reader.perf_snapshot(),
                     "loader": self.app.page_loader.perf_snapshot(),
+                    "suspend_before": self.suspend_before,
+                    "suspend_after": suspend_after,
                 });
                 write_report(&report).expect("performance report should be written");
+                if let (Some(before), Some(after)) = (self.suspend_before, suspend_after) {
+                    assert_eq!(after, before, "Reader work continued after suspension");
+                }
             }
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }

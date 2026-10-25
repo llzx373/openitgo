@@ -598,7 +598,7 @@ impl eframe::App for ReaderApp {
         if matches!(self.last_view, View::Reader) && !matches!(self.current_view, View::Reader) {
             self.record_reader_history();
             self.persist_history_bookmarks();
-            self.reader_view.clear_cache();
+            self.reader_view.suspend(&self.page_loader);
         }
         if matches!(self.last_view, View::Ebook) && !matches!(self.current_view, View::Ebook) {
             self.record_ebook_history();
@@ -643,13 +643,15 @@ impl eframe::App for ReaderApp {
 
         let cache_size_mb = self.settings.cache_size_mb as usize;
         self.page_loader.set_compress(self.settings.compress_images);
-        self.reader_view
-            .update(&ctx, &self.page_loader, cache_size_mb);
-        self.reader_view.request_preloads(
-            &self.page_loader,
-            cache_size_mb,
-            self.settings.real_image_cache_pages as usize,
-        );
+        if matches!(self.current_view, View::Reader) {
+            self.reader_view
+                .update(&ctx, &self.page_loader, cache_size_mb);
+            self.reader_view.request_preloads(
+                &self.page_loader,
+                cache_size_mb,
+                self.settings.real_image_cache_pages as usize,
+            );
+        }
         self.poll_cover_results();
         self.poll_media_covers();
         self.poll_extracts(&ctx);
