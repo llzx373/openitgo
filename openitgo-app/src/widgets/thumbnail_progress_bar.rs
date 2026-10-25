@@ -23,7 +23,12 @@ pub fn page_thumbnail_tooltip(
 
     if let Some(handle) = cache.get_texture(ctx, page_index) {
         // Maintain aspect ratio and letter-box inside the tooltip rect.
-        ui.put(rect, egui::Image::new(&handle).max_size(rect.size()));
+        ui.put(
+            rect,
+            egui::Image::new(&handle)
+                .uv(cache.texture_uv(page_index))
+                .fit_to_exact_size(rect.size()),
+        );
     } else {
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
             ui.with_layout(

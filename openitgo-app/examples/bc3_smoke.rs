@@ -85,6 +85,8 @@ impl eframe::App for SmokeApp {
             panic!("native BC3 texture missing");
         };
         assert_eq!(gpu_size, [8, 8]);
+        let uv = reader.cache.texture_uv(current);
+        assert_eq!(uv.max, egui::Pos2::new(5.0 / 8.0, 7.0 / 8.0));
         self.finished = true;
         let render_state = self.render_state.as_ref().expect("wgpu render state");
         let bytes_per_row = (gpu_size[0] * 4).next_multiple_of(256);

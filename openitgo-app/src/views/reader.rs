@@ -1578,6 +1578,7 @@ fn render_page_or_placeholder(
             _ => rect.size(),
         };
         let mut image = egui::Image::new(texture)
+            .uv(reader.cache.texture_uv(page_index))
             .fit_to_exact_size(mesh_size)
             .sense(egui::Sense::click_and_drag());
         if reader.state.rotation != 0 {

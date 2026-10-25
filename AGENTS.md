@@ -347,7 +347,8 @@ dirs_first 逐栏下发，RowsKey 自动失效。
   RenderState 在 `ReaderApp::ui` 的 Frame 中安装（CreationContext 创建期为 None）。`native_texture`
   持有纹理所有权直至淘汰。注册顺序为 1×1 占位 Managed ID → `update_texture` →
   `update_egui_texture_from_wgpu_texture`；勿改回单纯 `register_native_texture` 或缺省 ID 分配。
-  `bc3_smoke` 用真实 GPU 读回压缩块并校验解码像素。BC3 按 4 像素块行分条并行编码，单图最多
+  `bc3_smoke` 用真实 GPU 读回压缩块并校验解码像素与裁剪 UV。原生 BC3 渲染必须用
+  `texture_uv` 排除 4 像素块补齐边缘；CPU 回退已裁剪，使用完整 UV。BC3 按块行分条并行编码，单图最多
   4 线程、小图单线程，避免首屏延迟回退。缩略图另有 64MiB LRU 预算
   （`thumbnail_total_size_bytes`），上传后释放 CPU 图，full 淘汰必须同时检查 thumbnail CPU 与
   GPU handle，避免误删已上传纹理。`dimensions_version` 驱动 Webtoon 布局缓存：仅尺寸/旋转/

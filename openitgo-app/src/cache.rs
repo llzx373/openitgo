@@ -197,6 +197,24 @@ impl PageCache {
         Some((texture, *gpu_size))
     }
 
+    pub fn texture_uv(&self, page_index: usize) -> egui::Rect {
+        let Some(entry) = self.textures.get(&page_index) else {
+            return egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0));
+        };
+        if entry.native_texture.is_none() {
+            return egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0));
+        }
+        let Some(LoadedImage::Compressed {
+            original_size,
+            gpu_size,
+            ..
+        }) = entry.image.as_ref()
+        else {
+            return egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0));
+        };
+        bc3_texture_uv(*original_size, *gpu_size)
+    }
+
     pub fn contains_full(&self, page_index: usize) -> bool {
         self.textures
             .get(&page_index)
@@ -481,6 +499,19 @@ impl PageCache {
     }
 }
 
+fn bc3_texture_uv(original_size: [u32; 2], gpu_size: [u32; 2]) -> egui::Rect {
+    if original_size.contains(&0) || gpu_size.contains(&0) {
+        return egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0));
+    }
+    egui::Rect::from_min_max(
+        egui::Pos2::ZERO,
+        egui::Pos2::new(
+            original_size[0] as f32 / gpu_size[0] as f32,
+            original_size[1] as f32 / gpu_size[1] as f32,
+        ),
+    )
+}
+
 /// Pick the layout size used for fit/zoom.
 ///
 /// Prefers an already-known header/seed size, then an explicit `layout_size`
@@ -760,6 +791,28 @@ mod tests {
             [4500, 2815]
         );
         assert_eq!(prefer_layout_size(None, [0, 0], [4096, 2562]), [4096, 2562]);
+    }
+
+    #[test]
+    fn test_bc3_uv_excludes_padding() {
+        assert_eq!(
+            bc3_texture_uv([5, 7], [8, 8]),
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(5.0 / 8.0, 7.0 / 8.0))
+        );
+        assert_eq!(
+            bc3_texture_uv([8, 8], [8, 8]),
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0))
+        );
+    }
+
+    #[test]
+    fn test_compressed_cpu_fallback_uses_full_uv() {
+        let mut cache = PageCache::new();
+        cache.insert_full(0, make_compressed(5, 7), [5, 7], 1024, &HashSet::new());
+        assert_eq!(
+            cache.texture_uv(0),
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0))
+        );
     }
 
     #[test]
