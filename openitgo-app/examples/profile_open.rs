@@ -13,7 +13,15 @@ fn main() -> eframe::Result<()> {
         .map(PathBuf::from)
         .expect("usage: cargo run --example profile_open -- <path-to-archive>");
 
+    let decode_threads = std::env::var("OPENITGO_DECODE_THREADS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
     let mut app = ReaderApp::default();
+    app.page_loader = openitgo_app::loader::PageLoader::new_with_compress(
+        app.settings.compress_images,
+        decode_threads,
+    );
     app.page_loader.set_perf_enabled(true);
     app.opener = Some(AsyncOpener::<Comic>::open(path.clone(), |p| {
         openitgo_parser::parse(p).map_err(|e| e.to_string())
@@ -35,6 +43,7 @@ fn main() -> eframe::Result<()> {
                 app,
                 start: Instant::now(),
                 reported: false,
+                decode_threads,
                 test_suspend: std::env::var_os("OPENITGO_TEST_SUSPEND").is_some(),
                 suspend_before: None,
                 webtoon: std::env::var_os("OPENITGO_WEBTOON").is_some(),
@@ -47,6 +56,7 @@ struct ProfileApp {
     app: ReaderApp,
     start: Instant,
     reported: bool,
+    decode_threads: usize,
     webtoon: bool,
     test_suspend: bool,
     suspend_before: Option<openitgo_app::loader::LoaderPerfSnapshot>,
@@ -97,6 +107,7 @@ impl eframe::App for ProfileApp {
                     .map(|_| self.app.page_loader.perf_snapshot());
                 let report = serde_json::json!({
                     "scenario": "profile_open",
+                    "decode_threads": self.decode_threads,
                     "source": reader.comic.path,
                     "elapsed_ms": self.start.elapsed().as_millis() as u64,
                     "total": total,

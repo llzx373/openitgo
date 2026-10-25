@@ -15,7 +15,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total = comic.total_pages();
     println!("[rapid] total pages: {}", total);
 
-    let loader = PageLoader::new();
+    let decode_threads = std::env::var("OPENITGO_DECODE_THREADS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let loader = PageLoader::new_with_compress(false, decode_threads);
     loader.set_perf_enabled(true);
     let epoch = loader.next_epoch();
 
@@ -73,6 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     latency_us.sort_unstable();
     let report = serde_json::json!({
         "scenario": "rapid_flip",
+        "decode_threads": decode_threads,
         "source": path,
         "total": total,
         "received": received,
