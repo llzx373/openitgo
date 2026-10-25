@@ -166,9 +166,12 @@ impl RawCacheKey {
 ///
 /// The LRU order and total byte count share one lock so cache hits can refresh
 /// recency atomically with lookups and evictions.
+type RawLoadResult = Result<Arc<Vec<u8>>, String>;
+
 #[derive(Clone)]
 struct SharedRawCache {
     inner: Arc<RwLock<SharedRawCacheInner>>,
+    inflight: Arc<Mutex<HashMap<RawCacheKey, Receiver<RawLoadResult>>>>,
     perf: Option<Arc<LoaderPerf>>,
 }
 
@@ -193,6 +196,7 @@ impl SharedRawCache {
                 bytes: 0,
                 max_bytes,
             })),
+            inflight: Arc::new(Mutex::new(HashMap::new())),
             perf,
         }
     }
@@ -217,6 +221,54 @@ impl SharedRawCache {
                 LoaderPerfEvent::RawCacheMiss
             });
         }
+        result
+    }
+
+    fn get_or_load(
+        &self,
+        key: RawCacheKey,
+        load: impl FnOnce() -> Result<Vec<u8>, String>,
+    ) -> RawLoadResult {
+        if let Some(cached) = self.get(&key) {
+            return Ok(cached);
+        }
+
+        let (sender, receiver) = {
+            let mut inflight = self.inflight.lock().unwrap();
+            if let Some(cached) = self.inner.read().unwrap().map.get(&key).cloned() {
+                return Ok(cached);
+            }
+            if let Some(receiver) = inflight.get(&key) {
+                (None, receiver.clone())
+            } else {
+                let (sender, receiver) = bounded(1);
+                inflight.insert(key.clone(), receiver.clone());
+                (Some(sender), receiver)
+            }
+        };
+
+        let Some(sender) = sender else {
+            if let Some(perf) = &self.perf {
+                perf.record(LoaderPerfEvent::RawCacheJoined);
+            }
+            return match receiver.recv() {
+                Ok(result) => result,
+                Err(_) => {
+                    let mut inflight = self.inflight.lock().unwrap();
+                    if inflight
+                        .get(&key)
+                        .is_some_and(|current| current.same_channel(&receiver))
+                    {
+                        inflight.remove(&key);
+                    }
+                    Err("raw cache load worker disconnected".to_string())
+                }
+            };
+        };
+
+        let result = load().map(|bytes| self.insert(key.clone(), bytes));
+        self.inflight.lock().unwrap().remove(&key);
+        let _ = sender.send(result.clone());
         result
     }
 
@@ -272,7 +324,7 @@ pub enum LoadPriority {
     Low,
 }
 
-const LOADER_PERF_EVENT_COUNT: usize = 20;
+const LOADER_PERF_EVENT_COUNT: usize = 21;
 
 #[derive(Clone, Copy)]
 #[repr(usize)]
@@ -296,6 +348,7 @@ enum LoaderPerfEvent {
     RarEntryRead,
     RawCacheHit,
     RawCacheMiss,
+    RawCacheJoined,
     SourceBytesRead,
 }
 
@@ -321,6 +374,7 @@ pub struct LoaderPerfSnapshot {
     pub rar_entry_reads: u64,
     pub raw_cache_hits: u64,
     pub raw_cache_misses: u64,
+    pub raw_cache_joined: u64,
     pub source_bytes_read: u64,
 }
 
@@ -374,6 +428,7 @@ impl LoaderPerf {
             rar_entry_reads: get(LoaderPerfEvent::RarEntryRead),
             raw_cache_hits: get(LoaderPerfEvent::RawCacheHit),
             raw_cache_misses: get(LoaderPerfEvent::RawCacheMiss),
+            raw_cache_joined: get(LoaderPerfEvent::RawCacheJoined),
             source_bytes_read: get(LoaderPerfEvent::SourceBytesRead),
         }
     }
@@ -1018,45 +1073,9 @@ fn read_zip_entry(
     password: Option<&str>,
 ) -> Result<Arc<Vec<u8>>, String> {
     let key = RawCacheKey::zip(archive_path, index);
-    if let Some(cached) = raw_cache.get(&key) {
-        timing::log(&format!(
-            "read_zip_entry index {} -> {} bytes (raw-cache hit)",
-            index,
-            cached.len()
-        ));
-        return Ok(cached);
-    }
-
-    let first_attempt = timing::time("read_zip_entry (cached)", || -> Result<Vec<u8>, String> {
-        let archive = zip_cache.get_or_open(archive_path)?;
-        let mut entry = match password {
-            Some(pw) => archive
-                .by_index_decrypt(index, pw.as_bytes())
-                .map_err(zip_password_error_message)?,
-            None => archive
-                .by_index(index)
-                .map_err(zip_password_error_message)?,
-        };
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut entry, &mut bytes)
-            .map_err(|e| format!("failed to read zip entry: {e}"))?;
-        Ok(bytes)
-    });
-
-    match first_attempt {
-        Ok(bytes) => {
-            timing::log(&format!(
-                "read_zip_entry index {} -> {} bytes (archive read)",
-                index,
-                bytes.len()
-            ));
-            Ok(raw_cache.insert(key, bytes))
-        }
-        Err(_) => {
-            // File may have been modified/deleted externally. Drop cache and retry once.
-            timing::log("read_zip_entry cache miss/mismatch, retrying");
-            zip_cache.remove(archive_path);
-            let bytes = timing::time("read_zip_entry (retry)", || -> Result<Vec<u8>, String> {
+    raw_cache.get_or_load(key, || {
+        let first_attempt =
+            timing::time("read_zip_entry (cached)", || -> Result<Vec<u8>, String> {
                 let archive = zip_cache.get_or_open(archive_path)?;
                 let mut entry = match password {
                     Some(pw) => archive
@@ -1070,15 +1089,46 @@ fn read_zip_entry(
                 std::io::Read::read_to_end(&mut entry, &mut bytes)
                     .map_err(|e| format!("failed to read zip entry: {e}"))?;
                 Ok(bytes)
-            })?;
-            timing::log(&format!(
-                "read_zip_entry retry index {} -> {} bytes",
-                index,
-                bytes.len()
-            ));
-            Ok(raw_cache.insert(key, bytes))
+            });
+
+        match first_attempt {
+            Ok(bytes) => {
+                timing::log(&format!(
+                    "read_zip_entry index {} -> {} bytes (archive read)",
+                    index,
+                    bytes.len()
+                ));
+                Ok(bytes)
+            }
+            Err(_) => {
+                // File may have been modified/deleted externally. Drop cache and retry once.
+                timing::log("read_zip_entry cache miss/mismatch, retrying");
+                zip_cache.remove(archive_path);
+                let bytes =
+                    timing::time("read_zip_entry (retry)", || -> Result<Vec<u8>, String> {
+                        let archive = zip_cache.get_or_open(archive_path)?;
+                        let mut entry = match password {
+                            Some(pw) => archive
+                                .by_index_decrypt(index, pw.as_bytes())
+                                .map_err(zip_password_error_message)?,
+                            None => archive
+                                .by_index(index)
+                                .map_err(zip_password_error_message)?,
+                        };
+                        let mut bytes = Vec::new();
+                        std::io::Read::read_to_end(&mut entry, &mut bytes)
+                            .map_err(|e| format!("failed to read zip entry: {e}"))?;
+                        Ok(bytes)
+                    })?;
+                timing::log(&format!(
+                    "read_zip_entry retry index {} -> {} bytes",
+                    index,
+                    bytes.len()
+                ));
+                Ok(bytes)
+            }
         }
-    }
+    })
 }
 
 /// Chinese, user-facing message for password-related zip failures; other
@@ -1149,46 +1199,39 @@ fn read_rar_entry(
     password: Option<&str>,
 ) -> Result<Arc<Vec<u8>>, String> {
     let key = RawCacheKey::rar(archive_path, name);
-    if let Some(cached) = raw_cache.get(&key) {
-        timing::log(&format!(
-            "read_rar_entry {} -> {} bytes (raw-cache hit)",
-            name,
-            cached.len()
-        ));
-        return Ok(cached);
-    }
-
-    let builder = match password {
-        Some(pw) => unrar::Archive::with_password(archive_path, pw),
-        None => unrar::Archive::new(archive_path),
-    };
-    let mut archive = builder
-        .open_for_processing()
-        .map_err(rar_password_error_message)?;
-
-    // Skip headers before the target position. For archives where pages are
-    // ordered by filename, this turns a linear scan into a small constant
-    // overhead once the parser has emitted header_position.
-    let mut current_position: usize = 0;
-    loop {
-        let maybe_entry = archive.read_header().map_err(rar_password_error_message)?;
-        let entry = match maybe_entry {
-            Some(e) => e,
-            None => break,
+    raw_cache.get_or_load(key, || {
+        let builder = match password {
+            Some(pw) => unrar::Archive::with_password(archive_path, pw),
+            None => unrar::Archive::new(archive_path),
         };
-        if current_position >= header_position {
-            if entry.entry().filename.to_string_lossy() == name {
-                let (bytes, _archive) = entry.read().map_err(rar_password_error_message)?;
-                return Ok(raw_cache.insert(key, bytes));
-            }
-            archive = entry.skip().map_err(rar_password_error_message)?;
-        } else {
-            archive = entry.skip().map_err(rar_password_error_message)?;
-            current_position += 1;
-        }
-    }
+        let mut archive = builder
+            .open_for_processing()
+            .map_err(rar_password_error_message)?;
 
-    Err(format!("rar entry not found: {name}"))
+        // Skip headers before the target position. For archives where pages are
+        // ordered by filename, this turns a linear scan into a small constant
+        // overhead once the parser has emitted header_position.
+        let mut current_position: usize = 0;
+        loop {
+            let maybe_entry = archive.read_header().map_err(rar_password_error_message)?;
+            let entry = match maybe_entry {
+                Some(e) => e,
+                None => break,
+            };
+            if current_position >= header_position {
+                if entry.entry().filename.to_string_lossy() == name {
+                    let (bytes, _archive) = entry.read().map_err(rar_password_error_message)?;
+                    return Ok(bytes);
+                }
+                archive = entry.skip().map_err(rar_password_error_message)?;
+            } else {
+                archive = entry.skip().map_err(rar_password_error_message)?;
+                current_position += 1;
+            }
+        }
+
+        Err(format!("rar entry not found: {name}"))
+    })
 }
 
 fn rar_password_error_message(e: unrar::error::UnrarError) -> String {
@@ -2131,6 +2174,70 @@ mod tests {
             }
             _ => panic!("thumbnail should be a Color image"),
         }
+    }
+
+    #[test]
+    fn test_raw_cache_concurrent_loads_share_one_result() {
+        let perf = Arc::new(LoaderPerf::new());
+        perf.set_enabled(true);
+        let cache = SharedRawCache::with_perf(1024, Some(perf.clone()));
+        let key = RawCacheKey::zip(Path::new("/concurrent.cbz"), 0);
+        let (entered_sender, entered_receiver) = bounded(1);
+        let (release_sender, release_receiver) = bounded(1);
+
+        let leader_cache = cache.clone();
+        let leader_key = key.clone();
+        let leader = thread::spawn(move || {
+            leader_cache.get_or_load(leader_key, || {
+                entered_sender.send(()).unwrap();
+                release_receiver.recv().unwrap();
+                Ok(vec![7u8; 128])
+            })
+        });
+        entered_receiver.recv().unwrap();
+
+        let waiter_cache = cache.clone();
+        let waiter_key = key.clone();
+        let waiter = thread::spawn(move || {
+            waiter_cache.get_or_load(waiter_key, || {
+                panic!("waiter must not start a duplicate load")
+            })
+        });
+        let start = Instant::now();
+        while perf.snapshot().raw_cache_joined == 0 {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            thread::sleep(Duration::from_millis(1));
+        }
+        release_sender.send(()).unwrap();
+
+        let first = leader.join().unwrap().unwrap();
+        let second = waiter.join().unwrap().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        let snapshot = perf.snapshot();
+        assert_eq!(snapshot.raw_cache_joined, 1);
+        assert_eq!(snapshot.raw_cache_misses, 2);
+        assert_eq!(snapshot.zip_entry_reads, 1);
+        assert_eq!(snapshot.source_bytes_read, 128);
+    }
+
+    #[test]
+    fn test_raw_cache_failed_load_can_be_retried() {
+        let cache = SharedRawCache::new(1024);
+        let key = RawCacheKey::zip(Path::new("/retry.cbz"), 0);
+        let mut attempts = 0;
+        let first = cache.get_or_load(key.clone(), || {
+            attempts += 1;
+            Err("injected failure".to_string())
+        });
+        assert_eq!(first.unwrap_err(), "injected failure");
+        let second = cache
+            .get_or_load(key, || {
+                attempts += 1;
+                Ok(vec![3u8; 16])
+            })
+            .unwrap();
+        assert_eq!(second.as_slice(), vec![3u8; 16].as_slice());
+        assert_eq!(attempts, 2);
     }
 
     #[test]

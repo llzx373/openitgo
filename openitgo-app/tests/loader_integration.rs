@@ -106,3 +106,59 @@ fn test_loader_thumbnail_and_full_share_source() {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
+
+#[test]
+fn test_loader_zip_thumbnail_and_full_share_one_archive_read() {
+    use std::io::Write;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("pages.cbz");
+    {
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("page.png", options).unwrap();
+        let image = image::RgbaImage::from_pixel(400, 400, image::Rgba([0, 128, 255, 255]));
+        let mut bytes = Vec::new();
+        image
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        zip.write_all(&bytes).unwrap();
+        zip.finish().unwrap();
+    }
+
+    let loader = PageLoader::new();
+    loader.set_perf_enabled(true);
+    let epoch = loader.next_epoch();
+    let source = PageSource::ZipEntry {
+        archive: path,
+        name: "page.png".to_string(),
+        index: 0,
+    };
+    assert!(loader.request_thumbnail(epoch, 0, source.clone()));
+    assert!(loader.request_high(epoch, 0, source));
+
+    let start = Instant::now();
+    let mut got_thumbnail = false;
+    let mut got_full = false;
+    while !got_thumbnail || !got_full {
+        if let Some(result) = loader.try_recv() {
+            let _ = result.image.expect("image should decode");
+            if result.thumbnail {
+                got_thumbnail = true;
+            } else {
+                got_full = true;
+            }
+        }
+        assert!(start.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let snapshot = loader.perf_snapshot();
+    assert_eq!(snapshot.zip_entry_reads, 1);
+    assert_eq!(snapshot.error_results, 0);
+}
