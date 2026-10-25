@@ -6,6 +6,7 @@ use pdf_render::pdf_interpret::pdf_syntax::Pdf;
 use pdf_render::pdf_interpret::InterpreterSettings;
 use pdf_render::vello_cpu::color::palette::css::WHITE;
 use pdf_render::{render, RenderSettings};
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::path::PathBuf;
@@ -627,16 +628,13 @@ impl PageLoader {
                                 let decoded = image.original_size();
                                 let original_size =
                                     image_dimensions_from_bytes(&job.bytes).unwrap_or(decoded);
-                                // Piggyback: the full decode already paid for the pixels,
-                                // so deriving a 256px thumbnail here is nearly free and
-                                // covers the pages the user is actually reading. Skipped
-                                // when DXT5 compression is on — a compressed image would
-                                // need an expensive decompress_dxt5 first; the idle
+                                // Piggyback: reuse the full decode instead of decoding
+                                // the same source again for pages that are being read.
+                                // Skipped when DXT5 compression is on — a compressed image
+                                // would need an expensive decompress_dxt5 first; the idle
                                 // thumbnail batch covers those instead.
                                 if !compress {
-                                    if let Ok((thumb, _)) =
-                                        make_thumbnail_from_loaded(image.clone())
-                                    {
+                                    if let Ok((thumb, _)) = make_thumbnail_from_loaded(&image) {
                                         let _ = result_sender.send(LoadResult {
                                             epoch: job.epoch,
                                             page_index: job.page_index,
@@ -1433,8 +1431,11 @@ fn make_thumbnail(image: image::DynamicImage) -> (ColorImage, [u32; 2]) {
 }
 
 /// Build a thumbnail from any loaded image (Color or Compressed).
-fn make_thumbnail_from_loaded(loaded: LoadedImage) -> Result<(ColorImage, [u32; 2]), String> {
-    let color = loaded.to_color_image()?;
+fn make_thumbnail_from_loaded(loaded: &LoadedImage) -> Result<(ColorImage, [u32; 2]), String> {
+    let color = match loaded {
+        LoadedImage::Color(color) => Cow::Borrowed(color),
+        LoadedImage::Compressed { .. } => Cow::Owned(loaded.to_color_image()?),
+    };
     let (w, h) = (color.size[0] as u32, color.size[1] as u32);
     let bytes: Vec<u8> = color
         .pixels
@@ -1480,7 +1481,7 @@ fn decode_thumbnail_bytes(
 
     // Fall back to full decode + fast resize.
     let loaded = decode_image_bytes(bytes, format_hint, false)?;
-    make_thumbnail_from_loaded(loaded)
+    make_thumbnail_from_loaded(&loaded)
 }
 
 /// Convert an already-decoded dynamic image into the app's internal format.
@@ -1584,7 +1585,7 @@ fn render_pdf_page_cached(
     let size = [pixmap.width() as usize, pixmap.height() as usize];
     let image = ColorImage::from_rgba_premultiplied(size, pixmap.data_as_u8_slice());
     if thumbnail {
-        make_thumbnail_from_loaded(LoadedImage::Color(image)).map(|(thumb, _)| (thumb, full_size))
+        make_thumbnail_from_loaded(&LoadedImage::Color(image)).map(|(thumb, _)| (thumb, full_size))
     } else {
         Ok((image, full_size))
     }
@@ -1730,6 +1731,31 @@ mod tests {
             }
             _ => panic!("PDF should produce a Color image"),
         }
+    }
+
+    #[test]
+    fn test_borrowed_thumbnail_matches_owned_reference() {
+        let rgba = image::RgbaImage::from_fn(512, 256, |x, y| {
+            image::Rgba([(x % 256) as u8, y as u8, (x + y) as u8, 255])
+        });
+        let color = ColorImage::from_rgba_unmultiplied([512, 256], rgba.as_raw());
+        let loaded = LoadedImage::Color(color);
+        let (actual, original_size) = make_thumbnail_from_loaded(&loaded).unwrap();
+
+        let reference_color = loaded.to_color_image().unwrap();
+        let bytes: Vec<u8> = reference_color
+            .pixels
+            .iter()
+            .flat_map(|p| [p.r(), p.g(), p.b(), p.a()])
+            .collect();
+        let reference = make_thumbnail(image::DynamicImage::ImageRgba8(
+            image::RgbaImage::from_raw(512, 256, bytes).unwrap(),
+        ));
+
+        assert_eq!(original_size, [512, 256]);
+        assert_eq!(actual.size, [256, 128]);
+        assert_eq!(actual.pixels, reference.0.pixels);
+        assert_eq!(loaded.original_size(), [512, 256]);
     }
 
     #[test]
