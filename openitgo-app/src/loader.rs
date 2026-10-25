@@ -327,7 +327,7 @@ pub enum LoadPriority {
     Low,
 }
 
-const LOADER_PERF_EVENT_COUNT: usize = 23;
+const LOADER_PERF_EVENT_COUNT: usize = 24;
 
 #[derive(Clone, Copy)]
 #[repr(usize)]
@@ -355,6 +355,7 @@ enum LoaderPerfEvent {
     SourceBytesRead,
     PriorityUpgrade,
     CancelledRequest,
+    JpegDctThumbnail,
 }
 
 #[allow(dead_code)]
@@ -383,6 +384,7 @@ pub struct LoaderPerfSnapshot {
     pub source_bytes_read: u64,
     pub priority_upgrades: u64,
     pub cancelled_requests: u64,
+    pub jpeg_dct_thumbnails: u64,
 }
 
 struct LoaderPerf {
@@ -439,6 +441,7 @@ impl LoaderPerf {
             source_bytes_read: get(LoaderPerfEvent::SourceBytesRead),
             priority_upgrades: get(LoaderPerfEvent::PriorityUpgrade),
             cancelled_requests: get(LoaderPerfEvent::CancelledRequest),
+            jpeg_dct_thumbnails: get(LoaderPerfEvent::JpegDctThumbnail),
         }
     }
 }
@@ -835,7 +838,7 @@ impl PageLoader {
                         LoaderPerfEvent::DecodeFullJob
                     });
                     let result = if key.thumbnail {
-                        decode_thumbnail_bytes(&job.bytes, job.format_hint.as_deref()).map(
+                        decode_thumbnail_bytes(&job.bytes, job.format_hint.as_deref(), perf).map(
                             |(thumb, original_size)| LoadResult {
                                 epoch: key.epoch,
                                 page_index: key.page_index,
@@ -1690,7 +1693,6 @@ pub(crate) const THUMBNAIL_MAX_DIMENSION: u32 = 256;
 /// preserving aspect ratio. Small images are kept at their original size
 /// (image's `thumbnail` would upscale them; the macOS ImageIO path does not,
 /// and the tests assert parity).
-#[cfg(test)]
 fn make_thumbnail(image: image::DynamicImage) -> (ColorImage, [u32; 2]) {
     let original_size = [image.width(), image.height()];
     let thumb =
@@ -1747,6 +1749,35 @@ fn make_thumbnail_from_loaded(loaded: &LoadedImage) -> Result<(ColorImage, [u32;
     ))
 }
 
+fn decode_jpeg_thumbnail(bytes: &[u8]) -> Result<(ColorImage, [u32; 2]), String> {
+    let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.read_info().map_err(|e| e.to_string())?;
+    let info = decoder.info().ok_or("JPEG metadata unavailable")?;
+    let original_size = [info.width as u32, info.height as u32];
+    decoder
+        .scale(
+            THUMBNAIL_MAX_DIMENSION as u16,
+            THUMBNAIL_MAX_DIMENSION as u16,
+        )
+        .map_err(|e| e.to_string())?;
+    let scaled_info = decoder.info().ok_or("JPEG scaled metadata unavailable")?;
+    let pixels = decoder.decode().map_err(|e| e.to_string())?;
+    let (width, height) = (scaled_info.width as u32, scaled_info.height as u32);
+    let image = match scaled_info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => image::DynamicImage::ImageRgb8(
+            image::RgbImage::from_raw(width, height, pixels)
+                .ok_or_else(|| "invalid RGB buffer for JPEG thumbnail".to_string())?,
+        ),
+        jpeg_decoder::PixelFormat::L8 => image::DynamicImage::ImageLuma8(
+            image::GrayImage::from_raw(width, height, pixels)
+                .ok_or_else(|| "invalid luma buffer for JPEG thumbnail".to_string())?,
+        ),
+        format => return Err(format!("unsupported JPEG thumbnail format: {format:?}")),
+    };
+    let (thumbnail, _) = make_thumbnail(image);
+    Ok((thumbnail, original_size))
+}
+
 /// Try to read the original image dimensions without decoding pixels.
 fn image_dimensions_from_bytes(bytes: &[u8]) -> Option<[u32; 2]> {
     let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
@@ -1759,6 +1790,7 @@ fn image_dimensions_from_bytes(bytes: &[u8]) -> Option<[u32; 2]> {
 fn decode_thumbnail_bytes(
     bytes: &[u8],
     format_hint: Option<&str>,
+    perf: &LoaderPerf,
 ) -> Result<(ColorImage, [u32; 2]), String> {
     // Try the platform fast path first (macOS ImageIO can decode a thumbnail
     // directly without touching the full-resolution image).
@@ -1769,9 +1801,27 @@ fn decode_thumbnail_bytes(
         }
     }
 
+    let detected_format = image::guess_format(bytes).ok();
+    if detected_format == Some(image::ImageFormat::Jpeg) {
+        match timing::time("decode_thumbnail_bytes (JPEG DCT)", || {
+            decode_jpeg_thumbnail(bytes)
+        }) {
+            Ok(thumbnail) => {
+                perf.record(LoaderPerfEvent::JpegDctThumbnail);
+                return Ok(thumbnail);
+            }
+            Err(err) => {
+                timing::log(&format!(
+                    "JPEG DCT thumbnail failed ({}), falling back to full decode",
+                    err
+                ));
+            }
+        }
+    }
+
     // WebP fast path: libwebp (SIMD) can scale while decoding, which is much
     // cheaper than the pure-Rust decoder + downscale. Fall back on any failure.
-    if image::guess_format(bytes).ok() == Some(image::ImageFormat::WebP) {
+    if detected_format == Some(image::ImageFormat::WebP) {
         if let Some(thumb) = timing::time("decode_thumbnail_bytes (libwebp)", || {
             crate::webp_thumb::decode_webp_thumbnail(bytes, THUMBNAIL_MAX_DIMENSION)
         }) {
@@ -2241,6 +2291,75 @@ mod tests {
             }
             _ => panic!("PDF should produce a Color image"),
         }
+    }
+
+    #[test]
+    fn test_jpeg_dct_thumbnail_preserves_original_size() {
+        let image = image::RgbImage::from_fn(1024, 768, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, (x + y) as u8])
+        });
+        let mut bytes = Vec::new();
+        image
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        let perf = LoaderPerf::new();
+        perf.set_enabled(true);
+
+        let (thumbnail, original_size) =
+            decode_thumbnail_bytes(&bytes, Some("jpg"), &perf).unwrap();
+
+        assert_eq!(original_size, [1024, 768]);
+        assert_eq!(thumbnail.size, [256, 192]);
+        assert_eq!(perf.snapshot().jpeg_dct_thumbnails, 1);
+
+        let reference_loaded = decode_image_bytes(&bytes, Some("jpg"), false).unwrap();
+        let (reference, _) = make_thumbnail_from_loaded(&reference_loaded).unwrap();
+        let error: u64 = thumbnail
+            .pixels
+            .iter()
+            .zip(reference.pixels.iter())
+            .flat_map(|(actual, expected)| {
+                [
+                    actual.r().abs_diff(expected.r()) as u64,
+                    actual.g().abs_diff(expected.g()) as u64,
+                    actual.b().abs_diff(expected.b()) as u64,
+                ]
+            })
+            .sum();
+        let mean_error = error as f64 / (thumbnail.pixels.len() * 3) as f64;
+        assert!(mean_error < 4.0, "mean RGB error: {mean_error}");
+    }
+
+    #[test]
+    fn test_jpeg_dct_thumbnail_luma_does_not_upscale() {
+        let image = image::GrayImage::from_pixel(64, 32, image::Luma([128]));
+        let mut bytes = Vec::new();
+        image
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        let perf = LoaderPerf::new();
+        perf.set_enabled(true);
+
+        let (thumbnail, original_size) =
+            decode_thumbnail_bytes(&bytes, Some("jpg"), &perf).unwrap();
+
+        assert_eq!(original_size, [64, 32]);
+        assert_eq!(thumbnail.size, [64, 32]);
+        assert_eq!(perf.snapshot().jpeg_dct_thumbnails, 1);
+    }
+
+    #[test]
+    fn test_invalid_jpeg_uses_existing_error_path() {
+        let perf = LoaderPerf::new();
+        perf.set_enabled(true);
+        assert!(decode_thumbnail_bytes(b"not a jpeg", Some("jpg"), &perf).is_err());
+        assert_eq!(perf.snapshot().jpeg_dct_thumbnails, 0);
     }
 
     #[test]
