@@ -170,6 +170,7 @@ impl RawCacheKey {
 #[derive(Clone)]
 struct SharedRawCache {
     inner: Arc<RwLock<SharedRawCacheInner>>,
+    perf: Option<Arc<LoaderPerf>>,
 }
 
 struct SharedRawCacheInner {
@@ -180,7 +181,12 @@ struct SharedRawCacheInner {
 }
 
 impl SharedRawCache {
+    #[cfg(test)]
     fn new(max_bytes: usize) -> Self {
+        Self::with_perf(max_bytes, None)
+    }
+
+    fn with_perf(max_bytes: usize, perf: Option<Arc<LoaderPerf>>) -> Self {
         Self {
             inner: Arc::new(RwLock::new(SharedRawCacheInner {
                 map: HashMap::new(),
@@ -188,15 +194,32 @@ impl SharedRawCache {
                 bytes: 0,
                 max_bytes,
             })),
+            perf,
         }
     }
 
     fn get(&self, key: &RawCacheKey) -> Option<Arc<Vec<u8>>> {
-        self.inner.read().unwrap().map.get(key).cloned()
+        let result = self.inner.read().unwrap().map.get(key).cloned();
+        if let Some(perf) = &self.perf {
+            perf.record(if result.is_some() {
+                LoaderPerfEvent::RawCacheHit
+            } else {
+                LoaderPerfEvent::RawCacheMiss
+            });
+        }
+        result
     }
 
     fn insert(&self, key: RawCacheKey, bytes: Vec<u8>) {
         let len = bytes.len();
+        if let Some(perf) = &self.perf {
+            perf.record(if key.zip_index.is_some() {
+                LoaderPerfEvent::ZipEntryRead
+            } else {
+                LoaderPerfEvent::RarEntryRead
+            });
+            perf.record_value(LoaderPerfEvent::SourceBytesRead, len as u64);
+        }
         let mut inner = self.inner.write().unwrap();
         if len > inner.max_bytes {
             return;
@@ -237,7 +260,7 @@ pub enum LoadPriority {
     Low,
 }
 
-const LOADER_PERF_EVENT_COUNT: usize = 9;
+const LOADER_PERF_EVENT_COUNT: usize = 20;
 
 #[derive(Clone, Copy)]
 #[repr(usize)]
@@ -251,6 +274,17 @@ enum LoaderPerfEvent {
     ThumbnailResult,
     DroppedResult,
     ErrorResult,
+    DecodeQueueFull,
+    IoFullJob,
+    IoThumbnailJob,
+    DecodeFullJob,
+    DecodeThumbnailJob,
+    FileRead,
+    ZipEntryRead,
+    RarEntryRead,
+    RawCacheHit,
+    RawCacheMiss,
+    SourceBytesRead,
 }
 
 #[allow(dead_code)]
@@ -265,6 +299,17 @@ pub struct LoaderPerfSnapshot {
     pub thumbnail_results: u64,
     pub dropped_results: u64,
     pub error_results: u64,
+    pub decode_queue_full: u64,
+    pub io_full_jobs: u64,
+    pub io_thumbnail_jobs: u64,
+    pub decode_full_jobs: u64,
+    pub decode_thumbnail_jobs: u64,
+    pub file_reads: u64,
+    pub zip_entry_reads: u64,
+    pub rar_entry_reads: u64,
+    pub raw_cache_hits: u64,
+    pub raw_cache_misses: u64,
+    pub source_bytes_read: u64,
 }
 
 struct LoaderPerf {
@@ -286,8 +331,12 @@ impl LoaderPerf {
     }
 
     fn record(&self, event: LoaderPerfEvent) {
+        self.record_value(event, 1);
+    }
+
+    fn record_value(&self, event: LoaderPerfEvent, value: u64) {
         if self.enabled.load(Ordering::Relaxed) {
-            self.counters[event as usize].fetch_add(1, Ordering::Relaxed);
+            self.counters[event as usize].fetch_add(value, Ordering::Relaxed);
         }
     }
 
@@ -303,6 +352,17 @@ impl LoaderPerf {
             thumbnail_results: get(LoaderPerfEvent::ThumbnailResult),
             dropped_results: get(LoaderPerfEvent::DroppedResult),
             error_results: get(LoaderPerfEvent::ErrorResult),
+            decode_queue_full: get(LoaderPerfEvent::DecodeQueueFull),
+            io_full_jobs: get(LoaderPerfEvent::IoFullJob),
+            io_thumbnail_jobs: get(LoaderPerfEvent::IoThumbnailJob),
+            decode_full_jobs: get(LoaderPerfEvent::DecodeFullJob),
+            decode_thumbnail_jobs: get(LoaderPerfEvent::DecodeThumbnailJob),
+            file_reads: get(LoaderPerfEvent::FileRead),
+            zip_entry_reads: get(LoaderPerfEvent::ZipEntryRead),
+            rar_entry_reads: get(LoaderPerfEvent::RarEntryRead),
+            raw_cache_hits: get(LoaderPerfEvent::RawCacheHit),
+            raw_cache_misses: get(LoaderPerfEvent::RawCacheMiss),
+            source_bytes_read: get(LoaderPerfEvent::SourceBytesRead),
         }
     }
 }
@@ -376,7 +436,7 @@ pub struct PageLoader {
     epoch: Arc<AtomicU64>,
     compress: Arc<AtomicBool>,
     passwords: SharedPasswords,
-    perf: LoaderPerf,
+    perf: Arc<LoaderPerf>,
     _io_workers: Vec<thread::JoinHandle<()>>,
     _decode_workers: Vec<thread::JoinHandle<()>>,
 }
@@ -432,7 +492,8 @@ impl PageLoader {
         // happen in parallel. Each worker owns its own archive cache, but they
         // share a single decompressed-bytes cache so the same zip entry is never
         // decompressed more than once.
-        let raw_cache = SharedRawCache::new(512 * 1024 * 1024);
+        let perf = Arc::new(LoaderPerf::new());
+        let raw_cache = SharedRawCache::with_perf(512 * 1024 * 1024, Some(perf.clone()));
         let pdf_cache = PdfDocumentCache::new();
         let passwords: SharedPasswords = Arc::new(RwLock::new(HashMap::new()));
         let io_thread_count = worker_count;
@@ -447,6 +508,7 @@ impl PageLoader {
             let raw_cache = raw_cache.clone();
             let pdf_cache = pdf_cache.clone();
             let passwords = passwords.clone();
+            let perf = perf.clone();
             io_workers.push(thread::spawn(move || {
                 let mut zip_cache = ZipCache::new();
                 let mut high_disconnected = false;
@@ -466,6 +528,7 @@ impl PageLoader {
                             &mut zip_cache,
                             &raw_cache,
                             &pdf_cache,
+                            &perf,
                             &passwords,
                         );
                     }
@@ -482,6 +545,7 @@ impl PageLoader {
                                     &mut zip_cache,
                                     &raw_cache,
                                     &pdf_cache,
+                            &perf,
                                     &passwords,
                                 );
                             } else {
@@ -503,6 +567,7 @@ impl PageLoader {
                                     &mut zip_cache,
                                     &raw_cache,
                                     &pdf_cache,
+                            &perf,
                                     &passwords,
                                 );
                             } else {
@@ -530,8 +595,19 @@ impl PageLoader {
             let low_full_decode_receiver = low_full_decode_receiver.clone();
             let result_sender = result_sender.clone();
             let compress = compress.clone();
+            let perf = perf.clone();
             decode_workers.push(thread::spawn(move || {
-                fn process_job(job: DecodeJob, compress: bool, result_sender: &Sender<LoadResult>) {
+                fn process_job(
+                    job: DecodeJob,
+                    compress: bool,
+                    result_sender: &Sender<LoadResult>,
+                    perf: &LoaderPerf,
+                ) {
+                    perf.record(if job.thumbnail {
+                        LoaderPerfEvent::DecodeThumbnailJob
+                    } else {
+                        LoaderPerfEvent::DecodeFullJob
+                    });
                     let result = if job.thumbnail {
                         decode_thumbnail_bytes(&job.bytes, job.format_hint.as_deref()).map(
                             |(thumb, original_size)| LoadResult {
@@ -599,13 +675,13 @@ impl PageLoader {
                     // Priority order: high (visible pages), low thumbnails,
                     // then low full-image preloads.
                     while let Ok(job) = high_decode_receiver.try_recv() {
-                        process_job(job, compress.load(Ordering::Relaxed), &result_sender);
+                        process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf);
                     }
                     while let Ok(job) = low_thumb_decode_receiver.try_recv() {
-                        process_job(job, compress.load(Ordering::Relaxed), &result_sender);
+                        process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf);
                     }
                     while let Ok(job) = low_full_decode_receiver.try_recv() {
-                        process_job(job, compress.load(Ordering::Relaxed), &result_sender);
+                        process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf);
                     }
 
                     if high_disconnected && thumb_disconnected && full_disconnected {
@@ -615,7 +691,7 @@ impl PageLoader {
                     select! {
                         recv(high_decode_receiver) -> job => {
                             if let Ok(job) = job {
-                                process_job(job, compress.load(Ordering::Relaxed), &result_sender);
+                                process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf);
                             } else {
                                 high_disconnected = true;
                                 if thumb_disconnected && full_disconnected {
@@ -625,7 +701,7 @@ impl PageLoader {
                         }
                         recv(low_thumb_decode_receiver) -> job => {
                             if let Ok(job) = job {
-                                process_job(job, compress.load(Ordering::Relaxed), &result_sender);
+                                process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf);
                             } else {
                                 thumb_disconnected = true;
                                 if high_disconnected && full_disconnected {
@@ -635,7 +711,7 @@ impl PageLoader {
                         }
                         recv(low_full_decode_receiver) -> job => {
                             if let Ok(job) = job {
-                                process_job(job, compress.load(Ordering::Relaxed), &result_sender);
+                                process_job(job, compress.load(Ordering::Relaxed), &result_sender, &perf);
                             } else {
                                 full_disconnected = true;
                                 if high_disconnected && thumb_disconnected {
@@ -655,7 +731,7 @@ impl PageLoader {
             epoch: Arc::new(AtomicU64::new(1)),
             compress,
             passwords,
-            perf: LoaderPerf::new(),
+            perf,
             _io_workers: io_workers,
             _decode_workers: decode_workers,
         }
@@ -811,8 +887,14 @@ fn process_io_request(
     zip_cache: &mut ZipCache,
     raw_cache: &SharedRawCache,
     pdf_cache: &PdfDocumentCache,
+    perf: &LoaderPerf,
     passwords: &SharedPasswords,
 ) {
+    perf.record(if req.thumbnail {
+        LoaderPerfEvent::IoThumbnailJob
+    } else {
+        LoaderPerfEvent::IoFullJob
+    });
     let priority_label = match priority {
         LoadPriority::High => "high",
         LoadPriority::Low => "low",
@@ -867,7 +949,7 @@ fn process_io_request(
                 }
                 _ => None,
             };
-            match read_page_bytes(&req.source, zip_cache, raw_cache, password.as_deref()) {
+            match read_page_bytes(&req.source, zip_cache, raw_cache, password.as_deref(), perf) {
                 Ok((bytes, format_hint)) => {
                     let job = DecodeJob {
                         epoch: req.epoch,
@@ -882,6 +964,7 @@ fn process_io_request(
                         (LoadPriority::Low, false) => low_full_decode_sender,
                     };
                     if sender.try_send(job).is_err() {
+                        perf.record(LoaderPerfEvent::DecodeQueueFull);
                         timing::log(&format!(
                             "IO dropped decode job page {} ({} queue full)",
                             req.page_index, priority_label
@@ -1010,6 +1093,7 @@ fn read_page_bytes(
     zip_cache: &mut ZipCache,
     raw_cache: &SharedRawCache,
     password: Option<&str>,
+    perf: &LoaderPerf,
 ) -> Result<(Vec<u8>, Option<String>), String> {
     match source {
         PageSource::PdfPage { .. } => Err("PDF should be rendered on IO thread".to_string()),
@@ -1019,6 +1103,8 @@ fn read_page_bytes(
                 .and_then(|e| e.to_str())
                 .map(|s| s.to_lowercase());
             let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            perf.record(LoaderPerfEvent::FileRead);
+            perf.record_value(LoaderPerfEvent::SourceBytesRead, bytes.len() as u64);
             Ok((bytes, hint))
         }
         PageSource::ZipEntry {
@@ -1622,6 +1708,10 @@ mod tests {
         let snapshot = loader.perf_snapshot();
         assert_eq!(snapshot.high_full_requests, 1);
         assert_eq!(snapshot.full_results, 1);
+        assert_eq!(snapshot.io_full_jobs, 1);
+        assert_eq!(snapshot.decode_full_jobs, 1);
+        assert_eq!(snapshot.file_reads, 1);
+        assert!(snapshot.source_bytes_read > 0);
         assert_eq!(snapshot.request_queue_full, 0);
         assert_eq!(snapshot.dropped_results, 0);
         assert_eq!(snapshot.error_results, 0);
@@ -1883,6 +1973,8 @@ mod tests {
         let mut zip_cache = ZipCache::new();
         let raw_cache = SharedRawCache::new(64 * 1024 * 1024);
         let pdf_cache = PdfDocumentCache::new();
+        let perf = LoaderPerf::new();
+        perf.set_enabled(true);
         let passwords: SharedPasswords = Arc::new(RwLock::new(HashMap::new()));
 
         process_io_request(
@@ -1900,6 +1992,7 @@ mod tests {
             &mut zip_cache,
             &raw_cache,
             &pdf_cache,
+            &perf,
             &passwords,
         );
 
@@ -1913,6 +2006,12 @@ mod tests {
             "result should be an error, got {:?}",
             result.image
         );
+        let snapshot = perf.snapshot();
+        assert_eq!(snapshot.io_full_jobs, 1);
+        assert_eq!(snapshot.decode_full_jobs, 0);
+        assert_eq!(snapshot.file_reads, 1);
+        assert!(snapshot.source_bytes_read > 0);
+        assert_eq!(snapshot.decode_queue_full, 1);
     }
 
     #[test]
@@ -1969,6 +2068,34 @@ mod tests {
             }
             _ => panic!("thumbnail should be a Color image"),
         }
+    }
+
+    #[test]
+    fn test_loader_perf_tracks_zip_reads_and_raw_cache_hits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("perf.cbz");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("01.png", options).unwrap();
+            zip.write_all(b"fake-png").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let perf = Arc::new(LoaderPerf::new());
+        perf.set_enabled(true);
+        let raw_cache = SharedRawCache::with_perf(1024 * 1024, Some(perf.clone()));
+        let mut zip_cache = ZipCache::new();
+        read_zip_entry(&mut zip_cache, &raw_cache, &path, 0, None).unwrap();
+        read_zip_entry(&mut zip_cache, &raw_cache, &path, 0, None).unwrap();
+
+        let snapshot = perf.snapshot();
+        assert_eq!(snapshot.zip_entry_reads, 1);
+        assert_eq!(snapshot.source_bytes_read, 8);
+        assert_eq!(snapshot.raw_cache_misses, 1);
+        assert_eq!(snapshot.raw_cache_hits, 1);
     }
 
     #[test]
