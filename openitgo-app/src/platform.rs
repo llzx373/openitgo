@@ -804,6 +804,7 @@ pub mod windows {
     pub mod file_attr;
     pub mod file_icons;
     pub mod mpv_view;
+    pub mod recycle_bin;
     pub mod restore_rect;
     pub mod shell_verbs;
     pub mod startup_cloak;
@@ -1094,6 +1095,18 @@ pub mod file_attr {
 /// Unified file-attributes API (`crate::platform::file_attr`)。
 #[cfg(target_os = "windows")]
 pub use windows::file_attr;
+
+#[cfg(not(target_os = "windows"))]
+pub mod recycle_bin {
+    use std::path::Path;
+
+    pub fn delete(path: &Path) -> Result<(), String> {
+        trash::delete(path).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub use windows::recycle_bin;
 
 /// Unified video-view API used by views/media.rs (`PendingVideoView`
 /// two-phase construction + `MpvNativeView`).

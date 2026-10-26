@@ -44,7 +44,12 @@ impl<T: Send + Clone + 'static> AsyncOpener<T> {
                 self.cached = Some(result.clone());
                 OpenStatus::Ready(result)
             }
-            Err(_) => OpenStatus::Loading,
+            Err(std::sync::mpsc::TryRecvError::Empty) => OpenStatus::Loading,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                let result = Err("后台读取异常终止".to_string());
+                self.cached = Some(result.clone());
+                OpenStatus::Ready(result)
+            }
         }
     }
 }
@@ -103,6 +108,22 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
         let status = opener.poll();
         assert_eq!(status, OpenStatus::Ready(Err("parse failed".to_string())));
+    }
+
+    #[test]
+    fn poll_returns_error_when_worker_disconnects() {
+        let mut opener = AsyncOpener::<Comic>::open(PathBuf::from("/tmp/test"), |_path| {
+            panic!("worker failure")
+        });
+        for _ in 0..200 {
+            if let OpenStatus::Ready(Err(message)) = opener.poll() {
+                assert_eq!(message, "后台读取异常终止");
+                assert!(matches!(opener.poll(), OpenStatus::Ready(Err(_))));
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("worker disconnect should not stay loading");
     }
 
     #[test]

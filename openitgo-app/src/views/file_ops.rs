@@ -30,8 +30,8 @@
 //! 目录；目录级 apply_all 不预决文件级策略（各问各的，各自记忆）。
 //!
 //! 移动：`fs::rename` 快速路径（同盘瞬间完成），失败（跨盘/占用）回退
-//! 递归复制 + 成功后 `trash::delete` 源。
-//! 删除：默认逐项 `trash::delete`（回收站）；`fm_delete_mode = "permanent"`
+//! 递归复制 + 成功后 `platform::recycle_bin::delete` 源。
+//! 删除：默认逐项 `platform::recycle_bin::delete`（回收站）；`fm_delete_mode = "permanent"`
 //! 或 Shift+Del 直删时逐项物理删除（`permanent_delete`）。单项失败记 errors 继续。
 //! 符号链接：复制 = 复制链接目标内容（`fs::copy` 语义），删除 = 只删链接；
 //! 预扫描不跟进符号链接目录（防环），递归复制同样不跟进（符号链接目录
@@ -403,7 +403,7 @@ impl FileOpManager {
         )
     }
 
-    /// 后台删除：permanent=false 逐项移入回收站（trash::delete）；
+    /// 后台删除：permanent=false 逐项移入回收站（platform::recycle_bin::delete）；
     /// permanent=true（fm_delete_mode = "permanent" / Shift+Del 直删）
     /// 逐项物理删除（remove_file/remove_dir_all），失败记 errors 继续。
     pub fn start_delete(&mut self, sources: Vec<PathBuf>, permanent: bool) -> u64 {
@@ -859,7 +859,7 @@ fn run_op(
                 let result = if delete_permanent {
                     permanent_delete(src)
                 } else {
-                    trash::delete(src).map_err(|e| e.to_string())
+                    crate::platform::recycle_bin::delete(src)
                 };
                 if let Err(e) = result {
                     ctx.errors.push((src.clone(), e));
@@ -946,7 +946,7 @@ fn run_op(
                             if std::fs::remove_dir(verbatim_path(src)).is_ok() {
                                 ctx.written.push((dst.clone(), src.clone()));
                             }
-                        } else if let Err(e) = trash::delete(src) {
+                        } else if let Err(e) = crate::platform::recycle_bin::delete(src) {
                             ctx.errors
                                 .push((src.clone(), format!("源移入回收站失败: {e}")));
                         } else {
@@ -1802,7 +1802,7 @@ fn copy_recursive(src: &Path, dst: &Path, mode: ConflictMode, ctx: &mut OpCtx) -
                 // 过滤移动（阶段 AB）：逐文件 trash 已拷源文件；校验失败/
                 // 删源失败的保留在源。
                 if ctx.move_prune && !unsafe_to_prune {
-                    if let Err(e) = trash::delete(src) {
+                    if let Err(e) = crate::platform::recycle_bin::delete(src) {
                         ctx.errors
                             .push((src.to_path_buf(), format!("源文件删除失败: {e}")));
                         ctx.drop_source_unsafe = true;
@@ -2706,6 +2706,50 @@ mod tests {
         );
         assert!(r.errors.is_empty(), "{:?}", r.errors);
         assert!(!f.exists());
+    }
+
+    /// 与生产一致的后台 worker：MTA 下删除文件和目录，任务必须正常收尾。
+    #[cfg(windows)]
+    #[test]
+    fn delete_recycle_bin_finishes_on_background_worker() {
+        let t = TempTree::new("trash-worker");
+        let f = t.path().join("victim.txt");
+        let dir = t.path().join("dir");
+        write_file(&f, b"bye");
+        write_file(&dir.join("nested.txt"), b"nested");
+        let mut mgr = FileOpManager::default();
+        mgr.start_delete(vec![f.clone(), dir.clone()], false);
+        let mut finished = None;
+        for _ in 0..500 {
+            let summary = mgr.poll();
+            if let Some(fin) = summary.finished.into_iter().next() {
+                finished = Some(fin);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let fin = finished.expect("recycle-bin worker should finish");
+        assert!(fin.fatal.is_none(), "{:?}", fin.fatal);
+        assert!(fin.errors.is_empty(), "{:?}", fin.errors);
+        assert!(!f.exists());
+        assert!(!dir.exists());
+        assert!(!mgr.poll().has_active);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn delete_recycle_bin_missing_path_returns_error() {
+        let t = TempTree::new("trash-missing");
+        let missing = t.path().join("missing.txt");
+        let r = run_op_sync(
+            OpKind::Delete,
+            vec![missing.clone()],
+            None,
+            ConflictMode::Skip,
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert_eq!(r.errors.len(), 1);
+        assert_eq!(r.errors[0].0, missing);
     }
 
     /// 永久删除分派（fm_delete_mode = "permanent"）：文件与目录物理删除。

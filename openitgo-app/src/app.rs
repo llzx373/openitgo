@@ -2867,7 +2867,7 @@ impl ReaderApp {
             );
             if let Some((delete_archive, open_folder)) = self.extract_post.remove(id) {
                 if delete_archive {
-                    match trash::delete(archive) {
+                    match crate::platform::recycle_bin::delete(archive) {
                         Ok(()) => msg.push_str("，压缩包已移入回收站"),
                         Err(e) => msg.push_str(&format!("，删除压缩包失败: {e}")),
                     }

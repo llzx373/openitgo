@@ -168,7 +168,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 - **选择模型与 Archive 的差异**：`selected: HashSet<PathBuf>` **含目录**；焦点是 UI 行索引
   usize（0 = 「..」上级行，盘符根禁用上级）。
 - **file_ops 约定**：每任务一条后台线程 + channel 进度 + `Arc<AtomicBool>` 取消；删除逐项
-  `trash::delete`（回收站）；`ConflictMode::Ask` 执行期逐个问——worker 经
+  `platform::recycle_bin::delete`（回收站）。Windows 封装以 MTA 初始化后台 worker，兼容
+  UI 线程已有 COM 单元，所有 COM 错误返回 `Err`——**勿回退默认 STA 且内部 `unwrap` 的
+  `trash::delete`**；`ConflictMode::Ask` 执行期逐个问——worker 经
   `OpEvent::AskConflict` 阻塞等 `ConflictAnswer`（100ms 轮询，cancel 或断连按 Cancel）；
   「本次操作全部应用」记忆为后续同级冲突策略（文件级/目录级各自独立）；目录↔目录非 Ask
   恒合并；AutoRename `name (1).ext`；移动 = `fs::rename` 快速路径，失败回退递归复制 +
@@ -252,8 +254,10 @@ dirs_first 逐栏下发，RowsKey 自动失效。
   可用口径；unix statvfs，以 `[target.'cfg(unix)'] libc` 复用）；30s 会话缓存（失败 None
   同样缓存）。过滤激活指示：弱色 `过滤: xxx`。
 - 预览器（R）：FM 三处共用 `draw_preview_content(ui, in_popup)`。加载器返回 `PreviewOutcome
-  { data, bytes }`（原始字节是 HEX/重解码数据源，超 64MB 为 None）；所有类型都读取，二进制落
-  HEX。HEX = `format_hex_line` + show_rows 虚拟化（不物化全表）。编码手动切换：
+  { data, bytes }`（原始字节是 HEX/重解码数据源，超 64MB 为 None）；焦点自动预览仅
+  `is_previewable_name` 的文本/图片，其他类型只显示元信息；F3 显式预览可读所有类型，二进制落
+  HEX（`AsyncOpener` 断连必须返回 Err，勿永久 Loading）。HEX = `format_hex_line` + show_rows
+  虚拟化（不物化全表）。编码手动切换：
   `decode_text_with`/`decode_preview_text`/`preview_redecode`（用已读字节重解码不重读文件）。
   文本内搜索：**无搜索词维持 TextEdit 只读多行，有搜索词才切行级虚拟化**。图片旋转 = Mesh
   UV 角点轮换（不写文件）。F3 弹窗最大化走全屏 Area 自绘标题行。

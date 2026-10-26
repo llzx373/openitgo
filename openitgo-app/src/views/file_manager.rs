@@ -39,7 +39,8 @@ use crate::views::file_ops::{
     FileOpManager, FinishedOp, OpKind, OpSpeedMeter,
 };
 use crate::views::preview_bytes::{
-    decode_preview_text, format_hex_line, load_file_preview, PreviewData, PreviewOutcome,
+    decode_preview_text, format_hex_line, is_previewable_name, load_file_preview, PreviewData,
+    PreviewOutcome,
 };
 use egui_phosphor_icons::{icons, Icon};
 use openitgo_parser::archive::archive_kind;
@@ -6504,11 +6505,9 @@ impl FileManagerView {
         }
     }
 
-    /// 「选中即预览」：焦点栏焦点行落到文件时更新预览目标（可预览类型后台
-    /// 加载，不可预览类型直接显示元信息占位，不读内容）；焦点不在文件上
-    /// （目录/「..」/无焦点）时清空预览——预览面板/快览恒在，内容切占位。
-    /// 仅单栏预览开 / F3 弹窗开 / 双栏快览开时跟随焦点，其余情况不发起
-    /// 后台读取。
+    /// 「选中即预览」：焦点栏焦点行落到文本/图片时后台加载；其他类型只显示
+    /// 元信息，不因单击读取未知内容（F3 弹窗内仍可显式切换全类型）。焦点不在
+    /// 文件上时清空预览。仅单栏预览开 / F3 弹窗开 / 双栏快览开时跟随焦点。
     fn sync_preview_target(&mut self) {
         let follows = matches!(self.layout, PanelLayout::Single { preview_open: true })
             || self.preview_window_open
@@ -6519,16 +6518,25 @@ impl FileManagerView {
         match self.panels[self.active].focused_entry() {
             Some(entry) if !entry.is_dir => {
                 if self.preview_path.as_ref() != Some(&entry.path) {
-                    self.set_preview_target(entry);
+                    if self.preview_window_open || is_previewable_name(&entry.name) {
+                        self.set_preview_target(entry);
+                    } else {
+                        self.set_preview_metadata(entry);
+                    }
                 }
             }
             _ => self.clear_preview(),
         }
     }
 
-    /// 设置预览目标并发起后台读取（阶段 R 起不再按 is_previewable_name
-    /// 门槛分流：所有类型都读取——文本/图片走内容嗅探，其余落 HEX 模式；
-    /// 读取上限仍由 loader 的 PREVIEW_MAX_BYTES 把关）。每个新目标重置
+    fn set_preview_metadata(&mut self, entry: FsEntry) {
+        self.clear_preview();
+        self.preview_path = Some(entry.path.clone());
+        self.preview_entry = Some(entry);
+    }
+
+    /// F3 显式预览：所有类型都读取——文本/图片走内容嗅探，其余落 HEX 模式；
+    /// 读取上限仍由 loader 的 PREVIEW_MAX_BYTES 把关。每个新目标重置
     /// 模式/编码/旋转/搜索态（手动编码选择「下一个文件回自动」）。
     fn set_preview_target(&mut self, entry: FsEntry) {
         self.preview = None;
@@ -7723,6 +7731,45 @@ mod tests {
         ctx.set_fonts(fonts);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn delete_key_finishes_and_refreshes_panel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let victim = tmp.path().join("victim.txt");
+        std::fs::write(&victim, b"bye").unwrap();
+        let mut view = FileManagerView::new("single", 0.5, false, "name", true, &[]);
+        navigate_ready(&mut view.panels[0], tmp.path());
+        let ctx = egui::Context::default();
+        setup_test_fonts(&ctx);
+        headless_frame(&ctx, &mut view, 0.0, vec![]);
+        view.panels[0].focus = Some(1);
+        view.panels[0].selected.insert(victim.clone());
+        headless_frame(
+            &ctx,
+            &mut view,
+            1.0,
+            vec![egui::Event::Key {
+                key: egui::Key::Delete,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        for i in 0..500 {
+            if !victim.exists()
+                && view.ops.active_count() == 0
+                && matches!(view.panels[0].state, PanelLoadState::Ready)
+                && !view.panels[0].entries.iter().any(|e| e.path == victim)
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            headless_frame(&ctx, &mut view, 1.1 + i as f64 * 0.01, vec![]);
+        }
+        panic!("Delete 键删除未及时完成并刷新面板");
+    }
+
     /// 回归（双击目录闪退）：双击目录行同帧 navigate_to 清空 entries，
     /// render_list 的循环若继续按导航前 rows 快照渲染后续行，render_row
     /// 里 entries[i] 越界 panic。修复后状态离开 Ready 即停笔。
@@ -8122,6 +8169,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tmp_click_shows_metadata_without_read_and_f3_still_previews_hex() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sample.tmp");
+        let bytes: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, bytes).unwrap();
+        let mut view = FileManagerView::new("single", 0.5, true, "name", true, &[]);
+        navigate_ready(&mut view.panels[0], tmp.path());
+        let ctx = egui::Context::default();
+        setup_test_fonts(&ctx);
+        let mut t = 0.0;
+        headless_frame(&ctx, &mut view, t, vec![]);
+        let pos = locate_file_row(&ctx, &mut view, &mut t, "sample.tmp");
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, primary_click_events(pos));
+        for _ in 0..5 {
+            t += 1.0;
+            headless_frame(&ctx, &mut view, t, vec![]);
+            assert!(view.preview.is_none(), "单击 .tmp 不应读取内容");
+        }
+        assert_eq!(view.preview_path.as_deref(), Some(path.as_path()));
+        assert!(view.preview_bytes.is_none());
+
+        view.apply_layout_settings("dual", 0.5);
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, key_events(egui::Key::F3));
+        assert!(view.preview.is_some(), "F3 应显式读取 .tmp");
+        for _ in 0..200 {
+            t += 0.01;
+            headless_frame(&ctx, &mut view, t, vec![]);
+            if view.preview_bytes.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            view.preview_bytes.as_deref().map(<[u8]>::len),
+            Some(4 * 1024 * 1024)
+        );
+        assert_eq!(view.preview_mode, PreviewMode::Hex);
+        for _ in 0..3 {
+            t += 1.0;
+            headless_frame(&ctx, &mut view, t, vec![]);
+        }
+    }
+
     /// 竞态：预览在途时导航离开（clear_preview 先行），结果晚到不应 panic。
     #[test]
     fn preview_navigate_away_while_loading() {
@@ -8210,6 +8303,7 @@ mod tests {
                 headless_frame(&ctx, &mut view, t, vec![]);
             }
         }
+        assert!(view.preview_bytes.is_some(), "F3 切换二进制仍应读取 HEX");
         // Esc 关弹窗。
         t += 1.0;
         headless_frame(&ctx, &mut view, t, key_events(egui::Key::Escape));
