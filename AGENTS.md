@@ -154,7 +154,8 @@ cargo clippy --workspace --all-targets -- -D warnings
   改写为首卷，保证历史/密码表 key 稳定。
 - **解压对话框**（`extract_dialog.rs`）：统一入口 `ExtractDialogState`，三档 wrap
   （smart/always/never）、完成后删除压缩包（`trash` 移回收站）/打开目标文件夹；选项写回
-  settings，`poll_extracts` 在成功时执行删除/打开（失败/取消不执行）。
+  settings，`poll_extracts` 在成功时执行删除/打开（失败/取消不执行）；成功/取消写
+  `status_message`（普通正文色），解压或后处理失败写 `error_message`（错误红）。
 
 ### 文件管理器（View::FileManager，Total Commander 形态）
 

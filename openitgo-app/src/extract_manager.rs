@@ -124,7 +124,7 @@ struct PendingExtract {
     smart_wrap: bool,
 }
 
-/// `poll` 一帧的汇总：供 app 写 `error_message` / 决定重绘节奏。
+/// `poll` 一帧的汇总：供 app 写状态/错误消息与决定重绘节奏。
 #[derive(Debug, Default)]
 pub struct ExtractSummary {
     /// 完成的包：(任务 id, 包路径, 输出目录)。

@@ -363,6 +363,8 @@ pub struct ReaderApp {
     pub history: History,
     pub bookmarks: Bookmarks,
     pub error_message: Option<String>,
+    /// 非错误操作结果（如解压完成/取消），使用普通正文颜色显示。
+    pub status_message: Option<String>,
     pub page_loader: PageLoader,
     pub cover_loader: PageLoader,
     pub opener: Option<AsyncOpener<Comic>>,
@@ -529,6 +531,7 @@ impl Default for ReaderApp {
             history,
             bookmarks,
             error_message: settings_error.or(comic_settings_error),
+            status_message: None,
             page_loader,
             cover_loader,
             opener: None,
@@ -1114,6 +1117,8 @@ impl ReaderApp {
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(err) = &self.error_message {
                 ui.colored_label(ui.visuals().error_fg_color, err);
+            } else if let Some(status) = &self.status_message {
+                ui.label(status);
             }
             let mut open_idx = None;
             let mut open_path: Option<PathBuf> = None;
@@ -2544,6 +2549,8 @@ impl ReaderApp {
                         }
                         if let Some(err) = &self.error_message {
                             ui.colored_label(ui.visuals().error_fg_color, err);
+                        } else if let Some(status) = &self.status_message {
+                            ui.label(status);
                         }
                     });
                 },
@@ -2594,6 +2601,8 @@ impl ReaderApp {
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(err) = &self.error_message {
                 ui.colored_label(ui.visuals().error_fg_color, err);
+            } else if let Some(status) = &self.status_message {
+                ui.label(status);
             }
             // 预览读取加密条目用会话密码（canonical key 与裸路径两处都查）。
             self.archive_view.preview_password = self
@@ -2710,6 +2719,8 @@ impl ReaderApp {
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(err) = &self.error_message {
                 ui.colored_label(ui.visuals().error_fg_color, err);
+            } else if let Some(status) = &self.status_message {
+                ui.label(status);
             }
             let mut back = false;
             let mut open_path: Option<PathBuf> = None;
@@ -2853,12 +2864,13 @@ impl ReaderApp {
         }
     }
 
-    /// 每帧汇总解压任务结果 → `error_message`；有活动任务时驱动进度刷新。
+    /// 每帧汇总解压任务结果；成功/取消写普通状态消息，失败写错误消息。
     /// 完成任务的登记后处理（删除压缩包到回收站 / 打开目标文件夹）在此执行；
     /// 失败/取消不执行后处理。
     fn poll_extracts(&mut self, ctx: &egui::Context) {
         let summary = self.extract_manager.poll();
         let mut messages: Vec<String> = Vec::new();
+        let mut has_error = !summary.failed.is_empty();
         for (id, archive, output_dir) in &summary.finished {
             let mut msg = format!(
                 "已解压 {} 到 {}",
@@ -2869,11 +2881,15 @@ impl ReaderApp {
                 if delete_archive {
                     match crate::platform::recycle_bin::delete(archive) {
                         Ok(()) => msg.push_str("，压缩包已移入回收站"),
-                        Err(e) => msg.push_str(&format!("，删除压缩包失败: {e}")),
+                        Err(e) => {
+                            has_error = true;
+                            msg.push_str(&format!("，删除压缩包失败: {e}"));
+                        }
                     }
                 }
                 if open_folder {
                     if let Err(e) = crate::temp_open::open_with_os(output_dir) {
+                        has_error = true;
                         msg.push_str(&format!("，打开目标文件夹失败: {e}"));
                     }
                 }
@@ -2891,7 +2907,14 @@ impl ReaderApp {
             messages.push(format!("已取消解压 {}", path_display_name(archive)));
         }
         if !messages.is_empty() {
-            self.error_message = Some(messages.join("；"));
+            let message = messages.join("；");
+            if has_error {
+                self.status_message = None;
+                self.error_message = Some(message);
+            } else {
+                self.error_message = None;
+                self.status_message = Some(message);
+            }
         }
         // 文件管理器视图下刷新落点栏（输出目录或其父目录 == 栏目录时）。
         if self.current_view == View::FileManager {
@@ -5810,6 +5833,7 @@ mod tests {
                 history,
                 bookmarks,
                 error_message: None,
+                status_message: None,
                 page_loader,
                 cover_loader,
                 opener: None,
@@ -7346,6 +7370,34 @@ mod tests {
             zip.write_all(b"data").unwrap();
         }
         zip.finish().unwrap();
+    }
+
+    #[test]
+    fn test_poll_extracts_success_uses_status_message() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("pack.zip");
+        write_zip_with_entries(&archive, &["folder/a.txt"]);
+        let output = dir.path().join("out");
+        app.error_message = Some("旧错误".to_string());
+        app.extract_manager
+            .start(archive, output.clone(), None, None, 1, false, None, false);
+
+        let ctx = egui::Context::default();
+        for _ in 0..200 {
+            app.poll_extracts(&ctx);
+            if app.status_message.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(app.error_message, None);
+        assert!(app
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.starts_with("已解压 pack.zip 到 ")));
+        assert_eq!(std::fs::read(output.join("folder/a.txt")).unwrap(), b"data");
     }
 
     /// 轮询启发式分流直到任务完成（返回是否曾在 Loading 后落定）。
