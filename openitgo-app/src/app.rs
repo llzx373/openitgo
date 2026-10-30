@@ -840,6 +840,8 @@ impl ReaderApp {
         }
         // 启动时回收临时打开/拖出目录中的陈旧文件（24h，失败静默）。
         crate::temp_open::clean_stale(crate::temp_open::STALE_MAX_AGE);
+        // 影视关联已下线：清理旧版本写入的 OpenItGo.Media 关联（幂等，失败静默）。
+        let _ = crate::platform::file_assoc::cleanup_legacy_media();
         app
     }
 

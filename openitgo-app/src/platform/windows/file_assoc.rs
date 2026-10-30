@@ -1,38 +1,37 @@
 //! Windows 文件关联注册（HKCU\Software\Classes，免管理员、不碰 HKCR/HKLM）。
 //!
-//! 每个扩展名指向所属分组的 ProgID（`OpenItGo.Archive/Image/Media`），
+//! 每个扩展名指向所属分组的 ProgID（`OpenItGo.Archive/Image`），
 //! ProgID 键携带中文描述、`DefaultIcon` 与 `shell\open\command`。
 //! DefaultIcon 指向 exe 内嵌图标资源：`assets/icon/openitgo.rc` 按
-//! ID 1..=4 编入 AppIcon/Archive/Image/Media.ico，对应图标索引
-//! 0..=3（`"<exe>",<index>"`）；索引 0 是应用主图标，三组分组各用
-//! 1/2/3（见 `AssocGroup::icon_index`）。覆盖他人默认值前先备份到
-//! `HKCU\Software\Classes\OpenItGo.bak\<ext>`（已有备份不覆盖），注销时
+//! ID 2/3 编入 Archive/Image.ico，对应图标索引 1/2（`"<exe>",<index>"`）；
+//! 索引 0 是应用主图标（见 `AssocGroup::icon_index`）。覆盖他人默认值前先
+//! 备份到 `HKCU\Software\Classes\OpenItGo.bak\<ext>`（已有备份不覆盖），注销时
 //! 仅当默认值仍是本程序 ProgID 才恢复备份并删除；ProgID 键在不再被任何
 //! 扩展名引用时整体删除。注册/注销后广播 `SHChangeNotify(SHCNE_ASSOCCHANGED)`。
+//!
+//! 影视分组（`OpenItGo.Media`）已从可选关联中移除；旧版本写入的关联由
+//! [`cleanup_legacy_media`] 在启动时一次性清理（恢复备份并删除遗留键）。
 
 use std::io;
 
 use winreg::enums::{RegType, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
 use winreg::{RegKey, RegValue};
 
-/// 扩展名分组（压缩包 / 图片 / 影视）。
+/// 扩展名分组（压缩包 / 图片）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssocGroup {
     /// 压缩包（zip/cbz/rar/…）
     Archive,
     /// 图片（jpg/png/…）
     Image,
-    /// 影视（音视频）
-    Media,
 }
 
 impl AssocGroup {
-    /// 分组显示名（「压缩包」/「图片」/「影视」）。
+    /// 分组显示名（「压缩包」/「图片」）。
     pub fn label(self) -> &'static str {
         match self {
             AssocGroup::Archive => "压缩包",
             AssocGroup::Image => "图片",
-            AssocGroup::Media => "影视",
         }
     }
 
@@ -41,7 +40,6 @@ impl AssocGroup {
         match self {
             AssocGroup::Archive => "OpenItGo.Archive",
             AssocGroup::Image => "OpenItGo.Image",
-            AssocGroup::Media => "OpenItGo.Media",
         }
     }
 
@@ -50,12 +48,11 @@ impl AssocGroup {
         format!("OpenItGo {}", self.label())
     }
 
-    /// DefaultIcon 图标索引（`"<exe>",<index>"`）：对应 rc 资源 ID 2/3/4。
+    /// DefaultIcon 图标索引（`"<exe>",<index>"`）：对应 rc 资源 ID 2/3。
     pub fn icon_index(self) -> i32 {
         match self {
             AssocGroup::Archive => 1,
             AssocGroup::Image => 2,
-            AssocGroup::Media => 3,
         }
     }
 }
@@ -98,18 +95,19 @@ pub const EXT_GROUPS: &[(AssocGroup, &str, &[&str])] = &[
             "jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff", "tif", "avif",
         ],
     ),
-    (
-        AssocGroup::Media,
-        "影视",
-        &[
-            "mp4", "m4v", "mkv", "webm", "avi", "mov", "wmv", "flv", "ts", "m2ts", "mpg", "mpeg",
-            "3gp", "mp3", "flac", "aac", "m4a", "ogg", "oga", "opus", "wav", "aiff", "ape", "wma",
-        ],
-    ),
 ];
 
 const CLASSES_PATH: &str = "Software\\Classes";
 const BACKUP_ROOT: &str = "OpenItGo.bak";
+
+/// 已下线的影视分组 ProgID（旧版本写入，启动时清理）。
+const LEGACY_MEDIA_PROGID: &str = "OpenItGo.Media";
+
+/// 已下线的影视分组扩展名（与旧版 `EXT_GROUPS` 保持一致，供清理使用）。
+const LEGACY_MEDIA_EXTS: &[&str] = &[
+    "mp4", "m4v", "mkv", "webm", "avi", "mov", "wmv", "flv", "ts", "m2ts", "mpg", "mpeg", "3gp",
+    "mp3", "flac", "aac", "m4a", "ogg", "oga", "opus", "wav", "aiff", "ape", "wma",
+];
 
 /// 按默认注册值分类关联状态。
 fn classify_state(default: Option<String>, progid: &str) -> AssocState {
@@ -248,6 +246,54 @@ fn notify_assoc_changed() {
             std::ptr::null(),
         );
     }
+}
+
+/// 清理旧版本写入的影视关联（幂等，启动时调用）。
+///
+/// 对每个影视扩展名：默认值仍是 `OpenItGo.Media` 时恢复原备份（无备份则删除
+/// 默认值），并移除 `OpenWithProgids` 中的本程序项与遗留备份键；最后删除不再
+/// 被任何扩展名引用的 `OpenItGo.Media` ProgID 键。返回恢复的扩展名个数。
+pub fn cleanup_legacy_media() -> Result<usize, String> {
+    let classes = classes_key()?;
+    let mut restored = 0usize;
+    for ext in LEGACY_MEDIA_EXTS {
+        let key = match classes.open_subkey_with_flags(format!(".{ext}"), KEY_READ | KEY_WRITE) {
+            Ok(key) => key,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("打开 .{ext} 键失败: {e}")),
+        };
+        let current = match key.get_value::<String, _>("") {
+            Ok(v) if !v.is_empty() => Some(v),
+            Ok(_) => None,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("读取 .{ext} 默认值失败: {e}")),
+        };
+        if current.as_deref() == Some(LEGACY_MEDIA_PROGID) {
+            key.delete_value("")
+                .map_err(|e| format!("删除 .{ext} 默认值失败: {e}"))?;
+            if let Some(value) = read_backup(ext)? {
+                if !value.is_empty() {
+                    key.set_value("", &value)
+                        .map_err(|e| format!("恢复 .{ext} 备份失败: {e}"))?;
+                }
+            }
+            restored += 1;
+        }
+        if let Ok(owp) = key.open_subkey_with_flags("OpenWithProgids", KEY_WRITE) {
+            let _ = owp.delete_value(LEGACY_MEDIA_PROGID);
+        }
+        // 影视关联已下线，备份键不再有恢复价值。
+        delete_backup(ext)?;
+    }
+    match classes.delete_subkey_all(LEGACY_MEDIA_PROGID) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("删除 {LEGACY_MEDIA_PROGID} 键失败: {e}")),
+    }
+    if restored > 0 {
+        notify_assoc_changed();
+    }
+    Ok(restored)
 }
 
 /// 查询全部已知扩展名的当前关联状态。
@@ -396,8 +442,8 @@ mod tests {
 
     #[test]
     fn ext_table_well_formed() {
-        // 三组均非空，扩展名无重复、全小写、不带前导点。
-        assert_eq!(EXT_GROUPS.len(), 3);
+        // 两组均非空，扩展名无重复、全小写、不带前导点。
+        assert_eq!(EXT_GROUPS.len(), 2);
         let mut seen = HashSet::new();
         for (group, label, exts) in EXT_GROUPS {
             assert!(!exts.is_empty(), "{} 组为空", group.label());
@@ -446,11 +492,11 @@ mod tests {
 
     #[test]
     fn icon_indices_distinct() {
-        // 三组图标索引互不相同且都在 1..=3（0 是应用主图标，不用于分组）。
+        // 两组图标索引互不相同且都在 1..=2（0 是应用主图标，不用于分组）。
         let indices: HashSet<i32> = EXT_GROUPS.iter().map(|(g, _, _)| g.icon_index()).collect();
-        assert_eq!(indices.len(), 3);
+        assert_eq!(indices.len(), 2);
         for idx in indices {
-            assert!((1..=3).contains(&idx), "图标索引越界: {idx}");
+            assert!((1..=2).contains(&idx), "图标索引越界: {idx}");
         }
     }
 
@@ -459,8 +505,19 @@ mod tests {
         assert_eq!(group_for_ext("zip"), Some(AssocGroup::Archive));
         assert_eq!(group_for_ext("7z"), Some(AssocGroup::Archive));
         assert_eq!(group_for_ext("png"), Some(AssocGroup::Image));
-        assert_eq!(group_for_ext("mkv"), Some(AssocGroup::Media));
-        assert_eq!(group_for_ext("opus"), Some(AssocGroup::Media));
+        assert_eq!(group_for_ext("mkv"), None);
+        assert_eq!(group_for_ext("opus"), None);
         assert_eq!(group_for_ext("xyz"), None);
+    }
+
+    #[test]
+    fn legacy_media_list_sane() {
+        // 清理列表与可选关联表不重叠，且无重复项（避免误删现有关联）。
+        let mut seen = HashSet::new();
+        for ext in LEGACY_MEDIA_EXTS {
+            assert!(seen.insert(*ext), "影视扩展名重复: {ext}");
+            assert!(group_for_ext(ext).is_none(), "{ext} 仍属可选分组");
+        }
+        assert!(!LEGACY_MEDIA_EXTS.is_empty());
     }
 }

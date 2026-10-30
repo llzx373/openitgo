@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- 文件关联：移除影视（音视频）分组，仅保留压缩包与图片两类（`OpenItGo.Archive` / `OpenItGo.Image`）；启动时自动清理旧版本写入的 `OpenItGo.Media` 关联（恢复原备份、删除遗留 ProgID 与备份键）。
+
 ### Added
 
 - Windows 安装包：`scripts/package-windows.ps1` 在便携 zip 之外同时用 Inno Setup 产出 `dist/OpenItGo-<version>-setup.exe`（按用户/所有用户安装、开始菜单快捷方式、卸载器）；简体中文安装界面语言文件随仓库提供（`scripts/languages/ChineseSimplified.isl`）。

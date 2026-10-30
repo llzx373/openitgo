@@ -3863,7 +3863,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "openitgo-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bcdec_rs",
  "bytemuck",
@@ -3912,7 +3912,7 @@ dependencies = [
 
 [[package]]
 name = "openitgo-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3920,7 +3920,7 @@ dependencies = [
 
 [[package]]
 name = "openitgo-media"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cgl",
  "libc",
@@ -3930,7 +3930,7 @@ dependencies = [
 
 [[package]]
 name = "openitgo-parser"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "bzip2",
@@ -3959,7 +3959,7 @@ dependencies = [
 
 [[package]]
 name = "openitgo-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "dirs 5.0.1",

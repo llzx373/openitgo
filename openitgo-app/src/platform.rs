@@ -826,24 +826,21 @@ pub use windows::restore_rect;
 #[cfg(not(target_os = "windows"))]
 #[allow(dead_code)]
 pub mod file_assoc {
-    /// 扩展名分组（压缩包 / 图片 / 影视）。
+    /// 扩展名分组（压缩包 / 图片）。
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum AssocGroup {
         /// 压缩包（zip/cbz/rar/…）
         Archive,
         /// 图片（jpg/png/…）
         Image,
-        /// 影视（音视频）
-        Media,
     }
 
     impl AssocGroup {
-        /// 分组显示名（「压缩包」/「图片」/「影视」）。
+        /// 分组显示名（「压缩包」/「图片」）。
         pub fn label(self) -> &'static str {
             match self {
                 AssocGroup::Archive => "压缩包",
                 AssocGroup::Image => "图片",
-                AssocGroup::Media => "影视",
             }
         }
 
@@ -852,7 +849,6 @@ pub mod file_assoc {
             match self {
                 AssocGroup::Archive => "OpenItGo.Archive",
                 AssocGroup::Image => "OpenItGo.Image",
-                AssocGroup::Media => "OpenItGo.Media",
             }
         }
 
@@ -894,6 +890,11 @@ pub mod file_assoc {
     /// 查询全部已知扩展名的当前关联状态。
     pub fn query_status() -> Result<Vec<ExtAssoc>, String> {
         Err(UNSUPPORTED.to_string())
+    }
+
+    /// 清理旧版本影视关联（非 Windows 无操作）。
+    pub fn cleanup_legacy_media() -> Result<usize, String> {
+        Ok(0)
     }
 
     /// 注册文件关联（非 Windows 不支持）。
