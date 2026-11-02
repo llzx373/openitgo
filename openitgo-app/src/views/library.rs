@@ -333,9 +333,8 @@ impl LibraryView {
                                             );
                                         }
                                         if cover_sense.hovered() && !file_missing {
-                                            // Subtle lift: warm accent rim, no shadow stack.
-                                            let accent =
-                                                crate::theme::accent_for(ui.visuals().dark_mode);
+                                            // Subtle lift: theme accent rim, no shadow stack.
+                                            let accent = crate::theme::accent(ui.visuals());
                                             ui.painter().rect_stroke(
                                                 slot,
                                                 cover_radius,
@@ -509,7 +508,7 @@ impl LibraryView {
             ui.label(
                 egui::RichText::new(egui_phosphor_icons::icons::BOOKS.as_str())
                     .size(48.0)
-                    .color(crate::theme::accent_for(ui.visuals().dark_mode)),
+                    .color(crate::theme::accent(ui.visuals())),
             );
             ui.add_space(12.0);
             ui.label(egui::RichText::new("书架还是空的").size(22.0).strong());
@@ -864,7 +863,7 @@ fn render_empty_placeholder(ui: &mut egui::Ui, icon: &str, title: &str, subtitle
         ui.label(
             egui::RichText::new(icon)
                 .size(40.0)
-                .color(crate::theme::accent_for(ui.visuals().dark_mode)),
+                .color(crate::theme::accent(ui.visuals())),
         );
         ui.add_space(10.0);
         ui.label(egui::RichText::new(title).size(20.0).strong());

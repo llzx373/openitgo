@@ -755,6 +755,8 @@ pub enum Theme {
     System,
     Light,
     Dark,
+    Windows,
+    MacOS,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1213,6 +1215,20 @@ mod tests {
         assert!((s.chrome_opacity - 0.85).abs() < f32::EPSILON);
         assert_eq!(s.comic_end_action, ComicEndAction::DoNothing);
         assert_eq!(s.media_end_action, MediaEndAction::NextInDir);
+    }
+
+    #[test]
+    fn test_os_themes_serialize_and_deserialize() {
+        for (theme, name) in [(Theme::Windows, "Windows"), (Theme::MacOS, "MacOS")] {
+            let settings = Settings {
+                theme,
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&settings).unwrap();
+            assert!(json.contains(&format!("\"theme\":\"{name}\"")));
+            let loaded: Settings = serde_json::from_str(&json).unwrap();
+            assert_eq!(loaded.theme, settings.theme);
+        }
     }
 
     #[test]

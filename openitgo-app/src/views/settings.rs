@@ -104,14 +104,22 @@ impl SettingsView {
                     ui.selectable_value(&mut settings.theme, Theme::System, "跟随系统");
                     ui.selectable_value(&mut settings.theme, Theme::Light, "浅色");
                     ui.selectable_value(&mut settings.theme, Theme::Dark, "深色");
+                    ui.selectable_value(&mut settings.theme, Theme::Windows, "Windows");
+                    ui.selectable_value(&mut settings.theme, Theme::MacOS, "macOS");
                 });
             ui.add_space(8.0);
             let dark = crate::theme::dark_visuals();
             let light = crate::theme::light_visuals();
+            let windows = crate::theme::windows_visuals();
+            let macos = crate::theme::macos_visuals();
             crate::theme::theme_swatch(ui, dark.panel_fill, dark.hyperlink_color)
                 .on_hover_text("深色预览");
             crate::theme::theme_swatch(ui, light.panel_fill, light.hyperlink_color)
                 .on_hover_text("浅色预览");
+            crate::theme::theme_swatch(ui, windows.panel_fill, windows.hyperlink_color)
+                .on_hover_text("Windows 预览");
+            crate::theme::theme_swatch(ui, macos.panel_fill, macos.hyperlink_color)
+                .on_hover_text("macOS 预览");
         });
 
         ui.label("工具栏显示模式");
@@ -1015,6 +1023,8 @@ fn theme_label(theme: Theme) -> &'static str {
         Theme::System => "跟随系统",
         Theme::Light => "浅色",
         Theme::Dark => "深色",
+        Theme::Windows => "Windows",
+        Theme::MacOS => "macOS",
     }
 }
 

@@ -68,13 +68,24 @@ pub const RADIUS_CHIP: u8 = 12;
 /// Standard control corner radius.
 pub const RADIUS_CONTROL: u8 = 6;
 
-/// Install Gallery Immersive visuals + spacing for both egui themes.
-/// Safe to call repeatedly; System preference then picks dark/light correctly.
-pub fn install(ctx: &egui::Context) {
+/// Install visuals and spacing for the selected application theme.
+pub fn install(ctx: &egui::Context, app_theme: &openitgo_storage::models::Theme) {
+    use openitgo_storage::models::Theme as AppTheme;
+
     ctx.set_visuals_of(Theme::Dark, dark_visuals());
-    ctx.set_visuals_of(Theme::Light, light_visuals());
     ctx.style_mut_of(Theme::Dark, apply_gallery_style);
-    ctx.style_mut_of(Theme::Light, apply_gallery_style);
+    let light = match app_theme {
+        AppTheme::Windows => windows_visuals(),
+        AppTheme::MacOS => macos_visuals(),
+        _ => light_visuals(),
+    };
+    let apply_style: fn(&mut Style) = match app_theme {
+        AppTheme::Windows => apply_windows_style,
+        AppTheme::MacOS => apply_macos_style,
+        _ => apply_gallery_style,
+    };
+    ctx.set_visuals_of(Theme::Light, light);
+    ctx.style_mut_of(Theme::Light, apply_style);
 }
 
 pub fn accent_for(dark: bool) -> Color32 {
@@ -83,6 +94,10 @@ pub fn accent_for(dark: bool) -> Color32 {
     } else {
         ACCENT_LIGHT
     }
+}
+
+pub fn accent(visuals: &Visuals) -> Color32 {
+    visuals.hyperlink_color
 }
 
 pub fn dark_visuals() -> Visuals {
@@ -151,6 +166,98 @@ pub fn light_visuals() -> Visuals {
     v.selection.bg_fill = Color32::from_rgba_unmultiplied(0xB8, 0x83, 0x4A, 56);
     v.selection.stroke = Stroke::new(1.0, ACCENT_LIGHT);
     polish_widgets(&mut v, false);
+    v
+}
+
+pub fn windows_visuals() -> Visuals {
+    os_visuals(
+        Color32::from_rgb(0x00, 0x67, 0xC0),
+        Color32::from_rgb(0xF3, 0xF3, 0xF3),
+        Color32::from_rgb(0xE5, 0xE5, 0xE5),
+        Color32::from_rgb(0xD1, 0xD1, 0xD1),
+        4,
+    )
+}
+
+pub fn macos_visuals() -> Visuals {
+    os_visuals(
+        Color32::from_rgb(0x00, 0x7A, 0xFF),
+        Color32::from_rgb(0xF5, 0xF5, 0xF7),
+        Color32::from_rgb(0xE8, 0xE8, 0xED),
+        Color32::from_rgb(0xD8, 0xD8, 0xDE),
+        6,
+    )
+}
+
+fn os_visuals(
+    accent: Color32,
+    panel: Color32,
+    extreme: Color32,
+    border: Color32,
+    radius: u8,
+) -> Visuals {
+    let mut v = Visuals::light();
+    let text = Color32::from_rgb(0x1B, 0x1B, 0x1F);
+    let white = Color32::WHITE;
+    let hovered = Color32::from_rgb(0xF0, 0xF0, 0xF2);
+    let selected = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 32);
+
+    v.dark_mode = false;
+    v.override_text_color = Some(text);
+    v.weak_text_alpha = 0.55;
+    v.panel_fill = panel;
+    v.window_fill = white;
+    v.extreme_bg_color = extreme;
+    v.faint_bg_color = hovered;
+    v.code_bg_color = extreme;
+    v.hyperlink_color = accent;
+    v.warn_fg_color = Color32::from_rgb(0x9D, 0x5D, 0x00);
+    v.error_fg_color = Color32::from_rgb(0xC4, 0x2B, 0x1C);
+    v.window_corner_radius = CornerRadius::same(radius + 4);
+    v.menu_corner_radius = CornerRadius::same(radius + 2);
+    v.window_stroke = Stroke::new(1.0, border);
+    v.window_shadow = Shadow {
+        offset: [0, 4],
+        blur: 16,
+        spread: 0,
+        color: Color32::from_black_alpha(24),
+    };
+    v.popup_shadow = Shadow {
+        offset: [0, 3],
+        blur: 12,
+        spread: 0,
+        color: Color32::from_black_alpha(20),
+    };
+    v.selection.bg_fill = selected;
+    v.selection.stroke = Stroke::new(1.0, accent);
+
+    let control_radius = CornerRadius::same(radius);
+    for widget in [
+        &mut v.widgets.noninteractive,
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+        &mut v.widgets.open,
+    ] {
+        widget.corner_radius = control_radius;
+    }
+    v.widgets.noninteractive.bg_fill = panel;
+    v.widgets.noninteractive.weak_bg_fill = panel;
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, border);
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, text.gamma_multiply(0.65));
+    v.widgets.inactive.bg_fill = white;
+    v.widgets.inactive.weak_bg_fill = white;
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, border);
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0, text);
+    v.widgets.hovered.bg_fill = hovered;
+    v.widgets.hovered.weak_bg_fill = hovered;
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, border);
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0, text);
+    v.widgets.active.bg_fill = selected;
+    v.widgets.active.weak_bg_fill = selected;
+    v.widgets.active.bg_stroke = Stroke::new(1.0, accent);
+    v.widgets.active.fg_stroke = Stroke::new(1.0, accent);
+    v.widgets.open = v.widgets.active;
     v
 }
 
@@ -230,6 +337,21 @@ fn apply_gallery_style(style: &mut Style) {
     style.visuals.striped = false;
 }
 
+fn apply_windows_style(style: &mut Style) {
+    apply_gallery_style(style);
+    style.spacing.item_spacing = egui::vec2(6.0, 4.0);
+    style.spacing.button_padding = egui::vec2(10.0, 4.0);
+    style.spacing.window_margin = Margin::same(8);
+    style.spacing.slider_rail_height = 4.0;
+}
+
+fn apply_macos_style(style: &mut Style) {
+    apply_gallery_style(style);
+    style.spacing.button_padding = egui::vec2(12.0, 5.0);
+    style.spacing.window_margin = Margin::same(12);
+    style.spacing.slider_rail_height = 5.0;
+}
+
 /// Uniform height for toolbar / chrome controls (matches `interact_size.y`).
 pub const TOOLBAR_BUTTON_HEIGHT: f32 = 28.0;
 
@@ -305,11 +427,13 @@ pub fn dashed_separator(ui: &mut egui::Ui) {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 10.0), egui::Sense::hover());
     let y = rect.center().y;
-    let color = if ui.visuals().dark_mode {
-        Color32::from_rgba_unmultiplied(0xD4, 0xA5, 0x74, 90)
-    } else {
-        Color32::from_rgba_unmultiplied(0xB8, 0x83, 0x4A, 100)
-    };
+    let accent = accent(ui.visuals());
+    let color = Color32::from_rgba_unmultiplied(
+        accent.r(),
+        accent.g(),
+        accent.b(),
+        if ui.visuals().dark_mode { 90 } else { 100 },
+    );
     let stroke = Stroke::new(1.0, color);
     // Inset a little so the dash doesn't kiss the window edge.
     let inset = 4.0;
@@ -327,7 +451,7 @@ pub fn dashed_separator(ui: &mut egui::Ui) {
     ui.add_space(8.0);
 }
 
-/// Compact Dark/Light swatch used next to the theme picker.
+/// Compact theme swatch used next to the theme picker.
 pub fn theme_swatch(ui: &mut egui::Ui, panel: Color32, accent: Color32) -> egui::Response {
     let size = egui::vec2(28.0, 18.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
@@ -351,7 +475,7 @@ pub fn theme_swatch(ui: &mut egui::Ui, panel: Color32, accent: Color32) -> egui:
 /// Tag / filter chip (rounded capsule) with selected + hover fills.
 pub fn tag_chip(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
     let dark = ui.visuals().dark_mode;
-    let accent = accent_for(dark);
+    let accent = accent(ui.visuals());
     let id = ui.id().with(("tag_chip", label));
     let hovered = ui.ctx().read_response(id).is_some_and(|r| r.hovered());
 
@@ -502,7 +626,7 @@ pub fn tabbed_page<T: Copy + PartialEq>(
     let border = Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
     let page_fill = ui.visuals().window_fill;
     let strip_fill = ui.visuals().extreme_bg_color;
-    let accent = accent_for(ui.visuals().dark_mode);
+    let accent = accent(ui.visuals());
 
     let mut tab_rects: Vec<(T, egui::Rect)> = Vec::with_capacity(tabs.len());
 
@@ -628,7 +752,7 @@ pub fn segmented_tabs<T: Copy + PartialEq>(
     }
     let size = egui::vec2(max_w, tab_h);
     let dark = ui.visuals().dark_mode;
-    let accent = accent_for(dark);
+    let accent = accent(ui.visuals());
 
     let mut changed = false;
     segmented_frame(ui, |ui| {
@@ -698,6 +822,25 @@ mod tests {
         assert_ne!(dark.panel_fill, light.panel_fill);
         assert_eq!(dark.hyperlink_color, ACCENT_DARK);
         assert_eq!(light.hyperlink_color, ACCENT_LIGHT);
+    }
+
+    #[test]
+    fn os_visuals_have_distinct_native_palettes() {
+        let windows = windows_visuals();
+        let macos = macos_visuals();
+
+        assert!(!windows.dark_mode);
+        assert!(!macos.dark_mode);
+        assert_eq!(windows.hyperlink_color, Color32::from_rgb(0x00, 0x67, 0xC0));
+        assert_eq!(macos.hyperlink_color, Color32::from_rgb(0x00, 0x7A, 0xFF));
+        assert_ne!(windows.panel_fill, macos.panel_fill);
+        assert_eq!(
+            windows.widgets.inactive.corner_radius,
+            CornerRadius::same(4)
+        );
+        assert_eq!(macos.widgets.inactive.corner_radius, CornerRadius::same(6));
+        assert_eq!(accent(&windows), windows.selection.stroke.color);
+        assert_eq!(accent(&macos), macos.selection.stroke.color);
     }
 
     #[test]

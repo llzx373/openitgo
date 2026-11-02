@@ -3097,6 +3097,8 @@ impl ReaderApp {
                             (Theme::System, "跟随系统"),
                             (Theme::Light, "浅色"),
                             (Theme::Dark, "深色"),
+                            (Theme::Windows, "Windows"),
+                            (Theme::MacOS, "macOS"),
                         ] {
                             if ui
                                 .selectable_label(self.settings.theme == theme, label)
@@ -3609,11 +3611,11 @@ impl ReaderApp {
     fn apply_theme(&mut self, ctx: &egui::Context) {
         let preference = match self.settings.theme {
             Theme::System => egui::ThemePreference::System,
-            Theme::Light => egui::ThemePreference::Light,
             Theme::Dark => egui::ThemePreference::Dark,
+            Theme::Light | Theme::Windows | Theme::MacOS => egui::ThemePreference::Light,
         };
         ctx.set_theme(preference);
-        crate::theme::install(ctx);
+        crate::theme::install(ctx, &self.settings.theme);
     }
 
     fn handle_global_input(&mut self, ctx: &egui::Context) {
