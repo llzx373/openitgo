@@ -104,13 +104,31 @@ impl ExtractDialogState {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     let dest_ok = !self.dest.trim().is_empty();
-                    if ui
-                        .add_enabled(dest_ok, egui::Button::new("开始解压"))
-                        .clicked()
-                    {
+                    let start_response = if crate::theme::is_fluent(ui.visuals()) {
+                        ui.add_enabled_ui(dest_ok, |ui| {
+                            crate::widgets::fluent::button(
+                                ui,
+                                "开始解压",
+                                crate::widgets::fluent::ButtonKind::Primary,
+                            )
+                        })
+                        .inner
+                    } else {
+                        ui.add_enabled(dest_ok, egui::Button::new("开始解压"))
+                    };
+                    if start_response.clicked() {
                         start = true;
                     }
-                    if ui.button("取消").clicked() {
+                    let cancel_response = if crate::theme::is_fluent(ui.visuals()) {
+                        crate::widgets::fluent::button(
+                            ui,
+                            "取消",
+                            crate::widgets::fluent::ButtonKind::Standard,
+                        )
+                    } else {
+                        ui.button("取消")
+                    };
+                    if cancel_response.clicked() {
                         self.cancelled = true;
                     }
                 });

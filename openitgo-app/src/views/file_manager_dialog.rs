@@ -233,7 +233,11 @@ impl CopyMoveDialog {
                     if !self.dest.trim().is_empty() && !dest_ok {
                         ui.colored_label(ui.visuals().error_fg_color, "目标文件夹不存在");
                     }
-                    if ui.add_enabled(dest_ok, egui::Button::new(title)).clicked() {
+                    if ui
+                        .add_enabled_ui(dest_ok, |ui| dialog_button(ui, title, true))
+                        .inner
+                        .clicked()
+                    {
                         outcome = Some(FmDialogOutcome::ConfirmCopyMove {
                             kind: self.kind,
                             sources: self.sources.clone(),
@@ -246,7 +250,7 @@ impl CopyMoveDialog {
                             },
                         });
                     }
-                    if ui.button("取消").clicked() {
+                    if dialog_button(ui, "取消", false).clicked() {
                         outcome = Some(FmDialogOutcome::Cancelled);
                     }
                 });
@@ -1094,5 +1098,19 @@ impl MultiRenameDialog {
             outcome = Some(FmDialogOutcome::Cancelled);
         }
         outcome
+    }
+}
+
+fn dialog_button(ui: &mut egui::Ui, label: impl Into<String>, primary: bool) -> egui::Response {
+    let label = label.into();
+    if crate::theme::is_fluent(ui.visuals()) {
+        let kind = if primary {
+            crate::widgets::fluent::ButtonKind::Primary
+        } else {
+            crate::widgets::fluent::ButtonKind::Standard
+        };
+        crate::widgets::fluent::button(ui, label, kind)
+    } else {
+        ui.button(label)
     }
 }

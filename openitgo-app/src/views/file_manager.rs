@@ -1609,7 +1609,14 @@ impl FileManagerView {
     /// 顶栏：返回书架 / 单双栏切换（单栏时含预览开关）/ 右侧过滤框
     /// （过滤作用于焦点栏）。
     fn render_top_bar(&mut self, ui: &mut egui::Ui, intents: &mut FmIntents) {
+        let saved_style = ui.style().clone();
         ui.horizontal(|ui| {
+            if crate::theme::is_fluent(ui.visuals()) {
+                let visuals = ui.visuals_mut();
+                visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+                visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+                visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+            }
             if ui
                 .button((icons::HOUSE, " 书架"))
                 .on_hover_text("返回书架")
@@ -1769,6 +1776,7 @@ impl FileManagerView {
             // 过滤框（焦点栏）：默认顶栏右侧；fm_filter_bar_bottom 时改由
             // render_panel 渲染在焦点栏底部。
             if !self.options.filter_bar_bottom {
+                ui.set_style(saved_style);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.render_filter_bar(ui);
                 });

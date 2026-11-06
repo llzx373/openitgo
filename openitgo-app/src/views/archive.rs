@@ -1089,7 +1089,14 @@ impl ArchiveView {
             .is_some_and(crate::app::is_supported_comic_file);
 
         // 顶栏（WinRAR 工具栏位）：导航 / 打开 / 解压 / 预览 + 右侧过滤框。
+        let saved_style = ui.style().clone();
         ui.horizontal(|ui| {
+            if crate::theme::is_fluent(ui.visuals()) {
+                let visuals = ui.visuals_mut();
+                visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+                visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+                visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+            }
             if ui
                 .button((icons::HOUSE, " 书架"))
                 .on_hover_text("返回书架")
@@ -1141,6 +1148,7 @@ impl ArchiveView {
                 ui.label(egui::RichText::new(name).strong())
                     .on_hover_text(path.display().to_string());
             }
+            ui.set_style(saved_style);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.filter)
