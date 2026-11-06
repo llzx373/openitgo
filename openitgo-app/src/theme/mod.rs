@@ -111,6 +111,11 @@ pub fn accent(visuals: &Visuals) -> Color32 {
     visuals.hyperlink_color
 }
 
+pub fn is_fluent(visuals: &Visuals) -> bool {
+    visuals.hyperlink_color == tokens::FluentPalette::light().accent
+        || visuals.hyperlink_color == tokens::FluentPalette::dark().accent
+}
+
 pub fn dark_visuals() -> Visuals {
     let mut v = Visuals::dark();
     v.dark_mode = true;
@@ -418,8 +423,14 @@ pub fn begin_chrome_row(ui: &mut egui::Ui) {
     ui.spacing_mut().item_spacing.y = 0.0;
 }
 
-/// Soft dashed horizontal rule — used to separate library header from content.
+/// Library header separator: neutral rule for Fluent, dashed accent for Gallery.
 pub fn dashed_separator(ui: &mut egui::Ui) {
+    if is_fluent(ui.visuals()) {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+        return;
+    }
     ui.add_space(8.0);
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 10.0), egui::Sense::hover());
@@ -511,7 +522,11 @@ pub fn tag_chip(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Respons
 
     let inner = egui::Frame::new()
         .fill(fill)
-        .corner_radius(CornerRadius::same(RADIUS_CHIP))
+        .corner_radius(CornerRadius::same(if is_fluent(ui.visuals()) {
+            tokens::radius::CONTROL
+        } else {
+            RADIUS_CHIP
+        }))
         .inner_margin(Margin::symmetric(10, 4))
         .stroke(stroke)
         .show(ui, |ui| {

@@ -124,19 +124,21 @@ impl LibraryView {
                     });
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button(format!(
+                if library_button(
+                    ui,
+                    format!(
                         "{} 文件管理器",
                         egui_phosphor_icons::icons::COLUMNS.as_str()
-                    ))
-                    .on_hover_text("打开双栏文件管理器")
-                    .clicked()
+                    ),
+                    crate::widgets::fluent::ButtonKind::Standard,
+                )
+                .on_hover_text("打开双栏文件管理器")
+                .clicked()
                 {
                     (callbacks.on_open_file_manager)();
                 }
                 if matches!(self.mode, LibraryMode::Library | LibraryMode::Ebooks)
-                    && ui
-                        .button("清理已删除")
+                    && library_button(ui, "清理已删除", crate::widgets::fluent::ButtonKind::Subtle)
                         .on_hover_text("移除书库中文件已经不存在的条目")
                         .clicked()
                 {
@@ -155,23 +157,31 @@ impl LibraryView {
                             (callbacks.on_clear_library)();
                             self.pending_clear_library = false;
                         }
-                        if ui.button("取消").clicked() {
+                        if library_button(ui, "取消", crate::widgets::fluent::ButtonKind::Standard)
+                            .clicked()
+                        {
                             self.pending_clear_library = false;
                         }
-                    } else if ui
-                        .button("清空书架")
-                        .on_hover_text("移除书架上的全部漫画条目（不删除源文件）")
-                        .clicked()
+                    } else if library_button(
+                        ui,
+                        "清空书架",
+                        crate::widgets::fluent::ButtonKind::Subtle,
+                    )
+                    .on_hover_text("移除书架上的全部漫画条目（不删除源文件）")
+                    .clicked()
                     {
                         self.pending_clear_library = true;
                     }
                 }
-                if ui
-                    .button(format!(
+                if library_button(
+                    ui,
+                    format!(
                         "{} 打开文件夹",
                         egui_phosphor_icons::icons::FOLDER_PLUS.as_str()
-                    ))
-                    .clicked()
+                    ),
+                    crate::widgets::fluent::ButtonKind::Primary,
+                )
+                .clicked()
                 {
                     (callbacks.on_add)();
                 }
@@ -198,7 +208,7 @@ impl LibraryView {
             }
         }
 
-        // Soft dashed rule between header chrome and content grid.
+        // Separate header chrome from the content grid using the active theme.
         crate::theme::dashed_separator(ui);
 
         if let Some((idx, buffer)) = self.tag_edit_buffer.as_mut() {
@@ -213,10 +223,14 @@ impl LibraryView {
                     ui.label("多个标签用逗号分隔：");
                     ui.add(egui::TextEdit::singleline(buffer).desired_width(280.0));
                     ui.horizontal(|ui| {
-                        if ui.button("保存").clicked() {
+                        if library_button(ui, "保存", crate::widgets::fluent::ButtonKind::Primary)
+                            .clicked()
+                        {
                             save = true;
                         }
-                        if ui.button("取消").clicked() {
+                        if library_button(ui, "取消", crate::widgets::fluent::ButtonKind::Standard)
+                            .clicked()
+                        {
                             cancel = true;
                         }
                     });
@@ -256,7 +270,11 @@ impl LibraryView {
         const COVER_WIDTH: f32 = 132.0;
         const COVER_HEIGHT: f32 = 186.0;
         let cover_size = egui::vec2(COVER_WIDTH, COVER_HEIGHT);
-        let cover_radius = egui::CornerRadius::same(crate::theme::RADIUS_COVER);
+        let cover_radius = egui::CornerRadius::same(if crate::theme::is_fluent(ui.visuals()) {
+            crate::theme::tokens::radius::CARD
+        } else {
+            crate::theme::RADIUS_COVER
+        });
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -880,6 +898,19 @@ fn history_entry_title(entry: &HistoryEntry) -> String {
         .or_else(|| entry.path.file_name())
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| entry.comic_id.clone())
+}
+
+fn library_button(
+    ui: &mut egui::Ui,
+    label: impl Into<String>,
+    kind: crate::widgets::fluent::ButtonKind,
+) -> egui::Response {
+    let label = label.into();
+    if crate::theme::is_fluent(ui.visuals()) {
+        crate::widgets::fluent::button(ui, label, kind)
+    } else {
+        ui.button(label)
+    }
 }
 
 fn sort_label(sort: LibrarySort) -> &'static str {

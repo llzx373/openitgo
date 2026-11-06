@@ -740,16 +740,19 @@ fn toolbar_button(
     mode: ToolbarDisplayMode,
 ) -> egui::Response {
     let min = egui::vec2(0.0, crate::theme::TOOLBAR_BUTTON_HEIGHT);
+    let frame = !crate::theme::is_fluent(ui.visuals());
     match mode {
         ToolbarDisplayMode::IconOnly => ui
-            .add(egui::Button::new(icon).min_size(min))
+            .add(egui::Button::new(icon).min_size(min).frame(frame))
             .on_hover_text(text),
-        ToolbarDisplayMode::TextOnly => ui.add(egui::Button::new(text).min_size(min)),
+        ToolbarDisplayMode::TextOnly => ui.add(egui::Button::new(text).min_size(min).frame(frame)),
         // Separate atoms: Phosphor font for the icon, proportional for the label —
         // avoids mixed-font galley baseline drift that made labels look off-center.
-        ToolbarDisplayMode::IconAndText => {
-            ui.add(egui::Button::new((icon, format!(" {text}"))).min_size(min))
-        }
+        ToolbarDisplayMode::IconAndText => ui.add(
+            egui::Button::new((icon, format!(" {text}")))
+                .min_size(min)
+                .frame(frame),
+        ),
     }
 }
 
@@ -761,12 +764,20 @@ fn toolbar_selectable(
     mode: ToolbarDisplayMode,
 ) -> egui::Response {
     let min = egui::vec2(0.0, crate::theme::TOOLBAR_BUTTON_HEIGHT);
+    let frame = active || !crate::theme::is_fluent(ui.visuals());
     let button = match mode {
-        ToolbarDisplayMode::IconOnly => egui::Button::new(icon).selected(active).min_size(min),
-        ToolbarDisplayMode::TextOnly => egui::Button::new(text).selected(active).min_size(min),
+        ToolbarDisplayMode::IconOnly => egui::Button::new(icon)
+            .selected(active)
+            .min_size(min)
+            .frame(frame),
+        ToolbarDisplayMode::TextOnly => egui::Button::new(text)
+            .selected(active)
+            .min_size(min)
+            .frame(frame),
         ToolbarDisplayMode::IconAndText => egui::Button::new((icon, format!(" {text}")))
             .selected(active)
-            .min_size(min),
+            .min_size(min)
+            .frame(frame),
     };
     ui.add(button).on_hover_text(text)
 }
