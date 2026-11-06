@@ -1611,12 +1611,7 @@ impl FileManagerView {
     fn render_top_bar(&mut self, ui: &mut egui::Ui, intents: &mut FmIntents) {
         let saved_style = ui.style().clone();
         ui.horizontal(|ui| {
-            if crate::theme::is_fluent(ui.visuals()) {
-                let visuals = ui.visuals_mut();
-                visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
-                visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
-                visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-            }
+            crate::theme::prepare_subtle_toolbar_buttons(ui);
             if ui
                 .button((icons::HOUSE, " 书架"))
                 .on_hover_text("返回书架")
@@ -1832,11 +1827,7 @@ impl FileManagerView {
                 });
             }
             // 末尾小「+」开添加对话框（空栏时整条不渲染，占位在顶栏）。
-            if ui
-                .add(egui::Button::new(icons::PLUS.as_str()).small())
-                .on_hover_text("添加按钮")
-                .clicked()
-            {
+            if fm_icon_button(ui, icons::PLUS, "添加按钮", true).clicked() {
                 self.button_dialog = Some(ButtonDialog::new_create());
             }
             if let Some(i) = edit_idx {
@@ -1875,9 +1866,7 @@ impl FileManagerView {
                 .hint_text("过滤（焦点栏，支持 *.zip）")
                 .desired_width(160.0),
         );
-        let funnel = ui
-            .add(egui::Button::new(icons::FUNNEL.as_str()).frame(false))
-            .on_hover_text("过滤方案 / 最近使用");
+        let funnel = fm_icon_button(ui, icons::FUNNEL, "过滤方案 / 最近使用", true);
         // 菜单动作先收集、闭包后统一应用（闭包内 self 只读借用）。
         let current = self.panels[active].filter.trim().to_string();
         let mut apply: Option<String> = None;
@@ -2215,10 +2204,7 @@ impl FileManagerView {
                 egui::RichText::new(format!("{} 目录树", icons::TREE_STRUCTURE.as_str())).weak(),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button(icons::X.as_str())
-                    .on_hover_text("关闭目录树（Esc / Alt+F10）")
-                    .clicked()
+                if fm_icon_button(ui, icons::X, "关闭目录树（Esc / Alt+F10）", true).clicked()
                 {
                     close = true;
                 }
@@ -2475,11 +2461,7 @@ impl FileManagerView {
                             }
                         });
                     }
-                    if ui
-                        .add(egui::Button::new(icons::PLUS.as_str()).frame(false))
-                        .on_hover_text("新建标签（Ctrl+T）")
-                        .clicked()
-                    {
+                    if fm_icon_button(ui, icons::PLUS, "新建标签（Ctrl+T）", true).clicked() {
                         action = Some(TabAction::New);
                     }
                     // 标签组菜单（阶段 AI）：保存当前栏标签为一组 / 应用 /
@@ -2504,10 +2486,7 @@ impl FileManagerView {
                                     action = Some(TabAction::ApplyGroup(gi));
                                     ui.close();
                                 }
-                                if ui
-                                    .button(icons::X.as_str())
-                                    .on_hover_text("删除该标签组")
-                                    .clicked()
+                                if fm_icon_button(ui, icons::X, "删除该标签组", true).clicked()
                                 {
                                     action = Some(TabAction::DeleteGroup(gi));
                                     ui.close();
@@ -2516,7 +2495,10 @@ impl FileManagerView {
                         }
                     })
                     .response
-                    .on_hover_text("标签组");
+                    .on_hover_text("标签组")
+                    .widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "标签组")
+                    });
                 });
             });
         match action {
@@ -2572,13 +2554,13 @@ impl FileManagerView {
                         .back_target()
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|| "后退".to_string());
-                    if ui
-                        .add_enabled(
-                            self.panels[idx].can_go_back(),
-                            egui::Button::new(icons::CARET_LEFT.as_str()).frame(false),
-                        )
-                        .on_hover_text(back_tip)
-                        .clicked()
+                    if fm_icon_button(
+                        ui,
+                        icons::CARET_LEFT,
+                        &back_tip,
+                        self.panels[idx].can_go_back(),
+                    )
+                    .clicked()
                     {
                         self.panels[idx].go_back();
                     }
@@ -2586,13 +2568,13 @@ impl FileManagerView {
                         .forward_target()
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|| "前进".to_string());
-                    if ui
-                        .add_enabled(
-                            self.panels[idx].can_go_forward(),
-                            egui::Button::new(icons::CARET_RIGHT.as_str()).frame(false),
-                        )
-                        .on_hover_text(forward_tip)
-                        .clicked()
+                    if fm_icon_button(
+                        ui,
+                        icons::CARET_RIGHT,
+                        &forward_tip,
+                        self.panels[idx].can_go_forward(),
+                    )
+                    .clicked()
                     {
                         self.panels[idx].go_forward();
                     }
@@ -2676,11 +2658,7 @@ impl FileManagerView {
                         ui.label(egui::RichText::new("[分支]").weak());
                     }
                     // 铅笔按钮：进入路径编辑态（预填当前目录完整路径）。
-                    if ui
-                        .add(egui::Button::new(icons::PENCIL_SIMPLE.as_str()).frame(false))
-                        .on_hover_text("编辑路径")
-                        .clicked()
-                    {
+                    if fm_icon_button(ui, icons::PENCIL_SIMPLE, "编辑路径", true).clicked() {
                         self.breadcrumb_edit = Some(idx);
                         self.breadcrumb_edit_text = self.panels[idx].dir.display().to_string();
                         self.breadcrumb_edit_focused = false;
@@ -2694,9 +2672,12 @@ impl FileManagerView {
     /// 悬停显示完整路径），点击直跳；Alt+↓ 经 history_menu_toggle 一次性
     /// 请求切换焦点栏菜单的开/关（与点击共用同一 memory 弹层状态）。
     fn render_history_button(&mut self, ui: &mut egui::Ui, idx: usize) {
-        let response = ui
-            .add(egui::Button::new(icons::CLOCK_COUNTER_CLOCKWISE.as_str()).frame(false))
-            .on_hover_text("目录历史（Alt+↓）");
+        let response = fm_icon_button(
+            ui,
+            icons::CLOCK_COUNTER_CLOCKWISE,
+            "目录历史（Alt+↓）",
+            true,
+        );
         let kb_toggle = self.history_menu_toggle && self.active == idx;
         if kb_toggle {
             self.history_menu_toggle = false;
@@ -2793,9 +2774,7 @@ impl FileManagerView {
     /// Ctrl+D 经 bookmarks_menu_toggle 一次性请求切换焦点栏菜单开/关（与点击
     /// 共用同一 memory 弹层状态，同历史下拉的 Alt+↓ 模式）。
     fn render_bookmarks_button(&mut self, ui: &mut egui::Ui, idx: usize) {
-        let response = ui
-            .add(egui::Button::new(icons::STAR.as_str()).frame(false))
-            .on_hover_text("常用书签（目录/文件，Ctrl+D）");
+        let response = fm_icon_button(ui, icons::STAR, "常用书签（目录/文件，Ctrl+D）", true);
         let kb_toggle = self.bookmarks_menu_toggle && self.active == idx;
         if kb_toggle {
             self.bookmarks_menu_toggle = false;
@@ -2897,11 +2876,7 @@ impl FileManagerView {
                                 {
                                     jump = Some(PathBuf::from(bm));
                                 }
-                                if ui
-                                    .add(egui::Button::new(icons::X.as_str()).frame(false).small())
-                                    .on_hover_text("移除书签")
-                                    .clicked()
-                                {
+                                if fm_icon_button(ui, icons::X, "移除书签", true).clicked() {
                                     remove_bm = Some((gi, PathBuf::from(bm)));
                                 }
                             });
@@ -4375,10 +4350,7 @@ impl FileManagerView {
             for (i, (name, paths)) in self.saved_selections.iter().enumerate() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // ✕ 删除不收起菜单（同书签菜单先例）。
-                    if ui
-                        .add(egui::Button::new(icons::X.as_str()).frame(false))
-                        .clicked()
-                    {
+                    if fm_icon_button(ui, icons::X, "删除保存的选择集", true).clicked() {
                         delete = Some(i);
                     }
                     if ui.button(format!("{name}（{} 项）", paths.len())).clicked() {
@@ -7124,6 +7096,14 @@ fn breadcrumb_segments(path: &Path) -> Vec<(PathBuf, String)> {
         }
     }
     segments
+}
+
+fn fm_icon_button(ui: &mut egui::Ui, icon: Icon, label: &str, enabled: bool) -> egui::Response {
+    let response = ui.add_enabled(enabled, egui::Button::new(icon).frame(false));
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled() && enabled, label)
+    });
+    response.on_hover_text(label)
 }
 
 /// 明细列表行的类型图标（按扩展名，大小写不敏感）；目录行恒用 FOLDER。

@@ -423,6 +423,15 @@ pub fn begin_chrome_row(ui: &mut egui::Ui) {
     ui.spacing_mut().item_spacing.y = 0.0;
 }
 
+pub fn prepare_subtle_toolbar_buttons(ui: &mut egui::Ui) {
+    if is_fluent(ui.visuals()) {
+        let inactive = &mut ui.visuals_mut().widgets.inactive;
+        inactive.bg_fill = Color32::TRANSPARENT;
+        inactive.weak_bg_fill = Color32::TRANSPARENT;
+        inactive.bg_stroke = Stroke::NONE;
+    }
+}
+
 /// Library header separator: neutral rule for Fluent, dashed accent for Gallery.
 pub fn dashed_separator(ui: &mut egui::Ui) {
     if is_fluent(ui.visuals()) {

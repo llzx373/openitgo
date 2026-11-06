@@ -53,7 +53,7 @@ impl eframe::App for GalleryApp {
                         fluent::button(ui, "弱化按钮", ButtonKind::Subtle);
                         fluent::icon_button(
                             ui,
-                            icons::MAGNIFYING_GLASS.as_str(),
+                            icons::MAGNIFYING_GLASS,
                             "搜索",
                             ButtonKind::Subtle,
                         )

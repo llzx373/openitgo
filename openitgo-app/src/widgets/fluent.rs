@@ -31,16 +31,15 @@ pub fn button(ui: &mut Ui, label: impl Into<String>, kind: ButtonKind) -> Respon
     )
 }
 
-#[allow(dead_code)]
 pub fn icon_button(
     ui: &mut Ui,
-    icon: impl Into<String>,
+    icon: egui_phosphor_icons::Icon,
     label: impl Into<String>,
     kind: ButtonKind,
 ) -> Response {
     button_impl(
         ui,
-        icon.into(),
+        icon.as_str().to_owned(),
         label.into(),
         kind,
         egui::vec2(size::CONTROL, size::CONTROL),

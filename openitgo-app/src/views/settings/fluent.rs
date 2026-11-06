@@ -710,26 +710,26 @@ fn button_bar(view: &mut SettingsView, ui: &mut Ui, settings: &mut Settings) {
     for (i, button) in settings.fm_button_bar.iter().enumerate() {
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(i > 0, egui::Button::new(icons::CARET_UP.as_str()).small())
+                .add_enabled_ui(i > 0, |ui| {
+                    fw::icon_button(ui, icons::CARET_UP, "上移按钮", ButtonKind::Subtle)
+                })
+                .inner
                 .clicked()
             {
                 swap_idx = Some(i - 1);
             }
             if ui
-                .add_enabled(
-                    i + 1 < count,
-                    egui::Button::new(icons::CARET_DOWN.as_str()).small(),
-                )
+                .add_enabled_ui(i + 1 < count, |ui| {
+                    fw::icon_button(ui, icons::CARET_DOWN, "下移按钮", ButtonKind::Subtle)
+                })
+                .inner
                 .clicked()
             {
                 swap_idx = Some(i);
             }
             ui.label(&button.label);
             ui.label(RichText::new(&button.command).weak().small());
-            if ui
-                .add(egui::Button::new(icons::X.as_str()).small().frame(false))
-                .clicked()
-            {
+            if fw::icon_button(ui, icons::X, "删除按钮", ButtonKind::Subtle).clicked() {
                 delete_idx = Some(i);
             }
         });

@@ -607,28 +607,30 @@ impl SettingsView {
         let count = settings.fm_button_bar.len();
         for (i, b) in settings.fm_button_bar.iter().enumerate() {
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(i > 0, egui::Button::new(icons::CARET_UP.as_str()).small())
-                    .clicked()
-                {
+                let up = ui.add_enabled(i > 0, egui::Button::new(icons::CARET_UP).small());
+                up.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, i > 0, "上移按钮")
+                });
+                if up.clicked() {
                     swap_idx = Some(i - 1);
                 }
-                if ui
-                    .add_enabled(
-                        i + 1 < count,
-                        egui::Button::new(icons::CARET_DOWN.as_str()).small(),
-                    )
-                    .clicked()
-                {
+                let down =
+                    ui.add_enabled(i + 1 < count, egui::Button::new(icons::CARET_DOWN).small());
+                down.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, i + 1 < count, "下移按钮")
+                });
+                if down.clicked() {
                     swap_idx = Some(i);
                 }
                 ui.label(&b.label);
                 ui.label(egui::RichText::new(&b.command).weak().small());
-                if ui
-                    .add(egui::Button::new(icons::X.as_str()).small().frame(false))
-                    .on_hover_text("删除该按钮")
-                    .clicked()
-                {
+                let delete = ui
+                    .add(egui::Button::new(icons::X).small().frame(false))
+                    .on_hover_text("删除该按钮");
+                delete.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "删除该按钮")
+                });
+                if delete.clicked() {
                     delete_idx = Some(i);
                 }
             });
@@ -759,7 +761,15 @@ impl SettingsView {
                         };
                         ui.add(egui::Label::new(egui::RichText::new(text).monospace()).truncate());
                         let eye = if shown { icons::EYE_SLASH } else { icons::EYE };
-                        if ui.button(eye).on_hover_text("显示 / 隐藏密码").clicked() {
+                        let visibility = ui.button(eye).on_hover_text("显示 / 隐藏密码");
+                        visibility.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                "显示 / 隐藏密码",
+                            )
+                        });
+                        if visibility.clicked() {
                             if shown {
                                 self.password_show.remove(&idx);
                             } else {
@@ -773,7 +783,15 @@ impl SettingsView {
                             ui.label(egui::RichText::new(&entry.note).weak());
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(icons::TRASH).on_hover_text("删除").clicked() {
+                            let delete = ui.button(icons::TRASH).on_hover_text("删除密码");
+                            delete.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    true,
+                                    "删除密码",
+                                )
+                            });
+                            if delete.clicked() {
                                 remove_idx = Some(idx);
                             }
                             ui.label(

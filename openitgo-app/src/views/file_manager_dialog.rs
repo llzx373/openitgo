@@ -154,14 +154,21 @@ impl CopyMoveDialog {
             OpKind::Move => "移动到",
             _ => unreachable!("Delete/Compress/Split/Merge 各有对话框或专用路径"),
         };
-        let mut outcome = None;
-        let mut open = true;
-        egui::Window::new(title)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .open(&mut open)
-            .show(ctx, |ui| {
+        use crate::widgets::dialog::{modal_dialog, DialogAction};
+        use crate::widgets::fluent::ButtonKind;
+        let dest = PathBuf::from(self.dest.trim());
+        let dest_ok = !self.dest.trim().is_empty() && dest.is_dir();
+        let response = modal_dialog(
+            ctx,
+            egui::Id::new("fm_copy_move_dialog"),
+            title,
+            &[
+                DialogAction::new(title, ButtonKind::Primary)
+                    .default_focus()
+                    .enabled(dest_ok),
+                DialogAction::new("取消", ButtonKind::Standard),
+            ],
+            |ui| {
                 ui.label(format!(
                     "{}以下内容：",
                     match self.kind {
@@ -226,39 +233,27 @@ impl CopyMoveDialog {
                                 .small(),
                         );
                     });
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    let dest = PathBuf::from(self.dest.trim());
-                    let dest_ok = !self.dest.trim().is_empty() && dest.is_dir();
-                    if !self.dest.trim().is_empty() && !dest_ok {
-                        ui.colored_label(ui.visuals().error_fg_color, "目标文件夹不存在");
-                    }
-                    if ui
-                        .add_enabled_ui(dest_ok, |ui| dialog_button(ui, title, true))
-                        .inner
-                        .clicked()
-                    {
-                        outcome = Some(FmDialogOutcome::ConfirmCopyMove {
-                            kind: self.kind,
-                            sources: self.sources.clone(),
-                            dest,
-                            conflict: self.conflict,
-                            opts: CopyOptions {
-                                verify: self.verify,
-                                filter_pattern: self.filter_pattern.trim().to_string(),
-                                filter_newer_days: self.filter_newer_days,
-                            },
-                        });
-                    }
-                    if dialog_button(ui, "取消", false).clicked() {
-                        outcome = Some(FmDialogOutcome::Cancelled);
-                    }
-                });
-            });
-        if !open {
-            outcome = Some(FmDialogOutcome::Cancelled);
+                if !self.dest.trim().is_empty() && !dest_ok {
+                    ui.colored_label(ui.visuals().error_fg_color, "目标文件夹不存在");
+                }
+            },
+        );
+        match response.action {
+            Some(0) => Some(FmDialogOutcome::ConfirmCopyMove {
+                kind: self.kind,
+                sources: self.sources.clone(),
+                dest,
+                conflict: self.conflict,
+                opts: CopyOptions {
+                    verify: self.verify,
+                    filter_pattern: self.filter_pattern.trim().to_string(),
+                    filter_newer_days: self.filter_newer_days,
+                },
+            }),
+            Some(1) => Some(FmDialogOutcome::Cancelled),
+            _ if response.should_close => Some(FmDialogOutcome::Cancelled),
+            _ => None,
         }
-        outcome
     }
 }
 
@@ -644,14 +639,22 @@ impl DeleteDialog {
     }
 
     fn ui(&mut self, ctx: &egui::Context) -> Option<FmDialogOutcome> {
-        let mut outcome = None;
-        let mut open = true;
-        egui::Window::new("删除确认")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .open(&mut open)
-            .show(ctx, |ui| {
+        use crate::widgets::dialog::{modal_dialog, DialogAction};
+        use crate::widgets::fluent::ButtonKind;
+        let confirm_label = if self.permanent {
+            "永久删除"
+        } else {
+            "移入回收站"
+        };
+        let response = modal_dialog(
+            ctx,
+            egui::Id::new("fm_delete_confirmation"),
+            "删除确认",
+            &[
+                DialogAction::new(confirm_label, ButtonKind::Danger),
+                DialogAction::new("取消", ButtonKind::Standard).default_focus(),
+            ],
+            |ui| {
                 ui.label(format!(
                     "确定删除以下 {} 吗？",
                     sources_summary(&self.sources)
@@ -667,32 +670,18 @@ impl DeleteDialog {
                     ui.label(egui::RichText::new("将移入回收站，可从系统回收站恢复。").weak());
                 }
                 ui.checkbox(&mut self.dont_ask_again, "不再询问（设置中可改回）");
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    let label = if self.permanent {
-                        "永久删除"
-                    } else {
-                        "移入回收站"
-                    };
-                    let confirm =
-                        egui::Button::new(egui::RichText::new(label).color(egui::Color32::WHITE))
-                            .fill(ui.visuals().error_fg_color);
-                    if ui.add(confirm).clicked() {
-                        outcome = Some(FmDialogOutcome::ConfirmDelete {
-                            sources: self.sources.clone(),
-                            permanent: self.permanent,
-                            dont_ask_again: self.dont_ask_again,
-                        });
-                    }
-                    if ui.button("取消").clicked() {
-                        outcome = Some(FmDialogOutcome::Cancelled);
-                    }
-                });
-            });
-        if !open {
-            outcome = Some(FmDialogOutcome::Cancelled);
+            },
+        );
+        match response.action {
+            Some(0) => Some(FmDialogOutcome::ConfirmDelete {
+                sources: self.sources.clone(),
+                permanent: self.permanent,
+                dont_ask_again: self.dont_ask_again,
+            }),
+            Some(1) => Some(FmDialogOutcome::Cancelled),
+            _ if response.should_close => Some(FmDialogOutcome::Cancelled),
+            _ => None,
         }
-        outcome
     }
 }
 
@@ -1098,19 +1087,5 @@ impl MultiRenameDialog {
             outcome = Some(FmDialogOutcome::Cancelled);
         }
         outcome
-    }
-}
-
-fn dialog_button(ui: &mut egui::Ui, label: impl Into<String>, primary: bool) -> egui::Response {
-    let label = label.into();
-    if crate::theme::is_fluent(ui.visuals()) {
-        let kind = if primary {
-            crate::widgets::fluent::ButtonKind::Primary
-        } else {
-            crate::widgets::fluent::ButtonKind::Standard
-        };
-        crate::widgets::fluent::button(ui, label, kind)
-    } else {
-        ui.button(label)
     }
 }

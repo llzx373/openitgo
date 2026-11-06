@@ -738,10 +738,7 @@ fn add_toolbar_button(ui: &mut egui::Ui, button: egui::Button<'_>) -> egui::Resp
         return ui.add(button.frame(true));
     }
     ui.scope(|ui| {
-        let inactive = &mut ui.visuals_mut().widgets.inactive;
-        inactive.bg_fill = egui::Color32::TRANSPARENT;
-        inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
-        inactive.bg_stroke = egui::Stroke::NONE;
+        crate::theme::prepare_subtle_toolbar_buttons(ui);
         ui.add(button.frame(true))
     })
     .inner
@@ -763,7 +760,10 @@ fn toolbar_button(
             egui::Button::new((icon, format!(" {text}"))).min_size(min)
         }
     };
-    add_toolbar_button(ui, button).on_hover_text(text)
+    let response = add_toolbar_button(ui, button).on_hover_text(text);
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), text));
+    response
 }
 
 fn toolbar_selectable(
@@ -781,7 +781,11 @@ fn toolbar_selectable(
             .selected(active)
             .min_size(min),
     };
-    add_toolbar_button(ui, button).on_hover_text(text)
+    let response = add_toolbar_button(ui, button).on_hover_text(text);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), active, text)
+    });
+    response
 }
 
 /// 启动时要打开的路径：优先 `OPENITGO_OPEN` 环境变量，其次第一个命令行参数
@@ -2052,7 +2056,14 @@ impl ReaderApp {
                                 icons::SPEAKER_HIGH
                             };
                             let mute_label = if muted { "取消静音" } else { "静音" };
-                            if ui.button(mute_icon).on_hover_text(mute_label).clicked() {
+                            if toolbar_button(
+                                ui,
+                                mute_icon,
+                                mute_label,
+                                ToolbarDisplayMode::IconOnly,
+                            )
+                            .clicked()
+                            {
                                 self.toggle_media_mute(&ctx);
                             }
                         });
@@ -2230,10 +2241,7 @@ impl ReaderApp {
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let hide_button = egui::Button::new(icons::X)
-                            .min_size(egui::vec2(0.0, crate::theme::TOOLBAR_BUTTON_HEIGHT));
-                        if add_toolbar_button(ui, hide_button)
-                            .on_hover_text("隐藏工具栏")
+                        if toolbar_button(ui, icons::X, "隐藏工具栏", ToolbarDisplayMode::IconOnly)
                             .clicked()
                         {
                             self.settings.show_toolbar = false;
@@ -2261,12 +2269,7 @@ impl ReaderApp {
                     hovered_page = bar_response.hovered_page;
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(icons::X)
-                                    .min_size(egui::vec2(0.0, crate::theme::TOOLBAR_BUTTON_HEIGHT)),
-                            )
-                            .on_hover_text("隐藏状态栏")
+                        if toolbar_button(ui, icons::X, "隐藏状态栏", ToolbarDisplayMode::IconOnly)
                             .clicked()
                         {
                             self.settings.show_statusbar = false;
