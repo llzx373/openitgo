@@ -1,3 +1,5 @@
+mod fluent;
+
 use crate::platform::file_assoc::{self, AssocState, ExtAssoc};
 use egui_phosphor_icons::icons;
 use openitgo_core::ebook::EbookReadingMode;
@@ -68,6 +70,12 @@ impl SettingsView {
         settings: &mut Settings,
         password_book: &mut PasswordBook,
     ) -> bool {
+        if matches!(settings.theme, Theme::Windows)
+            || (cfg!(windows) && matches!(settings.theme, Theme::System))
+        {
+            return fluent::ui(self, ui, settings, password_book);
+        }
+
         ui.heading(egui::RichText::new("设置").size(22.0).strong());
         ui.add_space(10.0);
 
