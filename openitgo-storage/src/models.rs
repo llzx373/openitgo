@@ -90,6 +90,9 @@ pub struct Settings {
     pub double_page: bool,
     pub wide_page_threshold: f32,
     pub enable_page_animation: bool,
+    /// 减少非必要动效；false 时参考操作系统的动画偏好。
+    #[serde(default)]
+    pub reduce_motion: bool,
     pub compress_images: bool,
     pub decode_threads: u32,
     pub cache_size_mb: u32,
@@ -340,6 +343,7 @@ impl Default for Settings {
             double_page: false,
             wide_page_threshold: 1.4,
             enable_page_animation: true,
+            reduce_motion: false,
             compress_images: false,
             decode_threads: 0,
             cache_size_mb: 1024,

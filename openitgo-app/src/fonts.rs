@@ -6,6 +6,8 @@ const LATIN_UI_FONT_CANDIDATES: &[&str] = &[
     "C:/Windows/Fonts/segoeuiv.ttf",
     "C:/Windows/Fonts/segoeui.ttf",
 ];
+const SEMIBOLD_UI_FONT_CANDIDATES: &[&str] = &["C:/Windows/Fonts/segoeuisb.ttf"];
+const SEMIBOLD_FAMILY: &str = "system-ui-semibold";
 
 /// Candidate system fonts that include CJK glyphs, ordered by platform likelihood.
 const CJK_FONT_CANDIDATES: &[&str] = &[
@@ -49,6 +51,31 @@ pub fn setup_fonts(ctx: &egui::Context) {
         }
     }
 
+    if let Some(path) = SEMIBOLD_UI_FONT_CANDIDATES
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists())
+    {
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts.font_data.insert(
+                SEMIBOLD_FAMILY.to_owned(),
+                Arc::new(FontData::from_owned(bytes)),
+            );
+        }
+    }
+    let semibold = fonts
+        .families
+        .entry(FontFamily::Name(SEMIBOLD_FAMILY.into()))
+        .or_default();
+    semibold.push(
+        if fonts.font_data.contains_key(SEMIBOLD_FAMILY) {
+            SEMIBOLD_FAMILY
+        } else {
+            "system-ui"
+        }
+        .to_owned(),
+    );
+
     if let Some(path) = CJK_FONT_CANDIDATES
         .iter()
         .map(PathBuf::from)
@@ -66,6 +93,12 @@ pub fn setup_fonts(ctx: &egui::Context) {
                 .insert("cjk".to_owned(), std::sync::Arc::new(cjk));
             if let Some(proportional) = fonts.families.get_mut(&FontFamily::Proportional) {
                 proportional.push("cjk".to_owned());
+            }
+            if let Some(semibold) = fonts
+                .families
+                .get_mut(&FontFamily::Name(SEMIBOLD_FAMILY.into()))
+            {
+                semibold.push("cjk".to_owned());
             }
             // 预览面板等用 Monospace 渲染的文本同样需要 CJK 回退，
             // 否则中文显示为豆腐块。
@@ -89,6 +122,12 @@ pub fn setup_fonts(ctx: &egui::Context) {
     }
     if let Some(proportional) = fonts.families.get_mut(&FontFamily::Proportional) {
         proportional.push("phosphor-icons".to_owned());
+    }
+    if let Some(semibold) = fonts
+        .families
+        .get_mut(&FontFamily::Name(SEMIBOLD_FAMILY.into()))
+    {
+        semibold.push("phosphor-icons".to_owned());
     }
 
     ctx.set_fonts(fonts);

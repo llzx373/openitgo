@@ -343,6 +343,7 @@ pub struct ReaderApp {
     /// Library/Settings（顶层目的地）时也清空。不用栈：本期只做
     /// 「回文件浏览器」语义，避免视图间跳转都被记录的蔓延行为。
     pub previous_view: Option<View>,
+    view_animation: Option<(View, Instant)>,
     pub settings: Settings,
     pub library_view: LibraryView,
     pub reader_view: ReaderView,
@@ -518,6 +519,7 @@ impl Default for ReaderApp {
             current_view: View::Library,
             last_view: View::Library,
             previous_view: None,
+            view_animation: None,
             settings,
             library_view,
             reader_view: ReaderView::default(),
@@ -679,12 +681,17 @@ impl eframe::App for ReaderApp {
         self.poll_cover_results();
         self.poll_media_covers();
         self.poll_extracts(&ctx);
+        crate::theme::motion::set_reduced(
+            &ctx,
+            self.settings.reduce_motion || crate::platform::system_animations_disabled(),
+        );
 
         // 进入 Library/Settings（顶层目的地）清空回退落点（在渲染顶栏前
         // 同步，保证本帧按钮可见性一致）。
         self.sync_previous_view();
 
         self.render_menu_bar(ui);
+        self.apply_view_transition(ui);
 
         match self.current_view.clone() {
             View::Library => self.render_library(ui),
@@ -1065,7 +1072,8 @@ impl ReaderApp {
                             state,
                             &self.page_loader,
                             self.settings.wide_page_threshold,
-                            self.settings.enable_page_animation,
+                            self.settings.enable_page_animation
+                                && !crate::theme::motion::is_reduced(ctx),
                             archive_password.as_deref(),
                         );
                         self.update_library_page_count(&comic_id, page_count);
@@ -1349,13 +1357,30 @@ impl ReaderApp {
             BarEdge::Bottom,
         );
 
+        let toolbar_opacity = crate::theme::motion::animate_visibility(
+            &ctx,
+            egui::Id::new("reader_toolbar"),
+            show_toolbar,
+        );
+        let statusbar_opacity = crate::theme::motion::animate_visibility(
+            &ctx,
+            egui::Id::new("reader_statusbar"),
+            show_statusbar,
+        );
         // Panel chrome (not overlay): translucency is against the window clear /
         // reader background, never against the page content itself.
-        if show_toolbar {
-            self.render_reader_toolbar(ui, total_pages, current_page, mode, zoom);
+        if toolbar_opacity > 0.01 {
+            ui.scope(|ui| {
+                ui.set_opacity(toolbar_opacity);
+                self.render_reader_toolbar(ui, total_pages, current_page, mode, zoom);
+            });
         }
-        let (progress_bar_rect, hovered_page) = if show_statusbar {
-            self.render_reader_statusbar(ui)
+        let (progress_bar_rect, hovered_page) = if statusbar_opacity > 0.01 {
+            ui.scope(|ui| {
+                ui.set_opacity(statusbar_opacity);
+                self.render_reader_statusbar(ui)
+            })
+            .inner
         } else {
             (None, None)
         };
@@ -1454,6 +1479,9 @@ impl ReaderApp {
             self.current_view = View::Library;
             return;
         }
+        self.ebook_view.set_animation_enabled(
+            self.settings.ebook.enable_page_animation && !crate::theme::motion::is_reduced(&ctx),
+        );
 
         let (fullscreen, mouse_pos, screen_size) = ctx.input(|i| {
             (
@@ -1476,12 +1504,28 @@ impl ReaderApp {
             screen_size,
             BarEdge::Bottom,
         );
-        if show_toolbar {
-            self.render_ebook_toolbar(ui);
+        let toolbar_opacity = crate::theme::motion::animate_visibility(
+            &ctx,
+            egui::Id::new("ebook_toolbar"),
+            show_toolbar,
+        );
+        let statusbar_opacity = crate::theme::motion::animate_visibility(
+            &ctx,
+            egui::Id::new("ebook_statusbar"),
+            show_statusbar,
+        );
+        if toolbar_opacity > 0.01 {
+            ui.scope(|ui| {
+                ui.set_opacity(toolbar_opacity);
+                self.render_ebook_toolbar(ui);
+            });
         }
         self.render_ebook_search_bar(ui);
-        if show_statusbar {
-            self.render_ebook_statusbar(ui);
+        if statusbar_opacity > 0.01 {
+            ui.scope(|ui| {
+                ui.set_opacity(statusbar_opacity);
+                self.render_ebook_statusbar(ui);
+            });
         }
 
         // Render the TOC side panel before the central panel so that the
@@ -1588,11 +1632,27 @@ impl ReaderApp {
             screen_size,
             BarEdge::Bottom,
         );
-        if show_toolbar {
-            self.render_media_toolbar(ui);
+        let toolbar_opacity = crate::theme::motion::animate_visibility(
+            &ctx,
+            egui::Id::new("media_toolbar"),
+            show_toolbar,
+        );
+        let seekbar_opacity = crate::theme::motion::animate_visibility(
+            &ctx,
+            egui::Id::new("media_seekbar"),
+            show_seekbar,
+        );
+        if toolbar_opacity > 0.01 {
+            ui.scope(|ui| {
+                ui.set_opacity(toolbar_opacity);
+                self.render_media_toolbar(ui);
+            });
         }
-        if show_seekbar {
-            self.render_media_seekbar(ui);
+        if seekbar_opacity > 0.01 {
+            ui.scope(|ui| {
+                ui.set_opacity(seekbar_opacity);
+                self.render_media_seekbar(ui);
+            });
         }
 
         // Transparent frame while video plays: on macOS the layer composites
@@ -4044,6 +4104,33 @@ impl ReaderApp {
         self.last_saved_comic_settings = Some(snapshot);
     }
 
+    fn apply_view_transition(&mut self, ui: &mut egui::Ui) {
+        if crate::theme::motion::is_reduced(ui.ctx()) {
+            self.view_animation = None;
+            return;
+        }
+        let now = Instant::now();
+        let opacity = match &mut self.view_animation {
+            None => {
+                self.view_animation = Some((self.current_view.clone(), now));
+                1.0
+            }
+            Some((view, started)) if *view != self.current_view => {
+                *view = self.current_view.clone();
+                *started = now;
+                0.0
+            }
+            Some((_, started)) => {
+                let progress = (now.duration_since(*started).as_secs_f32() / 0.12).min(1.0);
+                egui::emath::easing::cubic_out(progress)
+            }
+        };
+        ui.set_opacity(opacity);
+        if opacity < 1.0 {
+            ui.ctx().request_repaint();
+        }
+    }
+
     /// 回退落点维护：Library/Settings 是顶层目的地，进入即清空
     /// previous_view（不回退）；其余视图保留 FM 回调记录的落点。
     fn sync_previous_view(&mut self) {
@@ -5965,6 +6052,7 @@ mod tests {
                 current_view: View::Library,
                 last_view: View::Library,
                 previous_view: None,
+                view_animation: None,
                 settings,
                 library_view,
                 reader_view: ReaderView::default(),

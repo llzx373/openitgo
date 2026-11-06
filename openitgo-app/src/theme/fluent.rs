@@ -1,5 +1,5 @@
-use super::tokens::{radius, size, spacing, text, FluentPalette};
-use egui::{Color32, CornerRadius, FontId, Margin, Shadow, Stroke, Style, TextStyle, Visuals};
+use super::tokens::{self, radius, size, spacing, text, FluentPalette};
+use egui::{Color32, CornerRadius, FontId, Margin, Stroke, Style, TextStyle, Visuals};
 
 pub fn palette(dark: bool) -> FluentPalette {
     if dark {
@@ -34,18 +34,8 @@ pub fn visuals(dark: bool) -> Visuals {
     v.window_corner_radius = CornerRadius::same(radius::CARD);
     v.menu_corner_radius = CornerRadius::same(radius::CARD);
     v.window_stroke = Stroke::new(1.0, p.stroke);
-    v.window_shadow = Shadow {
-        offset: [0, 8],
-        blur: 24,
-        spread: 0,
-        color: Color32::from_black_alpha(if dark { 80 } else { 28 }),
-    };
-    v.popup_shadow = Shadow {
-        offset: [0, 4],
-        blur: 16,
-        spread: 0,
-        color: Color32::from_black_alpha(if dark { 64 } else { 24 }),
-    };
+    v.window_shadow = tokens::elevation::window(dark);
+    v.popup_shadow = tokens::elevation::popup(dark);
     v.selection.bg_fill = Color32::from_rgba_unmultiplied(
         p.accent.r(),
         p.accent.g(),

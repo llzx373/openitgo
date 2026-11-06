@@ -803,11 +803,23 @@ pub mod windows {
     pub mod file_assoc;
     pub mod file_attr;
     pub mod file_icons;
+    pub mod motion;
     pub mod mpv_view;
     pub mod recycle_bin;
     pub mod restore_rect;
     pub mod shell_verbs;
     pub mod startup_cloak;
+}
+
+pub fn system_animations_disabled() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        windows::motion::animations_disabled()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
 }
 
 /// 还原矩形 stub（非 Windows）：无操作。

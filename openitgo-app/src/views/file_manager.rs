@@ -7758,11 +7758,15 @@ mod tests {
         })
     }
 
-    /// epaint 0.35 对未注册的字体族直接 panic：FM 行/按钮用磷图标字体
-    /// （fonts.rs 在 lib crate root，bin 测试目标够不到，此处内联最小版）。
+    /// 独立测试字体基座：图标 + 默认正文 + Semibold 回退。
     fn setup_test_fonts(ctx: &egui::Context) {
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor_icons::add_fonts(&mut fonts);
+        let fallback = fonts.families[&egui::FontFamily::Proportional].clone();
+        fonts.families.insert(
+            egui::FontFamily::Name("system-ui-semibold".into()),
+            fallback,
+        );
         ctx.set_fonts(fonts);
     }
 

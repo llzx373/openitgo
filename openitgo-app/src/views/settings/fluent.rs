@@ -61,11 +61,7 @@ fn content(
 ) -> bool {
     let width = ui.available_width().min(size::SETTINGS_CONTENT_MAX);
     ui.set_width(width);
-    ui.label(
-        RichText::new(tab_label(view.tab))
-            .font(egui::FontId::proportional(text::TITLE))
-            .strong(),
-    );
+    ui.label(RichText::new(tab_label(view.tab)).font(crate::theme::semibold_font(text::TITLE)));
     ui.add_space(spacing::LG);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -170,6 +166,16 @@ fn appearance(view: &mut SettingsView, ui: &mut Ui, settings: &mut Settings) {
                     ui,
                     egui::Slider::new(&mut settings.chrome_opacity, 0.2..=1.0).show_value(true),
                 );
+            },
+        );
+    });
+    group(ui, "辅助功能", |ui| {
+        row(
+            ui,
+            "减少动态效果",
+            Some("开启后直接呈现最终状态；关闭时跟随 Windows 动画偏好"),
+            |ui| {
+                fw::toggle(ui, &mut settings.reduce_motion, "减少动态效果");
             },
         );
     });

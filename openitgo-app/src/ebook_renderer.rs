@@ -132,6 +132,16 @@ impl EbookRenderer {
         }
     }
 
+    pub fn set_animation_enabled(&mut self, enabled: bool) {
+        let settings = if let Ok(mut state) = self.state.lock() {
+            state.settings.enable_page_animation = enabled;
+            state.settings.clone()
+        } else {
+            return;
+        };
+        self.apply_settings(&settings);
+    }
+
     pub fn apply_settings(&self, settings: &EbookSettings) {
         if let Ok(mut state) = self.state.lock() {
             state.settings = settings.clone();

@@ -110,6 +110,12 @@ impl EbookView {
             .unwrap_or(false)
     }
 
+    pub fn set_animation_enabled(&mut self, enabled: bool) {
+        if let Some(open) = self.open.as_mut() {
+            open.renderer.set_animation_enabled(enabled);
+        }
+    }
+
     pub fn apply_settings(&mut self, settings: &EbookSettings) {
         if let Some(open) = self.open.as_ref() {
             open.renderer.apply_settings(settings);

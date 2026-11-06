@@ -93,3 +93,23 @@ pub mod text {
     pub const SUBTITLE: f32 = 16.0;
     pub const TITLE: f32 = 24.0;
 }
+
+pub mod elevation {
+    pub fn window(dark: bool) -> egui::Shadow {
+        egui::Shadow {
+            offset: [0, 8],
+            blur: 24,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(if dark { 80 } else { 28 }),
+        }
+    }
+
+    pub fn popup(dark: bool) -> egui::Shadow {
+        egui::Shadow {
+            offset: [0, 4],
+            blur: 16,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(if dark { 64 } else { 24 }),
+        }
+    }
+}

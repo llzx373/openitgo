@@ -210,6 +210,7 @@ impl SettingsView {
             });
 
         ui.checkbox(&mut settings.enable_page_animation, "翻页动画");
+        ui.checkbox(&mut settings.reduce_motion, "减少动态效果");
         ui.checkbox(
             &mut settings.invert_scroll,
             "反转滚轮方向（适用于 macOS 自然滚动）",

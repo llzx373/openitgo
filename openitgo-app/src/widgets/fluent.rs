@@ -28,6 +28,7 @@ pub fn button(ui: &mut Ui, label: impl Into<String>, kind: ButtonKind) -> Respon
         kind,
         egui::vec2(width, size::CONTROL),
         true,
+        text::BODY,
     )
 }
 
@@ -44,6 +45,7 @@ pub fn icon_button(
         kind,
         egui::vec2(size::CONTROL, size::CONTROL),
         true,
+        20.0,
     )
 }
 
@@ -54,6 +56,7 @@ fn button_impl(
     kind: ButtonKind,
     size: egui::Vec2,
     wrap: bool,
+    font_size: f32,
 ) -> Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     response.widget_info(|| {
@@ -120,7 +123,7 @@ fn button_impl(
     if response.has_focus() {
         paint_focus_ring(ui, rect);
     }
-    let font = FontId::proportional(text::BODY);
+    let font = FontId::proportional(font_size);
     let galley = if wrap {
         ui.painter().layout_no_wrap(text, font, fg)
     } else {
@@ -282,8 +285,7 @@ pub fn setting_group(
             ui.spacing_mut().item_spacing.y = spacing::MD;
             ui.label(
                 RichText::new(title)
-                    .font(FontId::proportional(text::SUBTITLE))
-                    .strong()
+                    .font(crate::theme::semibold_font(text::SUBTITLE))
                     .color(p.text),
             );
             add_contents(ui);

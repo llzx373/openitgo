@@ -62,13 +62,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 - **Comic IDs**: deterministic from file/folder path via `openitgo_parser::stable_comic_id`.
   Never use the filename alone.
 - **History entries** store both `comic_id` and `path` for robust matching.
-- **Settings**: validated on load/save, invalid values clamped and reported via `error_message`.
+- **Settings**: validated on load/save, invalid values clamped and reported via `warning_message`；
+  真正的打开/写入失败使用 `error_message`，操作结果使用 `success_message`/`status_message`。
   解压相关：`extract_dir`、`extract_threads`（0=自动，≤32）、`extract_overwrite`
   （false=同名自动改名）、`extract_wrap`（"smart"/"always"/"never"）、
   `extract_delete_archive`/`extract_open_folder`。
   书架相关：`auto_add_to_library`（默认 true，打开漫画成功即自动入库，同路径去重）；
-  漫画 tab 顶栏「清空书架」二次确认后移除漫画/视频/音频条目并清理封面与书签缩略图
+  漫画 tab「管理 → 清空书架」经模态确认后移除漫画/视频/音频条目并清理封面与书签缩略图
   （不删源文件、不动历史）。
+- **Motion**：`settings.reduce_motion` 与 Windows 动画偏好在 `App::update` 写入
+  `theme::motion`；`animate_visibility` 用于工具栏/共享对话框的 120ms 淡化，开启减少
+  动态时直接到最终状态。漫画/电子书翻页也必须叠加该状态，而非只看各自动画开关。
 - **Per-comic reading settings**（`comic_settings.json`，keyed by comic_id）：打开时经
   `poll_opener` 覆盖全局默认（mode → double_page → fit → rotation，rotation 只收 90°
   步进，脏值回 0）；改动由 `ReaderApp::maybe_save_comic_settings`（`App::update` 末尾）
@@ -399,7 +403,8 @@ dirs_first 逐栏下发，RowsKey 自动失效。
   `HKCU\Software\Classes`（winreg）；覆盖前备份，取消时仅在本程序 ProgID 才删除并恢复备份；
   完成后 `SHChangeNotify`。UserChoice 优先——UI 提供 `open_default_apps_settings()` 引导。
 - **图标字体（egui_phosphor_icons）**：`fonts::setup_fonts` 追加 phosphor + 系统 CJK（同时挂
-  Proportional 与 Monospace，缺挂会中文豆腐块；非 UTF-8 文本经 `decode_text_guess` 识别）。
+  Proportional、Monospace 与 `system-ui-semibold`，缺挂会中文豆腐块或字体族 panic；
+  非 UTF-8 文本经 `decode_text_guess` 识别）。标题经 `theme::semibold_font` 使用该族。
   **字体未注册时 epaint 0.35 直接 panic**——任何构造 `ReaderApp` 的 example 必须先调
   `openitgo_app::fonts::setup_fonts`；带 UI 的 example 还需每帧 `request_repaint_after`。
 - **Packaging**：`scripts/package-macos.sh` 签名前跑 `bundle_mpv`，把 libmpv 及 Homebrew 依赖

@@ -5,9 +5,12 @@
 //! (not warm cream).
 
 pub mod fluent;
+pub mod motion;
 pub mod tokens;
 
-use egui::{Color32, CornerRadius, Margin, Shadow, Stroke, Style, Theme, Visuals};
+use egui::{
+    Color32, CornerRadius, FontFamily, FontId, Margin, Shadow, Stroke, Style, Theme, Visuals,
+};
 use openitgo_storage::models::EbookTheme;
 
 /// Warm amber accent — used for selection, progress, and active chrome.
@@ -109,6 +112,13 @@ pub fn accent_for(dark: bool) -> Color32 {
 
 pub fn accent(visuals: &Visuals) -> Color32 {
     visuals.hyperlink_color
+}
+
+pub fn semibold_font(size: f32) -> FontId {
+    FontId {
+        family: FontFamily::Name("system-ui-semibold".into()),
+        size,
+    }
 }
 
 pub fn is_fluent(visuals: &Visuals) -> bool {
@@ -916,6 +926,36 @@ pub fn segmented_tabs<T: Copy + PartialEq>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn contrast_ratio(a: Color32, b: Color32) -> f32 {
+        fn luminance(color: Color32) -> f32 {
+            fn channel(value: u8) -> f32 {
+                let value = value as f32 / 255.0;
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            }
+            0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
+        }
+        let (high, low) = (
+            luminance(a).max(luminance(b)),
+            luminance(a).min(luminance(b)),
+        );
+        (high + 0.05) / (low + 0.05)
+    }
+
+    #[test]
+    fn fluent_text_meets_body_contrast() {
+        for palette in [
+            tokens::FluentPalette::light(),
+            tokens::FluentPalette::dark(),
+        ] {
+            assert!(contrast_ratio(palette.text, palette.card) >= 4.5);
+            assert!(contrast_ratio(palette.text_secondary, palette.card) >= 4.5);
+        }
+    }
 
     #[test]
     fn dark_and_light_visuals_differ() {
