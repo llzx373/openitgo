@@ -264,6 +264,13 @@ pub struct Settings {
     /// 排队 FIFO 放行。
     #[serde(default = "default_fm_op_threads")]
     pub fm_op_threads: u32,
+    /// 列表密度："compact"（紧凑）| "comfortable"（舒适）。
+    #[serde(default = "default_fm_density")]
+    pub fm_density: String,
+}
+
+fn default_fm_density() -> String {
+    "compact".to_string()
 }
 
 fn default_fm_rubber_band() -> String {
@@ -398,6 +405,7 @@ impl Default for Settings {
             fm_button_bar: Vec::new(),
             fm_watch_recursive: false,
             fm_op_threads: default_fm_op_threads(),
+            fm_density: default_fm_density(),
         }
     }
 }
@@ -517,6 +525,12 @@ impl Settings {
                 self.fm_layout
             ));
         }
+        if !matches!(self.fm_density.as_str(), "compact" | "comfortable") {
+            return Err(format!(
+                "fm_density must be compact/comfortable, got {}",
+                self.fm_density
+            ));
+        }
         if !matches!(
             self.fm_sort_key.as_str(),
             "name" | "size" | "mtime" | "ext" | "unsorted" | "attr"
@@ -583,6 +597,9 @@ impl Settings {
         self.fm_dual_ratio = self.fm_dual_ratio.clamp(0.2, 0.8);
         if self.fm_layout != "single" {
             self.fm_layout = default_fm_layout();
+        }
+        if self.fm_density != "comfortable" {
+            self.fm_density = default_fm_density();
         }
         if !matches!(
             self.fm_sort_key.as_str(),
@@ -1481,6 +1498,21 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let loaded: Settings = serde_json::from_str(&json).unwrap();
         assert!(loaded.fm_watch_recursive);
+    }
+
+    #[test]
+    fn test_fm_density_default_validate_clamp() {
+        let loaded: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(loaded.fm_density, "compact");
+        let mut settings = Settings {
+            fm_density: "comfortable".to_owned(),
+            ..Default::default()
+        };
+        assert!(settings.validate().is_ok());
+        settings.fm_density = "invalid".to_owned();
+        assert!(settings.validate().is_err());
+        settings.clamp();
+        assert_eq!(settings.fm_density, "compact");
     }
 
     #[test]

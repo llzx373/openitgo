@@ -5,8 +5,8 @@
 //! 双栏模式 F3 对焦点文件弹临时预览窗，复用同一预览管线。
 //!
 //! 行渲染严格遵循 AGENTS.md 的列布局约定（与 archive.rs 明细列表同范式）：
-//! 固定行高 + show_rows 虚拟化、item_spacing.y 归零、行内容 scope 内
-//! interact_size.y 压回 ROW_HEIGHT-4、scope 后 advance_cursor_after_rect
+//! 当前密度行高 + show_rows 虚拟化、item_spacing.y 归零、行内容 scope 内
+//! interact_size.y 压回当前行高-4、scope 后 advance_cursor_after_rect
 //! 钉回行底、右侧固定列（FsPanel::columns 驱动）painter.text 右对齐直绘
 //! （禁止 RTL 嵌套）。
 
@@ -173,6 +173,29 @@ impl RubberBandMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FmDensity {
+    Compact,
+    Comfortable,
+}
+
+impl FmDensity {
+    pub fn from_setting(value: &str) -> Self {
+        if value == "comfortable" {
+            Self::Comfortable
+        } else {
+            Self::Compact
+        }
+    }
+
+    fn row_height(self) -> f32 {
+        match self {
+            Self::Compact => ROW_HEIGHT,
+            Self::Comfortable => 30.0,
+        }
+    }
+}
+
 /// 行为设置包（阶段 O，settings.fm_* 可选行为）：默认值 = 一期现状行为。
 /// app 侧每帧从 settings 构造下发（同 fm_show_hidden 模式——行为设置不进
 /// FmStateSnapshot，不参与快照 diff）。
@@ -213,6 +236,7 @@ pub struct FmBehaviorOptions {
     /// 递归 FS watch（fm_watch_recursive，阶段 Z）：true 时分支视图下
     /// 子目录变化也触发刷新（大目录有性能取舍）。
     pub watch_recursive: bool,
+    pub density: FmDensity,
 }
 
 impl Default for FmBehaviorOptions {
@@ -234,6 +258,7 @@ impl Default for FmBehaviorOptions {
             command_bar: true,
             watch_recursive: false,
             op_threads: 2,
+            density: FmDensity::Compact,
         }
     }
 }
@@ -1176,13 +1201,26 @@ impl FileManagerView {
         }
     }
 
+    fn row_height(&self) -> f32 {
+        self.options.density.row_height()
+    }
+
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
         callbacks: FmCallbacks<'_>,
         options: FmBehaviorOptions,
     ) {
+        let density_changed = self.options.density != options.density;
         self.options = options;
+        if density_changed {
+            for panel in &mut self.panels {
+                if panel.focus.is_some() {
+                    panel.focus_scroll_pending = true;
+                    panel.last_scroll_offset = f32::MAX;
+                }
+            }
+        }
         // show_hidden/dirs_first 权威在 settings（同 confirm_delete），每帧下发；
         // 休眠期间设置页改动在下次进入时经此同步，rows_cache 按
         // RowsKey 自动失效，无需重新 read_dir。
@@ -3532,7 +3570,7 @@ impl FileManagerView {
     /// 每条分隔竖线各带 6pt 拖拽热区（后注册于列点击格，拖拽优先）。
     fn render_column_header(&mut self, ui: &mut egui::Ui, idx: usize) {
         let (header_rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), ROW_HEIGHT),
+            egui::vec2(ui.available_width(), self.row_height()),
             egui::Sense::hover(),
         );
         let painter = ui.painter().clone();
@@ -3720,11 +3758,10 @@ impl FileManagerView {
     fn render_list(&mut self, ui: &mut egui::Ui, idx: usize, intents: &mut FmIntents) {
         let rows = self.panels[idx].rows();
         let row_count = rows.len() + 1;
-        // 行间不留缝（Explorer/WinRAR 式紧密列表）：item_spacing.y 归零后
-        // 行距 = ROW_HEIGHT。注意 show_rows 在调用时捕获本 ui 的 item_spacing
-        // 计算 pitch，行内 advance_cursor_after_rect 也读同一值，三处天然一致。
+        // 行间不留缝；show_rows 与行内 advance_cursor_after_rect 共用当前
+        // 密度行高和 item_spacing，保证虚拟化 pitch 一致。
         ui.spacing_mut().item_spacing.y = 0.0;
-        let row_pitch = ROW_HEIGHT + ui.spacing().item_spacing.y;
+        let row_pitch = self.row_height() + ui.spacing().item_spacing.y;
         let panel = &mut self.panels[idx];
         panel.last_row_pitch = row_pitch;
         let mut area = egui::ScrollArea::vertical()
@@ -3746,6 +3783,7 @@ impl FileManagerView {
                             panel.last_scroll_offset,
                             panel.last_viewport_height,
                             focus as f32 * row_pitch,
+                            row_pitch,
                         );
                         if (new_offset - panel.last_scroll_offset).abs() > 0.01 {
                             area = area.vertical_scroll_offset(new_offset);
@@ -3755,7 +3793,7 @@ impl FileManagerView {
             }
         }
         let active = self.active == idx;
-        let output = area.show_rows(ui, ROW_HEIGHT, row_count, |ui, range| {
+        let output = area.show_rows(ui, self.row_height(), row_count, |ui, range| {
             for row in range {
                 // 行内交互（双击目录/「..」、右键「打开」）可触发 navigate_to /
                 // refresh：entries 当场清空、rows 快照即刻失效，继续按旧行索引
@@ -3797,6 +3835,7 @@ impl FileManagerView {
         active: bool,
         intents: &mut FmIntents,
     ) {
+        let row_height = self.row_height();
         let panel = &mut self.panels[idx];
         let is_parent = row == 0;
         let branch = panel.branch_view;
@@ -3820,7 +3859,7 @@ impl FileManagerView {
         // 分支模式下「..」行 = 退出分支视图（根目录也可用）。
         let parent_enabled = branch || !at_root;
         let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), ROW_HEIGHT),
+            egui::vec2(ui.available_width(), row_height),
             egui::Sense::click_and_drag(),
         );
         // 斑马纹（全局行号，滚动时条纹不闪动）先铺底，再叠加选中/悬停高亮。
@@ -3861,11 +3900,9 @@ impl FileManagerView {
         let name_rect =
             egui::Rect::from_min_max(content.min, egui::pos2(name_right, content.max.y));
         ui.scope_builder(egui::UiBuilder::new().max_rect(name_rect), |ui| {
-            // ui.horizontal 的初始行高取 interact_size.y（全局 28pt，为工具栏
-            // 按钮而设），不压回会撑爆 18pt 的内容区：文字随之下沉约 5pt 贴到
-            // 条纹下缘，且 scope 结束时列表竖向光标被多推 8pt，实际行距与
-            // show_rows 假定的 22pt 逐行漂移。
-            ui.spacing_mut().interact_size.y = ROW_HEIGHT - 4.0;
+            // ui.horizontal 的初始行高取全局控件高度，必须压回当前密度
+            // 内容区，否则文字下沉且 scope 结束后的行距与虚拟化 pitch 漂移。
+            ui.spacing_mut().interact_size.y = row_height - 4.0;
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 match &entry {
@@ -3912,7 +3949,7 @@ impl FileManagerView {
                                 .selectable(false),
                             );
                         }
-                        // 语义着色（目录 accent / 链接斜体弱档 / 隐藏弱色 /
+                        // 语义着色（链接斜体弱档 / 隐藏弱色；目录使用正文色，
                         // 选中行回退强对比色，见 entry_name_rich_text）。
                         let name = entry_name_rich_text(&e.name, e, ui.visuals(), selected);
                         ui.add(egui::Label::new(name).truncate().selectable(false));
@@ -4427,6 +4464,7 @@ impl FileManagerView {
                             panel.last_scroll_offset,
                             panel.last_viewport_height,
                             grid_row_of(focus, cols) as f32 * THUMB_CELL_H,
+                            THUMB_CELL_H,
                         );
                         if (new_offset - panel.last_scroll_offset).abs() > 0.01 {
                             area = area.vertical_scroll_offset(new_offset);
@@ -4521,11 +4559,12 @@ impl FileManagerView {
         let cell_w = brief_col_width(max_units);
         let cols = brief_cols(ui.available_width(), cell_w);
         let grid_rows = grid_row_count(item_count, cols);
+        let row_height = self.row_height();
         ui.spacing_mut().item_spacing.y = 0.0;
         let panel = &mut self.panels[idx];
         panel.last_grid_cols = cols;
-        // PgUp/PgDn 步进与焦点滚动定位基准：简表行高。
-        panel.last_row_pitch = ROW_HEIGHT;
+        // PgUp/PgDn 步进与焦点滚动定位基准：简表当前密度行高。
+        panel.last_row_pitch = row_height;
         let mut area = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
@@ -4544,7 +4583,8 @@ impl FileManagerView {
                         let new_offset = min_scroll_to_reveal(
                             panel.last_scroll_offset,
                             panel.last_viewport_height,
-                            grid_row_of(focus, cols) as f32 * ROW_HEIGHT,
+                            grid_row_of(focus, cols) as f32 * row_height,
+                            row_height,
                         );
                         if (new_offset - panel.last_scroll_offset).abs() > 0.01 {
                             area = area.vertical_scroll_offset(new_offset);
@@ -4554,7 +4594,7 @@ impl FileManagerView {
             }
         }
         let active = self.active == idx;
-        let output = area.show_rows(ui, ROW_HEIGHT, grid_rows, |ui, range| {
+        let output = area.show_rows(ui, row_height, grid_rows, |ui, range| {
             for grid_row in range {
                 // 同 render_list：行内交互可触发导航当场清空 entries，旧
                 // rows 快照即刻失效，状态离开 Ready 就停笔。
@@ -4581,7 +4621,7 @@ impl FileManagerView {
         let full_rows = item_count / cols;
         let partial = item_count % cols;
         let geom = GridBlankGeom {
-            row_pitch: ROW_HEIGHT,
+            row_pitch: row_height,
             full_rows,
             full_width: cols as f32 * cell_w,
             last_width: if partial == 0 {
@@ -4590,15 +4630,15 @@ impl FileManagerView {
                 partial as f32 * cell_w
             },
         };
-        self.blank_dblclick_up(ui, idx, &output, grid_rows as f32 * ROW_HEIGHT, Some(geom));
+        self.blank_dblclick_up(ui, idx, &output, grid_rows as f32 * row_height, Some(geom));
         self.rubber_band(
             ui,
             idx,
             output.inner_rect,
             output.state.offset.y,
-            grid_rows as f32 * ROW_HEIGHT,
+            grid_rows as f32 * row_height,
             Some((geom, cols, cell_w)),
-            ROW_HEIGHT,
+            row_height,
             item_count,
         );
     }
@@ -4631,7 +4671,7 @@ impl FileManagerView {
             .is_some_and(|e| self.panels[idx].selected.contains(&e.path));
         let focused = self.panels[idx].focus == Some(row);
         let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(cell_w, ROW_HEIGHT),
+            egui::vec2(cell_w, self.row_height()),
             egui::Sense::click_and_drag(),
         );
         let painter = ui.painter().clone();
@@ -7099,7 +7139,12 @@ fn breadcrumb_segments(path: &Path) -> Vec<(PathBuf, String)> {
 }
 
 fn fm_icon_button(ui: &mut egui::Ui, icon: Icon, label: &str, enabled: bool) -> egui::Response {
-    let response = ui.add_enabled(enabled, egui::Button::new(icon).frame(false));
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::new(icon)
+            .frame(false)
+            .min_size(egui::vec2(28.0, 28.0)),
+    );
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled() && enabled, label)
     });
@@ -7108,12 +7153,9 @@ fn fm_icon_button(ui: &mut egui::Ui, icon: Icon, label: &str, enabled: bool) -> 
 
 /// 明细列表行的类型图标（按扩展名，大小写不敏感）；目录行恒用 FOLDER。
 /// 名称语义着色（明细行与网格共用；固定规则，不做用户配色）：
-/// 目录 = accent 色（hyperlink_color，主题派生深浅均可读；egui/epaint 无
-/// 字重支持——strong() 仅为更强颜色、未注册 bold 字族，故以 accent 色
-/// 承担目录强调）；符号链接 = 斜体 + 弱一档；隐藏条目 = 弱档 0.6（同
-/// dir_sizes 先例）；普通文件 = 默认文字色。选中行颜色统一回退
-/// text_color()（选中底色上保持对比度——现状选中行即此色；斜体字形
-/// 保留）。颜色全部经 visuals 派生，不硬编码色值。
+/// 目录和普通文件 = 正文色，类型由图标表达；符号链接 = 斜体 + 弱一档；
+/// 隐藏条目 = 弱档 0.6。选中行颜色统一回退 text_color()，斜体字形保留。
+/// 颜色全部经 visuals 派生，不硬编码色值。
 fn entry_name_rich_text(
     name: &str,
     e: &FsEntry,
@@ -7124,9 +7166,7 @@ fn entry_name_rich_text(
     if e.is_symlink {
         text = text.italics();
     }
-    let base = if e.is_dir {
-        visuals.hyperlink_color
-    } else if e.is_symlink {
+    let base = if e.is_symlink {
         visuals.weak_text_color()
     } else {
         visuals.text_color()
@@ -7180,8 +7220,8 @@ fn paint_column_separators(
 
 /// 键盘焦点的最小滚动（Explorer 语义）：焦点行已在视口内则偏移不变；
 /// 上方越界贴顶（offset = 行顶），下方越界贴底（offset = 行底 - 视口高）。
-fn min_scroll_to_reveal(offset: f32, viewport_h: f32, row_top: f32) -> f32 {
-    let row_bottom = row_top + ROW_HEIGHT;
+fn min_scroll_to_reveal(offset: f32, viewport_h: f32, row_top: f32, row_height: f32) -> f32 {
+    let row_bottom = row_top + row_height;
     if row_top < offset {
         row_top
     } else if row_bottom > offset + viewport_h {
@@ -7383,13 +7423,20 @@ mod tests {
     }
 
     #[test]
+    fn fm_density_uses_compact_default_and_comfortable_row_height() {
+        assert_eq!(FmDensity::from_setting("invalid"), FmDensity::Compact);
+        assert_eq!(FmDensity::Compact.row_height(), ROW_HEIGHT);
+        assert_eq!(FmDensity::Comfortable.row_height(), 30.0);
+    }
+
+    #[test]
     fn min_scroll_only_when_out_of_view() {
         // 已在视口内：不动
-        assert_eq!(min_scroll_to_reveal(100.0, 200.0, 150.0), 100.0);
+        assert_eq!(min_scroll_to_reveal(100.0, 200.0, 150.0, ROW_HEIGHT), 100.0);
         // 上方越界：贴顶
-        assert_eq!(min_scroll_to_reveal(100.0, 200.0, 50.0), 50.0);
+        assert_eq!(min_scroll_to_reveal(100.0, 200.0, 50.0, ROW_HEIGHT), 50.0);
         // 下方越界：贴底
-        assert_eq!(min_scroll_to_reveal(100.0, 200.0, 280.0), 102.0);
+        assert_eq!(min_scroll_to_reveal(100.0, 200.0, 280.0, ROW_HEIGHT), 102.0);
     }
 
     #[test]
@@ -7780,7 +7827,7 @@ mod tests {
         // 自上而下单击扫描，定位 UI 行 1（第一个目录 d1）的 y。
         // y 从 95 起跳过顶栏/面包屑/列头（面包屑单击会导航、污染扫描）。
         let mut row1_pos = None;
-        let mut y = 95.0;
+        let mut y = 130.0;
         while y < 500.0 {
             t += 1.0; // 间隔超过 max_double_click_delay，避免连击计数干扰
             let pos = egui::pos2(200.0, y);
@@ -7845,21 +7892,21 @@ mod tests {
                 None
             })
         };
-        // 自底向上悬停扫描，命中「常用 ▸」即展开飞出菜单（路径文字出现）。
-        // x=160 位于菜单行内（菜单左缘 ≈120）。
-        let mut x = None;
-        for y in (60..=260).rev().step_by(4) {
-            t += 1.0;
-            let pos = egui::pos2(160.0, y as f32);
-            headless_frame(&ctx, &mut view, t, vec![egui::Event::PointerMoved(pos)]);
-            t += 0.1;
-            let out = headless_frame_out(&ctx, &mut view, t, vec![]);
-            x = flyout_text_x(&out);
-            if x.is_some() {
-                break;
+        let menu = headless_frame_out(&ctx, &mut view, t, vec![]);
+        let group_pos = menu.shapes.iter().find_map(|cs| {
+            if let egui::Shape::Text(ts) = &cs.shape {
+                if ts.galley.text().contains("常用") {
+                    return Some(cs.shape.visual_bounding_rect().center());
+                }
             }
-        }
-        let x = x.expect("悬停未能展开书签飞出菜单（未绘制路径文字）");
+            None
+        });
+        let pos = group_pos.expect("书签菜单中应绘制「常用」分组");
+        t += 1.0;
+        headless_frame(&ctx, &mut view, t, vec![egui::Event::PointerMoved(pos)]);
+        t += 0.1;
+        let out = headless_frame_out(&ctx, &mut view, t, vec![]);
+        let x = flyout_text_x(&out).expect("悬停未能展开书签飞出菜单（未绘制路径文字）");
         // 飞出菜单从父菜单右缘（x≈400 起）展开，路径文字应紧贴其左缘；
         // RTL 布局 bug 下文字被画到 x≈654（屏幕越宽漂得越远，真机 1920
         // 下直接出窗不可见 = 用户看到的「全白」）。
@@ -8105,7 +8152,7 @@ mod tests {
         t: &mut f64,
         file_name: &str,
     ) -> egui::Pos2 {
-        let mut y = 95.0;
+        let mut y = 130.0;
         while y < 500.0 {
             *t += 1.0;
             let pos = egui::pos2(200.0, y);

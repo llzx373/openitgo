@@ -194,7 +194,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 **fm_* settings 一览**：布局/显示——`fm_layout`/`fm_dual_ratio`/`fm_preview_open`/
 `fm_view_mode`("list"|"brief"|"thumbs")/`fm_columns`（自定义列，阶段 V 的权威；
-`fm_col_size_width`/`fm_col_mtime_width`/`fm_col_shift` 为兼容回写）/`fm_system_icons`（S）。
+`fm_col_size_width`/`fm_col_mtime_width`/`fm_col_shift` 为兼容回写）/`fm_system_icons`（S）/
+`fm_density`（"compact"=22pt，"comfortable"=30pt；经 `FmBehaviorOptions` 下发，切换时
+保留选择并重新揭示焦点项）。
 排序/目录——`fm_sort_key`/`fm_sort_asc`/`fm_dirs_first`/`fm_dir_left`/`fm_dir_right`。
 标签/书签——`fm_tabs_left`/`fm_tabs_right`/`fm_active_tab_left`/`fm_active_tab_right`/
 `fm_tab_groups`（AI）/`fm_bookmark_groups`（`FmBookmarkGroup{name, items}` 两栏共享；旧扁平

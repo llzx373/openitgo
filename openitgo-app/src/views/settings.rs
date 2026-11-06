@@ -42,6 +42,7 @@ impl SettingsTab {
 pub struct SettingsView {
     pub tab: SettingsTab,
     shortcut_add_buffer: HashMap<&'static str, String>,
+    shortcut_errors: HashMap<&'static str, String>,
     /// 密码本列表中切换为明文显示的行索引。
     password_show: HashSet<usize>,
     /// 密码本「添加」输入框：密码。
@@ -486,6 +487,19 @@ impl SettingsView {
             ui,
             "同时进行的复制/移动/删除/压缩任务数（0 = 不限）；超出的任务排队等待",
         );
+        ui.horizontal(|ui| {
+            ui.label("列表密度");
+            egui::ComboBox::from_id_salt("fm_density")
+                .selected_text(if settings.fm_density == "comfortable" {
+                    "舒适"
+                } else {
+                    "紧凑"
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut settings.fm_density, "compact".to_owned(), "紧凑");
+                    ui.selectable_value(&mut settings.fm_density, "comfortable".to_owned(), "舒适");
+                });
+        });
         ui.horizontal(|ui| {
             ui.label("默认布局");
             egui::ComboBox::from_id_salt("fm_layout")
@@ -1002,24 +1016,80 @@ impl SettingsView {
             ("缩小", |s| &mut s.zoom_out),
             ("返回书架", |s| &mut s.back_to_library),
         ];
-        for &(label, getter) in actions {
-            let bindings = getter(shortcuts);
-            ui.horizontal(|ui| {
-                ui.label(label);
-                for i in (0..bindings.len()).rev() {
-                    let key = &bindings[i];
-                    if ui.button(format!("{} ✕", key)).clicked() {
-                        bindings.remove(i);
+        let mut owners: HashMap<String, Vec<&str>> = HashMap::new();
+        for &(owner, getter) in actions {
+            for key in getter(shortcuts).iter() {
+                owners.entry(key.clone()).or_default().push(owner);
+            }
+        }
+        egui::Grid::new("shortcut_editor_grid")
+            .num_columns(4)
+            .spacing(egui::vec2(12.0, 8.0))
+            .show(ui, |ui| {
+                for &(label, getter) in actions {
+                    let bindings = getter(shortcuts);
+                    ui.label(label);
+                    ui.horizontal_wrapped(|ui| {
+                        for i in (0..bindings.len()).rev() {
+                            let key = &bindings[i];
+                            let response = ui.button((icons::X, format!(" {key}")));
+                            response.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    true,
+                                    format!("删除快捷键 {key}"),
+                                )
+                            });
+                            if response.clicked() {
+                                bindings.remove(i);
+                            }
+                        }
+                    });
+                    let buffer = self.shortcut_add_buffer.entry(label).or_default();
+                    let input = ui.add(
+                        egui::TextEdit::singleline(buffer)
+                            .hint_text("添加按键")
+                            .desired_width(220.0),
+                    );
+                    if input.changed() {
+                        self.shortcut_errors.remove(label);
+                    }
+                    let add = ui.add(egui::Button::new(icons::PLUS));
+                    add.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "添加快捷键")
+                    });
+                    if add.clicked() && !buffer.trim().is_empty() {
+                        let candidate = buffer.trim();
+                        let error = if crate::shortcuts::key_from_name(candidate).is_none() {
+                            Some("无法识别该按键名称".to_owned())
+                        } else if bindings.iter().any(|key| key == candidate) {
+                            Some("此操作已经绑定该按键".to_owned())
+                        } else if owners
+                            .get(candidate)
+                            .is_some_and(|labels| labels.iter().any(|owner| *owner != label))
+                        {
+                            Some("该按键已用于其他操作".to_owned())
+                        } else {
+                            None
+                        };
+                        if let Some(error) = error {
+                            self.shortcut_errors.insert(label, error);
+                        } else {
+                            bindings.push(candidate.to_owned());
+                            buffer.clear();
+                            self.shortcut_errors.remove(label);
+                        }
+                    }
+                    ui.end_row();
+                    if let Some(error) = self.shortcut_errors.get(label) {
+                        ui.label("");
+                        ui.label("");
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                        ui.label("");
+                        ui.end_row();
                     }
                 }
-                let buffer = self.shortcut_add_buffer.entry(label).or_default();
-                ui.add(egui::TextEdit::singleline(buffer).hint_text("添加按键"));
-                if ui.button("+").clicked() && !buffer.trim().is_empty() {
-                    bindings.push(buffer.trim().to_string());
-                    buffer.clear();
-                }
             });
-        }
     }
 }
 

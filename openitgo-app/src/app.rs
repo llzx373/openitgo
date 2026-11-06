@@ -845,6 +845,7 @@ fn fm_behavior_options(settings: &Settings) -> FmBehaviorOptions {
         command_bar: settings.fm_command_bar,
         watch_recursive: settings.fm_watch_recursive,
         op_threads: settings.fm_op_threads as usize,
+        density: crate::views::file_manager::FmDensity::from_setting(&settings.fm_density),
     }
 }
 
@@ -3271,6 +3272,11 @@ impl ReaderApp {
                             env!("CARGO_PKG_VERSION")
                         ));
                         ui.close();
+                    }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button((icons::GEAR, " 设置")).clicked() {
+                        self.current_view = View::Settings;
                     }
                 });
             });

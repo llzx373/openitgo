@@ -90,7 +90,7 @@ fn content(
 }
 
 fn appearance(view: &mut SettingsView, ui: &mut Ui, settings: &mut Settings) {
-    group(ui, "外观", |ui| {
+    group(ui, "主题", |ui| {
         row(
             ui,
             "主题",
@@ -570,6 +570,28 @@ fn file_manager(view: &mut SettingsView, ui: &mut Ui, settings: &mut Settings) {
             Some("0 = 不限；超出的任务排队等待"),
             |ui| {
                 ui.add(egui::DragValue::new(&mut settings.fm_op_threads).range(0..=8));
+            },
+        );
+        separator(ui);
+        row(
+            ui,
+            "列表密度",
+            Some("舒适模式增加行高；切换后保留当前焦点和选择"),
+            |ui| {
+                egui::ComboBox::from_id_salt("fm_density")
+                    .selected_text(if settings.fm_density == "comfortable" {
+                        "舒适"
+                    } else {
+                        "紧凑"
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut settings.fm_density, "compact".to_owned(), "紧凑");
+                        ui.selectable_value(
+                            &mut settings.fm_density,
+                            "comfortable".to_owned(),
+                            "舒适",
+                        );
+                    });
             },
         );
         separator(ui);
