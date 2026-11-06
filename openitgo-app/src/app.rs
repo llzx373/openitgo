@@ -733,6 +733,21 @@ enum BarEdge {
     Bottom,
 }
 
+#[derive(Clone, Copy)]
+struct ReaderToolbarLayout {
+    show_modes: bool,
+    show_view_commands: bool,
+    show_secondary_commands: bool,
+}
+
+fn reader_toolbar_layout(width: f32) -> ReaderToolbarLayout {
+    ReaderToolbarLayout {
+        show_modes: width >= 1000.0,
+        show_view_commands: width >= 1200.0,
+        show_secondary_commands: width >= 900.0,
+    }
+}
+
 fn add_toolbar_button(ui: &mut egui::Ui, button: egui::Button<'_>) -> egui::Response {
     if !crate::theme::is_fluent(ui.visuals()) {
         return ui.add(button.frame(true));
@@ -1295,7 +1310,7 @@ impl ReaderApp {
             mouse_pos.map(|p| egui::pos2(p.x, p.y - ui.available_rect_before_wrap().min.y)),
             screen_size,
             BarEdge::Top,
-        );
+        ) || (menu_overlay_open(&ctx) && self.settings.show_toolbar);
         let show_statusbar = Self::should_show_bar(
             self.settings.show_statusbar,
             fullscreen,
@@ -1423,7 +1438,7 @@ impl ReaderApp {
             mouse_pos.map(|p| egui::pos2(p.x, p.y - ui.available_rect_before_wrap().min.y)),
             screen_size,
             BarEdge::Top,
-        );
+        ) || (menu_overlay_open(&ctx) && self.settings.show_toolbar);
         let show_statusbar = Self::should_show_bar(
             self.settings.show_statusbar,
             fullscreen,
@@ -1639,7 +1654,7 @@ impl ReaderApp {
         egui::Panel::top("media_toolbar")
             .frame(chrome)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     crate::theme::begin_chrome_row(ui);
                     if toolbar_button(ui, icons::HOUSE, "书架", display_mode).clicked() {
                         self.current_view = View::Library;
@@ -2072,6 +2087,107 @@ impl ReaderApp {
             });
     }
 
+    fn reader_mode_commands(
+        &mut self,
+        ui: &mut egui::Ui,
+        mode: ReadingMode,
+        display_mode: ToolbarDisplayMode,
+    ) {
+        let modes = [
+            (ReadingMode::Ltr, icons::ARROW_RIGHT, "国漫"),
+            (ReadingMode::Rtl, icons::ARROW_LEFT, "日漫"),
+            (ReadingMode::Webtoon, icons::ARROW_DOWN, "韩漫"),
+        ];
+        for (target, icon, label) in modes {
+            if toolbar_selectable(ui, icon, label, mode == target, display_mode).clicked() {
+                self.apply_reading_mode(target);
+                ui.close();
+            }
+        }
+    }
+
+    fn reader_view_commands(
+        &mut self,
+        ui: &mut egui::Ui,
+        total_pages: usize,
+        mode: ReadingMode,
+        zoom: f32,
+        display_mode: ToolbarDisplayMode,
+    ) {
+        if mode != ReadingMode::Webtoon {
+            let double_page = self
+                .reader_view
+                .open
+                .as_ref()
+                .map(|r| r.state.double_page)
+                .unwrap_or(self.settings.double_page);
+            if toolbar_selectable(ui, icons::BOOK_OPEN, "双页", double_page, display_mode)
+                .on_hover_text("切换到双页模式")
+                .clicked()
+            {
+                let new_double = !double_page;
+                self.settings.double_page = new_double;
+                if let Some(reader) = self.reader_view.open.as_mut() {
+                    reader.state.set_double_page(new_double, total_pages);
+                    reader.pending_fit = Some(FitMode::Page);
+                }
+                ui.close();
+            }
+        }
+        if toolbar_button(ui, icons::MINUS, "缩小", display_mode).clicked() {
+            if let Some(reader) = self.reader_view.open.as_mut() {
+                reader.zoom_out();
+            }
+        }
+        ui.label(format!("{:.0}%", zoom * 100.0));
+        if toolbar_button(ui, icons::PLUS, "放大", display_mode).clicked() {
+            if let Some(reader) = self.reader_view.open.as_mut() {
+                reader.zoom_in();
+            }
+        }
+        for (icon, label, fit) in [
+            (
+                icons::ARROWS_OUT_LINE_HORIZONTAL,
+                "适应宽度",
+                FitMode::Width,
+            ),
+            (icons::ARROWS_OUT_LINE_VERTICAL, "适应高度", FitMode::Height),
+            (icons::FRAME_CORNERS, "自动适应", FitMode::Page),
+        ] {
+            if toolbar_button(ui, icon, label, display_mode).clicked() {
+                if let Some(reader) = self.reader_view.open.as_mut() {
+                    reader.request_fit(fit);
+                }
+                ui.close();
+            }
+        }
+        if toolbar_button(ui, icons::ARROW_CLOCKWISE, "旋转", display_mode)
+            .on_hover_text("顺时针旋转 90°")
+            .clicked()
+        {
+            if let Some(reader) = self.reader_view.open.as_mut() {
+                reader.rotate_cw();
+            }
+            ui.close();
+        }
+    }
+
+    fn reader_secondary_commands(
+        &mut self,
+        ui: &mut egui::Ui,
+        current_page: usize,
+        display_mode: ToolbarDisplayMode,
+    ) {
+        if toolbar_button(ui, icons::BOOKMARK, "添加书签", display_mode).clicked() {
+            self.add_bookmark(current_page);
+            ui.close();
+        }
+        if toolbar_button(ui, icons::GEAR, "设置", display_mode).clicked() {
+            self.current_view = View::Settings;
+            ui.close();
+        }
+    }
+
     fn render_reader_toolbar(
         &mut self,
         ui: &mut egui::Ui,
@@ -2082,6 +2198,7 @@ impl ReaderApp {
     ) {
         let ctx = ui.ctx().clone();
         let display_mode = self.settings.toolbar_display_mode;
+        let layout = reader_toolbar_layout(ui.available_width());
         let chrome = crate::theme::chrome_bar_frame(ui.visuals(), self.settings.chrome_opacity);
         egui::Panel::top("reader_toolbar")
             .frame(chrome)
@@ -2106,95 +2223,14 @@ impl ReaderApp {
                     }
                     ui.separator();
 
-                    let modes = [
-                        (ReadingMode::Ltr, icons::ARROW_RIGHT, "国漫"),
-                        (ReadingMode::Rtl, icons::ARROW_LEFT, "日漫"),
-                        (ReadingMode::Webtoon, icons::ARROW_DOWN, "韩漫"),
-                    ];
-                    for (m, icon, label) in modes {
-                        if toolbar_selectable(ui, icon, label, mode == m, display_mode).clicked() {
-                            self.apply_reading_mode(m);
-                        }
-                    }
-                    ui.separator();
-
-                    if mode != ReadingMode::Webtoon {
-                        let double_page = self
-                            .reader_view
-                            .open
-                            .as_ref()
-                            .map(|r| r.state.double_page)
-                            .unwrap_or(self.settings.double_page);
-                        if toolbar_selectable(
-                            ui,
-                            icons::BOOK_OPEN,
-                            "双页",
-                            double_page,
-                            display_mode,
-                        )
-                        .on_hover_text("切换到双页模式")
-                        .clicked()
-                        {
-                            let new_double = !double_page;
-                            self.settings.double_page = new_double;
-                            if let Some(reader) = self.reader_view.open.as_mut() {
-                                reader.state.set_double_page(new_double, total_pages);
-                                reader.pending_fit = Some(FitMode::Page);
-                            }
-                        }
+                    if layout.show_modes {
+                        self.reader_mode_commands(ui, mode, display_mode);
                         ui.separator();
                     }
-
-                    if toolbar_button(ui, icons::MINUS, "", display_mode).clicked() {
-                        if let Some(reader) = self.reader_view.open.as_mut() {
-                            reader.zoom_out();
-                        }
+                    if layout.show_view_commands {
+                        self.reader_view_commands(ui, total_pages, mode, zoom, display_mode);
+                        ui.separator();
                     }
-                    ui.label(format!("{:.0}%", zoom * 100.0));
-                    if toolbar_button(ui, icons::PLUS, "", display_mode).clicked() {
-                        if let Some(reader) = self.reader_view.open.as_mut() {
-                            reader.zoom_in();
-                        }
-                    }
-                    if toolbar_button(
-                        ui,
-                        icons::ARROWS_OUT_LINE_HORIZONTAL,
-                        "适应宽度",
-                        display_mode,
-                    )
-                    .clicked()
-                    {
-                        if let Some(reader) = self.reader_view.open.as_mut() {
-                            reader.request_fit(FitMode::Width);
-                        }
-                    }
-                    if toolbar_button(
-                        ui,
-                        icons::ARROWS_OUT_LINE_VERTICAL,
-                        "适应高度",
-                        display_mode,
-                    )
-                    .clicked()
-                    {
-                        if let Some(reader) = self.reader_view.open.as_mut() {
-                            reader.request_fit(FitMode::Height);
-                        }
-                    }
-                    if toolbar_button(ui, icons::FRAME_CORNERS, "自动适应", display_mode).clicked()
-                    {
-                        if let Some(reader) = self.reader_view.open.as_mut() {
-                            reader.request_fit(FitMode::Page);
-                        }
-                    }
-                    if toolbar_button(ui, icons::ARROW_CLOCKWISE, "旋转", display_mode)
-                        .on_hover_text("顺时针旋转 90°")
-                        .clicked()
-                    {
-                        if let Some(reader) = self.reader_view.open.as_mut() {
-                            reader.rotate_cw();
-                        }
-                    }
-                    ui.separator();
 
                     if toolbar_button(ui, icons::CARET_LEFT, "上一页", display_mode).clicked() {
                         self.reader_prev_page();
@@ -2223,8 +2259,43 @@ impl ReaderApp {
                     }
                     ui.separator();
 
-                    if toolbar_button(ui, icons::BOOKMARK, "添加书签", display_mode).clicked() {
-                        self.add_bookmark(current_page);
+                    if !layout.show_modes
+                        || !layout.show_view_commands
+                        || !layout.show_secondary_commands
+                    {
+                        let more = toolbar_button(ui, icons::DOTS_THREE, "更多", display_mode);
+                        egui::Popup::menu(&more)
+                            .id(egui::Id::new("reader_toolbar_more"))
+                            .show(|ui| {
+                                if !layout.show_modes {
+                                    self.reader_mode_commands(
+                                        ui,
+                                        mode,
+                                        ToolbarDisplayMode::IconAndText,
+                                    );
+                                }
+                                if !layout.show_view_commands {
+                                    ui.separator();
+                                    self.reader_view_commands(
+                                        ui,
+                                        total_pages,
+                                        mode,
+                                        zoom,
+                                        ToolbarDisplayMode::IconAndText,
+                                    );
+                                }
+                                if !layout.show_secondary_commands {
+                                    ui.separator();
+                                    self.reader_secondary_commands(
+                                        ui,
+                                        current_page,
+                                        ToolbarDisplayMode::IconAndText,
+                                    );
+                                }
+                            });
+                    }
+                    if layout.show_secondary_commands {
+                        self.reader_secondary_commands(ui, current_page, display_mode);
                     }
                     let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                     let (fullscreen_icon, fullscreen_label) = if fullscreen {
@@ -2235,9 +2306,6 @@ impl ReaderApp {
                     if toolbar_button(ui, fullscreen_icon, fullscreen_label, display_mode).clicked()
                     {
                         self.toggle_fullscreen(&ctx);
-                    }
-                    if toolbar_button(ui, icons::GEAR, "设置", display_mode).clicked() {
-                        self.current_view = View::Settings;
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2302,7 +2370,7 @@ impl ReaderApp {
         egui::Panel::top("ebook_toolbar")
             .frame(chrome)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     crate::theme::begin_chrome_row(ui);
                     if toolbar_button(ui, icons::HOUSE, "书架", display_mode).clicked() {
                         self.current_view = View::Library;
@@ -7816,6 +7884,18 @@ mod tests {
             screen,
             BarEdge::Bottom
         ));
+    }
+
+    #[test]
+    fn reader_toolbar_progressively_discloses_commands() {
+        let wide = reader_toolbar_layout(1440.0);
+        assert!(wide.show_modes && wide.show_view_commands && wide.show_secondary_commands);
+        let medium = reader_toolbar_layout(1024.0);
+        assert!(medium.show_modes && medium.show_secondary_commands);
+        assert!(!medium.show_view_commands);
+        let narrow = reader_toolbar_layout(640.0);
+        assert!(!narrow.show_modes && !narrow.show_view_commands);
+        assert!(!narrow.show_secondary_commands);
     }
 
     #[test]

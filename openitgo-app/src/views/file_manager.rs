@@ -1610,7 +1610,7 @@ impl FileManagerView {
     /// （过滤作用于焦点栏）。
     fn render_top_bar(&mut self, ui: &mut egui::Ui, intents: &mut FmIntents) {
         let saved_style = ui.style().clone();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             crate::theme::prepare_subtle_toolbar_buttons(ui);
             if ui
                 .button((icons::HOUSE, " 书架"))
@@ -1758,16 +1758,16 @@ impl FileManagerView {
                     self.sync_dialog.open_with(l, r);
                 }
             }
-            // 按钮栏为空的占位提示（阶段 Y）：非空时按钮条在顶栏下方整行
-            // 渲染（含末尾「+」），顶栏不再重复占位。
-            if self.button_bar.is_empty()
-                && ui
+            ui.menu_button((icons::DOTS_THREE, " 更多"), |ui| {
+                if ui
                     .button((icons::PLUS, " 添加按钮"))
                     .on_hover_text("添加自定义命令按钮（按钮栏）")
                     .clicked()
-            {
-                self.button_dialog = Some(ButtonDialog::new_create());
-            }
+                {
+                    self.button_dialog = Some(ButtonDialog::new_create());
+                    ui.close();
+                }
+            });
             // 过滤框（焦点栏）：默认顶栏右侧；fm_filter_bar_bottom 时改由
             // render_panel 渲染在焦点栏底部。
             if !self.options.filter_bar_bottom {

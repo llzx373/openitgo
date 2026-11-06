@@ -89,7 +89,7 @@ impl LibraryView {
         stats: &HashMap<String, openitgo_storage::models::ReadingStat>,
         callbacks: LibraryCallbacks<'_>,
     ) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.heading(egui::RichText::new("书架").size(22.0).strong());
             ui.add_space(12.0);
             crate::theme::segmented_tabs(
@@ -137,19 +137,26 @@ impl LibraryView {
                 {
                     (callbacks.on_open_file_manager)();
                 }
-                if matches!(self.mode, LibraryMode::Library | LibraryMode::Ebooks)
-                    && library_button(ui, "清理已删除", crate::widgets::fluent::ButtonKind::Subtle)
-                        .on_hover_text("移除书库中文件已经不存在的条目")
-                        .clicked()
-                {
-                    (callbacks.on_remove_missing)();
-                }
-                if matches!(self.mode, LibraryMode::Library)
-                    && library_button(ui, "清空书架", crate::widgets::fluent::ButtonKind::Subtle)
-                        .on_hover_text("移除书架上的全部漫画条目（不删除源文件）")
-                        .clicked()
-                {
-                    self.pending_clear_library = true;
+                if matches!(self.mode, LibraryMode::Library | LibraryMode::Ebooks) {
+                    ui.menu_button("管理", |ui| {
+                        if ui
+                            .button("清理已删除")
+                            .on_hover_text("移除书库中文件已经不存在的条目")
+                            .clicked()
+                        {
+                            (callbacks.on_remove_missing)();
+                            ui.close();
+                        }
+                        if matches!(self.mode, LibraryMode::Library)
+                            && ui
+                                .button("清空书架")
+                                .on_hover_text("移除书架上的全部漫画条目（不删除源文件）")
+                                .clicked()
+                        {
+                            self.pending_clear_library = true;
+                            ui.close();
+                        }
+                    });
                 }
                 if library_button(
                     ui,
