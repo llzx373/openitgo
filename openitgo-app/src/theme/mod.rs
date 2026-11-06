@@ -4,6 +4,9 @@
 //! soft rounding, minimal borders. Light mode uses a cool gallery gray
 //! (not warm cream).
 
+pub mod fluent;
+pub mod tokens;
+
 use egui::{Color32, CornerRadius, Margin, Shadow, Stroke, Style, Theme, Visuals};
 use openitgo_storage::models::EbookTheme;
 
@@ -72,15 +75,23 @@ pub const RADIUS_CONTROL: u8 = 6;
 pub fn install(ctx: &egui::Context, app_theme: &openitgo_storage::models::Theme) {
     use openitgo_storage::models::Theme as AppTheme;
 
+    let use_fluent = matches!(app_theme, AppTheme::Windows)
+        || (cfg!(windows) && matches!(app_theme, AppTheme::System));
+    if use_fluent {
+        ctx.set_visuals_of(Theme::Dark, fluent::visuals(true));
+        ctx.set_visuals_of(Theme::Light, fluent::visuals(false));
+        ctx.style_mut_of(Theme::Dark, fluent::apply_style);
+        ctx.style_mut_of(Theme::Light, fluent::apply_style);
+        return;
+    }
+
     ctx.set_visuals_of(Theme::Dark, dark_visuals());
     ctx.style_mut_of(Theme::Dark, apply_gallery_style);
     let light = match app_theme {
-        AppTheme::Windows => windows_visuals(),
         AppTheme::MacOS => macos_visuals(),
         _ => light_visuals(),
     };
     let apply_style: fn(&mut Style) = match app_theme {
-        AppTheme::Windows => apply_windows_style,
         AppTheme::MacOS => apply_macos_style,
         _ => apply_gallery_style,
     };
@@ -170,13 +181,7 @@ pub fn light_visuals() -> Visuals {
 }
 
 pub fn windows_visuals() -> Visuals {
-    os_visuals(
-        Color32::from_rgb(0x00, 0x67, 0xC0),
-        Color32::from_rgb(0xF3, 0xF3, 0xF3),
-        Color32::from_rgb(0xE5, 0xE5, 0xE5),
-        Color32::from_rgb(0xD1, 0xD1, 0xD1),
-        4,
-    )
+    fluent::visuals(false)
 }
 
 pub fn macos_visuals() -> Visuals {
@@ -335,14 +340,6 @@ fn apply_gallery_style(style: &mut Style) {
     style.spacing.slider_rail_height = 6.0;
     style.visuals.button_frame = true;
     style.visuals.striped = false;
-}
-
-fn apply_windows_style(style: &mut Style) {
-    apply_gallery_style(style);
-    style.spacing.item_spacing = egui::vec2(6.0, 4.0);
-    style.spacing.button_padding = egui::vec2(10.0, 4.0);
-    style.spacing.window_margin = Margin::same(8);
-    style.spacing.slider_rail_height = 4.0;
 }
 
 fn apply_macos_style(style: &mut Style) {
@@ -831,7 +828,14 @@ mod tests {
 
         assert!(!windows.dark_mode);
         assert!(!macos.dark_mode);
-        assert_eq!(windows.hyperlink_color, Color32::from_rgb(0x00, 0x67, 0xC0));
+        assert_eq!(
+            windows.hyperlink_color,
+            tokens::FluentPalette::light().accent
+        );
+        assert_eq!(
+            fluent::visuals(true).hyperlink_color,
+            tokens::FluentPalette::dark().accent
+        );
         assert_eq!(macos.hyperlink_color, Color32::from_rgb(0x00, 0x7A, 0xFF));
         assert_ne!(windows.panel_fill, macos.panel_fill);
         assert_eq!(

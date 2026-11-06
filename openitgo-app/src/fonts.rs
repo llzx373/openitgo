@@ -1,5 +1,11 @@
-use egui::{FontDefinitions, FontFamily};
+use egui::{FontData, FontDefinitions, FontFamily};
 use std::path::PathBuf;
+use std::sync::Arc;
+
+const LATIN_UI_FONT_CANDIDATES: &[&str] = &[
+    "C:/Windows/Fonts/segoeuiv.ttf",
+    "C:/Windows/Fonts/segoeui.ttf",
+];
 
 /// Candidate system fonts that include CJK glyphs, ordered by platform likelihood.
 const CJK_FONT_CANDIDATES: &[&str] = &[
@@ -26,6 +32,22 @@ const CJK_FONT_CANDIDATES: &[&str] = &[
 /// Loads the first available system CJK font and installs the Phosphor icon font.
 pub fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
+
+    if let Some(path) = LATIN_UI_FONT_CANDIDATES
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists())
+    {
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts.font_data.insert(
+                "system-ui".to_owned(),
+                Arc::new(FontData::from_owned(bytes)),
+            );
+            if let Some(proportional) = fonts.families.get_mut(&FontFamily::Proportional) {
+                proportional.insert(0, "system-ui".to_owned());
+            }
+        }
+    }
 
     if let Some(path) = CJK_FONT_CANDIDATES
         .iter()
