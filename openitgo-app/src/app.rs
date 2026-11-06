@@ -363,7 +363,9 @@ pub struct ReaderApp {
     pub history: History,
     pub bookmarks: Bookmarks,
     pub error_message: Option<String>,
-    /// 非错误操作结果（如解压完成/取消），使用普通正文颜色显示。
+    pub warning_message: Option<String>,
+    pub success_message: Option<String>,
+    /// 非错误操作结果（如取消），使用普通正文颜色显示。
     pub status_message: Option<String>,
     pub page_loader: PageLoader,
     pub cover_loader: PageLoader,
@@ -530,7 +532,9 @@ impl Default for ReaderApp {
             store,
             history,
             bookmarks,
-            error_message: settings_error.or(comic_settings_error),
+            error_message: None,
+            warning_message: settings_error.or(comic_settings_error),
+            success_message: None,
             status_message: None,
             page_loader,
             cover_loader,
@@ -1149,10 +1153,35 @@ impl ReaderApp {
 
     fn render_library(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
-            if let Some(err) = &self.error_message {
-                ui.colored_label(ui.visuals().error_fg_color, err);
-            } else if let Some(status) = &self.status_message {
-                ui.label(status);
+            use crate::widgets::message_bar::{message_bar, MessageKind};
+            let message = if let Some(text) = &self.error_message {
+                Some((MessageKind::Error, text.clone()))
+            } else if let Some(text) = &self.warning_message {
+                Some((MessageKind::Warning, text.clone()))
+            } else if let Some(text) = &self.success_message {
+                Some((MessageKind::Success, text.clone()))
+            } else {
+                self.status_message
+                    .as_ref()
+                    .map(|text| (MessageKind::Info, text.clone()))
+            };
+            if let Some((kind, text)) = message {
+                let mut close = false;
+                egui::Area::new(egui::Id::new("library_message"))
+                    .order(egui::Order::Foreground)
+                    .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 8.0))
+                    .show(ui.ctx(), |ui| {
+                        ui.set_max_width(560.0);
+                        close = message_bar(ui, kind, &text).clicked();
+                    });
+                if close {
+                    match kind {
+                        MessageKind::Error => self.error_message = None,
+                        MessageKind::Warning => self.warning_message = None,
+                        MessageKind::Success => self.success_message = None,
+                        MessageKind::Info => self.status_message = None,
+                    }
+                }
             }
             let mut open_idx = None;
             let mut open_path: Option<PathBuf> = None;
@@ -2998,12 +3027,18 @@ impl ReaderApp {
         }
         if !messages.is_empty() {
             let message = messages.join("；");
+            self.warning_message = None;
+            self.success_message = None;
+            self.status_message = None;
             if has_error {
-                self.status_message = None;
                 self.error_message = Some(message);
             } else {
                 self.error_message = None;
-                self.status_message = Some(message);
+                if summary.finished.is_empty() {
+                    self.status_message = Some(message);
+                } else {
+                    self.success_message = Some(message);
+                }
             }
         }
         // 文件管理器视图下刷新落点栏（输出目录或其父目录 == 栏目录时）。
@@ -3231,7 +3266,7 @@ impl ReaderApp {
                         ui.close();
                     }
                     if ui.button("关于 OpenItGo").clicked() {
-                        self.error_message = Some(format!(
+                        self.status_message = Some(format!(
                             "OpenItGo v{}\n一个用 Rust 写的漫画阅读器。",
                             env!("CARGO_PKG_VERSION")
                         ));
@@ -3935,7 +3970,7 @@ impl ReaderApp {
                         self.open_path(next);
                     }
                     None => {
-                        self.error_message = Some("已是最后一个漫画".to_string());
+                        self.status_message = Some("已是最后一个漫画".to_string());
                     }
                 }
             }
@@ -4456,6 +4491,7 @@ impl ReaderApp {
                 .insert(epoch, (comic_id.to_string(), path.to_path_buf()));
         } else {
             self.requested_cover_ids.remove(comic_id);
+            self.library_view.cover_request_finished(comic_id, false);
         }
     }
 
@@ -4477,7 +4513,10 @@ impl ReaderApp {
             };
             let image = match result.image {
                 Ok(crate::loader::LoadedImage::Color(img)) => img,
-                _ => continue,
+                _ => {
+                    self.library_view.cover_request_finished(&comic_id, false);
+                    continue;
+                }
             };
             if let Some(cover_path) = save_cover_image(&self.covers_dir(), &comic_id, &image) {
                 if let Some(entry) = self
@@ -4490,6 +4529,9 @@ impl ReaderApp {
                     entry.cover_path = Some(cover_path);
                     let _ = self.store.save_library(&self.library_view.library);
                 }
+                self.library_view.cover_request_finished(&comic_id, true);
+            } else {
+                self.library_view.cover_request_finished(&comic_id, false);
             }
         }
     }
@@ -4497,6 +4539,10 @@ impl ReaderApp {
     fn poll_media_covers(&mut self) {
         let mut updated = false;
         while let Ok((id, path)) = self.media_cover_rx.try_recv() {
+            if path.as_os_str().is_empty() {
+                self.library_view.cover_request_finished(&id, false);
+                continue;
+            }
             if let Some(entry) = self
                 .library_view
                 .library
@@ -4507,6 +4553,7 @@ impl ReaderApp {
                 entry.cover_path = Some(path);
                 updated = true;
             }
+            self.library_view.cover_request_finished(&id, true);
         }
         // Same persistence timing as the comic cover path: save after a
         // drained batch so cover_path survives restarts.
@@ -4538,6 +4585,7 @@ impl ReaderApp {
                 entry.cover_path = Some(out);
                 let _ = self.store.save_library(&self.library_view.library);
             }
+            self.library_view.cover_request_finished(&id, true);
             return;
         }
         let tx = self.media_cover_tx.clone();
@@ -4560,6 +4608,7 @@ impl ReaderApp {
                 // 生成或缩放失败时清除可能残缺的 .jpg，
                 // 避免回填分支把坏文件当成有效封面。
                 std::fs::remove_file(&out).ok();
+                let _ = tx.send((id, PathBuf::new()));
             }
         });
     }
@@ -5925,6 +5974,8 @@ mod tests {
                 history,
                 bookmarks,
                 error_message: None,
+                warning_message: None,
+                success_message: None,
                 status_message: None,
                 page_loader,
                 cover_loader,
@@ -7465,7 +7516,7 @@ mod tests {
     }
 
     #[test]
-    fn test_poll_extracts_success_uses_status_message() {
+    fn test_poll_extracts_success_uses_success_message() {
         let (mut app, _tmp) = app_with_temp_store();
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("pack.zip");
@@ -7478,7 +7529,7 @@ mod tests {
         let ctx = egui::Context::default();
         for _ in 0..200 {
             app.poll_extracts(&ctx);
-            if app.status_message.is_some() {
+            if app.success_message.is_some() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -7486,7 +7537,7 @@ mod tests {
 
         assert_eq!(app.error_message, None);
         assert!(app
-            .status_message
+            .success_message
             .as_deref()
             .is_some_and(|message| message.starts_with("已解压 pack.zip 到 ")));
         assert_eq!(std::fs::read(output.join("folder/a.txt")).unwrap(), b"data");

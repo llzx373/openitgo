@@ -1,7 +1,8 @@
+use egui_phosphor_icons::icons;
 use openitgo_storage::models::{
     Bookmarks, History, HistoryEntry, Library, LibraryEntry, LibrarySort, MediaType,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +24,8 @@ pub struct LibraryView {
     /// 「清空书架」按钮的确认态（第一次点击后等待二次确认）。
     pending_clear_library: bool,
     cover_textures: HashMap<String, egui::TextureHandle>,
+    cover_pending: HashSet<String>,
+    cover_failed: HashSet<String>,
     /// 标签过滤 chips 的当前选择（None = 全部）。
     pub tag_filter: Option<String>,
     /// 标签编辑对话框状态：(条目索引, 输入缓冲)。
@@ -41,6 +44,8 @@ impl Default for LibraryView {
             pending_delete: None,
             pending_clear_library: false,
             cover_textures: HashMap::new(),
+            cover_pending: HashSet::new(),
+            cover_failed: HashSet::new(),
             tag_filter: None,
             tag_edit_buffer: None,
             covers_dir: None,
@@ -72,6 +77,15 @@ pub struct LibraryCallbacks<'a> {
 }
 
 impl LibraryView {
+    pub fn cover_request_finished(&mut self, comic_id: &str, succeeded: bool) {
+        self.cover_pending.remove(comic_id);
+        if succeeded {
+            self.cover_failed.remove(comic_id);
+        } else {
+            self.cover_failed.insert(comic_id.to_owned());
+        }
+    }
+
     pub fn entry_at(&self, idx: usize) -> Option<&LibraryEntry> {
         self.library.entries.get(idx)
     }
@@ -89,6 +103,7 @@ impl LibraryView {
         stats: &HashMap<String, openitgo_storage::models::ReadingStat>,
         callbacks: LibraryCallbacks<'_>,
     ) {
+        let narrow_header = ui.available_width() < 1000.0;
         ui.horizontal_wrapped(|ui| {
             ui.heading(egui::RichText::new("书架").size(22.0).strong());
             ui.add_space(12.0);
@@ -123,7 +138,7 @@ impl LibraryView {
                         ui.selectable_value(library_sort, LibrarySort::Added, "添加时间");
                     });
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let mut render_actions = |ui: &mut egui::Ui| {
                 if library_button(
                     ui,
                     format!(
@@ -170,7 +185,15 @@ impl LibraryView {
                 {
                     (callbacks.on_add)();
                 }
-            });
+            };
+            if narrow_header {
+                render_actions(ui);
+            } else {
+                ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    render_actions,
+                );
+            }
         });
 
         if self.pending_clear_library {
@@ -264,7 +287,17 @@ impl LibraryView {
     ) {
         let entries = self.filtered_entries(history, sort);
         if entries.is_empty() {
-            self.render_empty_library(ui, callbacks);
+            let has_unfiltered = self.library.entries.iter().any(|entry| match self.mode {
+                LibraryMode::Ebooks => entry.media_type == MediaType::Ebook,
+                LibraryMode::Library => matches!(
+                    entry.media_type,
+                    MediaType::Comic | MediaType::Video | MediaType::Audio
+                ),
+                _ => true,
+            });
+            let filtered = has_unfiltered
+                && (!self.search_query.trim().is_empty() || self.tag_filter.is_some());
+            self.render_empty_library(ui, callbacks, filtered);
             return;
         }
         const CARD_WIDTH: f32 = 148.0;
@@ -290,10 +323,14 @@ impl LibraryView {
                         .map(|p| !p.exists())
                         .unwrap_or(true);
 
-                    if !file_missing && cover_missing {
+                    let cover_pending = self.cover_pending.contains(&entry.comic_id);
+                    let cover_failed = self.cover_failed.contains(&entry.comic_id);
+                    if !file_missing && cover_missing && !cover_pending && !cover_failed {
+                        self.cover_pending.insert(entry.comic_id.clone());
                         (callbacks.on_request_cover)(original_idx);
                     }
 
+                    let mut more_menu_clicked = false;
                     let card_response = ui
                         .allocate_ui_with_layout(
                             egui::vec2(CARD_WIDTH, CARD_HEIGHT),
@@ -302,7 +339,7 @@ impl LibraryView {
                                 ui.set_min_size(egui::vec2(CARD_WIDTH, CARD_HEIGHT));
                                 ui.vertical_centered(|ui| {
                                     let cover_rect = {
-                                        let (slot, cover_sense) = ui
+                                        let (slot, _) = ui
                                             .allocate_exact_size(cover_size, egui::Sense::hover());
                                         ui.painter().rect_filled(
                                             slot,
@@ -325,48 +362,40 @@ impl LibraryView {
                                                 .corner_radius(cover_radius)
                                                 .paint_at(ui, rect);
                                         } else {
-                                            let placeholder_color =
-                                                if entry.media_type == MediaType::Ebook {
-                                                    egui::Color32::from_rgb(60, 72, 96)
-                                                } else {
-                                                    ui.visuals().widgets.inactive.bg_fill
-                                                };
                                             ui.painter().rect_filled(
                                                 slot,
                                                 cover_radius,
-                                                placeholder_color,
+                                                ui.visuals().faint_bg_color,
                                             );
-                                            let placeholder_label = match entry.media_type {
-                                                MediaType::Ebook => "电子书",
-                                                MediaType::Comic => "漫画",
-                                                MediaType::Video => "视频",
-                                                MediaType::Audio => "音频",
+                                            let (placeholder_icon, type_label) = match entry
+                                                .media_type
+                                            {
+                                                MediaType::Ebook => (icons::BOOK_OPEN, "电子书"),
+                                                MediaType::Comic => (icons::BOOKS, "漫画"),
+                                                MediaType::Video => (icons::PLAY, "视频"),
+                                                MediaType::Audio => (icons::SPEAKER_HIGH, "音频"),
                                             };
+                                            let placeholder_label = if cover_failed {
+                                                "封面生成失败"
+                                            } else if cover_pending {
+                                                "封面加载中"
+                                            } else {
+                                                type_label
+                                            };
+                                            let color = ui.visuals().weak_text_color();
                                             ui.painter().text(
-                                                slot.center(),
+                                                slot.center() - egui::vec2(0.0, 16.0),
+                                                egui::Align2::CENTER_CENTER,
+                                                placeholder_icon.as_str(),
+                                                egui::FontId::proportional(24.0),
+                                                color,
+                                            );
+                                            ui.painter().text(
+                                                slot.center() + egui::vec2(0.0, 16.0),
                                                 egui::Align2::CENTER_CENTER,
                                                 placeholder_label,
-                                                egui::FontId::proportional(15.0),
-                                                egui::Color32::from_rgba_unmultiplied(
-                                                    255, 255, 255, 200,
-                                                ),
-                                            );
-                                        }
-                                        if cover_sense.hovered() && !file_missing {
-                                            // Subtle lift: theme accent rim, no shadow stack.
-                                            let accent = crate::theme::accent(ui.visuals());
-                                            ui.painter().rect_stroke(
-                                                slot,
-                                                cover_radius,
-                                                egui::Stroke::new(1.0, accent),
-                                                egui::StrokeKind::Outside,
-                                            );
-                                            ui.painter().rect_filled(
-                                                slot,
-                                                cover_radius,
-                                                egui::Color32::from_rgba_unmultiplied(
-                                                    255, 255, 255, 18,
-                                                ),
+                                                egui::FontId::proportional(13.0),
+                                                color,
                                             );
                                         }
                                         slot
@@ -416,14 +445,29 @@ impl LibraryView {
                                             self.edit_buffer = None;
                                         }
                                     } else {
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(&entry.title)
-                                                    .strong()
-                                                    .size(13.0),
+                                        ui.horizontal(|ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(&entry.title)
+                                                        .strong()
+                                                        .size(13.0),
+                                                )
+                                                .truncate(),
                                             )
-                                            .truncate(),
-                                        );
+                                            .on_hover_text(&entry.title);
+                                            let more =
+                                                ui.add(egui::Button::new("…").small().frame(false));
+                                            more.widget_info(|| {
+                                                egui::WidgetInfo::labeled(
+                                                    egui::WidgetType::Button,
+                                                    true,
+                                                    "更多操作",
+                                                )
+                                            });
+                                            if more.clicked() {
+                                                more_menu_clicked = true;
+                                            }
+                                        });
                                     }
 
                                     let progress = library_progress(history, &entry);
@@ -493,7 +537,10 @@ impl LibraryView {
                             &accessible_label,
                         )
                     });
-                    if card_response.has_focus() {
+                    if card_response.has_focus()
+                        || card_response.hovered()
+                        || card_response.is_pointer_button_down_on()
+                    {
                         ui.painter().rect_stroke(
                             card_response.rect.expand(2.0),
                             cover_radius,
@@ -505,11 +552,14 @@ impl LibraryView {
                         && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                     let keyboard_menu = card_response.has_focus()
                         && ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F10));
-                    if !is_editing && (card_response.clicked() || open_with_keyboard) {
+                    if !is_editing
+                        && !more_menu_clicked
+                        && (card_response.clicked() || open_with_keyboard)
+                    {
                         (callbacks.on_open_library)(original_idx);
                     }
                     let mut context_menu = egui::Popup::context_menu(&card_response);
-                    if keyboard_menu {
+                    if keyboard_menu || more_menu_clicked {
                         context_menu = context_menu
                             .at_position(card_response.rect.left_bottom())
                             .open_memory(Some(egui::SetOpenCommand::Bool(true)));
@@ -562,30 +612,46 @@ impl LibraryView {
         });
     }
 
-    fn render_empty_library(&mut self, ui: &mut egui::Ui, callbacks: LibraryCallbacks<'_>) {
+    fn render_empty_library(
+        &mut self,
+        ui: &mut egui::Ui,
+        callbacks: LibraryCallbacks<'_>,
+        filtered: bool,
+    ) {
         ui.vertical_centered(|ui| {
             ui.add_space(80.0);
+            let (icon, title, description) = if filtered {
+                (
+                    icons::MAGNIFYING_GLASS,
+                    "没有匹配的内容",
+                    "尝试其他关键词，或清除当前搜索和标签筛选。",
+                )
+            } else {
+                (
+                    icons::BOOKS,
+                    "书架还是空的",
+                    "拖拽漫画、电子书或影音文件到窗口，或点击下方按钮导入。",
+                )
+            };
             ui.label(
-                egui::RichText::new(egui_phosphor_icons::icons::BOOKS.as_str())
+                egui::RichText::new(icon.as_str())
                     .size(48.0)
                     .color(crate::theme::accent(ui.visuals())),
             );
             ui.add_space(12.0);
-            ui.label(egui::RichText::new("书架还是空的").size(22.0).strong());
+            ui.label(egui::RichText::new(title).size(22.0).strong());
             ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("拖拽漫画、电子书或影音文件到窗口，或点击下方按钮导入。")
-                    .weak()
-                    .size(14.0),
-            );
+            ui.label(egui::RichText::new(description).weak().size(14.0));
             ui.add_space(20.0);
-            if ui
+            if filtered {
+                if ui.button("清除搜索和筛选").clicked() {
+                    self.search_query.clear();
+                    self.tag_filter = None;
+                }
+            } else if ui
                 .add_sized(
                     egui::vec2(160.0, 32.0),
-                    egui::Button::new(format!(
-                        "{} 打开文件夹",
-                        egui_phosphor_icons::icons::FOLDER_PLUS.as_str()
-                    )),
+                    egui::Button::new(format!("{} 打开文件夹", icons::FOLDER_PLUS.as_str())),
                 )
                 .clicked()
             {
@@ -1039,6 +1105,19 @@ mod tests {
                 page_count: None,
             }],
         }
+    }
+
+    #[test]
+    fn cover_result_clears_pending_and_records_failure() {
+        let mut view = LibraryView::default();
+        view.cover_pending.insert("comic-1".to_owned());
+        view.cover_request_finished("comic-1", false);
+        assert!(!view.cover_pending.contains("comic-1"));
+        assert!(view.cover_failed.contains("comic-1"));
+        view.cover_pending.insert("comic-1".to_owned());
+        view.cover_request_finished("comic-1", true);
+        assert!(!view.cover_pending.contains("comic-1"));
+        assert!(!view.cover_failed.contains("comic-1"));
     }
 
     #[test]
