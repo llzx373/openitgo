@@ -733,6 +733,20 @@ enum BarEdge {
     Bottom,
 }
 
+fn add_toolbar_button(ui: &mut egui::Ui, button: egui::Button<'_>) -> egui::Response {
+    if !crate::theme::is_fluent(ui.visuals()) {
+        return ui.add(button.frame(true));
+    }
+    ui.scope(|ui| {
+        let inactive = &mut ui.visuals_mut().widgets.inactive;
+        inactive.bg_fill = egui::Color32::TRANSPARENT;
+        inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+        inactive.bg_stroke = egui::Stroke::NONE;
+        ui.add(button.frame(true))
+    })
+    .inner
+}
+
 fn toolbar_button(
     ui: &mut egui::Ui,
     icon: Icon,
@@ -740,20 +754,16 @@ fn toolbar_button(
     mode: ToolbarDisplayMode,
 ) -> egui::Response {
     let min = egui::vec2(0.0, crate::theme::TOOLBAR_BUTTON_HEIGHT);
-    let frame = !crate::theme::is_fluent(ui.visuals());
-    match mode {
-        ToolbarDisplayMode::IconOnly => ui
-            .add(egui::Button::new(icon).min_size(min).frame(frame))
-            .on_hover_text(text),
-        ToolbarDisplayMode::TextOnly => ui.add(egui::Button::new(text).min_size(min).frame(frame)),
+    let button = match mode {
+        ToolbarDisplayMode::IconOnly => egui::Button::new(icon).min_size(min),
+        ToolbarDisplayMode::TextOnly => egui::Button::new(text).min_size(min),
         // Separate atoms: Phosphor font for the icon, proportional for the label —
         // avoids mixed-font galley baseline drift that made labels look off-center.
-        ToolbarDisplayMode::IconAndText => ui.add(
-            egui::Button::new((icon, format!(" {text}")))
-                .min_size(min)
-                .frame(frame),
-        ),
-    }
+        ToolbarDisplayMode::IconAndText => {
+            egui::Button::new((icon, format!(" {text}"))).min_size(min)
+        }
+    };
+    add_toolbar_button(ui, button).on_hover_text(text)
 }
 
 fn toolbar_selectable(
@@ -764,22 +774,14 @@ fn toolbar_selectable(
     mode: ToolbarDisplayMode,
 ) -> egui::Response {
     let min = egui::vec2(0.0, crate::theme::TOOLBAR_BUTTON_HEIGHT);
-    let frame = active || !crate::theme::is_fluent(ui.visuals());
     let button = match mode {
-        ToolbarDisplayMode::IconOnly => egui::Button::new(icon)
-            .selected(active)
-            .min_size(min)
-            .frame(frame),
-        ToolbarDisplayMode::TextOnly => egui::Button::new(text)
-            .selected(active)
-            .min_size(min)
-            .frame(frame),
+        ToolbarDisplayMode::IconOnly => egui::Button::new(icon).selected(active).min_size(min),
+        ToolbarDisplayMode::TextOnly => egui::Button::new(text).selected(active).min_size(min),
         ToolbarDisplayMode::IconAndText => egui::Button::new((icon, format!(" {text}")))
             .selected(active)
-            .min_size(min)
-            .frame(frame),
+            .min_size(min),
     };
-    ui.add(button).on_hover_text(text)
+    add_toolbar_button(ui, button).on_hover_text(text)
 }
 
 /// 启动时要打开的路径：优先 `OPENITGO_OPEN` 环境变量，其次第一个命令行参数
@@ -1286,7 +1288,7 @@ impl ReaderApp {
         let show_toolbar = Self::should_show_bar(
             self.settings.show_toolbar,
             fullscreen,
-            mouse_pos,
+            mouse_pos.map(|p| egui::pos2(p.x, p.y - ui.available_rect_before_wrap().min.y)),
             screen_size,
             BarEdge::Top,
         );
@@ -1414,7 +1416,7 @@ impl ReaderApp {
         let show_toolbar = Self::should_show_bar(
             self.settings.show_toolbar,
             fullscreen,
-            mouse_pos,
+            mouse_pos.map(|p| egui::pos2(p.x, p.y - ui.available_rect_before_wrap().min.y)),
             screen_size,
             BarEdge::Top,
         );
@@ -1526,7 +1528,7 @@ impl ReaderApp {
         let show_toolbar = Self::should_show_bar(
             self.settings.show_toolbar,
             fullscreen,
-            mouse_pos,
+            mouse_pos.map(|p| egui::pos2(p.x, p.y - ui.available_rect_before_wrap().min.y)),
             screen_size,
             BarEdge::Top,
         ) || (menu_open && self.settings.show_toolbar);
@@ -2213,7 +2215,13 @@ impl ReaderApp {
                     if toolbar_button(ui, icons::BOOKMARK, "添加书签", display_mode).clicked() {
                         self.add_bookmark(current_page);
                     }
-                    if toolbar_button(ui, icons::ARROWS_OUT_SIMPLE, "全屏", display_mode).clicked()
+                    let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                    let (fullscreen_icon, fullscreen_label) = if fullscreen {
+                        (icons::ARROWS_IN_SIMPLE, "退出全屏")
+                    } else {
+                        (icons::ARROWS_OUT_SIMPLE, "全屏")
+                    };
+                    if toolbar_button(ui, fullscreen_icon, fullscreen_label, display_mode).clicked()
                     {
                         self.toggle_fullscreen(&ctx);
                     }
@@ -2222,11 +2230,9 @@ impl ReaderApp {
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(icons::X)
-                                    .min_size(egui::vec2(0.0, crate::theme::TOOLBAR_BUTTON_HEIGHT)),
-                            )
+                        let hide_button = egui::Button::new(icons::X)
+                            .min_size(egui::vec2(0.0, crate::theme::TOOLBAR_BUTTON_HEIGHT));
+                        if add_toolbar_button(ui, hide_button)
                             .on_hover_text("隐藏工具栏")
                             .clicked()
                         {
@@ -3897,11 +3903,11 @@ impl ReaderApp {
         if !fullscreen {
             return true;
         }
-        const THRESHOLD: f32 = 20.0;
+        let bar_height = crate::theme::TOOLBAR_BUTTON_HEIGHT + 8.0;
         match edge {
-            BarEdge::Top => mouse_pos.map(|p| p.y <= THRESHOLD).unwrap_or(false),
+            BarEdge::Top => mouse_pos.map(|p| p.y <= bar_height).unwrap_or(false),
             BarEdge::Bottom => mouse_pos
-                .map(|p| p.y >= screen_size.y - THRESHOLD)
+                .map(|p| p.y >= screen_size.y - bar_height)
                 .unwrap_or(false),
         }
     }
@@ -7816,6 +7822,13 @@ mod tests {
             true,
             true,
             Some(egui::pos2(100.0, 10.0)),
+            screen,
+            BarEdge::Top
+        ));
+        assert!(should_show_bar(
+            true,
+            true,
+            Some(egui::pos2(100.0, 32.0)),
             screen,
             BarEdge::Top
         ));
