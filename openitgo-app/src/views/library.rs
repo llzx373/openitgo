@@ -144,34 +144,12 @@ impl LibraryView {
                 {
                     (callbacks.on_remove_missing)();
                 }
-                if matches!(self.mode, LibraryMode::Library) {
-                    if self.pending_clear_library {
-                        if ui
-                            .button(
-                                egui::RichText::new("确定清空？")
-                                    .color(ui.visuals().error_fg_color),
-                            )
-                            .on_hover_text("移除书架上的全部漫画条目（不删除源文件）")
-                            .clicked()
-                        {
-                            (callbacks.on_clear_library)();
-                            self.pending_clear_library = false;
-                        }
-                        if library_button(ui, "取消", crate::widgets::fluent::ButtonKind::Standard)
-                            .clicked()
-                        {
-                            self.pending_clear_library = false;
-                        }
-                    } else if library_button(
-                        ui,
-                        "清空书架",
-                        crate::widgets::fluent::ButtonKind::Subtle,
-                    )
-                    .on_hover_text("移除书架上的全部漫画条目（不删除源文件）")
-                    .clicked()
-                    {
-                        self.pending_clear_library = true;
-                    }
+                if matches!(self.mode, LibraryMode::Library)
+                    && library_button(ui, "清空书架", crate::widgets::fluent::ButtonKind::Subtle)
+                        .on_hover_text("移除书架上的全部漫画条目（不删除源文件）")
+                        .clicked()
+                {
+                    self.pending_clear_library = true;
                 }
                 if library_button(
                     ui,
@@ -187,6 +165,30 @@ impl LibraryView {
                 }
             });
         });
+
+        if self.pending_clear_library {
+            use crate::widgets::dialog::{modal_dialog, DialogAction};
+            use crate::widgets::fluent::ButtonKind;
+            let response = modal_dialog(
+                ui.ctx(),
+                egui::Id::new("clear_library_confirmation"),
+                "清空书架？",
+                &[
+                    DialogAction::new("清空书架", ButtonKind::Danger),
+                    DialogAction::new("取消", ButtonKind::Standard).default_focus(),
+                ],
+                |ui| {
+                    ui.label("将移除书架上的全部漫画条目，并清理相关封面和书签缩略图。");
+                    ui.label("不会删除源文件，也不会清空阅读历史。");
+                },
+            );
+            if response.action == Some(0) {
+                (callbacks.on_clear_library)();
+                self.pending_clear_library = false;
+            } else if response.action == Some(1) || response.should_close {
+                self.pending_clear_library = false;
+            }
+        }
 
         if matches!(self.mode, LibraryMode::Library | LibraryMode::Ebooks) {
             let tags = collect_unique_tags(&self.library.entries);
@@ -213,32 +215,25 @@ impl LibraryView {
 
         if let Some((idx, buffer)) = self.tag_edit_buffer.as_mut() {
             let idx = *idx;
-            let mut save = false;
-            let mut cancel = false;
-            egui::Window::new("编辑标签")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                .show(ui.ctx(), |ui| {
+            use crate::widgets::dialog::{modal_dialog, DialogAction};
+            use crate::widgets::fluent::ButtonKind;
+            let response = modal_dialog(
+                ui.ctx(),
+                egui::Id::new("edit_library_tags"),
+                "编辑标签",
+                &[
+                    DialogAction::new("保存", ButtonKind::Primary).default_focus(),
+                    DialogAction::new("取消", ButtonKind::Standard),
+                ],
+                |ui| {
                     ui.label("多个标签用逗号分隔：");
                     ui.add(egui::TextEdit::singleline(buffer).desired_width(280.0));
-                    ui.horizontal(|ui| {
-                        if library_button(ui, "保存", crate::widgets::fluent::ButtonKind::Primary)
-                            .clicked()
-                        {
-                            save = true;
-                        }
-                        if library_button(ui, "取消", crate::widgets::fluent::ButtonKind::Standard)
-                            .clicked()
-                        {
-                            cancel = true;
-                        }
-                    });
-                });
-            if save {
+                },
+            );
+            if response.action == Some(0) {
                 (callbacks.on_update_tags)(idx, parse_tags_input(buffer));
                 self.tag_edit_buffer = None;
-            } else if cancel {
+            } else if response.action == Some(1) || response.should_close {
                 self.tag_edit_buffer = None;
             }
         }
@@ -469,10 +464,50 @@ impl LibraryView {
                         )
                         .inner;
 
-                    if !is_editing && card_response.clicked() {
+                    let media_label = match entry.media_type {
+                        MediaType::Ebook => "电子书",
+                        MediaType::Comic => "漫画",
+                        MediaType::Video => "视频",
+                        MediaType::Audio => "音频",
+                    };
+                    let mut accessible_label = format!("{}，{}", entry.title, media_label);
+                    let progress = library_progress(history, &entry);
+                    if progress.total > 0 {
+                        accessible_label
+                            .push_str(&format!("，已读 {}/{}", progress.read, progress.total));
+                    }
+                    if file_missing {
+                        accessible_label.push_str("，源文件已删除");
+                    }
+                    card_response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            ui.is_enabled(),
+                            &accessible_label,
+                        )
+                    });
+                    if card_response.has_focus() {
+                        ui.painter().rect_stroke(
+                            card_response.rect.expand(2.0),
+                            cover_radius,
+                            egui::Stroke::new(2.0, crate::theme::accent(ui.visuals())),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                    let open_with_keyboard = card_response.has_focus()
+                        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                    let keyboard_menu = card_response.has_focus()
+                        && ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F10));
+                    if !is_editing && (card_response.clicked() || open_with_keyboard) {
                         (callbacks.on_open_library)(original_idx);
                     }
-                    card_response.context_menu(|ui| {
+                    let mut context_menu = egui::Popup::context_menu(&card_response);
+                    if keyboard_menu {
+                        context_menu = context_menu
+                            .at_position(card_response.rect.left_bottom())
+                            .open_memory(Some(egui::SetOpenCommand::Bool(true)));
+                    }
+                    context_menu.show(|ui| {
                         if ui.button("打开").clicked() {
                             (callbacks.on_open_library)(original_idx);
                             ui.close();

@@ -64,14 +64,20 @@ impl ExtractDialogState {
             .and_then(|s| s.to_str())
             .unwrap_or("压缩包")
             .to_string();
-        let mut start = false;
-        let mut open = true;
-        egui::Window::new("解压到")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .open(&mut open)
-            .show(ctx, |ui| {
+        use crate::widgets::dialog::{modal_dialog, DialogAction};
+        use crate::widgets::fluent::ButtonKind;
+        let dest_ok = !self.dest.trim().is_empty();
+        let response = modal_dialog(
+            ctx,
+            egui::Id::new("extract_dialog"),
+            "解压到",
+            &[
+                DialogAction::new("开始解压", ButtonKind::Primary)
+                    .default_focus()
+                    .enabled(dest_ok),
+                DialogAction::new("取消", ButtonKind::Standard),
+            ],
+            |ui| {
                 ui.label(format!("解压「{name}」到："));
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.dest).desired_width(360.0));
@@ -101,41 +107,11 @@ impl ExtractDialogState {
                     "解压完成后删除压缩包（移入回收站）",
                 );
                 ui.checkbox(&mut self.open_folder, "解压完成后打开目标文件夹");
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    let dest_ok = !self.dest.trim().is_empty();
-                    let start_response = if crate::theme::is_fluent(ui.visuals()) {
-                        ui.add_enabled_ui(dest_ok, |ui| {
-                            crate::widgets::fluent::button(
-                                ui,
-                                "开始解压",
-                                crate::widgets::fluent::ButtonKind::Primary,
-                            )
-                        })
-                        .inner
-                    } else {
-                        ui.add_enabled(dest_ok, egui::Button::new("开始解压"))
-                    };
-                    if start_response.clicked() {
-                        start = true;
-                    }
-                    let cancel_response = if crate::theme::is_fluent(ui.visuals()) {
-                        crate::widgets::fluent::button(
-                            ui,
-                            "取消",
-                            crate::widgets::fluent::ButtonKind::Standard,
-                        )
-                    } else {
-                        ui.button("取消")
-                    };
-                    if cancel_response.clicked() {
-                        self.cancelled = true;
-                    }
-                });
-            });
-        if !open {
+            },
+        );
+        if response.action == Some(1) || response.should_close {
             self.cancelled = true;
         }
-        start
+        response.action == Some(0)
     }
 }
