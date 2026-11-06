@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use egui::Color32;
 
 #[derive(Debug, Clone, Copy)]
@@ -75,7 +73,6 @@ pub mod spacing {
     pub const MD: f32 = 12.0;
     pub const LG: f32 = 16.0;
     pub const XL: f32 = 24.0;
-    pub const XXL: f32 = 32.0;
 }
 
 pub mod size {

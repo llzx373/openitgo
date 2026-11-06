@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::theme::fluent::palette;
 use crate::theme::tokens::{radius, size, spacing, text};
 use egui::{
@@ -25,6 +23,7 @@ pub fn button(ui: &mut Ui, label: impl Into<String>, kind: ButtonKind) -> Respon
     button_impl(ui, label, kind, egui::vec2(width, size::CONTROL), true)
 }
 
+#[allow(dead_code)]
 pub fn icon_button(ui: &mut Ui, icon: impl Into<String>, kind: ButtonKind) -> Response {
     button_impl(
         ui,

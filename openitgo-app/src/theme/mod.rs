@@ -355,7 +355,7 @@ fn apply_macos_style(style: &mut Style) {
 }
 
 /// Uniform height for toolbar / chrome controls (matches `interact_size.y`).
-pub const TOOLBAR_BUTTON_HEIGHT: f32 = 28.0;
+pub const TOOLBAR_BUTTON_HEIGHT: f32 = tokens::size::CONTROL_COMPACT;
 
 fn opacity_u8(opacity: f32) -> u8 {
     (opacity.clamp(0.0, 1.0) * 255.0).round() as u8
