@@ -532,7 +532,19 @@ pub fn tag_chip(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Respons
         .show(ui, |ui| {
             ui.label(egui::RichText::new(label).size(12.5).color(fg));
         });
-    ui.interact(inner.response.rect, id, egui::Sense::click())
+    let response = ui.interact(inner.response.rect, id, egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label)
+    });
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            response.rect.expand(2.0),
+            CornerRadius::same(tokens::radius::CONTROL + 2),
+            Stroke::new(2.0, accent),
+            egui::StrokeKind::Outside,
+        );
+    }
+    response
 }
 
 /// Segmented control background wrapping selectable labels.
@@ -561,6 +573,9 @@ fn tab_button_sized(
 ) -> egui::Response {
     let font = egui::FontId::proportional(13.5);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label)
+    });
     let hovered = response.hovered();
 
     let (fill, fg) = if selected {
@@ -602,6 +617,14 @@ fn tab_button_sized(
         rect.center().y - galley.size().y * 0.5,
     );
     ui.painter().galley(text_pos, galley, fg);
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect.expand(2.0),
+            CornerRadius::same(6),
+            Stroke::new(2.0, accent(ui.visuals())),
+            egui::StrokeKind::Outside,
+        );
+    }
 
     response
 }
@@ -741,6 +764,13 @@ pub fn tabbed_page<T: Copy + PartialEq>(
     current
 }
 
+fn moved_segmented_index(index: usize, len: usize, delta: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    (index as isize + delta).rem_euclid(len as isize) as usize
+}
+
 /// Capsule segmented control with fixed-size segments (no hover width jump).
 pub fn segmented_tabs<T: Copy + PartialEq>(
     ui: &mut egui::Ui,
@@ -770,9 +800,54 @@ pub fn segmented_tabs<T: Copy + PartialEq>(
     segmented_frame(ui, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            for &(tab, label) in tabs {
+            for (index, &(tab, label)) in tabs.iter().enumerate() {
                 let selected = *current == tab;
-                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                let id = ui.id().with(("segmented_tab", index));
+                let response = ui.interact(rect, id, egui::Sense::click());
+                response.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::WidgetType::Button,
+                        ui.is_enabled(),
+                        selected,
+                        label,
+                    )
+                });
+                if response.has_focus() {
+                    ui.memory_mut(|memory| {
+                        memory.set_focus_lock_filter(
+                            id,
+                            egui::EventFilter {
+                                horizontal_arrows: true,
+                                ..Default::default()
+                            },
+                        );
+                    });
+                }
+                let key_target = if response.has_focus() {
+                    ui.input_mut(|i| {
+                        if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight) {
+                            Some(moved_segmented_index(index, tabs.len(), 1))
+                        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft) {
+                            Some(moved_segmented_index(index, tabs.len(), -1))
+                        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Home) {
+                            Some(0)
+                        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::End) {
+                            Some(tabs.len() - 1)
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
+                if let Some(target) = key_target {
+                    if target != index {
+                        *current = tabs[target].0;
+                        changed = true;
+                    }
+                    ui.memory_mut(|mem| mem.request_focus(ui.id().with(("segmented_tab", target))));
+                }
                 let hovered = response.hovered();
                 let (fill, fg) = if selected {
                     (
@@ -802,6 +877,14 @@ pub fn segmented_tabs<T: Copy + PartialEq>(
                 };
                 if fill.a() > 0 {
                     ui.painter().rect_filled(rect, CornerRadius::same(6), fill);
+                }
+                if response.has_focus() {
+                    ui.painter().rect_stroke(
+                        rect.expand(2.0),
+                        CornerRadius::same(8),
+                        Stroke::new(2.0, accent),
+                        egui::StrokeKind::Outside,
+                    );
                 }
                 let galley = ui
                     .painter()
@@ -868,6 +951,14 @@ mod tests {
         let fill = chrome_fill(&dark, 0.85);
         assert!(fill.a() < 255);
         assert_eq!(chrome_fill(&dark, 1.0).a(), 255);
+    }
+
+    #[test]
+    fn segmented_keyboard_navigation_wraps_and_handles_empty() {
+        assert_eq!(moved_segmented_index(0, 5, -1), 4);
+        assert_eq!(moved_segmented_index(4, 5, 1), 0);
+        assert_eq!(moved_segmented_index(2, 5, 1), 3);
+        assert_eq!(moved_segmented_index(0, 0, 1), 0);
     }
 
     #[test]

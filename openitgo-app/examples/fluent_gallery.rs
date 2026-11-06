@@ -36,7 +36,7 @@ impl eframe::App for GalleryApp {
                 ui.heading("Fluent 2 控件画廊");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label("深色");
-                    fluent::toggle(ui, &mut self.dark);
+                    fluent::toggle(ui, &mut self.dark, "深色主题");
                 });
             });
         });
@@ -54,6 +54,7 @@ impl eframe::App for GalleryApp {
                         fluent::icon_button(
                             ui,
                             icons::MAGNIFYING_GLASS.as_str(),
+                            "搜索",
                             ButtonKind::Subtle,
                         )
                         .on_hover_text("搜索");
@@ -72,7 +73,7 @@ impl eframe::App for GalleryApp {
                         "启用新外观",
                         Some("使用统一的表面、间距和控件状态"),
                         |ui| {
-                            fluent::toggle(ui, &mut self.enabled);
+                            fluent::toggle(ui, &mut self.enabled, "启用新外观");
                         },
                     );
                     ui.separator();

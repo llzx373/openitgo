@@ -149,11 +149,11 @@ fn appearance(view: &mut SettingsView, ui: &mut Ui, settings: &mut Settings) {
         });
         separator(ui);
         row(ui, "显示工具栏", None, |ui| {
-            fw::toggle(ui, &mut settings.show_toolbar);
+            fw::toggle(ui, &mut settings.show_toolbar, "显示工具栏");
         });
         separator(ui);
         row(ui, "显示状态栏 / 进度条", None, |ui| {
-            fw::toggle(ui, &mut settings.show_statusbar);
+            fw::toggle(ui, &mut settings.show_statusbar, "显示状态栏 / 进度条");
         });
     });
     group(ui, "阅读界面", |ui| {
@@ -212,16 +212,20 @@ fn comic(ui: &mut Ui, settings: &mut Settings) {
         });
         separator(ui);
         row(ui, "默认双页", None, |ui| {
-            fw::toggle(ui, &mut settings.double_page);
+            fw::toggle(ui, &mut settings.double_page, "默认双页");
         });
         separator(ui);
         row(ui, "打开漫画时自动加入书架", None, |ui| {
-            fw::toggle(ui, &mut settings.auto_add_to_library);
+            fw::toggle(
+                ui,
+                &mut settings.auto_add_to_library,
+                "打开漫画时自动加入书架",
+            );
         });
     });
     group(ui, "翻页", |ui| {
         row(ui, "翻页动画", None, |ui| {
-            fw::toggle(ui, &mut settings.enable_page_animation);
+            fw::toggle(ui, &mut settings.enable_page_animation, "漫画翻页动画");
         });
         separator(ui);
         row(
@@ -229,7 +233,7 @@ fn comic(ui: &mut Ui, settings: &mut Settings) {
             "反转滚轮方向",
             Some("适用于 macOS 自然滚动"),
             |ui| {
-                fw::toggle(ui, &mut settings.invert_scroll);
+                fw::toggle(ui, &mut settings.invert_scroll, "漫画反转滚轮方向");
             },
         );
         separator(ui);
@@ -379,7 +383,11 @@ fn ebook(ui: &mut Ui, settings: &mut Settings) {
     });
     group(ui, "阅读行为", |ui| {
         row(ui, "翻页动画", None, |ui| {
-            fw::toggle(ui, &mut settings.ebook.enable_page_animation);
+            fw::toggle(
+                ui,
+                &mut settings.ebook.enable_page_animation,
+                "电子书翻页动画",
+            );
         });
         separator(ui);
         row(
@@ -387,7 +395,7 @@ fn ebook(ui: &mut Ui, settings: &mut Settings) {
             "反转滚轮方向",
             Some("适用于 macOS 自然滚动"),
             |ui| {
-                fw::toggle(ui, &mut settings.ebook.invert_scroll);
+                fw::toggle(ui, &mut settings.ebook.invert_scroll, "电子书反转滚轮方向");
             },
         );
     });
@@ -474,7 +482,7 @@ fn performance(ui: &mut Ui, settings: &mut Settings) {
             "DXT5/BC3 纹理压缩",
             Some("使用原生 GPU 格式；打开时 CPU 占用较高"),
             |ui| {
-                fw::toggle(ui, &mut settings.compress_images);
+                fw::toggle(ui, &mut settings.compress_images, "DXT5/BC3 纹理压缩");
             },
         );
         separator(ui);
@@ -518,16 +526,16 @@ fn file_manager(view: &mut SettingsView, ui: &mut Ui, settings: &mut Settings) {
         );
         separator(ui);
         row(ui, "删除前确认", None, |ui| {
-            fw::toggle(ui, &mut settings.fm_confirm_delete);
+            fw::toggle(ui, &mut settings.fm_confirm_delete, "删除前确认");
         });
     });
     group(ui, "显示与布局", |ui| {
         row(ui, "显示隐藏文件", None, |ui| {
-            fw::toggle(ui, &mut settings.fm_show_hidden);
+            fw::toggle(ui, &mut settings.fm_show_hidden, "显示隐藏文件");
         });
         separator(ui);
         row(ui, "目录排在文件前", None, |ui| {
-            fw::toggle(ui, &mut settings.fm_dirs_first);
+            fw::toggle(ui, &mut settings.fm_dirs_first, "目录排在文件前");
         });
         separator(ui);
         row(
@@ -535,16 +543,16 @@ fn file_manager(view: &mut SettingsView, ui: &mut Ui, settings: &mut Settings) {
             "显示系统真实图标",
             Some("关闭后使用内置字体图标"),
             |ui| {
-                fw::toggle(ui, &mut settings.fm_system_icons);
+                fw::toggle(ui, &mut settings.fm_system_icons, "显示系统真实图标");
             },
         );
         separator(ui);
         row(ui, "过滤框显示在栏底部", None, |ui| {
-            fw::toggle(ui, &mut settings.fm_filter_bar_bottom);
+            fw::toggle(ui, &mut settings.fm_filter_bar_bottom, "过滤框显示在栏底部");
         });
         separator(ui);
         row(ui, "显示命令行输入条", None, |ui| {
-            fw::toggle(ui, &mut settings.fm_command_bar);
+            fw::toggle(ui, &mut settings.fm_command_bar, "显示命令行输入条");
         });
         separator(ui);
         row(
@@ -552,7 +560,7 @@ fn file_manager(view: &mut SettingsView, ui: &mut Ui, settings: &mut Settings) {
             "递归监听子目录变化",
             Some("大目录或网络盘可能产生额外开销"),
             |ui| {
-                fw::toggle(ui, &mut settings.fm_watch_recursive);
+                fw::toggle(ui, &mut settings.fm_watch_recursive, "递归监听子目录变化");
             },
         );
         separator(ui);
@@ -621,16 +629,20 @@ fn file_manager(view: &mut SettingsView, ui: &mut Ui, settings: &mut Settings) {
             "栏间拖放复制前确认",
             Some("拖动时按住 Shift 为移动"),
             |ui| {
-                fw::toggle(ui, &mut settings.fm_drag_confirm);
+                fw::toggle(ui, &mut settings.fm_drag_confirm, "栏间拖放复制前确认");
             },
         );
         separator(ui);
         row(ui, "Esc 保留选中", None, |ui| {
-            fw::toggle(ui, &mut settings.fm_esc_keep_selection);
+            fw::toggle(ui, &mut settings.fm_esc_keep_selection, "Esc 保留选中");
         });
         separator(ui);
         row(ui, "双击空白处回上级目录", None, |ui| {
-            fw::toggle(ui, &mut settings.fm_dblclick_blank_up);
+            fw::toggle(
+                ui,
+                &mut settings.fm_dblclick_blank_up,
+                "双击空白处回上级目录",
+            );
         });
         separator(ui);
         row(ui, "鼠标框选", None, |ui| {

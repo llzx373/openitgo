@@ -10,6 +10,7 @@ pub enum ButtonKind {
     Standard,
     Primary,
     Subtle,
+    Danger,
 }
 
 pub fn button(ui: &mut Ui, label: impl Into<String>, kind: ButtonKind) -> Response {
@@ -20,14 +21,27 @@ pub fn button(ui: &mut Ui, label: impl Into<String>, kind: ButtonKind) -> Respon
         Color32::WHITE,
     );
     let width = (galley.size().x + spacing::XL).max(80.0);
-    button_impl(ui, label, kind, egui::vec2(width, size::CONTROL), true)
+    button_impl(
+        ui,
+        label.clone(),
+        label,
+        kind,
+        egui::vec2(width, size::CONTROL),
+        true,
+    )
 }
 
 #[allow(dead_code)]
-pub fn icon_button(ui: &mut Ui, icon: impl Into<String>, kind: ButtonKind) -> Response {
+pub fn icon_button(
+    ui: &mut Ui,
+    icon: impl Into<String>,
+    label: impl Into<String>,
+    kind: ButtonKind,
+) -> Response {
     button_impl(
         ui,
         icon.into(),
+        label.into(),
         kind,
         egui::vec2(size::CONTROL, size::CONTROL),
         true,
@@ -36,13 +50,16 @@ pub fn icon_button(ui: &mut Ui, icon: impl Into<String>, kind: ButtonKind) -> Re
 
 fn button_impl(
     ui: &mut Ui,
-    label: String,
+    text: String,
+    accessible_label: String,
     kind: ButtonKind,
     size: egui::Vec2,
     wrap: bool,
 ) -> Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), &label));
+    response.widget_info(|| {
+        WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), &accessible_label)
+    });
     if !ui.is_rect_visible(rect) {
         return response;
     }
@@ -51,23 +68,31 @@ fn button_impl(
     let enabled = ui.is_enabled();
     let pressed = response.is_pointer_button_down_on();
     let hovered = response.hovered() || response.has_focus();
+    let danger_fg = if ui.visuals().dark_mode {
+        Color32::from_rgb(0x10, 0x10, 0x10)
+    } else {
+        Color32::WHITE
+    };
     let (mut fill, mut fg, mut stroke) = match kind {
         ButtonKind::Primary => (p.accent, p.on_accent, Stroke::NONE),
         ButtonKind::Standard => (p.control, p.text, Stroke::new(1.0, p.stroke_strong)),
         ButtonKind::Subtle => (Color32::TRANSPARENT, p.text, Stroke::NONE),
+        ButtonKind::Danger => (p.danger, danger_fg, Stroke::NONE),
     };
     if enabled && hovered {
         fill = match kind {
             ButtonKind::Primary => p.accent_hover,
             ButtonKind::Standard | ButtonKind::Subtle => p.control_hover,
+            ButtonKind::Danger => p.danger.gamma_multiply(0.9),
         };
     }
     if enabled && pressed {
         fill = match kind {
             ButtonKind::Primary => p.accent_pressed,
             ButtonKind::Standard | ButtonKind::Subtle => p.control_pressed,
+            ButtonKind::Danger => p.danger.gamma_multiply(0.8),
         };
-        if kind != ButtonKind::Primary {
+        if matches!(kind, ButtonKind::Standard | ButtonKind::Subtle) {
             fg = p.text_secondary;
         }
     }
@@ -98,9 +123,9 @@ fn button_impl(
     }
     let font = FontId::proportional(text::BODY);
     let galley = if wrap {
-        ui.painter().layout_no_wrap(label, font, fg)
+        ui.painter().layout_no_wrap(text, font, fg)
     } else {
-        ui.painter().layout(label, font, fg, rect.width())
+        ui.painter().layout(text, font, fg, rect.width())
     };
     ui.painter().galley(
         egui::pos2(
@@ -113,11 +138,10 @@ fn button_impl(
     response
 }
 
-pub fn toggle(ui: &mut Ui, value: &mut bool) -> Response {
+pub fn toggle(ui: &mut Ui, value: &mut bool, label: &str) -> Response {
     let (rect, mut response) = ui.allocate_exact_size(egui::vec2(40.0, 20.0), Sense::click());
-    response.widget_info(|| {
-        WidgetInfo::selected(WidgetType::Checkbox, ui.is_enabled(), *value, "开关")
-    });
+    response
+        .widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, ui.is_enabled(), *value, label));
     if response.clicked() {
         *value = !*value;
         response.mark_changed();
