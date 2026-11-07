@@ -36,7 +36,7 @@ use crate::views::file_manager_undo::{plan_undo, precheck, UndoPlan, UndoStack, 
 use crate::views::file_ops::{
     collect_chunks, create_dir, create_text_file, format_eta, merge_target_base, rename_entry,
     retry_sources, suggest_folder_name, suggest_text_file_name, verbatim_path, ConflictMode,
-    FileOpManager, FinishedOp, OpKind, OpSpeedMeter,
+    CopyOptions, FileOpManager, FinishedOp, OpKind, OpSpeedMeter,
 };
 use crate::views::preview_bytes::{
     decode_preview_text, format_hex_line, is_previewable_name, load_file_preview, PreviewData,
@@ -497,14 +497,16 @@ pub struct FileManagerView {
 }
 
 /// 错误汇总窗数据（阶段 AA）：含失败项的操作结束时从 FinishedOp 留存，
-/// 「重试失败项」据此重建同参数任务（Copy/Move 用原 dest_dir 与冲突策略，
-/// Delete 用原 permanent 档，Compress 用原 dest_zip）。
+/// 「重试失败项」据此重建同参数任务（Copy/Move 用原顶层源、dest_dir、
+/// 冲突策略与高级选项，Delete 用原 permanent 档，Compress 用原 dest_zip）。
 struct OpErrorReport {
     kind: OpKind,
+    sources: Vec<PathBuf>,
     /// 工作线程目标（Compress = dest_zip；Copy/Move = dest_dir）。
     dest: Option<PathBuf>,
     dest_dir: Option<PathBuf>,
     conflict: ConflictMode,
+    opts: CopyOptions,
     delete_permanent: bool,
     errors: Vec<(PathBuf, String)>,
 }
@@ -3324,7 +3326,7 @@ impl FileManagerView {
             let Some(report) = self.op_error_report.take() else {
                 return;
             };
-            let sources = retry_sources(&report.errors);
+            let sources = retry_sources(&report.sources, &report.errors);
             if sources.is_empty() {
                 // 失败源全部消失：无可重试项（报告关闭）。
                 return;
@@ -3332,12 +3334,14 @@ impl FileManagerView {
             match report.kind {
                 OpKind::Copy => {
                     if let Some(dest) = report.dest_dir {
-                        self.ops.start_copy(sources, dest, report.conflict);
+                        self.ops
+                            .start_copy_opts(sources, dest, report.conflict, report.opts);
                     }
                 }
                 OpKind::Move => {
                     if let Some(dest) = report.dest_dir {
-                        self.ops.start_move(sources, dest, report.conflict);
+                        self.ops
+                            .start_move_opts(sources, dest, report.conflict, report.opts);
                     }
                 }
                 OpKind::Delete => {
@@ -5837,9 +5841,11 @@ impl FileManagerView {
             // 前 3 项）。新报告覆盖旧窗。
             self.op_error_report = Some(OpErrorReport {
                 kind: op.kind,
+                sources: op.sources.clone(),
                 dest: op.dest.clone(),
                 dest_dir: op.dest_dir.clone(),
                 conflict: op.conflict,
+                opts: op.opts.clone(),
                 delete_permanent: op.delete_permanent,
                 errors: op.errors.clone(),
             });

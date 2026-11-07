@@ -122,7 +122,7 @@ pub struct ConflictAnswer {
 
 /// 复制/移动高级选项（阶段 AB，CopyMoveDialog「高级」折叠区 + 校验
 /// checkbox）：默认全关（= 阶段 AA 前行为）。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CopyOptions {
     /// 复制完成后校验：逐文件重读源与目标分块字节比对（`files_identical`），
     /// 不一致记 errors「校验失败」。Move 的同盘 rename 快速路径无复制动作，
@@ -243,6 +243,8 @@ pub struct FileOpTask {
     dest: Option<PathBuf>,
     /// 冲突策略（重试重建用；Delete/Compress 恒 Skip）。
     conflict: ConflictMode,
+    /// 复制/移动高级选项（重试必须沿用，避免扩大原操作范围）。
+    opts: CopyOptions,
     /// 永久删除档（重试重建用；仅 Delete 有意义）。
     delete_permanent: bool,
     /// 涉及的源目录（各 source 的 parent），完成后刷新用。
@@ -297,11 +299,13 @@ pub struct FinishedOp {
     pub errors: Vec<(PathBuf, String)>,
     pub src_dirs: Vec<PathBuf>,
     pub dest_dir: Option<PathBuf>,
-    /// 重试重建参数（阶段 AA 错误汇总窗「重试失败项」）：工作线程目标
-    /// （Compress = dest_zip）/ 冲突策略 / 永久删除档；源从 errors 重建
-    /// （errors 恒为源路径，retry_sources 过滤仍在项）。
+    /// 重试重建参数（阶段 AA 错误汇总窗「重试失败项」）：原顶层源、
+    /// 工作线程目标（Compress = dest_zip）/ 冲突策略 / 高级选项 / 永久删除档。
+    /// 子项错误只用于筛选原顶层源，不得直接提升为新的顶层源。
+    pub sources: Vec<PathBuf>,
     pub dest: Option<PathBuf>,
     pub conflict: ConflictMode,
+    pub opts: CopyOptions,
     pub delete_permanent: bool,
     /// 实际写入的顶层目标与对应源（阶段 AG 撤销用；语义见 OpEvent::Finished）。
     pub written: Vec<(PathBuf, PathBuf)>,
@@ -546,6 +550,7 @@ impl FileOpManager {
             sources: sources.clone(),
             dest: dest.clone(),
             conflict,
+            opts: opts.clone(),
             delete_permanent,
             src_dirs,
             dest_dir,
@@ -760,8 +765,10 @@ impl FileOpManager {
                     errors,
                     src_dirs: task.src_dirs,
                     dest_dir: task.dest_dir,
+                    sources: task.sources,
                     dest: task.dest,
                     conflict: task.conflict,
+                    opts: task.opts,
                     delete_permanent: task.delete_permanent,
                     written,
                 });
@@ -794,13 +801,20 @@ fn permanent_delete(path: &Path) -> Result<(), String> {
 }
 
 /// 从失败项重建重试源列表（阶段 AA 错误汇总窗「重试失败项」）：
-/// 源路径仍在才纳入（Copy/Move/Delete 的 errors 均为源路径），去重保序。
-pub fn retry_sources(errors: &[(PathBuf, String)]) -> Vec<PathBuf> {
+/// 子项错误映射回原顶层源，源路径仍在才纳入，去重保序。直接把子项当作
+/// 新顶层源会改变目标相对路径（目录重试被扁平化），必须禁止。
+pub fn retry_sources(sources: &[PathBuf], errors: &[(PathBuf, String)]) -> Vec<PathBuf> {
     let mut seen = std::collections::HashSet::new();
-    errors
+    sources
         .iter()
-        .map(|(p, _)| p.clone())
-        .filter(|p| p.exists() && seen.insert(p.clone()))
+        .filter(|source| {
+            source.exists()
+                && errors
+                    .iter()
+                    .any(|(failed, _)| failed == *source || failed.starts_with(source))
+                && seen.insert((*source).clone())
+        })
+        .cloned()
         .collect()
 }
 
@@ -918,16 +932,18 @@ fn run_op(
                 };
                 if let Some(dst) = dst {
                     ctx.drop_source_unsafe = false;
-                    let copied = copy_recursive(src, &dst, conflict, &mut ctx).is_ok();
-                    // 撤销记账（阶段 AG）：Copy 成功即记 (目标, 源)；Move 仅
-                    // 源已移除才记（源残留 = 原位置仍被占用，移回必冲突）。
-                    if copied && kind == OpKind::Copy && !ctx.cancelled {
+                    let error_count = ctx.errors.len();
+                    let dst_existed = verbatim_path(&dst).exists();
+                    let completed = copy_recursive(src, &dst, conflict, &mut ctx).is_ok();
+                    let clean = completed && ctx.errors.len() == error_count;
+                    // 整体撤销只适用于完整写入的新目标。覆盖或目录合并含有
+                    // 既有数据，部分失败也不能把已有目标整棵删除/移回。
+                    if clean && !dst_existed && kind == OpKind::Copy && !ctx.cancelled {
                         ctx.written.push((dst.clone(), src.clone()));
                     }
-                    if copied && kind == OpKind::Move && !ctx.cancelled {
-                        // 跨盘/占用回退：复制成功后清理源。过滤移动
-                        // （move_prune）已逐文件 trash + 清空空目录，此处
-                        // 只除根并说明残留；非过滤且发生过校验失败时不整删。
+                    if completed && kind == OpKind::Move && !ctx.cancelled {
+                        // 跨盘/占用回退：复制执行完后清理源。任何跳过或失败
+                        // 都经 drop_source_unsafe 禁止非过滤移动的整源删除。
                         if ctx.drop_source_unsafe {
                             if ctx.move_prune {
                                 let _ = std::fs::remove_dir(verbatim_path(src));
@@ -943,13 +959,16 @@ fn run_op(
                                 ));
                             }
                         } else if ctx.move_prune {
-                            if std::fs::remove_dir(verbatim_path(src)).is_ok() {
+                            if std::fs::remove_dir(verbatim_path(src)).is_ok()
+                                && clean
+                                && !dst_existed
+                            {
                                 ctx.written.push((dst.clone(), src.clone()));
                             }
                         } else if let Err(e) = crate::platform::recycle_bin::delete(src) {
                             ctx.errors
                                 .push((src.clone(), format!("源移入回收站失败: {e}")));
-                        } else {
+                        } else if clean && !dst_existed {
                             ctx.written.push((dst.clone(), src.clone()));
                         }
                     }
@@ -1739,16 +1758,27 @@ fn copy_recursive(src: &Path, dst: &Path, mode: ConflictMode, ctx: &mut OpCtx) -
         ctx.progress.cur_total_bytes = 0;
         if let Err(e) = std::fs::create_dir_all(verbatim_path(dst)) {
             ctx.errors
-                .push((dst.to_path_buf(), format!("无法创建目录: {e}")));
+                .push((src.to_path_buf(), format!("无法创建目录: {e}")));
+            ctx.drop_source_unsafe = true;
         }
         ctx.progress.done_files += 1;
         ctx.send_progress();
         let Ok(rd) = std::fs::read_dir(verbatim_path(src)) else {
             ctx.errors
                 .push((src.to_path_buf(), "无法读取目录内容".to_string()));
+            ctx.drop_source_unsafe = true;
             return Ok(());
         };
-        for item in rd.flatten() {
+        for item in rd {
+            let item = match item {
+                Ok(item) => item,
+                Err(e) => {
+                    ctx.errors
+                        .push((src.to_path_buf(), format!("无法读取目录项: {e}")));
+                    ctx.drop_source_unsafe = true;
+                    continue;
+                }
+            };
             let child_src = item.path();
             let child_dst = dst.join(item.file_name());
             // 递归内部逐项冲突消解（目录↔目录合并在 resolve_dst 内判定）。
@@ -1757,6 +1787,7 @@ fn copy_recursive(src: &Path, dst: &Path, mode: ConflictMode, ctx: &mut OpCtx) -
                 Resolve::Skip => {
                     ctx.errors
                         .push((child_src.clone(), "目标已存在，已跳过".to_string()));
+                    ctx.drop_source_unsafe = true;
                     continue;
                 }
                 Resolve::Cancelled => return Err(()),
@@ -2239,6 +2270,7 @@ mod tests {
     struct FinishedLike {
         cancelled: bool,
         errors: Vec<(PathBuf, String)>,
+        written: Vec<(PathBuf, PathBuf)>,
     }
 
     fn run_op_sync(
@@ -2276,10 +2308,17 @@ mod tests {
         let mut finished = None;
         while let Ok(ev) = rx.try_recv() {
             if let OpEvent::Finished {
-                cancelled, errors, ..
+                cancelled,
+                errors,
+                written,
+                ..
             } = ev
             {
-                finished = Some(FinishedLike { cancelled, errors });
+                finished = Some(FinishedLike {
+                    cancelled,
+                    errors,
+                    written,
+                });
             }
         }
         finished.expect("worker must finish")
@@ -2333,6 +2372,90 @@ mod tests {
         assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"old");
     }
 
+    #[test]
+    fn copy_missing_source_does_not_record_undo_target() {
+        let t = TempTree::new("copy-missing-source");
+        let src = t.path().join("missing.txt");
+        let dest = t.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+
+        let r = run_copy_sync(vec![src], dest.clone(), ConflictMode::AutoRename);
+
+        assert_eq!(r.errors.len(), 1);
+        assert!(r.written.is_empty(), "失败项不得进入撤销记账");
+        assert!(!dest.join("missing.txt").exists());
+    }
+
+    #[test]
+    fn copy_directory_merge_does_not_record_preexisting_target_for_undo() {
+        let t = TempTree::new("copy-merge-undo");
+        let src = t.path().join("src/root");
+        write_file(&src.join("new.txt"), b"new");
+        let dest = t.path().join("dest");
+        write_file(&dest.join("root/existing.txt"), b"existing");
+
+        let r = run_copy_sync(vec![src], dest.clone(), ConflictMode::AutoRename);
+
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(r.written.is_empty(), "合并进已有目录不能按整个目标目录撤销");
+        assert_eq!(
+            std::fs::read(dest.join("root/existing.txt")).unwrap(),
+            b"existing"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn move_skip_nested_conflict_preserves_source() {
+        let t = TempTree::new("move-skip-nested");
+        let src = t.path().join("src/root");
+        write_file(&src.join("new.txt"), b"new");
+        write_file(&src.join("skip.txt"), b"source");
+        let dest = t.path().join("dest");
+        write_file(&dest.join("root/skip.txt"), b"target");
+
+        let r = run_op_sync(
+            OpKind::Move,
+            vec![src.clone()],
+            Some(dest.clone()),
+            ConflictMode::Skip,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert_eq!(r.errors.len(), 2, "冲突与源保留原因都应上报");
+        assert_eq!(r.errors[0].0, src.join("skip.txt"));
+        assert!(src.join("skip.txt").exists(), "跳过项的源不得被删除");
+        assert!(src.join("new.txt").exists(), "部分失败时不得整删源目录");
+        assert!(r.written.is_empty());
+        assert_eq!(
+            std::fs::read(dest.join("root/skip.txt")).unwrap(),
+            b"target"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn move_directory_onto_file_failure_preserves_source() {
+        let t = TempTree::new("move-dir-create-failure");
+        let src = t.path().join("src/root");
+        std::fs::create_dir_all(&src).unwrap();
+        let dest = t.path().join("dest");
+        write_file(&dest.join("root"), b"target");
+
+        let r = run_op_sync(
+            OpKind::Move,
+            vec![src.clone()],
+            Some(dest),
+            ConflictMode::Overwrite,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert_eq!(r.errors.len(), 2, "创建失败与源保留原因都应上报");
+        assert_eq!(r.errors[0].0, src);
+        assert!(src.exists(), "目标创建失败时不得删除源目录");
+        assert!(r.written.is_empty());
+    }
+
     fn answer(action: ConflictAction, apply_all: bool) -> ConflictAnswer {
         ConflictAnswer { action, apply_all }
     }
@@ -2373,9 +2496,16 @@ mod tests {
                     queries.push(q);
                 }
                 OpEvent::Finished {
-                    cancelled, errors, ..
+                    cancelled,
+                    errors,
+                    written,
+                    ..
                 } => {
-                    finished = Some(FinishedLike { cancelled, errors });
+                    finished = Some(FinishedLike {
+                        cancelled,
+                        errors,
+                        written,
+                    });
                 }
                 OpEvent::Progress(_) => {}
             }
@@ -2816,6 +2946,41 @@ mod tests {
     }
 
     #[test]
+    fn finished_copy_keeps_original_sources_and_retry_options() {
+        let t = TempTree::new("retry-options");
+        let src = t.path().join("missing.txt");
+        let dest = t.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        let opts = CopyOptions {
+            verify: true,
+            filter_pattern: "*.txt".to_string(),
+            filter_newer_days: 3,
+        };
+        let mut mgr = FileOpManager::default();
+        mgr.start_copy_opts(
+            vec![src.clone()],
+            dest,
+            ConflictMode::AutoRename,
+            opts.clone(),
+        );
+
+        let mut finished = None;
+        for _ in 0..200 {
+            let summary = mgr.poll();
+            if let Some(f) = summary.finished.into_iter().next() {
+                finished = Some(f);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let f = finished.expect("op should finish");
+        assert_eq!(f.sources, vec![src]);
+        assert_eq!(f.opts, opts);
+        assert_eq!(f.errors.len(), 1);
+    }
+
+    #[test]
     fn manager_compress_lifecycle() {
         let t = TempTree::new("compress");
         let src_dir = t.path().join("src");
@@ -3098,11 +3263,28 @@ mod tests {
         let gone = t.path().join("gone.txt");
         let errors = vec![
             (keep.clone(), "占用".to_string()),
-            (gone, "不存在".to_string()),
+            (gone.clone(), "不存在".to_string()),
             (keep.clone(), "重复项".to_string()),
         ];
-        assert_eq!(retry_sources(&errors), vec![keep]);
-        assert!(retry_sources(&[]).is_empty());
+        let sources = vec![keep.clone(), gone];
+        assert_eq!(retry_sources(&sources, &errors), vec![keep]);
+        assert!(retry_sources(&sources, &[]).is_empty());
+    }
+
+    #[test]
+    fn retry_nested_failure_uses_original_top_level_source() {
+        let t = TempTree::new("retry-nested");
+        let root = t.path().join("root");
+        let child = root.join("nested/a.txt");
+        write_file(&child, b"x");
+        let unrelated = t.path().join("unrelated.txt");
+        write_file(&unrelated, b"y");
+        let errors = vec![(child, "目标已存在，已跳过".to_string())];
+
+        assert_eq!(
+            retry_sources(&[root.clone(), unrelated], &errors),
+            vec![root]
+        );
     }
 
     // ---- 阶段 AB：复制后校验 / 高级过滤 ----
@@ -3279,10 +3461,17 @@ mod tests {
         let mut finished = None;
         while let Ok(ev) = rx.try_recv() {
             if let OpEvent::Finished {
-                cancelled, errors, ..
+                cancelled,
+                errors,
+                written,
+                ..
             } = ev
             {
-                finished = Some(FinishedLike { cancelled, errors });
+                finished = Some(FinishedLike {
+                    cancelled,
+                    errors,
+                    written,
+                });
             }
         }
         finished.expect("run_split 必有 Finished")
@@ -3298,10 +3487,17 @@ mod tests {
         let mut finished = None;
         while let Ok(ev) = rx.try_recv() {
             if let OpEvent::Finished {
-                cancelled, errors, ..
+                cancelled,
+                errors,
+                written,
+                ..
             } = ev
             {
-                finished = Some(FinishedLike { cancelled, errors });
+                finished = Some(FinishedLike {
+                    cancelled,
+                    errors,
+                    written,
+                });
             }
         }
         finished.expect("run_merge 必有 Finished")

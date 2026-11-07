@@ -17,7 +17,8 @@ an embedded `wry` webview; audio/video via embedded `libmpv`.
 - `openitgo-media/` — libmpv wrapper: commands, event pump, property observation, OpenGL
   render context, headless covers. `args.rs`/`apply.rs` 为 FFI-free 纯函数模块，CI 可测。
 - `openitgo-app/` — egui application, cache, loader, UI views.
-- `docs/` — audit reports, bug notes, implementation plans.
+- `docs/` — audit reports, bug notes, implementation plans；`state-machines.md` 是显式/隐式
+  状态、不变式、转换与已确认状态 bug 的单一记录，改状态语义时同步更新。
 
 ## Build & Test
 
@@ -99,7 +100,9 @@ cargo clippy --workspace --all-targets -- -D warnings
   （`open_archive_browser`）→ comic。图片分支 `open_image_as_comic` 把父目录作为漫画打开
   并置一次性 `pending_open_options`：`poll_opener` 在每书设置与历史恢复之后消费——定位该图
   （`find_image_page_index`）并强制单页；应用后同步 `last_saved_comic_settings` 快照，防止
-  「单页」被误存为长期每书设置。
+  「单页」被误存为长期每书设置。**所有打开入口遵守最后一次请求获胜**：
+  `cancel_pending_open` 取消旧 comic/ebook opener、archive router 与 password probe，
+  清旧密码框和一次性选项；不得让旧任务完成后覆盖新 Loading/内容视图。
 
 ### 压缩包引擎（parser 侧）
 
@@ -180,11 +183,15 @@ cargo clippy --workspace --all-targets -- -D warnings
   「本次操作全部应用」记忆为后续同级冲突策略（文件级/目录级各自独立）；目录↔目录非 Ask
   恒合并；AutoRename `name (1).ext`；移动 = `fs::rename` 快速路径，失败回退递归复制 +
   trash 源；取消清理半成品；不跟进符号链接目录（防环）；长路径经 `verbatim_path` 加
-  `\\?\` 前缀（>240 字符才加）。
+  `\\?\` 前缀（>240 字符才加）。**递归返回 Ok ≠ 完整成功**：嵌套 Skip、目录读取/创建、
+  目录项读取或文件复制/校验失败必须置 `drop_source_unsafe`，禁止非过滤 Move 整删源；
+  只有无新增错误且目标原本不存在的顶层项才进 `written` 整体撤销，覆盖/合并不入栈。
 - **队列（阶段 AA）**：并发上限 `max_concurrent`（settings `fm_op_threads`，默认 2，0=不限，
   ≤8）——超上限进 `queued` FIFO（不起线程、无进度），排队取消 = 静默出队。
-  `task_summaries()` 任务面板快照；`FinishedOp` 带 dest/conflict/delete_permanent 供
-  「重试失败项」（`retry_sources` 从 errors 过滤仍在的源）。
+  `task_summaries()` 任务面板快照；`FinishedOp` 带原顶层 sources、dest/conflict/opts/
+  delete_permanent 供「重试失败项」。`retry_sources(sources, errors)` 把子项错误映射回
+  原顶层源并过滤已消失项；Copy/Move 必须走 `start_*_opts` 保留过滤/校验，不得把子项
+  直接提升为顶层源（会把目录重试扁平化）。
 - **持久化模式**：`FileManagerView::snapshot()` 采集，`maybe_save_fm_state`（`App::update`
   末尾）diff 快照后写回 settings——**不自行落盘**，退出时 `on_exit` 统一 `save_settings`；
   快照在离开 FM 视图时重置。设置页改动经 `apply_layout_settings`/`set_button_bar`/
@@ -304,8 +311,8 @@ dirs_first 逐栏下发，RowsKey 自动失效。
   编辑/删除；写回同 fm_bookmark_groups 模式（视图副本 + 快照 diff + `set_button_bar` 同步）。
 - 任务面板 + 错误汇总（AA）：顶栏「任务」/点状态栏进度区开 `render_task_panel`（排队任务
   显示「排队中」）；状态栏只显示第一个在途 + `（+N 在途 +M 排队）`。errors 非空留存
-  `OpErrorReport` → `render_op_error_report` 虚拟化列失败项 + 「重试失败项」（不带
-  verify/filter 高级选项）。
+  `OpErrorReport` → `render_op_error_report` 虚拟化列失败项 + 「重试失败项」（沿用
+  原顶层源与 verify/filter 高级选项）。
 - 复制校验/过滤/压缩暂停（AB）：`CopyOptions{verify, filter_pattern, filter_newer_days}`；
   `copy_filter_matches` 预扫描与执行共用（目录恒保留）；verify 经 `files_identical` 第二轮
   进度。**过滤 + Move**：禁 rename 快速路径；`ctx.move_prune` 逐文件 trash 已拷源；
@@ -325,10 +332,11 @@ dirs_first 逐栏下发，RowsKey 自动失效。
 - 比较内容（AF）：`file_manager_compare.rs` `CompareDialog`（选中恰 2 个非目录，或双栏
   「比较两栏焦点文件」）；`binary_compare` 快比 + `text_diff`（自实现 LCS u16 DP，行数乘积
   >4001×4001 回退）；单 ScrollArea 左右对照（天然联动滚动）。
-- 撤销（AG）：`file_manager_undo.rs` `UndoStack` 会话内上限 32。可撤销：Copy（撤销 = 目标集
-  Delete 进回收站）、Move、Rename/MultiRename（批量逆序回改防互换命名相撞）、NewFile/NewDir；
-  Delete/覆盖写/Compress/Split/Merge/属性不可撤销——不入栈也**不清空栈**。记账点：Copy/Move
-  在 `on_op_finished` 按 `FinishedOp.written`（实际写入的顶层对，AutoRename 后为准）。
+- 撤销（AG）：`file_manager_undo.rs` `UndoStack` 会话内上限 32。可撤销：完整写入新目标的
+  Copy（撤销 = 目标集 Delete 进回收站）/Move、Rename/MultiRename（批量逆序回改防互换
+  命名相撞）、NewFile/NewDir；Delete/覆盖写/目录合并/部分失败/Compress/Split/Merge/属性
+  不可整体撤销——不入栈也**不清空栈**。记账点：Copy/Move 在 `on_op_finished` 按
+  `FinishedOp.written`（clean 且原本不存在的顶层目标对，AutoRename 后为准）。
   执行 `plan_undo` 纯函数 + `precheck`（Trash 目标缺失跳过；RenameBack **改回位置被占用**
   跳过，防覆盖第三方文件）。入口 Ctrl+Z + 右键动态项「撤销 {label}」。
 - 树形面板（AH）：`file_manager_tree.rs` `DirTree`——双栏下 Alt+F10 把**非活动栏**整栏替换

@@ -2721,10 +2721,7 @@ impl ReaderApp {
                         }
                         ui.add_space(16.0);
                         if ui.button("取消").clicked() {
-                            self.opener = None;
-                            self.ebook_opener = None;
-                            self.password_probe = None;
-                            self.archive_router = None;
+                            self.cancel_pending_open();
                             self.current_view = View::Library;
                         }
                         if let Some(err) = &self.error_message {
@@ -2740,8 +2737,7 @@ impl ReaderApp {
 
     /// 打开压缩包浏览视图（库卡片右键「浏览压缩包」入口）。
     fn open_archive_browser(&mut self, path: PathBuf) {
-        // 直接进浏览视图，取消在途的启发式分流任务。
-        self.archive_router = None;
+        self.cancel_pending_open();
         self.archive_view.open(path.clone());
         self.current_view = View::Archive(path);
         self.error_message = None;
@@ -5052,11 +5048,23 @@ impl ReaderApp {
         let _ = self.store.save_library(&self.library_view.library);
     }
 
+    /// 打开请求是单代际状态：新请求取代漫画/电子书解析、压缩包分流和
+    /// 密码探测中的全部旧任务。Drop AsyncOpener 会置协作取消旗标，旧结果
+    /// 因此没有可写回的接收状态，更不能在稍后覆盖新请求的视图。
+    fn cancel_pending_open(&mut self) {
+        self.opener = None;
+        self.ebook_opener = None;
+        self.archive_router = None;
+        self.password_probe = None;
+        self.password_dialog = None;
+        self.opening_path = None;
+        self.pending_open_options = None;
+    }
+
     fn open_comic(&mut self, path: std::path::PathBuf) {
         timing::log(&format!("open_comic {:?}", path));
+        self.cancel_pending_open();
         self.page_scroll_acc = 0.0;
-        // 清掉上一次双击图片遗留的一次性选项；open_image_as_comic 在本调用之后重新设置。
-        self.pending_open_options = None;
         let password = self.passwords.get(&path).cloned();
         self.opener = Some(AsyncOpener::open(path.clone(), move |p| {
             openitgo_parser::parse_with_password(p, password.as_deref()).map_err(|e| match e {
@@ -5086,6 +5094,7 @@ impl ReaderApp {
 
     fn open_ebook(&mut self, path: std::path::PathBuf) {
         timing::log(&format!("open_ebook {:?}", path));
+        self.cancel_pending_open();
         self.ebook_opener = Some(AsyncOpener::open(path.clone(), |p| {
             openitgo_parser::parse_ebook(p).map_err(|e| e.to_string())
         }));
@@ -5113,8 +5122,7 @@ impl ReaderApp {
     }
 
     fn open_path(&mut self, path: std::path::PathBuf) {
-        // 新的打开请求取代在途的启发式分流任务。
-        self.archive_router = None;
+        self.cancel_pending_open();
         // 多卷 RAR 归一到首卷（存在才换；卷链由 unrar 处理）。
         let path = normalize_rar_volume_path(&path);
         if is_ebook_file(&path) {
@@ -5203,6 +5211,7 @@ impl ReaderApp {
     /// 双击压缩包浏览视图中的图片条目：以漫画打开并定位到该页。
     /// 快路径：同一漫画已打开时直接跳页，不重新解析。
     fn open_entry_as_comic(&mut self, archive_path: &Path, entry_name: String) {
+        self.cancel_pending_open();
         if let Some(reader) = self.reader_view.open.as_mut() {
             if reader.comic.path == archive_path {
                 let total = reader.total_pages();
@@ -7413,6 +7422,56 @@ mod tests {
         assert!(matches!(app.current_view, View::Loading(_)));
         assert!(app.ebook_opener.is_some());
         assert!(app.opener.is_none());
+    }
+
+    #[test]
+    fn new_open_request_cancels_superseded_comic_opener() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let (cancelled_tx, cancelled_rx) = std::sync::mpsc::channel();
+        app.opener = Some(AsyncOpener::open_cancellable(
+            PathBuf::from("/tmp/old.cbz"),
+            move |_, cancel| {
+                while !cancel.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let _ = cancelled_tx.send(());
+                Err("已取消".to_string())
+            },
+        ));
+        app.opening_path = Some(PathBuf::from("/tmp/old.cbz"));
+
+        app.open_path(PathBuf::from("/tmp/new.epub"));
+
+        assert!(app.opener.is_none());
+        assert!(app.opening_path.is_none());
+        cancelled_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    }
+
+    #[test]
+    fn new_open_request_cancels_stale_password_probe() {
+        let (mut app, _tmp) = app_with_temp_store();
+        let old = PathBuf::from("/tmp/encrypted.cbz");
+        app.password_probe = Some((
+            old.clone(),
+            PasswordPromptKind::Required,
+            AsyncOpener::open(old, |_| Ok(None)),
+        ));
+
+        app.open_path(PathBuf::from("/tmp/new.epub"));
+        let ctx = egui::Context::default();
+        for _ in 0..200 {
+            app.poll_password_probe(&ctx);
+            if app.password_dialog.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(app.password_probe.is_none());
+        assert!(app.password_dialog.is_none());
+        assert!(
+            matches!(&app.current_view, View::Loading(path) if path == Path::new("/tmp/new.epub"))
+        );
     }
 
     #[test]
