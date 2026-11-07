@@ -140,3 +140,66 @@
 8. 设置和快捷键页面。
 9. 字体、动效、图标与阴影。
 10. 全量验证及安装包更新。
+
+## 新 Agent 交接
+
+### 当前状态
+
+- 工作分支：`feat/fluent2-ui`。
+- 本交接写入前的最新提交：`822ad0f docs: 记录 Fluent 2 修正验证结果`。
+- 主要功能、完整测试、Clippy、Release 构建和覆盖安装均已完成。
+- 不要重做已经打勾的项目；先读取当前代码和 `git log`，再处理下面的未完成项。
+- 每完成一项更新对应检查框，运行相关验证并独立提交。不要把未完成验证标为完成。
+
+### 任务 A：菜单统一进入/退出动效
+
+当前状态：`theme::motion::animate_visibility` 已覆盖工具栏、状态栏和共享模态对话框；egui 0.35 `Popup` 没有统一的退出动画通道，因此菜单项仍未完成。
+
+实施要求：
+
+1. 先研究 `egui::Popup` 的 open memory、`PopupCloseBehavior` 和 Area 生命周期，优先在 app 侧封装，不修改 vendor/依赖源码。
+2. 菜单打开/关闭必须保持现有命令事件、选中状态、键盘焦点和 `menu_overlay_open` 语义。
+3. 退出动画期间不能因为指针离开而让全屏工具栏消失。
+4. Esc、点击外部、选择命令三条关闭路径都要验证；结果不能重复执行。
+5. 开启“减少动态效果”后应立即显隐。
+6. 如果确认无法安全实现统一退出动画，保留未完成状态并记录具体 API 阻碍，不要用只有淡入的实现冒充完成。
+
+相关文件：`openitgo-app/src/theme/motion.rs`、`openitgo-app/src/app.rs`、`openitgo-app/src/widgets/dialog.rs`。
+
+### 任务 B：电子书与媒体 smoke
+
+当前缺少可直接使用的 EPUB/媒体样本。获得样本后分别运行：
+
+```bash
+scripts/cargo-win.bat run -p openitgo-app --example probe_ebook_menu -- <epub-path>
+scripts/cargo-win.bat run -p openitgo-app --example media_smoke -- <media-path>
+```
+
+- 电子书可用 `scripts/make-big-chapter-epub.py` 生成测试书，但先阅读脚本参数。
+- 媒体使用小型、合法且可解码的本地音视频文件；不要为大文件下载或生成任务扩大范围。
+- 必须看到示例自身的成功条件，而不只是进程退出；超时也会关闭窗口，不能据此判成功。
+- 同时验证减少动态效果开启时翻页/菜单行为正常。
+
+### 任务 C：最终安装版组合复验
+
+先确认当前代码没有其他未提交修改，再执行完整流水线、打包和覆盖安装：
+
+```bash
+scripts/cargo-win.bat fmt --all
+scripts/cargo-win.bat check --workspace
+scripts/cargo-win.bat test --workspace
+scripts/cargo-win.bat clippy --workspace --all-targets -- -D warnings
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1
+```
+
+安装到现有目录 `F:\Program Files\OpenItGo`，不要清除用户配置、书库或历史。可使用 `openitgo-parser/tests/sample.pdf` 做阅读器验证。
+
+至少逐项验证：
+
+- 书架卡片 Tab 聚焦、Enter 打开、Shift+F10 打开菜单。
+- “管理 → 清空书架”默认聚焦取消，Esc/Enter 取消后条目不变。
+- 文件删除或永久删除确认默认聚焦取消，不执行真实删除。
+- 窄窗口“更多”菜单与全屏“退出全屏”按钮可直接点击。
+- 安装后的 `OpenItGo.exe` 与 `dist/OpenItGo/OpenItGo.exe` 哈希一致。
+
+完成 A/B/C 后更新本文件并分别提交。若某项受外部条件阻塞，保持 `[ ]` 并在交接记录中写明阻塞原因和已验证范围。
