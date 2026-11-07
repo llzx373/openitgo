@@ -61,6 +61,7 @@ mod tests {
                 href: format!("#c{i}"),
                 title: Some(format!("章 {i}")),
                 level,
+                text: None,
             })
             .collect()
     }

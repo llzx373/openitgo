@@ -4,13 +4,36 @@ use openitgo_core::ebook::Ebook;
 use std::path::Path;
 
 const CHAPTER_WORDS: usize = 3000;
+const MAX_CHAPTER_HTML_BYTES: usize = 4 * 1024 * 1024;
+
+fn wrap_text_chapter_html(html: String) -> Result<String, ParseError> {
+    if html.len() > MAX_CHAPTER_HTML_BYTES {
+        return Err(ParseError::InvalidText(
+            "章节 HTML 过大，无法安全渲染".to_string(),
+        ));
+    }
+    let wrapped = format!("<div class=\"chapter\">{}</div>", html);
+    if wrapped.len() > MAX_CHAPTER_HTML_BYTES {
+        return Err(ParseError::InvalidText(
+            "章节 HTML 过大，无法安全渲染".to_string(),
+        ));
+    }
+    Ok(wrapped)
+}
 
 /// Render a single chapter of an ebook as HTML.
 pub fn render_chapter_html(ebook: &Ebook, chapter_index: usize) -> Result<String, ParseError> {
     let path = &ebook.path;
 
     if is_text_like_path(path) {
-        let text = crate::text_encoding::read_text_lossy(path)?;
+        if ebook.text.is_some() && !is_markdown_path(path) {
+            let body = crate::text_index::read_chapter(ebook, chapter_index)?;
+            return wrap_text_chapter_html(plain_text_to_html(&body));
+        }
+        let text = crate::text_encoding::read_text_lossy_limited(
+            path,
+            crate::text_encoding::FULL_TEXT_MAX_BYTES,
+        )?;
         let is_md = is_markdown_path(path);
         let body = if is_md {
             let parts = crate::chapters::split_markdown(&text);
@@ -40,17 +63,26 @@ pub fn render_chapter_html(ebook: &Ebook, chapter_index: usize) -> Result<String
         } else {
             plain_text_to_html(&body)
         };
-        Ok(format!("<div class=\"chapter\">{}</div>", html))
+        wrap_text_chapter_html(html)
     } else if is_mobi_path(path) {
+        if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+            > crate::text_encoding::FULL_TEXT_MAX_BYTES * 4
+        {
+            return Err(ParseError::InvalidMobi(
+                "MOBI 文件过大，无法安全打开".to_string(),
+            ));
+        }
         let book =
             mobi::Mobi::from_path(path).map_err(|e| ParseError::InvalidMobi(format!("{}", e)))?;
         let text = book.content_as_string_lossy();
+        if text.len() as u64 > crate::text_encoding::FULL_TEXT_MAX_BYTES {
+            return Err(ParseError::InvalidMobi(
+                "MOBI 解码内容过大，无法安全打开".to_string(),
+            ));
+        }
         let parts = split_by_word_count(&text, CHAPTER_WORDS);
         let (_, body) = parts.get(chapter_index).ok_or(ParseError::NoPages)?.clone();
-        Ok(format!(
-            "<div class=\"chapter\">{}</div>",
-            plain_text_to_html(&body)
-        ))
+        wrap_text_chapter_html(plain_text_to_html(&body))
     } else if is_epub_path(path) {
         let mut doc =
             epub::doc::EpubDoc::new(path).map_err(|e| ParseError::InvalidEpub(format!("{}", e)))?;
@@ -911,7 +943,9 @@ mod tests {
                 href: "#ch1".to_string(),
                 title: Some("Chapter 1".to_string()),
                 level: 0,
+                text: None,
             }],
+            text: None,
         }
     }
 

@@ -1,11 +1,32 @@
 use crate::traits::ParseError;
 use std::path::Path;
 
+pub(crate) const FULL_TEXT_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Read a text file as UTF-8, detecting legacy encodings (GBK/GB18030/Big5/...)
 /// when the bytes are not valid UTF-8. Invalid sequences are replaced (lossy).
 pub fn read_text_lossy(path: &Path) -> Result<String, ParseError> {
     let bytes = std::fs::read(path).map_err(|e| ParseError::InvalidText(format!("{}", e)))?;
     Ok(decode_text_bytes(&bytes))
+}
+
+pub(crate) fn read_text_lossy_limited(path: &Path, max_bytes: u64) -> Result<String, ParseError> {
+    let size = std::fs::metadata(path)
+        .map_err(|e| ParseError::InvalidText(e.to_string()))?
+        .len();
+    if size > max_bytes {
+        return Err(ParseError::InvalidText(format!(
+            "文本文件过大（{} 字节），当前格式无法安全打开",
+            size
+        )));
+    }
+    let text = read_text_lossy(path)?;
+    if text.len() as u64 > max_bytes {
+        return Err(ParseError::InvalidText(
+            "解码后的文本过大，无法安全打开".to_string(),
+        ));
+    }
+    Ok(text)
 }
 
 /// Decode raw bytes: UTF-8 fast path (optional BOM stripped), otherwise

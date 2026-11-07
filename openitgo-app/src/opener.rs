@@ -1,6 +1,8 @@
 use crate::timing;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OpenStatus<T> {
@@ -11,6 +13,7 @@ pub enum OpenStatus<T> {
 pub struct AsyncOpener<T> {
     receiver: Receiver<Result<T, String>>,
     cached: Option<Result<T, String>>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl<T: Send + Clone + 'static> AsyncOpener<T> {
@@ -18,11 +21,20 @@ impl<T: Send + Clone + 'static> AsyncOpener<T> {
     where
         F: FnOnce(&Path) -> Result<T, String> + Send + 'static,
     {
+        Self::open_cancellable(path, move |path, _| parser(path))
+    }
+
+    pub fn open_cancellable<F>(path: PathBuf, parser: F) -> Self
+    where
+        F: FnOnce(&Path, Arc<AtomicBool>) -> Result<T, String> + Send + 'static,
+    {
         let (tx, rx) = channel();
         let path_clone = path.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
         std::thread::spawn(move || {
             timing::log(&format!("AsyncOpener parsing {:?}", path_clone));
-            let result = timing::time("AsyncOpener parse", || parser(&path_clone));
+            let result = timing::time("AsyncOpener parse", || parser(&path_clone, worker_cancel));
             timing::log(&format!(
                 "AsyncOpener result: {:?}",
                 result.as_ref().map(|_| "Ok")
@@ -32,6 +44,7 @@ impl<T: Send + Clone + 'static> AsyncOpener<T> {
         Self {
             receiver: rx,
             cached: None,
+            cancel,
         }
     }
 
@@ -51,6 +64,12 @@ impl<T: Send + Clone + 'static> AsyncOpener<T> {
                 OpenStatus::Ready(result)
             }
         }
+    }
+}
+
+impl<T> Drop for AsyncOpener<T> {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
     }
 }
 
@@ -134,5 +153,23 @@ mod tests {
         let first = opener.poll();
         let second = opener.poll();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn drop_sets_cancellation_flag() {
+        let (started_tx, started_rx) = channel();
+        let (cancelled_tx, cancelled_rx) = channel();
+        let opener =
+            AsyncOpener::<Comic>::open_cancellable(PathBuf::from("/tmp/test"), move |_, cancel| {
+                started_tx.send(()).unwrap();
+                while !cancel.load(Ordering::Acquire) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                cancelled_tx.send(()).unwrap();
+                Err("已取消".to_string())
+            });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        drop(opener);
+        cancelled_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     }
 }

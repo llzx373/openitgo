@@ -118,6 +118,7 @@ impl EpubParser {
                     href: point.content.to_string_lossy().to_string(),
                     title: Some(point.label.trim().to_string()),
                     level: depth,
+                    text: None,
                 });
                 *base_idx += 1;
                 chapters.extend(collect_navpoints(&point.children, base_idx, depth + 1));
@@ -152,6 +153,7 @@ impl EpubParser {
                     href,
                     title,
                     level: 0,
+                    text: None,
                 });
             }
         }
@@ -169,6 +171,7 @@ impl EpubParser {
             resources,
             spine,
             chapters,
+            text: None,
         })
     }
 }

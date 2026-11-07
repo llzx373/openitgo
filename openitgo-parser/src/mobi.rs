@@ -21,6 +21,13 @@ impl MobiParser {
     }
 
     pub fn parse(path: &Path) -> Result<Ebook, ParseError> {
+        if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+            > crate::text_encoding::FULL_TEXT_MAX_BYTES * 4
+        {
+            return Err(ParseError::InvalidMobi(
+                "MOBI 文件过大，无法安全打开".to_string(),
+            ));
+        }
         let book =
             mobi::Mobi::from_path(path).map_err(|e| ParseError::InvalidMobi(format!("{}", e)))?;
 
@@ -37,6 +44,11 @@ impl MobiParser {
         let content = book
             .content_as_string()
             .map_err(|e| ParseError::InvalidMobi(format!("{}", e)))?;
+        if content.len() as u64 > crate::text_encoding::FULL_TEXT_MAX_BYTES {
+            return Err(ParseError::InvalidMobi(
+                "MOBI 解码内容过大，无法安全打开".to_string(),
+            ));
+        }
 
         let raw_chapters = split_by_word_count(&content, CHAPTER_WORDS);
         let chapters: Vec<EbookChapter> = build_chapters(raw_chapters);
@@ -58,6 +70,7 @@ impl MobiParser {
             resources: Vec::new(),
             spine: Vec::new(),
             chapters,
+            text: None,
         })
     }
 }

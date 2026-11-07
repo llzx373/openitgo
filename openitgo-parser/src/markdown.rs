@@ -16,7 +16,10 @@ impl MarkdownParser {
     }
 
     pub fn parse(path: &Path) -> Result<Ebook, ParseError> {
-        let text = crate::text_encoding::read_text_lossy(path)?;
+        let text = crate::text_encoding::read_text_lossy_limited(
+            path,
+            crate::text_encoding::FULL_TEXT_MAX_BYTES,
+        )?;
 
         if text.trim().is_empty() {
             return Err(ParseError::NoPages);

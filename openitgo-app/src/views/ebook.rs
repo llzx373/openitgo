@@ -57,7 +57,7 @@ pub struct OpenEbook {
 }
 
 impl EbookView {
-    pub fn open(
+    pub fn open_with_position(
         &mut self,
         ctx: &egui::Context,
         parent: &(impl wry::raw_window_handle::HasWindowHandle
@@ -65,12 +65,23 @@ impl EbookView {
         bounds: Rect,
         ebook: Ebook,
         settings: &EbookSettings,
+        initial_position: (usize, usize),
     ) -> Result<(), String> {
-        let renderer = EbookRenderer::new(parent, bounds, ebook.clone(), settings.clone(), ctx)?;
+        let (initial_chapter, initial_offset) = initial_position;
+        let initial_chapter = initial_chapter.min(ebook.total_chapters().saturating_sub(1));
+        let renderer = EbookRenderer::new_with_position(
+            parent,
+            bounds,
+            ebook.clone(),
+            settings.clone(),
+            initial_chapter,
+            initial_offset,
+            ctx,
+        )?;
         self.open = Some(OpenEbook {
             ebook,
             renderer,
-            current_chapter: 0,
+            current_chapter: initial_chapter,
             current_spread: 0,
             search: SearchState::default(),
             webview_hidden: false,
@@ -183,12 +194,11 @@ impl EbookView {
         })
     }
 
-    /// Navigates to a chapter.
-    pub fn goto_chapter(&mut self, chapter: usize) {
+    pub fn goto_position(&mut self, chapter: usize, offset: usize) {
         if let Some(open) = self.open.as_mut() {
             let chapter = chapter.min(open.ebook.total_chapters().saturating_sub(1));
             open.current_chapter = chapter;
-            open.renderer.goto_chapter(chapter, 0);
+            open.renderer.goto_chapter(chapter, offset);
         }
     }
 
@@ -322,6 +332,7 @@ mod tests {
                     href: "ch1.xhtml".to_string(),
                     title: Some("第一章".to_string()),
                     level: 0,
+                    text: None,
                 },
                 EbookChapter {
                     index: 1,
@@ -329,8 +340,10 @@ mod tests {
                     href: "ch2.xhtml".to_string(),
                     title: Some("第二章".to_string()),
                     level: 1,
+                    text: None,
                 },
             ],
+            text: None,
         }
     }
 

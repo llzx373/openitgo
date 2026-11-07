@@ -152,6 +152,7 @@ pub fn build_chapters_leveled(parts: Vec<(usize, Option<String>, String)>) -> Ve
                 href: format!("#{}", id),
                 title,
                 level,
+                text: None,
             }
         })
         .collect()
@@ -173,6 +174,7 @@ pub fn text_ebook(path: &Path, chapters: Vec<EbookChapter>) -> Ebook {
         resources: Vec::new(),
         spine: Vec::new(),
         chapters,
+        text: None,
     }
 }
 

@@ -14,6 +14,7 @@ pub mod mobi;
 pub mod pdf;
 pub mod rar;
 pub mod text_encoding;
+pub(crate) mod text_index;
 pub mod traits;
 pub mod txt;
 pub mod zip;
@@ -51,12 +52,26 @@ pub fn parse_with_password(path: &Path, password: Option<&str>) -> Result<Comic,
 }
 
 pub fn parse_ebook(path: &Path) -> Result<Ebook, ParseError> {
+    parse_ebook_inner(path, None)
+}
+
+pub fn parse_ebook_with_cancel(
+    path: &Path,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<Ebook, ParseError> {
+    parse_ebook_inner(path, Some(cancel))
+}
+
+fn parse_ebook_inner(
+    path: &Path,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<Ebook, ParseError> {
     if EpubParser::supports(path) {
         EpubParser::parse(path)
     } else if MobiParser::supports(path) {
         MobiParser::parse(path)
     } else if TxtParser::supports(path) {
-        TxtParser::parse(path)
+        TxtParser::parse_with_cancel(path, cancel)
     } else if MarkdownParser::supports(path) {
         MarkdownParser::parse(path)
     } else {

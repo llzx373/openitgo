@@ -6,7 +6,9 @@ use wry::{Rect, WebView, WebViewBuilder};
 
 #[path = "ebook_renderer_template.rs"]
 mod ebook_renderer_template;
+#[cfg(test)]
 use ebook_renderer_template::reader_html;
+use ebook_renderer_template::reader_html_with_position;
 
 pub struct EbookRenderer {
     webview: WebView,
@@ -14,7 +16,7 @@ pub struct EbookRenderer {
 }
 
 struct RendererState {
-    ebook: Ebook,
+    ebook: Arc<Ebook>,
     current_chapter: usize,
     char_offset: usize,
     current_spread: usize,
@@ -76,19 +78,21 @@ impl From<&EbookSettings> for JsSettings {
 }
 
 impl EbookRenderer {
-    pub fn new<
+    pub fn new_with_position<
         W: wry::raw_window_handle::HasWindowHandle + wry::raw_window_handle::HasDisplayHandle,
     >(
         parent: &W,
         bounds: Rect,
         ebook: Ebook,
         settings: EbookSettings,
+        initial_chapter: usize,
+        initial_offset: usize,
         ctx: &egui::Context,
     ) -> Result<Self, String> {
         let state = Arc::new(Mutex::new(RendererState {
-            ebook,
-            current_chapter: 0,
-            char_offset: 0,
+            ebook: Arc::new(ebook),
+            current_chapter: initial_chapter,
+            char_offset: initial_offset,
             current_spread: 0,
             total_spreads: 1,
             settings,
@@ -134,6 +138,9 @@ impl EbookRenderer {
 
     pub fn set_animation_enabled(&mut self, enabled: bool) {
         let settings = if let Ok(mut state) = self.state.lock() {
+            if state.settings.enable_page_animation == enabled {
+                return;
+            }
             state.settings.enable_page_animation = enabled;
             state.settings.clone()
         } else {
@@ -163,22 +170,6 @@ impl EbookRenderer {
         let js = format!("loadChapter({}, {});", chapter, offset);
         if let Err(e) = self.webview.evaluate_script(&js) {
             eprintln!("EbookRenderer::goto_chapter failed: {e}");
-        }
-        // Warm the parser cache for the chapters the user is most likely to
-        // open next. The JS side also preloads on its own navigation paths;
-        // these calls are idempotent and cheap if already done.
-        if chapter > 0 {
-            self.preload_chapter(chapter - 1);
-        }
-        self.preload_chapter(chapter + 1);
-    }
-
-    /// Ask the webview to fetch and parse a chapter into an inert template.
-    /// This is best-effort and does not change the visible page.
-    pub fn preload_chapter(&self, chapter: usize) {
-        let js = format!("preloadChapter({});", chapter);
-        if let Err(e) = self.webview.evaluate_script(&js) {
-            eprintln!("EbookRenderer::preload_chapter failed: {e}");
         }
     }
 
@@ -310,8 +301,13 @@ fn handle_ebook_protocol(
 ) -> wry::http::Response<Cow<'static, [u8]>> {
     let path = request.uri().path();
 
-    let state = match state.lock() {
-        Ok(s) => s,
+    let (ebook, settings, initial_chapter, initial_offset) = match state.lock() {
+        Ok(state) => (
+            Arc::clone(&state.ebook),
+            state.settings.clone(),
+            state.current_chapter,
+            state.char_offset,
+        ),
         Err(e) => {
             eprintln!("EbookRenderer: mutex poisoned in protocol handler: {e}");
             return wry::http::Response::builder()
@@ -325,7 +321,7 @@ fn handle_ebook_protocol(
     if let Some(ch) = query.strip_prefix("chapter=") {
         if let Ok(idx) = ch.parse::<usize>() {
             eprintln!("EbookRenderer: serving chapter {idx}");
-            match openitgo_parser::html::render_chapter_html(&state.ebook, idx) {
+            match openitgo_parser::html::render_chapter_html(&ebook, idx) {
                 Ok(html) => {
                     return wry::http::Response::builder()
                         .header("Content-Type", "application/xhtml+xml; charset=utf-8")
@@ -341,20 +337,33 @@ fn handle_ebook_protocol(
     }
 
     if path == "/reader" || path == "/" || path.is_empty() {
-        let chapter_count = state.ebook.total_chapters();
+        let chapter_count = ebook.total_chapters();
+        let preload_enabled = !ebook
+            .path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| {
+                matches!(ext.to_ascii_lowercase().as_str(), "txt" | "md" | "markdown")
+            });
         return wry::http::Response::builder()
             .header("Content-Type", "text/html; charset=utf-8")
             .header("Cache-Control", "no-cache, no-store, must-revalidate")
             .body(
-                reader_html(&state.settings, chapter_count)
-                    .into_bytes()
-                    .into(),
+                reader_html_with_position(
+                    &settings,
+                    chapter_count,
+                    initial_chapter,
+                    initial_offset,
+                    preload_enabled,
+                )
+                .into_bytes()
+                .into(),
             )
             .unwrap();
     }
 
     if let Some(res_path) = decode_res_path(path) {
-        match openitgo_parser::html::read_epub_resource(&state.ebook, &res_path) {
+        match openitgo_parser::html::read_epub_resource(&ebook, &res_path) {
             Some((mime, bytes)) => {
                 return wry::http::Response::builder()
                     .header("Content-Type", mime)
@@ -369,7 +378,7 @@ fn handle_ebook_protocol(
     }
 
     if let Some(rel) = decode_file_path(path) {
-        match openitgo_parser::html::read_text_resource(&state.ebook, &rel) {
+        match openitgo_parser::html::read_text_resource(&ebook, &rel) {
             Some((mime, bytes)) => {
                 eprintln!("EbookRenderer: serving file resource {rel}");
                 return wry::http::Response::builder()
@@ -464,7 +473,7 @@ mod tests {
             ebook.resources
         );
         let state = Arc::new(Mutex::new(RendererState {
-            ebook,
+            ebook: Arc::new(ebook),
             current_chapter: 0,
             char_offset: 0,
             current_spread: 0,
@@ -505,7 +514,7 @@ mod tests {
 
     fn state_for_ebook(ebook: Ebook) -> Arc<Mutex<RendererState>> {
         Arc::new(Mutex::new(RendererState {
-            ebook,
+            ebook: Arc::new(ebook),
             current_chapter: 0,
             char_offset: 0,
             current_spread: 0,
@@ -514,6 +523,29 @@ mod tests {
             search_count: 0,
             search_active: -1,
         }))
+    }
+
+    #[test]
+    fn reader_request_uses_saved_position_and_disables_txt_preload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.txt");
+        std::fs::write(&path, "正文").unwrap();
+        let ebook = openitgo_parser::parse_ebook(&path).unwrap();
+        let state = state_for_ebook(ebook);
+        {
+            let mut state = state.lock().unwrap();
+            state.current_chapter = 3;
+            state.char_offset = 456;
+        }
+        let request = wry::http::Request::builder()
+            .uri("ebook://reader/reader")
+            .body(Vec::new())
+            .unwrap();
+        let response = handle_ebook_protocol(&state, request);
+        let html = String::from_utf8(response.body().to_vec()).unwrap();
+        assert!(html.contains("loadChapter(3, 456);"));
+        assert!(!html.contains("loadChapter(0, 0);"));
+        assert!(html.contains("const preloadEnabled = false;"));
     }
 
     #[test]
@@ -654,7 +686,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
 
         let state = Arc::new(Mutex::new(RendererState {
-            ebook: Ebook {
+            ebook: Arc::new(Ebook {
                 id: "test".to_string(),
                 title: "Test".to_string(),
                 path: PathBuf::from("/tmp/test.epub"),
@@ -663,7 +695,8 @@ mod tests {
                 resources: Vec::new(),
                 spine: Vec::new(),
                 chapters: Vec::new(),
-            },
+                text: None,
+            }),
             current_chapter: 0,
             char_offset: 0,
             current_spread: 0,
@@ -692,7 +725,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
 
         let state = Arc::new(Mutex::new(RendererState {
-            ebook: Ebook {
+            ebook: Arc::new(Ebook {
                 id: "test".to_string(),
                 title: "Test".to_string(),
                 path: PathBuf::from("/tmp/test.epub"),
@@ -701,7 +734,8 @@ mod tests {
                 resources: Vec::new(),
                 spine: Vec::new(),
                 chapters: Vec::new(),
-            },
+                text: None,
+            }),
             current_chapter: 0,
             char_offset: 0,
             current_spread: 0,
@@ -726,7 +760,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
 
         let state = Arc::new(Mutex::new(RendererState {
-            ebook: Ebook {
+            ebook: Arc::new(Ebook {
                 id: "test".to_string(),
                 title: "Test".to_string(),
                 path: PathBuf::from("/tmp/test.epub"),
@@ -735,7 +769,8 @@ mod tests {
                 resources: Vec::new(),
                 spine: Vec::new(),
                 chapters: Vec::new(),
-            },
+                text: None,
+            }),
             current_chapter: 0,
             char_offset: 0,
             current_spread: 0,
@@ -763,7 +798,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
 
         let state = Arc::new(Mutex::new(RendererState {
-            ebook: Ebook {
+            ebook: Arc::new(Ebook {
                 id: "test".to_string(),
                 title: "Test".to_string(),
                 path: PathBuf::from("/tmp/test.epub"),
@@ -772,7 +807,8 @@ mod tests {
                 resources: Vec::new(),
                 spine: Vec::new(),
                 chapters: Vec::new(),
-            },
+                text: None,
+            }),
             current_chapter: 0,
             char_offset: 0,
             current_spread: 0,
@@ -842,10 +878,12 @@ mod tests {
                 href: "c.xhtml".to_string(),
                 title: None,
                 level: 0,
+                text: None,
             }],
+            text: None,
         };
         Arc::new(Mutex::new(RendererState {
-            ebook,
+            ebook: Arc::new(ebook),
             current_chapter: 0,
             char_offset: 0,
             current_spread: 0,

@@ -2,6 +2,8 @@ use crate::chapters::{build_chapters, split_by_heading, split_by_word_count, tex
 use crate::traits::ParseError;
 use openitgo_core::ebook::Ebook;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 pub struct TxtParser;
 
@@ -29,6 +31,18 @@ impl TxtParser {
     }
 
     pub fn parse(path: &Path) -> Result<Ebook, ParseError> {
+        Self::parse_with_cancel(path, None)
+    }
+
+    pub fn parse_with_cancel(
+        path: &Path,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<Ebook, ParseError> {
+        if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+            > crate::text_index::STREAM_THRESHOLD_BYTES
+        {
+            return crate::text_index::parse_streaming_with_cancel(path, cancel);
+        }
         let text = crate::text_encoding::read_text_lossy(path)?;
 
         if text.trim().is_empty() {

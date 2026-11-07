@@ -3,7 +3,18 @@
 use super::JsSettings;
 use openitgo_storage::models::EbookSettings;
 
+#[cfg(test)]
 pub fn reader_html(settings: &EbookSettings, chapter_count: usize) -> String {
+    reader_html_with_position(settings, chapter_count, 0, 0, true)
+}
+
+pub fn reader_html_with_position(
+    settings: &EbookSettings,
+    chapter_count: usize,
+    initial_chapter: usize,
+    initial_offset: usize,
+    preload_enabled: bool,
+) -> String {
     let js = JsSettings::from(settings);
     format!(
         r#"<!DOCTYPE html>
@@ -136,6 +147,10 @@ const columnContent = document.getElementById('column-content');
 const errorLayer = document.getElementById('ebook-error-layer');
 let currentChapter = 0;
 let currentChapterHtml = '';
+let chapterLoadGeneration = 0;
+const chapterFetches = new Map();
+const preloadEnabled = {preload_enabled};
+const retainChapterHtml = {retain_chapter_html};
 window.ebookChapterCount = {chapter_count};
 const RESIZE_DEBOUNCE_MS = 200;
 let currentSettings = {{
@@ -740,43 +755,57 @@ function applySettings(json) {{
   root.style.setProperty('--margin-h', s.margin_h + 'px');
   root.style.setProperty('--margin-v', s.margin_v + 'px');
   document.body.className = s.mode;
-  // 设置变化可能导致分页改变，重新布局并恢复进度
+  // 设置变化可能导致分页改变，重新布局并恢复进度。流式文本已经释放
+  // HTML 字符串，仅更新现有 DOM，不再复制整章内容。
   if (currentChapterHtml) {{
     columnContent.innerHTML = currentChapterHtml;
-    hideError();
-    layout();
-    const totalChars = columnContent.textContent.length;
-    if (isScrollMode()) {{
-      if (totalChars > 0 && savedCharOffset > 0) {{
-        const ratio = savedCharOffset / totalChars;
-        columnView.scrollTop = Math.floor(ratio * maxScroll());
-      }}
-      reportPosition();
-    }} else {{
-      let targetSpread = 0;
-      if (totalChars > 0 && savedCharOffset > 0) {{
-        const ratio = savedCharOffset / totalChars;
-        targetSpread = Math.floor(ratio * (getPageCount() - 1));
-      }}
-      goToSpread(targetSpread);
+  }}
+  hideError();
+  layout();
+  const totalChars = columnContent.textContent.length;
+  if (isScrollMode()) {{
+    if (totalChars > 0 && savedCharOffset > 0) {{
+      const ratio = savedCharOffset / totalChars;
+      columnView.scrollTop = Math.floor(ratio * maxScroll());
     }}
-    restoreSearchAfterLayout();
+    reportPosition();
+  }} else {{
+    let targetSpread = 0;
+    if (totalChars > 0 && savedCharOffset > 0) {{
+      const ratio = savedCharOffset / totalChars;
+      targetSpread = Math.floor(ratio * (getPageCount() - 1));
+    }}
+    goToSpread(targetSpread);
+  }}
+  restoreSearchAfterLayout();
+}}
+
+async function fetchChapterHtml(index) {{
+  if (chapterFetches.has(index)) return chapterFetches.get(index);
+  const request = (async () => {{
+    // Query-only relative URL: resolves to ebook://reader?chapter=N on
+    // WebKit, and to wry's http://ebook.* workaround origin on WebView2.
+    const res = await fetch('?chapter=' + index);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return await res.text();
+  }})();
+  chapterFetches.set(index, request);
+  try {{
+    return await request;
+  }} finally {{
+    chapterFetches.delete(index);
   }}
 }}
 
-// Lightweight adjacent-chapter preload. The fetched HTML is parsed into an
-// inert <template> so it warms the Rust EPUB parser / HTML parse cache without
-// affecting the visible column layout.
+// Lightweight adjacent-chapter preload. Text files opt out so only the bounded
+// visible chapter is resident; EPUB keeps the existing inert-template cache.
 async function preloadChapter(index) {{
-  if (typeof index !== 'number') return;
+  if (!preloadEnabled || typeof index !== 'number') return;
   if (index < 0 || index >= window.ebookChapterCount) return;
   const id = 'preload-chapter-' + index;
   if (document.getElementById(id)) return;
   try {{
-    // Query-only relative URL: resolves to ebook://reader?chapter=N on
-    // WebKit, and to wry's http://ebook.* workaround origin on WebView2.
-    const res = await fetch('?chapter=' + index);
-    const html = await res.text();
+    const html = await fetchChapterHtml(index);
     const template = document.createElement('template');
     template.id = id;
     template.innerHTML = html;
@@ -805,14 +834,17 @@ function cleanupPreloaded(keepCenter) {{
 
 async function loadChapter(index, charOffset) {{
   index = index ?? 0;
+  const generation = ++chapterLoadGeneration;
   currentChapter = index;
   cleanupPreloaded(currentChapter);
   // A new chapter always needs a fresh layout.
   layoutCache.key = null;
   try {{
-    const res = await fetch('?chapter=' + currentChapter);
-    currentChapterHtml = await res.text();
-    columnContent.innerHTML = currentChapterHtml;
+    const html = await fetchChapterHtml(index);
+    if (generation !== chapterLoadGeneration) return;
+    currentChapterHtml = html;
+    columnContent.innerHTML = html;
+    if (!retainChapterHtml) currentChapterHtml = '';
     hideError();
     // Measure first so getPageCount() is valid before restoring progress.
     layout();
@@ -835,7 +867,9 @@ async function loadChapter(index, charOffset) {{
     preloadChapter(currentChapter + 1);
     restoreSearchAfterLayout();
   }} catch (e) {{
-    columnContent.innerHTML = '<p>章节加载失败: ' + e + '</p>';
+    if (generation === chapterLoadGeneration) {{
+      columnContent.innerHTML = '<p>章节加载失败: ' + e + '</p>';
+    }}
   }}
 }}
 
@@ -874,7 +908,7 @@ let resizeTimeout = null;
 window.addEventListener('resize', () => {{
   clearTimeout(resizeTimeout);
   resizeTimeout = setTimeout(() => {{
-    if (!currentChapterHtml) return;
+    if (!currentChapterHtml && !columnContent.firstChild) return;
     const viewportW = document.body.clientWidth;
     const viewportH = columnView ? columnView.clientHeight : 0;
     const mode = isScrollMode() ? 'scroll' : (isDoubleMode() ? 'double' : 'single');
@@ -909,7 +943,7 @@ window.addEventListener('resize', () => {{
 }});
 
 applySettings({settings_json});
-loadChapter(0, 0);
+loadChapter({initial_chapter}, {initial_offset});
 sendIpc({{ "type": "ready" }});
 </script>
 </body>
@@ -926,6 +960,10 @@ sendIpc({{ "type": "ready" }});
         animate = js.animate,
         invert_scroll = js.invert_scroll,
         chapter_count = chapter_count,
+        initial_chapter = initial_chapter,
+        initial_offset = initial_offset,
+        preload_enabled = preload_enabled,
+        retain_chapter_html = preload_enabled,
         settings_json = serde_json::to_string(&js).unwrap_or_default()
     )
 }
@@ -2241,7 +2279,7 @@ mod tests {
             .next()
             .expect("resize handler end not found");
         assert!(
-            handler_body.contains("if (!currentChapterHtml) return;"),
+            handler_body.contains("if (!currentChapterHtml && !columnContent.firstChild) return;"),
             "resize handler should guard on missing chapter content"
         );
         assert!(
@@ -2474,8 +2512,12 @@ mod tests {
             "preloadChapter should parse into an inert template"
         );
         assert!(
-            fn_body.contains("'?chapter='"),
-            "preloadChapter should fetch from the ebook protocol via a relative URL"
+            fn_body.contains("fetchChapterHtml(index)"),
+            "preloadChapter should share the single-flight chapter request"
+        );
+        assert!(
+            html.contains("const res = await fetch('?chapter=' + index);"),
+            "the shared request should use a relative ebook protocol URL"
         );
         assert!(
             !fn_body.contains("columnContent.innerHTML = html"),
@@ -2638,11 +2680,11 @@ mod tests {
             .next()
             .expect("loadChapter end not found");
         assert!(
-            fn_body.contains("columnContent.innerHTML = currentChapterHtml;"),
+            fn_body.contains("columnContent.innerHTML = html;"),
             "loadChapter should set the chapter content"
         );
         let content_pos = fn_body
-            .find("columnContent.innerHTML = currentChapterHtml;")
+            .find("columnContent.innerHTML = html;")
             .expect("content assignment not found");
         let hide_pos = fn_body
             .find("hideError();")
@@ -2848,5 +2890,17 @@ mod tests {
             style.contains("#column-content pre { overflow-x: auto; }"),
             "pre overflow-x rule missing: {style}"
         );
+    }
+
+    #[test]
+    fn initial_position_is_loaded_exactly_once_without_text_preload() {
+        let html = reader_html_with_position(&EbookSettings::default(), 8, 3, 456, false);
+        assert!(html.contains("loadChapter(3, 456);"));
+        assert!(!html.contains("loadChapter(0, 0);"));
+        assert!(html.contains("const preloadEnabled = false;"));
+        assert!(html.contains("const retainChapterHtml = false;"));
+        assert!(html.contains("chapterFetches.set(index, request);"));
+        assert!(html.contains("if (generation !== chapterLoadGeneration) return;"));
+        assert!(html.contains("if (!retainChapterHtml) currentChapterHtml = '';"));
     }
 }
