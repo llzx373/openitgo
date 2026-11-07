@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- 媒体播放：移除内嵌 libmpv 播放、媒体书库条目/封面、播放设置与快捷键、原生视频窗口、相关诊断示例及打包依赖；应用现在专注漫画与电子书阅读。
 - 文件关联：移除影视（音视频）分组，仅保留压缩包与图片两类（`OpenItGo.Archive` / `OpenItGo.Image`）；启动时自动清理旧版本写入的 `OpenItGo.Media` 关联（恢复原备份、删除遗留 ProgID 与备份键）。
 
 ### Added
@@ -26,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 文件操作安全：目录合并中的嵌套跳过、目录读取/创建或复制/校验失败不再被当作完整成功，禁止整删 Move 源；只有完整写入的新目标才进入整体撤销，避免误删已有目录。
 - 失败项重试：子项错误映射回原顶层源，保留目录结构与复制/移动的过滤、校验选项，不再把子文件扁平化到目标根目录。
 - 并发打开：新打开请求统一取消旧漫画/电子书解析、压缩包分流与密码探测，旧任务结果不再覆盖较新的内容视图。
+- 漫画/电子书黑屏：修复工具栏淡化外层 `ui.scope` 将底部面板外框重复推进根布局游标的问题；中央阅读区不再被压缩到零高度，保留 120ms 淡化并显式恢复原先透明度。
+- 电子书翻页：动画开关现在仅在值变化时下发；避免每帧重排 WebView 并将新页码重置回旧位置。
 - 电子书：修复 Windows（WebView2）下打开任意电子书报「章节加载失败： TypeError: Failed to fetch」的问题——wry 自定义协议在 Windows 走 `http://ebook.*` 变通域名，页面内绝对 `ebook://` 请求不被拦截；章节 fetch 与 EPUB 图片/字体资源 URL 改为相对形式（`?chapter=N`、`/res/...`）。
 
 ### Added（文件管理器与压缩包）

@@ -3,7 +3,7 @@ use openitgo_storage::{
     json_store::JsonStore,
     models::{
         Bookmark, Bookmarks, ComicReadingSettings, History, HistoryEntry, Library, LibraryEntry,
-        MediaType, Settings,
+        Settings,
     },
 };
 use std::collections::HashMap;
@@ -34,7 +34,6 @@ fn test_library_roundtrip() {
             path: PathBuf::from("/tmp/comic"),
             cover_path: Some(PathBuf::from("/tmp/cover.jpg")),
             added_at: 123,
-            media_type: MediaType::Comic,
             tags: Vec::new(),
             page_count: Some(10),
         }],
@@ -55,6 +54,7 @@ fn test_history_roundtrip() {
             volume_index: 0,
             page_index: 7,
             char_offset: None,
+            ebook_char_offset: None,
             last_read_at: 456,
         }],
     };
@@ -73,6 +73,7 @@ fn test_bookmarks_roundtrip() {
             volume_index: 0,
             page_index: 3,
             char_offset: Some(100),
+            ebook_char_offset: None,
             note: Some("remember this page".to_string()),
         }],
     };

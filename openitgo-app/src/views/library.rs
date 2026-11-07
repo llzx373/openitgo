@@ -1,6 +1,6 @@
 use egui_phosphor_icons::icons;
 use openitgo_storage::models::{
-    Bookmarks, History, HistoryEntry, Library, LibraryEntry, LibrarySort, MediaType,
+    Bookmarks, History, HistoryEntry, Library, LibraryEntry, LibrarySort,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -220,6 +220,40 @@ impl LibraryView {
             }
         }
 
+        if let Some(idx) = self.pending_delete {
+            let title = self
+                .library
+                .entries
+                .get(idx)
+                .map(|entry| entry.title.clone());
+            if let Some(title) = title {
+                use crate::widgets::dialog::{modal_dialog, DialogAction};
+                use crate::widgets::fluent::ButtonKind;
+                let response = modal_dialog(
+                    ui.ctx(),
+                    egui::Id::new("delete_library_entry_confirmation"),
+                    "从书架移除？",
+                    &[
+                        DialogAction::new("移除", ButtonKind::Danger),
+                        DialogAction::new("取消", ButtonKind::Standard).default_focus(),
+                    ],
+                    |ui| {
+                        ui.label(format!("确定从书架移除《{title}》吗？"));
+                        ui.label("不会删除源文件，也不会清空阅读历史。");
+                    },
+                );
+                if response.action == Some(0) {
+                    (callbacks.on_delete_library)(idx);
+                    self.pending_delete = None;
+                    self.edit_buffer = None;
+                } else if response.action == Some(1) || response.should_close {
+                    self.pending_delete = None;
+                }
+            } else {
+                self.pending_delete = None;
+            }
+        }
+
         if matches!(self.mode, LibraryMode::Library | LibraryMode::Ebooks) {
             let tags = collect_unique_tags(&self.library.entries);
             if !tags.is_empty() {
@@ -288,11 +322,8 @@ impl LibraryView {
         let entries = self.filtered_entries(history, sort);
         if entries.is_empty() {
             let has_unfiltered = self.library.entries.iter().any(|entry| match self.mode {
-                LibraryMode::Ebooks => entry.media_type == MediaType::Ebook,
-                LibraryMode::Library => matches!(
-                    entry.media_type,
-                    MediaType::Comic | MediaType::Video | MediaType::Audio
-                ),
+                LibraryMode::Ebooks => crate::app::is_ebook_file(&entry.path),
+                LibraryMode::Library => !crate::app::is_ebook_file(&entry.path),
                 _ => true,
             });
             let filtered = has_unfiltered
@@ -367,14 +398,12 @@ impl LibraryView {
                                                 cover_radius,
                                                 ui.visuals().faint_bg_color,
                                             );
-                                            let (placeholder_icon, type_label) = match entry
-                                                .media_type
-                                            {
-                                                MediaType::Ebook => (icons::BOOK_OPEN, "电子书"),
-                                                MediaType::Comic => (icons::BOOKS, "漫画"),
-                                                MediaType::Video => (icons::PLAY, "视频"),
-                                                MediaType::Audio => (icons::SPEAKER_HIGH, "音频"),
-                                            };
+                                            let (placeholder_icon, type_label) =
+                                                if crate::app::is_ebook_file(&entry.path) {
+                                                    (icons::BOOK_OPEN, "电子书")
+                                                } else {
+                                                    (icons::BOOKS, "漫画")
+                                                };
                                             let placeholder_label = if cover_failed {
                                                 "封面生成失败"
                                             } else if cover_pending {
@@ -514,13 +543,12 @@ impl LibraryView {
                         )
                         .inner;
 
-                    let media_label = match entry.media_type {
-                        MediaType::Ebook => "电子书",
-                        MediaType::Comic => "漫画",
-                        MediaType::Video => "视频",
-                        MediaType::Audio => "音频",
+                    let type_label = if crate::app::is_ebook_file(&entry.path) {
+                        "电子书"
+                    } else {
+                        "漫画"
                     };
-                    let mut accessible_label = format!("{}，{}", entry.title, media_label);
+                    let mut accessible_label = format!("{}，{}", entry.title, type_label);
                     let progress = library_progress(history, &entry);
                     if progress.total > 0 {
                         accessible_label
@@ -589,19 +617,7 @@ impl LibraryView {
                                 ui.close();
                             }
                         }
-                        if self.pending_delete == Some(original_idx) {
-                            ui.label("确定删除？");
-                            if ui.button("是").clicked() {
-                                (callbacks.on_delete_library)(original_idx);
-                                self.pending_delete = None;
-                                self.edit_buffer = None;
-                                ui.close();
-                            }
-                            if ui.button("否").clicked() {
-                                self.pending_delete = None;
-                                ui.close();
-                            }
-                        } else if ui.button("删除").clicked() {
+                        if ui.button("删除").clicked() {
                             self.pending_delete = Some(original_idx);
                             ui.close();
                         }
@@ -667,15 +683,12 @@ impl LibraryView {
             .iter()
             .enumerate()
             .filter(|(_, e)| {
-                let media_ok = match self.mode {
-                    LibraryMode::Ebooks => e.media_type == MediaType::Ebook,
-                    LibraryMode::Library => matches!(
-                        e.media_type,
-                        MediaType::Comic | MediaType::Video | MediaType::Audio
-                    ),
+                let type_ok = match self.mode {
+                    LibraryMode::Ebooks => crate::app::is_ebook_file(&e.path),
+                    LibraryMode::Library => !crate::app::is_ebook_file(&e.path),
                     _ => true,
                 };
-                media_ok
+                type_ok
                     && entry_matches_tag_filter(e, &self.tag_filter)
                     && entry_matches_query(e, &query)
             })
@@ -1099,11 +1112,163 @@ mod tests {
                 path: PathBuf::from("/tmp/comic-1"),
                 cover_path: None,
                 added_at: 0,
-                media_type: MediaType::Comic,
+
                 tags: Vec::new(),
                 page_count: None,
             }],
         }
+    }
+
+    fn headless_frame(
+        ctx: &egui::Context,
+        view: &mut LibraryView,
+        time: f64,
+        events: Vec<egui::Event>,
+        delete_idx: &mut Option<usize>,
+    ) -> egui::FullOutput {
+        let history = History::default();
+        let bookmarks = Bookmarks::default();
+        let stats = HashMap::new();
+        let mut sort = LibrarySort::LastRead;
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 700.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                view.ui(
+                    ui,
+                    &history,
+                    &bookmarks,
+                    &mut sort,
+                    &stats,
+                    LibraryCallbacks {
+                        on_open_library: &mut |_| {},
+                        on_open_path: &mut |_| {},
+                        on_add: &mut || {},
+                        on_request_cover: &mut |_| {},
+                        on_remove_missing: &mut || {},
+                        on_delete_bookmark: &mut |_| {},
+                        on_update_bookmark: &mut |_, _| {},
+                        on_update_title: &mut |_, _| {},
+                        on_delete_library: &mut |idx| *delete_idx = Some(idx),
+                        on_clear_history: &mut || {},
+                        on_delete_history: &mut |_| {},
+                        on_update_tags: &mut |_, _| {},
+                        on_browse_archive: &mut |_| {},
+                        on_extract_archive: &mut |_| {},
+                        on_open_file_manager: &mut || {},
+                        on_clear_library: &mut || {},
+                    },
+                );
+            },
+        )
+    }
+
+    fn click_events(pos: egui::Pos2, button: egui::PointerButton) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos,
+                button,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    fn text_center(output: &egui::FullOutput, text: &str) -> Option<egui::Pos2> {
+        output.shapes.iter().find_map(|clipped| {
+            if let egui::Shape::Text(shape) = &clipped.shape {
+                if shape.galley.text() == text {
+                    return Some(clipped.shape.visual_bounding_rect().center());
+                }
+            }
+            None
+        })
+    }
+
+    #[test]
+    fn context_delete_opens_modal_and_confirm_deletes() {
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        egui_phosphor_icons::add_fonts(&mut fonts);
+        let fallback = fonts.families[&egui::FontFamily::Proportional].clone();
+        fonts.families.insert(
+            egui::FontFamily::Name("system-ui-semibold".into()),
+            fallback,
+        );
+        ctx.set_fonts(fonts);
+        let mut view = LibraryView {
+            library: sample_library(),
+            ..Default::default()
+        };
+        let mut deleted = None;
+        let mut time = 0.0;
+
+        let initial = headless_frame(&ctx, &mut view, time, vec![], &mut deleted);
+        let card = text_center(&initial, "Test Comic").expect("应绘制书籍卡片");
+        time += 1.0;
+        headless_frame(
+            &ctx,
+            &mut view,
+            time,
+            click_events(card, egui::PointerButton::Secondary),
+            &mut deleted,
+        );
+        time += 1.0;
+        let menu = headless_frame(&ctx, &mut view, time, vec![], &mut deleted);
+        let delete = text_center(&menu, "删除").expect("右键菜单应显示删除");
+        time += 1.0;
+        headless_frame(
+            &ctx,
+            &mut view,
+            time,
+            click_events(delete, egui::PointerButton::Primary),
+            &mut deleted,
+        );
+        assert_eq!(deleted, None);
+        assert_eq!(view.pending_delete, Some(0));
+
+        let mut confirm = None;
+        for _ in 0..4 {
+            time += 1.0;
+            let dialog = headless_frame(&ctx, &mut view, time, vec![], &mut deleted);
+            confirm = text_center(&dialog, "移除");
+            if confirm.is_some() {
+                break;
+            }
+        }
+        let confirm = confirm.expect("删除后应立即显示确认对话框");
+        time += 1.0;
+        headless_frame(
+            &ctx,
+            &mut view,
+            time,
+            click_events(confirm, egui::PointerButton::Primary),
+            &mut deleted,
+        );
+        for _ in 0..4 {
+            if deleted.is_some() {
+                break;
+            }
+            time += 1.0;
+            headless_frame(&ctx, &mut view, time, vec![], &mut deleted);
+        }
+
+        assert_eq!(deleted, Some(0));
+        assert_eq!(view.pending_delete, None);
     }
 
     #[test]
@@ -1145,6 +1310,7 @@ mod tests {
             volume_index: 0,
             page_index: 0,
             char_offset: None,
+            ebook_char_offset: None,
             last_read_at: 0,
         };
         assert_eq!(history_entry_title(&entry), "Some Comic");
@@ -1171,7 +1337,7 @@ mod tests {
                         path: PathBuf::from("/a"),
                         cover_path: None,
                         added_at: 1,
-                        media_type: MediaType::Comic,
+
                         tags: Vec::new(),
                         page_count: None,
                     },
@@ -1181,7 +1347,7 @@ mod tests {
                         path: PathBuf::from("/b"),
                         cover_path: None,
                         added_at: 2,
-                        media_type: MediaType::Comic,
+
                         tags: Vec::new(),
                         page_count: None,
                     },
@@ -1206,7 +1372,7 @@ mod tests {
                         path: PathBuf::from("/b"),
                         cover_path: None,
                         added_at: 0,
-                        media_type: MediaType::Comic,
+
                         tags: Vec::new(),
                         page_count: None,
                     },
@@ -1216,7 +1382,7 @@ mod tests {
                         path: PathBuf::from("/a"),
                         cover_path: None,
                         added_at: 0,
-                        media_type: MediaType::Comic,
+
                         tags: Vec::new(),
                         page_count: None,
                     },
@@ -1240,7 +1406,7 @@ mod tests {
                         path: PathBuf::from("/old"),
                         cover_path: None,
                         added_at: 100,
-                        media_type: MediaType::Comic,
+
                         tags: Vec::new(),
                         page_count: None,
                     },
@@ -1250,7 +1416,7 @@ mod tests {
                         path: PathBuf::from("/new"),
                         cover_path: None,
                         added_at: 200,
-                        media_type: MediaType::Comic,
+
                         tags: Vec::new(),
                         page_count: None,
                     },
@@ -1274,7 +1440,7 @@ mod tests {
                         path: PathBuf::from("/recent"),
                         cover_path: None,
                         added_at: 0,
-                        media_type: MediaType::Comic,
+
                         tags: Vec::new(),
                         page_count: None,
                     },
@@ -1284,7 +1450,7 @@ mod tests {
                         path: PathBuf::from("/old"),
                         cover_path: None,
                         added_at: 0,
-                        media_type: MediaType::Comic,
+
                         tags: Vec::new(),
                         page_count: None,
                     },
@@ -1300,6 +1466,7 @@ mod tests {
                     volume_index: 0,
                     page_index: 0,
                     char_offset: None,
+                    ebook_char_offset: None,
                     last_read_at: 100,
                 },
                 HistoryEntry {
@@ -1308,6 +1475,7 @@ mod tests {
                     volume_index: 0,
                     page_index: 0,
                     char_offset: None,
+                    ebook_char_offset: None,
                     last_read_at: 300,
                 },
             ],
@@ -1318,31 +1486,16 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_by_media_type() {
+    fn test_filter_by_entry_type() {
+        let entry = |id: &str, path: &str| LibraryEntry {
+            comic_id: id.to_string(),
+            title: id.to_string(),
+            path: PathBuf::from(path),
+            ..Default::default()
+        };
         let mut view = LibraryView {
             library: Library {
-                entries: vec![
-                    LibraryEntry {
-                        comic_id: "comic-1".to_string(),
-                        title: "Comic One".to_string(),
-                        path: PathBuf::from("/c1"),
-                        cover_path: None,
-                        added_at: 0,
-                        media_type: MediaType::Comic,
-                        tags: Vec::new(),
-                        page_count: None,
-                    },
-                    LibraryEntry {
-                        comic_id: "ebook-1".to_string(),
-                        title: "Ebook One".to_string(),
-                        path: PathBuf::from("/e1.epub"),
-                        cover_path: None,
-                        added_at: 0,
-                        media_type: MediaType::Ebook,
-                        tags: Vec::new(),
-                        page_count: None,
-                    },
-                ],
+                entries: vec![entry("comic", "/c1"), entry("ebook", "/e1.epub")],
             },
             ..Default::default()
         };
@@ -1350,42 +1503,12 @@ mod tests {
         view.mode = LibraryMode::Library;
         let comics = view.filtered_entries(&History::default(), LibrarySort::Title);
         assert_eq!(comics.len(), 1);
-        assert_eq!(comics[0].1.media_type, MediaType::Comic);
+        assert_eq!(comics[0].1.comic_id, "comic");
 
         view.mode = LibraryMode::Ebooks;
         let ebooks = view.filtered_entries(&History::default(), LibrarySort::Title);
         assert_eq!(ebooks.len(), 1);
-        assert_eq!(ebooks[0].1.media_type, MediaType::Ebook);
-    }
-
-    #[test]
-    fn test_library_mode_includes_media_entries() {
-        let entry = |id: &str, media_type: MediaType| LibraryEntry {
-            comic_id: id.to_string(),
-            title: id.to_string(),
-            path: PathBuf::from(format!("/{id}")),
-            cover_path: None,
-            added_at: 0,
-            media_type,
-            tags: Vec::new(),
-            page_count: None,
-        };
-        let library = Library {
-            entries: vec![
-                entry("comic", MediaType::Comic),
-                entry("video", MediaType::Video),
-                entry("audio", MediaType::Audio),
-                entry("ebook", MediaType::Ebook),
-            ],
-        };
-        let view = LibraryView {
-            library,
-            mode: LibraryMode::Library,
-            ..Default::default()
-        };
-        let filtered = view.filtered_entries(&History::default(), LibrarySort::Title);
-        let ids: Vec<&str> = filtered.iter().map(|(_, e)| e.comic_id.as_str()).collect();
-        assert_eq!(ids, ["audio", "comic", "video"]);
+        assert_eq!(ebooks[0].1.comic_id, "ebook");
     }
 
     #[test]

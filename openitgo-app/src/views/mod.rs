@@ -19,7 +19,6 @@ pub mod file_manager_undo;
 pub mod file_ops;
 pub mod fm_comments;
 pub mod library;
-pub mod media;
 pub mod preview_bytes;
 pub mod reader;
 pub mod settings;

@@ -5,8 +5,8 @@ use egui_phosphor_icons::icons;
 use openitgo_core::ebook::EbookReadingMode;
 use openitgo_core::models::{FitMode, ReadingMode};
 use openitgo_storage::models::{
-    ComicEndAction, EbookTheme, FmButton, MediaEndAction, PasswordBook, PasswordBookEntry,
-    Settings, Theme, ToolbarDisplayMode,
+    ComicEndAction, EbookTheme, FmButton, PasswordBook, PasswordBookEntry, Settings, Theme,
+    ToolbarDisplayMode,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -16,7 +16,6 @@ pub enum SettingsTab {
     Appearance,
     Comic,
     Ebook,
-    Media,
     Archive,
     FileManager,
     FileAssoc,
@@ -25,11 +24,10 @@ pub enum SettingsTab {
 }
 
 impl SettingsTab {
-    const ALL: [(SettingsTab, &'static str); 9] = [
+    const ALL: [(SettingsTab, &'static str); 8] = [
         (SettingsTab::Appearance, "外观"),
         (SettingsTab::Comic, "漫画"),
         (SettingsTab::Ebook, "电子书"),
-        (SettingsTab::Media, "媒体"),
         (SettingsTab::Archive, "压缩包"),
         (SettingsTab::FileManager, "文件管理器"),
         (SettingsTab::FileAssoc, "文件关联"),
@@ -90,7 +88,6 @@ impl SettingsView {
                         SettingsTab::Appearance => self.appearance_ui(ui, settings),
                         SettingsTab::Comic => self.comic_ui(ui, settings),
                         SettingsTab::Ebook => self.ebook_settings_ui(ui, settings),
-                        SettingsTab::Media => self.media_ui(ui, settings),
                         SettingsTab::Archive => {
                             book_changed = self.archive_ui(ui, settings, password_book);
                         }
@@ -253,60 +250,6 @@ impl SettingsView {
         hint(
             ui,
             "「打开下一个」：当前是压缩包/PDF 则找同目录下一个漫画文件；当前是图片文件夹则找同级下一个文件夹",
-        );
-    }
-
-    fn media_ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {
-        ui.label("播放到结尾");
-        egui::ComboBox::from_id_salt("media_end_action")
-            .selected_text(media_end_action_label(settings.media_end_action))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut settings.media_end_action,
-                    MediaEndAction::Stop,
-                    media_end_action_label(MediaEndAction::Stop),
-                );
-                ui.selectable_value(
-                    &mut settings.media_end_action,
-                    MediaEndAction::NextInDir,
-                    media_end_action_label(MediaEndAction::NextInDir),
-                );
-            });
-        hint(
-            ui,
-            "「自动下一集」按同目录自然排序续播；开启循环播放时不会触发",
-        );
-
-        ui.horizontal(|ui| {
-            ui.label("默认音量:");
-            let mut vol = settings.media_volume as f32;
-            if ui.add(egui::Slider::new(&mut vol, 0.0..=100.0)).changed() {
-                settings.media_volume = vol as f64;
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("默认倍速:");
-            let mut speed = settings.media_speed as f32;
-            if ui
-                .add(egui::Slider::new(&mut speed, 0.25..=4.0).step_by(0.05))
-                .changed()
-            {
-                settings.media_speed = speed as f64;
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("默认音频输出:");
-            ui.add(
-                egui::TextEdit::singleline(&mut settings.media_audio_device)
-                    .hint_text("空 = 自动")
-                    .desired_width(220.0),
-            );
-        });
-        hint(
-            ui,
-            "填写 mpv 设备名；留空为系统默认。无效设备会在打开媒体时回退到自动。",
         );
     }
 
@@ -1138,13 +1081,6 @@ fn comic_end_action_label(action: ComicEndAction) -> &'static str {
         ComicEndAction::DoNothing => "什么都不做",
         ComicEndAction::WrapToFirst => "回到第一页",
         ComicEndAction::NextSibling => "打开下一个漫画",
-    }
-}
-
-fn media_end_action_label(action: MediaEndAction) -> &'static str {
-    match action {
-        MediaEndAction::Stop => "停止",
-        MediaEndAction::NextInDir => "自动播放下一集",
     }
 }
 

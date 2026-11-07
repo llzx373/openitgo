@@ -120,15 +120,9 @@ pub struct Settings {
     pub auto_add_to_library: bool,
     pub toolbar_display_mode: ToolbarDisplayMode,
     pub ebook: EbookSettings,
-    pub media_volume: f64,
-    pub media_speed: f64,
-    pub media_audio_device: String,
     /// 漫画翻到末页后再按「下一页」时的行为。
     #[serde(default)]
     pub comic_end_action: ComicEndAction,
-    /// 媒体播放到结尾时的行为。
-    #[serde(default)]
-    pub media_end_action: MediaEndAction,
     /// 解压输出目录；空 = 压缩包同目录下的同名子目录。
     #[serde(default)]
     pub extract_dir: String,
@@ -362,11 +356,7 @@ impl Default for Settings {
             auto_add_to_library: true,
             toolbar_display_mode: ToolbarDisplayMode::default(),
             ebook: EbookSettings::default(),
-            media_volume: 100.0,
-            media_speed: 1.0,
-            media_audio_device: String::new(),
             comic_end_action: ComicEndAction::default(),
-            media_end_action: MediaEndAction::default(),
             extract_dir: String::new(),
             extract_threads: 0,
             extract_overwrite: false,
@@ -487,18 +477,6 @@ impl Settings {
         if self.ebook.font_family.trim().is_empty() {
             return Err("ebook.font_family must not be empty".to_string());
         }
-        if !(0.0..=100.0).contains(&self.media_volume) {
-            return Err(format!(
-                "media_volume must be between 0 and 100, got {}",
-                self.media_volume
-            ));
-        }
-        if !(0.1..=16.0).contains(&self.media_speed) {
-            return Err(format!(
-                "media_speed must be between 0.1 and 16, got {}",
-                self.media_speed
-            ));
-        }
         if self.extract_threads > 32 {
             return Err(format!(
                 "extract_threads must be <= 32, got {}",
@@ -591,8 +569,6 @@ impl Settings {
         if self.ebook.font_family.trim().is_empty() {
             self.ebook.font_family = "system-ui".to_string();
         }
-        self.media_volume = self.media_volume.clamp(0.0, 100.0);
-        self.media_speed = self.media_speed.clamp(0.1, 16.0);
         self.extract_threads = self.extract_threads.min(32);
         self.fm_op_threads = self.fm_op_threads.min(8);
         if !matches!(self.extract_wrap.as_str(), "smart" | "always" | "never") {
@@ -811,27 +787,6 @@ pub enum ComicEndAction {
     NextSibling,
 }
 
-/// 媒体播放到结尾时的行为。
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MediaEndAction {
-    /// 停在结尾，不自动续播。
-    Stop,
-    /// 自动打开同目录自然排序的下一个媒体文件（默认，与历史行为一致）。
-    #[default]
-    NextInDir,
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MediaType {
-    #[default]
-    Comic,
-    Ebook,
-    Video,
-    Audio,
-}
-
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EbookTheme {
@@ -879,9 +834,8 @@ pub struct LibraryEntry {
     pub path: PathBuf,
     pub cover_path: Option<PathBuf>,
     pub added_at: u64,
-    pub media_type: MediaType,
     pub tags: Vec<String>,
-    /// Total pages (comics) or chapters (ebooks). Media leaves `None`.
+    /// Total pages (comics) or chapters (ebooks).
     #[serde(default)]
     pub page_count: Option<usize>,
 }
@@ -894,7 +848,6 @@ impl Default for LibraryEntry {
             path: PathBuf::new(),
             cover_path: None,
             added_at: 0,
-            media_type: MediaType::Comic,
             tags: Vec::new(),
             page_count: None,
         }
@@ -915,6 +868,8 @@ pub struct HistoryEntry {
     pub page_index: usize,
     #[serde(default)]
     pub char_offset: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ebook_char_offset: Option<usize>,
     pub last_read_at: u64,
 }
 
@@ -926,6 +881,7 @@ impl Default for HistoryEntry {
             volume_index: 0,
             page_index: 0,
             char_offset: None,
+            ebook_char_offset: None,
             last_read_at: 0,
         }
     }
@@ -943,6 +899,8 @@ pub struct Bookmark {
     pub page_index: usize,
     #[serde(default)]
     pub char_offset: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ebook_char_offset: Option<usize>,
     pub note: Option<String>,
 }
 
@@ -1235,7 +1193,6 @@ mod tests {
         assert!((s.page_scroll_threshold - 12.0).abs() < f32::EPSILON);
         assert!((s.chrome_opacity - 0.85).abs() < f32::EPSILON);
         assert_eq!(s.comic_end_action, ComicEndAction::DoNothing);
-        assert_eq!(s.media_end_action, MediaEndAction::NextInDir);
     }
 
     #[test]
@@ -1257,7 +1214,6 @@ mod tests {
         let json = r#"{"theme":"Dark"}"#;
         let s: Settings = serde_json::from_str(json).unwrap();
         assert_eq!(s.comic_end_action, ComicEndAction::DoNothing);
-        assert_eq!(s.media_end_action, MediaEndAction::NextInDir);
     }
 
     #[test]
@@ -1701,50 +1657,12 @@ mod tests {
                 path: PathBuf::from("/tmp"),
                 cover_path: None,
                 added_at: 0,
-                media_type: MediaType::Comic,
                 tags: Vec::new(),
                 page_count: None,
             }],
         };
         let json = serde_json::to_string(&lib).unwrap();
         assert!(json.contains("Test"));
-    }
-
-    #[test]
-    fn test_library_entry_default_media_type_is_comic() {
-        let entry = LibraryEntry::default();
-        assert_eq!(entry.media_type, MediaType::Comic);
-    }
-
-    #[test]
-    fn test_library_entry_deserializes_missing_media_type_as_comic() {
-        let json =
-            r#"{"comic_id":"id","title":"Test","path":"/tmp","cover_path":null,"added_at":0}"#;
-        let entry: LibraryEntry = serde_json::from_str(json).unwrap();
-        assert_eq!(entry.media_type, MediaType::Comic);
-    }
-
-    #[test]
-    fn test_media_type_video_audio_roundtrip() {
-        let v = serde_json::to_string(&MediaType::Video).unwrap();
-        let a = serde_json::to_string(&MediaType::Audio).unwrap();
-        assert_eq!(v, "\"video\"");
-        assert_eq!(a, "\"audio\"");
-        assert_eq!(
-            serde_json::from_str::<MediaType>(&v).unwrap(),
-            MediaType::Video
-        );
-        assert_eq!(
-            serde_json::from_str::<MediaType>(&a).unwrap(),
-            MediaType::Audio
-        );
-    }
-
-    #[test]
-    fn test_library_entry_deserializes_media_type_video() {
-        let json = r#"{"comic_id":"id","title":"T","path":"/tmp/v.mp4","cover_path":null,"added_at":0,"media_type":"video"}"#;
-        let entry: LibraryEntry = serde_json::from_str(json).unwrap();
-        assert_eq!(entry.media_type, MediaType::Video);
     }
 
     #[test]
@@ -1777,6 +1695,7 @@ mod tests {
             volume_index: 0,
             page_index: 2,
             char_offset: Some(1500),
+            ebook_char_offset: Some(61500),
             last_read_at: 12345,
         };
         let json = serde_json::to_string(&h).unwrap();
@@ -1801,6 +1720,7 @@ mod tests {
             volume_index: 0,
             page_index: 3,
             char_offset: Some(1200),
+            ebook_char_offset: Some(61200),
             note: Some("note".to_string()),
         };
         let json = serde_json::to_string(&b).unwrap();

@@ -1,5 +1,5 @@
 [workspace]
-members = ["openitgo-core", "openitgo-parser", "openitgo-storage", "openitgo-app", "openitgo-media"]
+members = ["openitgo-core", "openitgo-parser", "openitgo-storage", "openitgo-app"]
 resolver = "2"
 
 [workspace.dependencies]

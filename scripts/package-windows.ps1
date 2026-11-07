@@ -5,7 +5,6 @@
 #   powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -NoInstaller
 #
 # 前置:
-#   - 先运行 scripts/setup-windows.ps1 生成 vendor/mpv（mpv.lib + libmpv-2.dll）
 #   - VS Build Tools（C++ 工作负载）；本脚本自带 vcvars64 环境
 #   - 安装包需要 Inno Setup 6（ISCC.exe）；未安装时跳过并给出警告
 #
@@ -21,11 +20,6 @@ param(
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
-
-$dll = Join-Path $root "vendor\mpv\libmpv-2.dll"
-if (-not (Test-Path $dll)) {
-    throw "未找到 vendor/mpv/libmpv-2.dll，请先运行 scripts/setup-windows.ps1"
-}
 
 # MSVC 环境（用 vswhere 找最新的带 C++ 工具集的 VS 实例，本机为 VS2022
 # Community；若已处于 vcvars 环境（LIB 已设置）则跳过）
@@ -54,7 +48,6 @@ Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $stage | Out-Null
 
 Copy-Item (Join-Path $root "target\release\openitgo-app.exe") (Join-Path $stage "OpenItGo.exe")
-Copy-Item $dll $stage
 Copy-Item (Join-Path $root "README.md"), (Join-Path $root "LICENSE"), (Join-Path $root "CHANGELOG.md") $stage
 
 Remove-Item $zip -Force -ErrorAction SilentlyContinue

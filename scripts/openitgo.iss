@@ -48,9 +48,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
+[InstallDelete]
+; 旧版本媒体播放运行时在升级时移除。
+Type: files; Name: "{app}\libmpv-2.dll"
+
 [Files]
 Source: "{#MyStage}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#MyStage}\libmpv-2.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyStage}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyStage}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyStage}\CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion

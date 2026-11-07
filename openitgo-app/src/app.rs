@@ -16,7 +16,6 @@ use crate::views::{
     archive::{ArchiveCallbacks, ArchiveView, ArchiveViewState},
     ebook::EbookView,
     library::{LibraryCallbacks, LibraryView},
-    media::{media_overlay, MediaOverlay, MediaView},
     reader::ReaderView,
 };
 use crate::window_geometry::{
@@ -34,7 +33,7 @@ use openitgo_storage::{
     json_store::JsonStore,
     models::{
         Bookmarks, ComicEndAction, ComicReadingSettings, EbookTheme, History, HistoryEntry,
-        Library, MediaEndAction, MediaType, PasswordBook, Settings, Theme, ToolbarDisplayMode,
+        Library, PasswordBook, Settings, Theme, ToolbarDisplayMode,
     },
 };
 use std::collections::{HashMap, HashSet};
@@ -47,12 +46,6 @@ const HISTORY_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
 
 /// 窗口几何写入 settings 的节流间隔。
 const WINDOW_GEOMETRY_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
-
-/// 待打开的媒体请求；`force_start` 为 true 时跳过历史续播（自动续播下一集）。
-pub struct PendingMediaOpen {
-    pub path: PathBuf,
-    pub force_start: bool,
-}
 
 /// 双击图片文件/压缩包图片条目触发的一次性打开选项：打开所在文件夹/包
 /// 作为漫画后，定位到起始页（图片路径或包内条目名）并可强制单页模式。
@@ -75,45 +68,6 @@ fn should_prewarm_next_comic(current_page: usize, total_pages: usize) -> bool {
     total_pages > 0 && current_page + 2 >= total_pages
 }
 
-/// 计算打开媒体时的 resume 毫秒：自动续播强制从头，手动打开沿用历史进度。
-fn media_resume_ms(force_start: bool, history_ms: Option<u64>) -> Option<u64> {
-    if force_start {
-        None
-    } else {
-        history_ms
-    }
-}
-
-/// 换片前是否应写入当前媒体进度：已有打开媒体且路径与下一集不同。
-fn should_record_media_before_open(current: Option<&Path>, next: &Path) -> bool {
-    current.is_some_and(|cur| cur != next)
-}
-
-/// 将媒体播放进度写入（或更新）history；`char_offset` 存毫秒。
-fn upsert_media_history_entry(history: &mut History, path: PathBuf, position_ms: u64, now: u64) {
-    let media_id = openitgo_parser::stable_comic_id(&path);
-    if let Some(entry) = history
-        .entries
-        .iter_mut()
-        .find(|h| history_matches(h, &media_id, &path))
-    {
-        entry.comic_id = media_id;
-        entry.path = path;
-        entry.page_index = 0;
-        entry.char_offset = Some(position_ms as usize);
-        entry.last_read_at = now;
-    } else {
-        history.entries.push(HistoryEntry {
-            comic_id: media_id,
-            path,
-            volume_index: 0,
-            page_index: 0,
-            char_offset: Some(position_ms as usize),
-            last_read_at: now,
-        });
-    }
-}
-
 /// 脏且距上次落盘已满 `min_interval`（或尚无落盘记录）时返回 true。
 fn history_persist_due(
     dirty: bool,
@@ -133,29 +87,10 @@ fn history_persist_due(
 /// 电子书扩展名表：is_ebook_file 判定与「打开文件…」过滤器共用（单处定义）。
 const EBOOK_EXTS: &[&str] = &["epub", "mobi", "azw", "azw3", "txt", "md", "markdown"];
 
-fn is_ebook_file(path: &std::path::Path) -> bool {
+pub(crate) fn is_ebook_file(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| EBOOK_EXTS.contains(&e.to_ascii_lowercase().as_str()))
-}
-
-/// 视频扩展名表：is_media_file 判定与「打开文件…」过滤器共用（单处定义）。
-const VIDEO_EXTS: &[&str] = &[
-    "mp4", "m4v", "mkv", "webm", "avi", "mov", "wmv", "flv", "ts", "m2ts", "mpg", "mpeg", "3gp",
-];
-
-const AUDIO_EXTS: &[&str] = &[
-    "mp3", "flac", "aac", "m4a", "ogg", "oga", "opus", "wav", "aiff", "ape", "wma",
-];
-
-fn is_media_file(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| {
-            let ext = e.to_ascii_lowercase();
-            VIDEO_EXTS.contains(&ext.as_str()) || AUDIO_EXTS.contains(&ext.as_str())
-        })
-        .unwrap_or(false)
 }
 
 /// 是否为图片文件（双击图片打开所在文件夹的分发依据）。扩展名表与
@@ -213,21 +148,6 @@ fn find_entry_page_index(comic: &Comic, entry_name: &str) -> Option<usize> {
         })
 }
 
-/// 返回同目录下按自然排序位于 current 之后的第一个媒体文件；
-/// current 不在目录的媒体列表中或已是最后一个时返回 None。
-fn next_media_in_dir(current: &Path) -> Option<PathBuf> {
-    let dir = current.parent()?;
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_file() && is_media_file(p))
-        .collect();
-    sort_paths_natural(&mut entries);
-    let pos = entries.iter().position(|p| p == current)?;
-    entries.get(pos + 1).cloned()
-}
-
 /// 同级下一个漫画：当前为文件则找下一个漫画文件；为文件夹则找下一个含图片的兄弟文件夹。
 fn next_comic_sibling(current: &Path) -> Option<PathBuf> {
     let dir = current.parent()?;
@@ -276,24 +196,6 @@ fn is_comic_folder(path: &Path) -> bool {
                 .and_then(|n| n.to_str())
                 .is_some_and(openitgo_parser::traits::is_comic_image_name)
     })
-}
-
-fn media_type_for_path(path: &std::path::Path) -> MediaType {
-    if is_ebook_file(path) {
-        MediaType::Ebook
-    } else if is_media_file(path) {
-        match path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .as_deref()
-        {
-            Some(ext) if AUDIO_EXTS.contains(&ext) => MediaType::Audio,
-            _ => MediaType::Video,
-        }
-    } else {
-        MediaType::Comic
-    }
 }
 
 /// Line 单位滚轮增量换算为点(pt)。取 egui 原生默认值
@@ -348,7 +250,6 @@ pub struct ReaderApp {
     pub library_view: LibraryView,
     pub reader_view: ReaderView,
     pub ebook_view: EbookView,
-    pub media_view: MediaView,
     pub settings_view: SettingsView,
     /// 压缩包浏览视图（View::Archive 时前台展示）。
     pub archive_view: ArchiveView,
@@ -379,16 +280,12 @@ pub struct ReaderApp {
     archive_router: Option<(PathBuf, AsyncOpener<Vec<ArchiveEntry>>)>,
     /// 双击压缩包条目的外部打开任务（临时解压 + 系统程序打开）。
     pending_external_open: Option<AsyncOpener<PathBuf>>,
-    pub pending_media_open: Option<PendingMediaOpen>,
     /// 双击图片打开所在文件夹的一次性选项（起始图/强制单页），poll_opener 消费。
     pending_open_options: Option<PendingOpenOptions>,
     /// Cover requests in flight: epoch -> (comic_id, comic_path).
     pub pending_covers: HashMap<crate::loader::Epoch, (String, PathBuf)>,
     /// Comic ids for which a cover generation has already been requested.
     pub requested_cover_ids: HashSet<String>,
-    /// Media cover results from worker threads: (comic_id, cover_path).
-    pub media_cover_tx: crossbeam_channel::Sender<(String, PathBuf)>,
-    pub media_cover_rx: crossbeam_channel::Receiver<(String, PathBuf)>,
     /// The theme currently applied to egui, used to avoid redundant updates.
     pub current_theme: Theme,
     /// 每本书记忆的阅读设置（comic_id -> 模式/双页/缩放），打开漫画时覆盖全局默认。
@@ -456,7 +353,12 @@ impl Default for ReaderApp {
         let (comic_settings, comic_settings_error) = load_comic_settings_with_error(&store);
         let mut reading_stats = store.load_reading_stats().unwrap_or_default();
         let mut comic_settings = comic_settings;
-        let library = store.load_library().unwrap_or_default();
+        let mut library = store.load_library().unwrap_or_default();
+        library.entries.retain(|entry| {
+            entry.path.is_dir()
+                || is_ebook_file(&entry.path)
+                || is_supported_comic_file(&entry.path)
+        });
         let mut history = store.load_history().unwrap_or_default();
         let mut bookmarks = store.load_bookmarks().unwrap_or_default();
         let mut library_view = LibraryView::default();
@@ -482,7 +384,6 @@ impl Default for ReaderApp {
             settings.decode_threads as usize,
         );
         let cover_loader = PageLoader::new_with_compress(false, 1);
-        let (media_cover_tx, media_cover_rx) = crossbeam_channel::unbounded();
         let password_book = store.load_password_book().unwrap_or_else(|_| PasswordBook {
             entries: PasswordBook::builtin_defaults(),
         });
@@ -524,7 +425,6 @@ impl Default for ReaderApp {
             library_view,
             reader_view: ReaderView::default(),
             ebook_view: EbookView::default(),
-            media_view: MediaView::default(),
             settings_view: SettingsView::default(),
             archive_view: ArchiveView::default(),
             file_manager_view,
@@ -546,12 +446,9 @@ impl Default for ReaderApp {
             prewarm_attempted: None,
             archive_router: None,
             pending_external_open: None,
-            pending_media_open: None,
             pending_open_options: None,
             pending_covers: HashMap::new(),
             requested_cover_ids: HashSet::new(),
-            media_cover_tx,
-            media_cover_rx,
             current_theme: Theme::System,
             comic_settings,
             last_saved_comic_settings: None,
@@ -583,26 +480,13 @@ impl Default for ReaderApp {
 }
 
 impl eframe::App for ReaderApp {
-    /// macOS: fully transparent — the mpv video layer composites below the
-    /// egui surface and shows through the unpainted central area (see
-    /// platform/macos/mpv_view.rs). Windows embeds video in an HWND child
-    /// window instead (platform/windows/mpv_view.rs), so the surface stays
-    /// opaque; other views paint their own opaque panels either way.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        #[cfg(target_os = "macos")]
-        {
-            [0.0, 0.0, 0.0, 0.0]
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            [0.0, 0.0, 0.0, 1.0]
-        }
+        [0.0, 0.0, 0.0, 1.0]
     }
 
     fn on_exit(&mut self) {
         self.record_reader_history();
         self.record_ebook_history();
-        self.record_media_history();
         self.flush_reading_stats();
         self.reader_view.close();
         // Window geometry is updated during ui(); flush settings once more on exit.
@@ -628,11 +512,6 @@ impl eframe::App for ReaderApp {
             self.record_ebook_history();
             self.persist_history_bookmarks();
             self.ebook_view.close();
-        }
-        if matches!(self.last_view, View::Media) && !matches!(self.current_view, View::Media) {
-            self.record_media_history();
-            self.persist_history_bookmarks();
-            self.media_view.close();
         }
         self.last_view = self.current_view.clone();
 
@@ -661,11 +540,6 @@ impl eframe::App for ReaderApp {
         self.poll_external_open(&ctx);
         self.poll_password_probe(&ctx);
         self.poll_ebook_opener(&ctx, frame);
-        self.poll_media_open(&ctx, frame);
-        if self.media_view.take_startup_device_invalid() {
-            // 保存的音频设备已拔出：已回退 auto，同步清除持久化设置。
-            self.settings.media_audio_device.clear();
-        }
 
         let cache_size_mb = self.settings.cache_size_mb as usize;
         self.page_loader.set_compress(self.settings.compress_images);
@@ -679,7 +553,6 @@ impl eframe::App for ReaderApp {
             );
         }
         self.poll_cover_results();
-        self.poll_media_covers();
         self.poll_extracts(&ctx);
         crate::theme::motion::set_reduced(
             &ctx,
@@ -697,7 +570,6 @@ impl eframe::App for ReaderApp {
             View::Library => self.render_library(ui),
             View::Reader => self.render_reader(ui),
             View::Ebook => self.render_ebook(ui),
-            View::Media => self.render_media(ui),
             View::Settings => self.render_settings(ui),
             View::Archive(path) => self.render_archive(ui, &path),
             View::FileManager => self.render_file_manager(ui),
@@ -732,7 +604,6 @@ pub enum View {
     Library,
     Reader,
     Ebook,
-    Media,
     Settings,
     Archive(PathBuf),
     FileManager,
@@ -1269,10 +1140,7 @@ impl ReaderApp {
                 }
             }
             if let Some(idx) = delete_library_idx {
-                if idx < self.library_view.library.entries.len() {
-                    let removed = self.library_view.library.entries.remove(idx);
-                    remove_bookmark_thumbs(&self.covers_dir(), &removed.comic_id, None);
-                }
+                self.delete_library_entry(idx);
             }
             if let Some((idx, note)) = update_bookmark {
                 if let Some(entry) = self.bookmarks.entries.get_mut(idx) {
@@ -1370,17 +1238,17 @@ impl ReaderApp {
         // Panel chrome (not overlay): translucency is against the window clear /
         // reader background, never against the page content itself.
         if toolbar_opacity > 0.01 {
-            ui.scope(|ui| {
-                ui.set_opacity(toolbar_opacity);
-                self.render_reader_toolbar(ui, total_pages, current_page, mode, zoom);
-            });
+            let previous_opacity = ui.opacity();
+            ui.set_opacity(toolbar_opacity);
+            self.render_reader_toolbar(ui, total_pages, current_page, mode, zoom);
+            ui.set_opacity(previous_opacity);
         }
         let (progress_bar_rect, hovered_page) = if statusbar_opacity > 0.01 {
-            ui.scope(|ui| {
-                ui.set_opacity(statusbar_opacity);
-                self.render_reader_statusbar(ui)
-            })
-            .inner
+            let previous_opacity = ui.opacity();
+            ui.set_opacity(statusbar_opacity);
+            let result = self.render_reader_statusbar(ui);
+            ui.set_opacity(previous_opacity);
+            result
         } else {
             (None, None)
         };
@@ -1515,17 +1383,17 @@ impl ReaderApp {
             show_statusbar,
         );
         if toolbar_opacity > 0.01 {
-            ui.scope(|ui| {
-                ui.set_opacity(toolbar_opacity);
-                self.render_ebook_toolbar(ui);
-            });
+            let previous_opacity = ui.opacity();
+            ui.set_opacity(toolbar_opacity);
+            self.render_ebook_toolbar(ui);
+            ui.set_opacity(previous_opacity);
         }
         self.render_ebook_search_bar(ui);
         if statusbar_opacity > 0.01 {
-            ui.scope(|ui| {
-                ui.set_opacity(statusbar_opacity);
-                self.render_ebook_statusbar(ui);
-            });
+            let previous_opacity = ui.opacity();
+            ui.set_opacity(statusbar_opacity);
+            self.render_ebook_statusbar(ui);
+            ui.set_opacity(previous_opacity);
         }
 
         // Render the TOC side panel before the central panel so that the
@@ -1558,623 +1426,6 @@ impl ReaderApp {
             self.ebook_view.update_bounds(bounds);
             self.ebook_view.ui(&ctx, ui);
         });
-    }
-
-    /// 播放正常结束（ended 且无 error）时按 `media_end_action` 处理：
-    /// `NextInDir` 自动续播同目录自然排序的下一集；`Stop` 则停在结尾。
-    /// 每个打开的媒体只触发一次（auto_next_fired 守卫，open() 时复位）。
-    /// 有下一集时先写入当前集进度，再以 force_start 打开下一集（从头播放），
-    /// OSD 通过 pending_open_osd 由 MediaView::open 在新媒体就绪后显示。
-    fn maybe_auto_next_media(&mut self, ctx: &egui::Context) {
-        if self.settings.media_end_action != MediaEndAction::NextInDir {
-            return;
-        }
-        let should_fire = match self.media_view.open.as_ref() {
-            Some(open) => {
-                !self.media_view.auto_next_fired && open.last.ended && open.last.error.is_none()
-            }
-            None => false,
-        };
-        if !should_fire {
-            return;
-        }
-        self.media_view.auto_next_fired = true;
-        let Some(current) = self.media_view.open.as_ref().map(|o| o.path.clone()) else {
-            return;
-        };
-        match next_media_in_dir(&current) {
-            Some(next) => {
-                let title = next
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("未知媒体")
-                    .to_string();
-                self.record_media_history();
-                self.media_view.pending_open_osd = Some(format!("自动播放下一集：{title}"));
-                self.open_media_with(next, true);
-            }
-            None => {
-                self.media_view.show_osd(ctx, "已是最后一集".to_string());
-            }
-        }
-    }
-
-    fn render_media(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        if self.media_view.open.is_none() {
-            self.current_view = View::Library;
-            return;
-        }
-        self.media_view.sync_state();
-        self.maybe_auto_next_media(&ctx);
-        self.media_view.tick_osd(&ctx);
-        self.media_view
-            .apply_reader_background(self.settings.background_color, self.settings.chrome_opacity);
-
-        let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-        let mouse_pos = ctx.input(|i| i.pointer.hover_pos());
-        let screen_size = ctx.content_rect().size();
-        // While a menu/dropdown is open, keep the toolbar up (otherwise the
-        // dropdown self-dismisses in fullscreen when the pointer leaves the
-        // top edge).
-        let menu_open = menu_overlay_open(&ctx);
-        let show_toolbar = Self::should_show_bar(
-            self.settings.show_toolbar,
-            fullscreen,
-            mouse_pos.map(|p| egui::pos2(p.x, p.y - ui.available_rect_before_wrap().min.y)),
-            screen_size,
-            BarEdge::Top,
-        ) || (menu_open && self.settings.show_toolbar);
-        let show_seekbar = Self::should_show_bar(
-            self.settings.show_statusbar,
-            fullscreen,
-            mouse_pos,
-            screen_size,
-            BarEdge::Bottom,
-        );
-        let toolbar_opacity = crate::theme::motion::animate_visibility(
-            &ctx,
-            egui::Id::new("media_toolbar"),
-            show_toolbar,
-        );
-        let seekbar_opacity = crate::theme::motion::animate_visibility(
-            &ctx,
-            egui::Id::new("media_seekbar"),
-            show_seekbar,
-        );
-        if toolbar_opacity > 0.01 {
-            ui.scope(|ui| {
-                ui.set_opacity(toolbar_opacity);
-                self.render_media_toolbar(ui);
-            });
-        }
-        if seekbar_opacity > 0.01 {
-            ui.scope(|ui| {
-                ui.set_opacity(seekbar_opacity);
-                self.render_media_seekbar(ui);
-            });
-        }
-
-        // Transparent frame while video plays: on macOS the layer composites
-        // below egui (Task 4); on Windows the HWND child covers the panel.
-        // Letterbox uses mpv background-color matching the comic
-        // reader fill. Audio-only/error still paint that fill via MediaView::ui.
-        let panel_fill = crate::theme::reader_background_fill(
-            self.settings.background_color,
-            self.settings.chrome_opacity,
-        );
-        // Windows 菜单停放：HWND 子窗口恒在 egui 表面之上，弹层会被视频盖住，
-        // 因此菜单打开时与电子书 webview 同一模式——停放视频窗口并以背景色
-        // 填充正文区，关闭即恢复。macOS 的层叠模型（视频在 egui 之下）无需此处理。
-        let menu_parked = cfg!(target_os = "windows") && menu_overlay_open(&ctx);
-        let frame = if menu_parked {
-            egui::Frame::NONE.fill(panel_fill)
-        } else {
-            egui::Frame::NONE
-        };
-        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
-            let rect = ui.max_rect();
-            // Scroll-wheel volume over the video area. Skipped while an egui
-            // popup (字幕/音轨/输出 dropdown) is open under the pointer, so
-            // scrolling the popup list does not also change the volume.
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 && ui.rect_contains_pointer(rect) && !ctx.is_pointer_over_egui() {
-                let (acc, steps) =
-                    crate::views::media::accumulate_scroll(self.media_view.scroll_acc, scroll);
-                self.media_view.scroll_acc = acc;
-                if steps != 0 {
-                    self.adjust_media_volume(&ctx, steps as f64 * 5.0);
-                }
-            }
-            let overlay = self
-                .media_view
-                .open
-                .as_ref()
-                .map(|o| media_overlay(&o.last))
-                .unwrap_or(MediaOverlay::None);
-            // Audio-only or decode error: park the native layer at zero
-            // size so the egui placeholder painted by MediaView::ui shows
-            // instead of the video. On Windows the HWND child also parks
-            // while a menu is open (menu_parked above); macOS needs no
-            // menu parking since the egui surface composites above the
-            // video layer.
-            let bounds = if matches!(overlay, MediaOverlay::None) && !menu_parked {
-                wry::Rect {
-                    position: wry::dpi::LogicalPosition::new(rect.min.x, rect.min.y).into(),
-                    size: wry::dpi::LogicalSize::new(rect.width(), rect.height()).into(),
-                }
-            } else {
-                wry::Rect {
-                    position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
-                    size: wry::dpi::LogicalSize::new(0.0, 0.0).into(),
-                }
-            };
-            self.media_view.update_bounds(bounds);
-            self.media_view.ui(&ctx, ui, panel_fill);
-        });
-    }
-
-    fn render_media_toolbar(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        let (title, tracks, current_sub, current_audio, speed, paused) = self
-            .media_view
-            .open
-            .as_ref()
-            .map(|o| {
-                (
-                    o.title.clone(),
-                    o.last.tracks.clone(),
-                    o.last.current_sub,
-                    o.last.current_audio,
-                    o.last.speed,
-                    o.last.paused,
-                )
-            })
-            .unwrap_or_default();
-        let devices: Vec<(String, String)> = self
-            .media_view
-            .open
-            .as_ref()
-            .and_then(|o| o.last.audio_devices.as_ref())
-            .map(|ds| ds.iter().map(|d| (d.name.clone(), d.label())).collect())
-            .unwrap_or_default();
-        let current_device = self.settings.media_audio_device.clone();
-        let display_mode = self.settings.toolbar_display_mode;
-        let chrome = crate::theme::chrome_bar_frame(ui.visuals(), self.settings.chrome_opacity);
-        egui::Panel::top("media_toolbar")
-            .frame(chrome)
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    crate::theme::begin_chrome_row(ui);
-                    if toolbar_button(ui, icons::HOUSE, "书架", display_mode).clicked() {
-                        self.current_view = View::Library;
-                    }
-                    ui.separator();
-                    let play_icon = if paused { icons::PLAY } else { icons::PAUSE };
-                    let play_label = if paused { "播放" } else { "暂停" };
-                    if toolbar_button(ui, play_icon, play_label, display_mode).clicked() {
-                        self.media_view.toggle_pause();
-                    }
-                    if toolbar_button(ui, icons::SKIP_BACK, "-10s", display_mode).clicked() {
-                        self.seek_media_rel(&ctx, -10.0);
-                    }
-                    if toolbar_button(ui, icons::SKIP_FORWARD, "+10s", display_mode).clicked() {
-                        self.seek_media_rel(&ctx, 10.0);
-                    }
-                    ui.separator();
-                    if ui
-                        .add(
-                            egui::Button::new(format!("{:.1}x", speed))
-                                .min_size(egui::vec2(0.0, crate::theme::TOOLBAR_BUTTON_HEIGHT)),
-                        )
-                        .on_hover_text("循环切换倍速")
-                        .clicked()
-                    {
-                        if let Some(target) = self.media_view.cycle_speed() {
-                            self.settings.media_speed = target;
-                            self.media_view
-                                .show_osd(&ctx, crate::views::media::speed_osd_text(target));
-                        }
-                    }
-                    ui.separator();
-                    let subs: Vec<(i64, String)> = tracks
-                        .iter()
-                        .filter(|t| t.kind == openitgo_media::TrackKind::Sub)
-                        .enumerate()
-                        .map(|(i, t)| (t.id, crate::views::media::track_label(t, i)))
-                        .collect();
-                    egui::ComboBox::from_label("字幕")
-                        .selected_text(
-                            current_sub
-                                .and_then(|id| subs.iter().find(|(sid, _)| *sid == id))
-                                .map(|(_, l)| l.clone())
-                                .unwrap_or_else(|| "关闭".to_string()),
-                        )
-                        .show_ui(ui, |ui| {
-                            if ui.selectable_label(current_sub.is_none(), "关闭").clicked() {
-                                self.media_view.set_sub(None);
-                            }
-                            for (id, label) in &subs {
-                                if ui
-                                    .selectable_label(current_sub == Some(*id), label)
-                                    .clicked()
-                                {
-                                    self.media_view.set_sub(Some(*id));
-                                }
-                            }
-                            ui.separator();
-                            if ui.button("加载外部字幕…").clicked() {
-                                self.load_external_subtitle(&ctx);
-                            }
-                            ui.separator();
-                            if ui.button("字幕延迟 -0.1s").clicked() {
-                                self.adjust_media_sub_delay(&ctx, -0.1);
-                            }
-                            if ui.button("字幕延迟 +0.1s").clicked() {
-                                self.adjust_media_sub_delay(&ctx, 0.1);
-                            }
-                            if ui.button("重置字幕延迟").clicked() {
-                                self.reset_media_sub_delay(&ctx);
-                            }
-                        });
-                    let audios: Vec<(i64, String)> = tracks
-                        .iter()
-                        .filter(|t| t.kind == openitgo_media::TrackKind::Audio)
-                        .enumerate()
-                        .map(|(i, t)| (t.id, crate::views::media::track_label(t, i)))
-                        .collect();
-                    if audios.len() > 1 {
-                        egui::ComboBox::from_label("音轨")
-                            .selected_text(
-                                current_audio
-                                    .and_then(|id| audios.iter().find(|(aid, _)| *aid == id))
-                                    .map(|(_, l)| l.clone())
-                                    .unwrap_or_else(|| "-".to_string()),
-                            )
-                            .show_ui(ui, |ui| {
-                                for (id, label) in &audios {
-                                    if ui
-                                        .selectable_label(current_audio == Some(*id), label)
-                                        .clicked()
-                                    {
-                                        self.media_view.set_audio(*id);
-                                    }
-                                }
-                            });
-                    }
-                    ui.separator();
-                    let current_label = devices
-                        .iter()
-                        .find(|(n, _)| *n == current_device)
-                        .map(|(_, l)| l.clone())
-                        .unwrap_or_else(|| "自动".to_string());
-                    egui::ComboBox::from_label("输出")
-                        // 选中项截断显示，避免长设备名撑爆工具栏；下拉列表保留全名
-                        .selected_text(crate::views::media::truncate_label(&current_label, 20))
-                        .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_label(current_device.is_empty(), "自动")
-                                .clicked()
-                            {
-                                self.set_media_audio_device(
-                                    &ctx,
-                                    String::new(),
-                                    "自动".to_string(),
-                                );
-                            }
-                            for (name, label) in &devices {
-                                if ui
-                                    .selectable_label(current_device == *name, label)
-                                    .clicked()
-                                {
-                                    self.set_media_audio_device(&ctx, name.clone(), label.clone());
-                                }
-                            }
-                        });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if toolbar_button(ui, icons::ARROWS_OUT_SIMPLE, "全屏", display_mode)
-                            .clicked()
-                        {
-                            self.toggle_fullscreen(&ctx);
-                        }
-                        ui.label(egui::RichText::new(title).weak());
-                    });
-                });
-            });
-    }
-
-    /// 媒体视图菜单：倍速微调/循环播放/截图/AB 循环/章节导航。
-    fn render_media_menu(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        if ui.button("倍速 -0.25").clicked() {
-            self.adjust_media_speed(ctx, -0.25);
-            ui.close();
-        }
-        if ui.button("倍速 +0.25").clicked() {
-            self.adjust_media_speed(ctx, 0.25);
-            ui.close();
-        }
-        ui.separator();
-        let loop_on = self.media_view.loop_file;
-        if ui.selectable_label(loop_on, "循环播放").clicked() {
-            self.toggle_media_loop(ctx);
-            ui.close();
-        }
-        if ui.button("截图").clicked() {
-            self.media_screenshot(ctx);
-            ui.close();
-        }
-        ui.separator();
-        let ab_label = match self.media_view.ab_loop {
-            crate::views::media::AbLoop::None => "设置 A 点",
-            crate::views::media::AbLoop::ASet(_) => "设置 B 点",
-            crate::views::media::AbLoop::Both(..) => "取消 AB 循环",
-        };
-        if ui.button(ab_label).clicked() {
-            self.media_ab_advance(ctx);
-            ui.close();
-        }
-        ui.separator();
-        let has_chapters = self
-            .media_view
-            .open
-            .as_ref()
-            .map(|o| !o.last.chapters.is_empty())
-            .unwrap_or(false);
-        if ui
-            .add_enabled(has_chapters, egui::Button::new("上一章"))
-            .clicked()
-        {
-            self.media_chapter_step(ctx, -1);
-            ui.close();
-        }
-        if ui
-            .add_enabled(has_chapters, egui::Button::new("下一章"))
-            .clicked()
-        {
-            self.media_chapter_step(ctx, 1);
-            ui.close();
-        }
-    }
-
-    fn adjust_media_speed(&mut self, ctx: &egui::Context, delta: f64) {
-        if let Some(v) = self.media_view.adjust_speed(delta) {
-            self.settings.media_speed = v;
-            self.media_view
-                .show_osd(ctx, crate::views::media::speed_fine_osd_text(v));
-        }
-    }
-
-    fn toggle_media_loop(&mut self, ctx: &egui::Context) {
-        if let Some(on) = self.media_view.toggle_loop_file() {
-            self.media_view.show_osd(
-                ctx,
-                if on {
-                    "循环播放 开".to_string()
-                } else {
-                    "循环播放 关".to_string()
-                },
-            );
-        }
-    }
-
-    fn media_screenshot(&mut self, ctx: &egui::Context) {
-        match self.media_view.take_screenshot() {
-            Ok(path) => self
-                .media_view
-                .show_osd(ctx, format!("已保存截图：{}", path.display())),
-            Err(e) => {
-                self.error_message = Some(format!("截图失败: {e}"));
-            }
-        }
-    }
-
-    fn media_ab_advance(&mut self, ctx: &egui::Context) {
-        if let Some(text) = self.media_view.advance_ab_loop() {
-            self.media_view.show_osd(ctx, text);
-        }
-    }
-
-    fn media_chapter_step(&mut self, ctx: &egui::Context, delta: i64) {
-        if let Some(text) = self.media_view.chapter_step(delta) {
-            self.media_view.show_osd(ctx, text);
-        }
-    }
-
-    fn set_media_volume(&mut self, ctx: &egui::Context, v: f64) {
-        let v = v.clamp(0.0, 100.0);
-        self.media_view.set_volume(v);
-        self.settings.media_volume = v;
-        self.media_view
-            .show_osd(ctx, crate::views::media::volume_osd_text(v));
-    }
-
-    fn toggle_media_mute(&mut self, ctx: &egui::Context) {
-        if let Some(muted) = self.media_view.toggle_mute() {
-            self.media_view
-                .show_osd(ctx, crate::views::media::mute_osd_text(muted).to_string());
-        }
-    }
-
-    fn adjust_media_volume(&mut self, ctx: &egui::Context, delta: f64) {
-        if let Some(v) = self.media_view.adjust_volume(delta) {
-            self.settings.media_volume = v;
-            self.media_view
-                .show_osd(ctx, crate::views::media::volume_osd_text(v));
-        }
-    }
-
-    fn seek_media_rel(&mut self, ctx: &egui::Context, secs: f64) {
-        self.media_view.seek_rel(secs);
-        self.media_view.show_osd(ctx, format!("{:+}s", secs as i32));
-    }
-
-    fn set_media_speed(&mut self, ctx: &egui::Context, speed: f64) {
-        self.media_view.set_speed(speed);
-        self.settings.media_speed = speed;
-        self.media_view
-            .show_osd(ctx, crate::views::media::speed_osd_text(speed));
-    }
-
-    fn set_media_audio_device(&mut self, ctx: &egui::Context, name: String, label: String) {
-        match self.media_view.set_audio_device(&name) {
-            Ok(()) => {
-                self.settings.media_audio_device = name;
-                self.media_view.show_osd(ctx, format!("输出: {label}"));
-            }
-            Err(e) => {
-                self.error_message = Some(format!("无法切换音频输出设备: {e}"));
-            }
-        }
-    }
-
-    fn load_external_subtitle(&mut self, ctx: &egui::Context) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("字幕", &["srt", "ass", "ssa", "vtt"])
-            .pick_file()
-        else {
-            return;
-        };
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("未知字幕")
-            .to_string();
-        match self.media_view.sub_add(&path) {
-            Ok(()) => self.media_view.show_osd(ctx, format!("已加载字幕：{name}")),
-            Err(e) => {
-                self.error_message = Some(format!("无法加载字幕: {e}"));
-            }
-        }
-    }
-
-    fn adjust_media_sub_delay(&mut self, ctx: &egui::Context, delta: f64) {
-        if let Some(v) = self.media_view.adjust_sub_delay(delta) {
-            self.media_view.show_osd(
-                ctx,
-                format!("字幕延迟 {}s", crate::views::media::format_sub_delay(v)),
-            );
-        }
-    }
-
-    fn reset_media_sub_delay(&mut self, ctx: &egui::Context) {
-        self.media_view.reset_sub_delay();
-        self.media_view.show_osd(
-            ctx,
-            format!("字幕延迟 {}s", crate::views::media::format_sub_delay(0.0)),
-        );
-    }
-
-    fn render_media_seekbar(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        let (pos, dur, volume, muted) = self
-            .media_view
-            .open
-            .as_ref()
-            .map(|o| {
-                (
-                    o.last.position_ms,
-                    o.last.duration_ms,
-                    o.last.volume,
-                    o.last.muted,
-                )
-            })
-            .unwrap_or((0, None, 100.0, false));
-        egui::Panel::bottom("media_seekbar")
-            .frame(crate::theme::chrome_bar_frame(
-                ui.visuals(),
-                self.settings.chrome_opacity,
-            ))
-            .show(ui, |ui| {
-                ui.vertical(|ui| {
-                    // Row 1: full-width seek bar with a hover-time tooltip.
-                    // egui 0.35 Slider still allocates spacing().slider_width
-                    // (100px) and ignores add_sized (egui-0.35.0
-                    // widgets/slider.rs:652-653), so override the width in a
-                    // scoped Ui — without leaking it to the row-2 volume slider.
-                    match dur {
-                        Some(d) if d > 0 => {
-                            let mut ratio = pos as f32 / d as f32;
-                            let slider = egui::Slider::new(&mut ratio, 0.0..=1.0)
-                                .show_value(false)
-                                .trailing_fill(true);
-                            let width = ui.available_width();
-                            let opacity = self.settings.chrome_opacity;
-                            let response = ui
-                                .scope(|ui| {
-                                    crate::theme::style_media_seek_slider(ui, width, opacity);
-                                    ui.add(slider)
-                                })
-                                .inner;
-                            let hover_text = response.hover_pos().and_then(|hover| {
-                                crate::views::media::hover_time_at(hover.x, response.rect, dur)
-                                    .map(openitgo_media::time::format_time_ms)
-                            });
-                            if response.drag_stopped() {
-                                self.media_view.seek_to_ratio_exact(ratio as f64);
-                            } else if response.changed() {
-                                self.media_view.seek_to_ratio(ratio as f64);
-                            }
-                            if let Some(text) = hover_text {
-                                // Consumes the response, so it goes last.
-                                response.on_hover_text(text);
-                            }
-                        }
-                        _ => {
-                            let width = ui.available_width();
-                            let opacity = self.settings.chrome_opacity;
-                            ui.scope(|ui| {
-                                crate::theme::style_media_seek_slider(ui, width, opacity);
-                                ui.add_enabled(
-                                    false,
-                                    egui::Slider::new(&mut 0.0f32, 0.0..=1.0)
-                                        .show_value(false)
-                                        .trailing_fill(true),
-                                )
-                            });
-                        }
-                    }
-                    // Row 2: time display on the left; mute + volume on the right.
-                    ui.horizontal(|ui| {
-                        let dur_text = dur
-                            .map(openitgo_media::time::format_time_ms)
-                            .unwrap_or_else(|| "--:--".to_string());
-                        ui.label(format!(
-                            "{} / {}",
-                            openitgo_media::time::format_time_ms(pos),
-                            dur_text
-                        ));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let mut vol = volume as f32;
-                            let vol_resp = crate::widgets::volume_wedge::volume_wedge(
-                                ui,
-                                &mut vol,
-                                !muted,
-                                self.settings.chrome_opacity,
-                            );
-                            if vol_resp.changed() {
-                                self.set_media_volume(&ctx, vol as f64);
-                            }
-                            vol_resp.on_hover_text(format!("音量 {:.0}%", volume));
-                            let mute_icon = if muted {
-                                icons::SPEAKER_SLASH
-                            } else {
-                                icons::SPEAKER_HIGH
-                            };
-                            let mute_label = if muted { "取消静音" } else { "静音" };
-                            if toolbar_button(
-                                ui,
-                                mute_icon,
-                                mute_label,
-                                ToolbarDisplayMode::IconOnly,
-                            )
-                            .clicked()
-                            {
-                                self.toggle_media_mute(&ctx);
-                            }
-                        });
-                    });
-                });
-            });
     }
 
     fn reader_mode_commands(
@@ -2627,6 +1878,20 @@ impl ReaderApp {
         (title, progress)
     }
 
+    fn memory_size_text(bytes: u64) -> String {
+        const KIB: f64 = 1024.0;
+        const MIB: f64 = KIB * 1024.0;
+        const GIB: f64 = MIB * 1024.0;
+        let bytes = bytes as f64;
+        if bytes >= GIB {
+            format!("{:.2} GiB", bytes / GIB)
+        } else if bytes >= MIB {
+            format!("{:.1} MiB", bytes / MIB)
+        } else {
+            format!("{:.0} KiB", bytes / KIB)
+        }
+    }
+
     fn render_ebook_statusbar(&mut self, ui: &mut egui::Ui) {
         self.ebook_view.sync_position();
         let (title, progress) = self
@@ -2648,6 +1913,12 @@ impl ReaderApp {
                 )
             })
             .unwrap_or_else(|| ("".to_string(), "".to_string()));
+        let process_memory = self
+            .ebook_view
+            .open
+            .as_ref()
+            .filter(|open| open.ebook.text.is_some())
+            .and_then(|_| crate::platform::process_memory_bytes());
 
         egui::Panel::bottom("ebook_statusbar")
             .frame(crate::theme::chrome_bar_frame(
@@ -2659,6 +1930,17 @@ impl ReaderApp {
                     ui.label(egui::RichText::new(title).weak());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(egui::RichText::new(progress).weak().size(12.5));
+                        if let Some(bytes) = process_memory {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "主程序内存 {}",
+                                    Self::memory_size_text(bytes)
+                                ))
+                                .weak()
+                                .size(12.5),
+                            )
+                            .on_hover_text("Windows 工作集，不含 WebView2 子进程");
+                        }
                     });
                 });
             });
@@ -3181,7 +2463,15 @@ impl ReaderApp {
         }
     }
 
+    fn should_show_menu_bar(view: &View, fullscreen: bool) -> bool {
+        !(fullscreen && matches!(view, View::Reader | View::Ebook))
+    }
+
     fn render_menu_bar(&mut self, ui: &mut egui::Ui) {
+        let fullscreen = ui.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        if !Self::should_show_menu_bar(&self.current_view, fullscreen) {
+            return;
+        }
         let ctx = ui.ctx().clone();
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -3303,13 +2593,6 @@ impl ReaderApp {
                     });
                 });
 
-                let is_media = matches!(self.current_view, View::Media);
-                ui.add_enabled_ui(is_media, |ui| {
-                    ui.menu_button("播放", |ui| {
-                        self.render_media_menu(&ctx, ui);
-                    });
-                });
-
                 ui.menu_button("工具", |ui| {
                     if ui.button("设置").clicked() {
                         self.current_view = View::Settings;
@@ -3371,18 +2654,6 @@ impl ReaderApp {
                     .striped(true)
                     .show(ui, |ui| {
                         for (keys, action) in crate::shortcuts::hardcoded_reader_rows() {
-                            ui.label(keys);
-                            ui.label(action);
-                            ui.end_row();
-                        }
-                    });
-                ui.separator();
-                ui.label("内置快捷键（媒体）");
-                egui::Grid::new("shortcuts_media_grid")
-                    .num_columns(2)
-                    .striped(true)
-                    .show(ui, |ui| {
-                        for (keys, action) in crate::shortcuts::hardcoded_media_rows() {
                             ui.label(keys);
                             ui.label(action);
                             ui.end_row();
@@ -3650,19 +2921,29 @@ impl ReaderApp {
             .iter()
             .map(|c| c.title.clone())
             .collect();
-        let entries: Vec<(usize, usize, Option<String>)> = self
+        let entries: Vec<(usize, usize, usize, Option<String>)> = self
             .bookmarks
             .entries
             .iter()
             .enumerate()
             .filter(|(_, b)| b.comic_id == comic_id)
-            .map(|(idx, b)| (idx, b.page_index, b.note.clone()))
+            .map(|(idx, b)| {
+                let (chapter, offset) = if let Some(global) = b.ebook_char_offset {
+                    open.ebook.text_position(global)
+                } else if open.ebook.text.is_some() {
+                    open.ebook
+                        .legacy_text_position(b.page_index, b.char_offset.unwrap_or(0))
+                } else {
+                    (b.page_index, b.char_offset.unwrap_or(0))
+                };
+                (idx, chapter, offset, b.note.clone())
+            })
             .collect();
         if entries.is_empty() {
             return;
         }
         ui.menu_button("书签", |ui| {
-            for (idx, chapter, note) in entries {
+            for (idx, chapter, offset, note) in entries {
                 let title = chapters
                     .get(chapter)
                     .cloned()
@@ -3670,7 +2951,7 @@ impl ReaderApp {
                     .unwrap_or_else(|| format!("第 {} 章", chapter + 1));
                 let label = note.unwrap_or(title);
                 if ui.button(label).clicked() {
-                    self.ebook_view.goto_chapter(chapter);
+                    self.ebook_view.goto_position(chapter, offset);
                     ui.close();
                 }
                 if ui.small_button("删除").clicked() {
@@ -3930,71 +3211,6 @@ impl ReaderApp {
                     }
                 }
             }
-            View::Media => {
-                if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-                    self.media_view.toggle_pause();
-                }
-                if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-                    self.seek_media_rel(ctx, 5.0);
-                }
-                if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-                    self.seek_media_rel(ctx, -5.0);
-                }
-                if ctx.input(|i| i.key_pressed(egui::Key::J)) {
-                    self.seek_media_rel(ctx, -10.0);
-                }
-                if ctx.input(|i| i.key_pressed(egui::Key::L)) {
-                    self.seek_media_rel(ctx, 10.0);
-                }
-                if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-                    self.adjust_media_volume(ctx, 5.0);
-                }
-                if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-                    self.adjust_media_volume(ctx, -5.0);
-                }
-                for (key, speed) in [
-                    (egui::Key::Num1, 0.5),
-                    (egui::Key::Num2, 1.0),
-                    (egui::Key::Num3, 1.5),
-                    (egui::Key::Num4, 2.0),
-                ] {
-                    if ctx.input(|i| i.key_pressed(key)) {
-                        self.set_media_speed(ctx, speed);
-                    }
-                }
-                if ctx.input(|i| i.key_pressed(egui::Key::V)) {
-                    self.media_view.cycle_sub();
-                }
-                if ctx.input(|i| i.key_pressed(egui::Key::Z)) {
-                    self.adjust_media_sub_delay(ctx, -0.1);
-                }
-                if ctx.input(|i| i.key_pressed(egui::Key::X)) {
-                    self.adjust_media_sub_delay(ctx, 0.1);
-                }
-                if ctx.input(|i| i.key_pressed(egui::Key::M)) {
-                    self.toggle_media_mute(ctx);
-                }
-                if ctx.input(|i| i.key_pressed(egui::Key::F)) {
-                    self.toggle_fullscreen(ctx);
-                }
-                if ctx.input(|i| i.key_pressed(egui::Key::OpenBracket)) {
-                    self.adjust_media_speed(ctx, -0.25);
-                }
-                if ctx.input(|i| i.key_pressed(egui::Key::CloseBracket)) {
-                    self.adjust_media_speed(ctx, 0.25);
-                }
-                if ctx.input(|i| i.key_pressed(egui::Key::A)) {
-                    self.media_ab_advance(ctx);
-                }
-                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-                    if fullscreen {
-                        self.toggle_fullscreen(ctx);
-                    } else {
-                        self.current_view = View::Library;
-                    }
-                }
-            }
             _ => {}
         }
     }
@@ -4188,16 +3404,11 @@ impl ReaderApp {
         self.last_saved_fm_state = Some(snapshot);
     }
 
-    /// 当前打开中的读物 id（漫画/电子书/媒体都算），无则 None。
+    /// 当前打开中的读物 id（漫画/电子书），无则 None。
     fn current_reading_id(&self) -> Option<String> {
         match self.current_view {
             View::Reader => self.reader_view.open.as_ref().map(|r| r.comic.id.clone()),
             View::Ebook => self.ebook_view.open.as_ref().map(|e| e.ebook.id.clone()),
-            View::Media => self
-                .media_view
-                .open
-                .as_ref()
-                .map(|o| openitgo_parser::stable_comic_id(&o.path)),
             _ => None,
         }
     }
@@ -4251,7 +3462,6 @@ impl ReaderApp {
         match self.current_view {
             View::Reader => self.record_reader_history(),
             View::Ebook => self.record_ebook_history(),
-            View::Media => self.record_media_history(),
             _ => {}
         }
         self.persist_history_bookmarks_if_due(Instant::now(), HISTORY_FLUSH_INTERVAL);
@@ -4432,12 +3642,6 @@ impl ReaderApp {
                 };
                 format_content_window_title(&path_display_name(&open.ebook.path))
             }
-            View::Media => {
-                let Some(open) = self.media_view.open.as_ref() else {
-                    return APP_WINDOW_TITLE.to_string();
-                };
-                format_content_window_title(&path_display_name(&open.path))
-            }
             View::Loading(path) => format_content_window_title(&path_display_name(path)),
             View::Archive(path) => format_content_window_title(&path_display_name(path)),
             View::Library | View::Settings => APP_WINDOW_TITLE.to_string(),
@@ -4505,6 +3709,7 @@ impl ReaderApp {
                     volume_index: 0,
                     page_index,
                     char_offset: None,
+                    ebook_char_offset: None,
                     last_read_at: now,
                 });
             }
@@ -4519,6 +3724,7 @@ impl ReaderApp {
             let path = open.ebook.path.clone();
             let chapter = open.current_chapter;
             let char_offset = open.renderer.current_position().1;
+            let ebook_char_offset = open.ebook.global_char_offset(chapter, char_offset);
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -4533,6 +3739,7 @@ impl ReaderApp {
                 entry.path = path;
                 entry.page_index = chapter;
                 entry.char_offset = Some(char_offset);
+                entry.ebook_char_offset = ebook_char_offset;
                 entry.last_read_at = now;
             } else {
                 self.history.entries.push(HistoryEntry {
@@ -4541,6 +3748,7 @@ impl ReaderApp {
                     volume_index: 0,
                     page_index: chapter,
                     char_offset: Some(char_offset),
+                    ebook_char_offset,
                     last_read_at: now,
                 });
             }
@@ -4550,24 +3758,6 @@ impl ReaderApp {
 
     fn covers_dir(&self) -> PathBuf {
         self.store.dir().join("covers")
-    }
-
-    /// Media playback progress: `char_offset` holds the position in
-    /// milliseconds and `page_index` stays 0 (mirrors the ebook pattern).
-    fn record_media_history(&mut self) {
-        if let Some(open) = self.media_view.open.as_ref() {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            upsert_media_history_entry(
-                &mut self.history,
-                open.path.clone(),
-                open.last.position_ms,
-                now,
-            );
-            self.history_dirty = true;
-        }
     }
 
     fn request_cover(&mut self, comic_id: &str, path: &Path, source: PageSource) {
@@ -4625,83 +3815,6 @@ impl ReaderApp {
         }
     }
 
-    fn poll_media_covers(&mut self) {
-        let mut updated = false;
-        while let Ok((id, path)) = self.media_cover_rx.try_recv() {
-            if path.as_os_str().is_empty() {
-                self.library_view.cover_request_finished(&id, false);
-                continue;
-            }
-            if let Some(entry) = self
-                .library_view
-                .library
-                .entries
-                .iter_mut()
-                .find(|e| e.comic_id == id)
-            {
-                entry.cover_path = Some(path);
-                updated = true;
-            }
-            self.library_view.cover_request_finished(&id, true);
-        }
-        // Same persistence timing as the comic cover path: save after a
-        // drained batch so cover_path survives restarts.
-        if updated {
-            let _ = self.store.save_library(&self.library_view.library);
-        }
-    }
-
-    fn request_media_cover(&mut self, idx: usize) {
-        let Some(entry) = self.library_view.library.entries.get(idx) else {
-            return;
-        };
-        let input = entry.path.clone();
-        let id = entry.comic_id.clone();
-        if !input.exists() {
-            return;
-        }
-        // The id stays in the set even when generation fails, so the library
-        // view's per-frame cover requests do not retry in a loop.
-        if !self.requested_cover_ids.insert(id.clone()) {
-            return;
-        }
-        let covers_dir = self.covers_dir();
-        std::fs::create_dir_all(&covers_dir).ok();
-        let out = openitgo_media::cover::cover_output_path(&covers_dir, &id);
-        if out.exists() {
-            // 封面已在磁盘上（上次生成过）：直接回填路径，无需重新生成。
-            if let Some(entry) = self.library_view.library.entries.get_mut(idx) {
-                entry.cover_path = Some(out);
-                let _ = self.store.save_library(&self.library_view.library);
-            }
-            self.library_view.cover_request_finished(&id, true);
-            return;
-        }
-        let tx = self.media_cover_tx.clone();
-        std::thread::spawn(move || {
-            // mpv grabs a full-resolution PNG; shrink it to the comic-cover
-            // thumbnail size and store JPEG so disk usage and GPU textures
-            // stay small (4K videos would otherwise upload 4K textures).
-            let tmp_png = covers_dir.join(format!(".{id}.cover-tmp.png"));
-            let ok = openitgo_media::cover::generate_cover(
-                &input,
-                &tmp_png,
-                std::time::Duration::from_secs(15),
-            )
-            .is_ok()
-                && shrink_media_cover(&tmp_png, &out).is_ok();
-            std::fs::remove_file(&tmp_png).ok();
-            if ok {
-                let _ = tx.send((id, out));
-            } else {
-                // 生成或缩放失败时清除可能残缺的 .jpg，
-                // 避免回填分支把坏文件当成有效封面。
-                std::fs::remove_file(&out).ok();
-                let _ = tx.send((id, PathBuf::new()));
-            }
-        });
-    }
-
     fn add_folder_to_library(&mut self, path: std::path::PathBuf) {
         if path.is_file() {
             self.add_file_to_library(path);
@@ -4719,7 +3832,7 @@ impl ReaderApp {
         let mut other_failed = 0;
         for entry in walk_supported_files(&path) {
             match classify_import_result(&entry, &self.passwords) {
-                ImportAttempt::AddedComic | ImportAttempt::AddedEbookOrMedia => {
+                ImportAttempt::AddedComic | ImportAttempt::AddedEbook => {
                     self.add_file_to_library(entry);
                     found += 1;
                 }
@@ -4768,7 +3881,6 @@ impl ReaderApp {
                     path: path.to_path_buf(),
                     cover_path: None,
                     added_at,
-                    media_type: media_type_for_path(path),
                     tags: Vec::new(),
                     page_count: Some(comic.total_pages()),
                 });
@@ -4783,7 +3895,6 @@ impl ReaderApp {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let media_type = media_type_for_path(&path);
         let page_count = Some(ebook.total_chapters());
         if !self
             .library_view
@@ -4801,46 +3912,10 @@ impl ReaderApp {
                     path,
                     cover_path: None,
                     added_at,
-                    media_type,
                     tags: Vec::new(),
                     page_count,
                 });
         }
-    }
-
-    fn add_media_to_library(&mut self, path: std::path::PathBuf) {
-        if self
-            .library_view
-            .library
-            .entries
-            .iter()
-            .any(|e| e.path == path)
-        {
-            return;
-        }
-        let added_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let title = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("未知媒体")
-            .to_string();
-        let media_type = media_type_for_path(&path);
-        self.library_view
-            .library
-            .entries
-            .push(openitgo_storage::models::LibraryEntry {
-                comic_id: openitgo_parser::stable_comic_id(&path),
-                title,
-                path,
-                cover_path: None,
-                added_at,
-                media_type,
-                tags: Vec::new(),
-                page_count: None,
-            });
     }
 
     /// Write total pages/chapters onto a matching library entry (no-op if absent).
@@ -4864,8 +3939,6 @@ impl ReaderApp {
     fn add_file_to_library(&mut self, path: std::path::PathBuf) {
         if is_ebook_file(&path) {
             self.add_ebook_to_library(path);
-        } else if is_media_file(&path) {
-            self.add_media_to_library(path);
         } else {
             let password = self
                 .passwords
@@ -4931,6 +4004,7 @@ impl ReaderApp {
                 volume_index: 0,
                 page_index,
                 char_offset: None,
+                ebook_char_offset: None,
                 note: None,
             });
         self.bookmarks_dirty = true;
@@ -4956,6 +4030,7 @@ impl ReaderApp {
             let comic_id = open.ebook.id.clone();
             let page_index = open.current_chapter;
             let char_offset = open.renderer.current_position().1;
+            let ebook_char_offset = open.ebook.global_char_offset(page_index, char_offset);
             let exists = self.bookmarks.entries.iter().any(|b| {
                 b.comic_id == comic_id && b.volume_index == 0 && b.page_index == page_index
             });
@@ -4967,6 +4042,7 @@ impl ReaderApp {
                         volume_index: 0,
                         page_index,
                         char_offset: Some(char_offset),
+                        ebook_char_offset,
                         note: None,
                     });
                 self.bookmarks_dirty = true;
@@ -4979,10 +4055,6 @@ impl ReaderApp {
         let Some(entry) = self.library_view.library.entries.get(idx) else {
             return;
         };
-        if matches!(entry.media_type, MediaType::Video | MediaType::Audio) {
-            self.request_media_cover(idx);
-            return;
-        }
         if !entry.path.exists() {
             return;
         }
@@ -5025,19 +4097,26 @@ impl ReaderApp {
         }
     }
 
-    /// 清空书架漫画视图（漫画/视频/音频）的全部条目：移除条目并清理封面
-    /// 与书签缩略图，不删除源文件，历史记录保留（历史页有独立「清空」）。
+    fn delete_library_entry(&mut self, idx: usize) {
+        if idx >= self.library_view.library.entries.len() {
+            return;
+        }
+        let removed = self.library_view.library.entries.remove(idx);
+        if let Err(e) = self.store.save_library(&self.library_view.library) {
+            self.error_message = Some(format!("无法保存书架: {e}"));
+            return;
+        }
+        remove_bookmark_thumbs(&self.covers_dir(), &removed.comic_id, None);
+    }
+
+    /// 清空书架漫画视图的全部条目：移除条目并清理封面与书签缩略图，
+    /// 不删除源文件，历史记录保留（历史页有独立「清空」）。
     fn clear_library_entries(&mut self) {
         let covers_dir = self.covers_dir();
         let (removed, kept): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.library_view.library.entries)
                 .into_iter()
-                .partition(|e| {
-                    matches!(
-                        e.media_type,
-                        MediaType::Comic | MediaType::Video | MediaType::Audio
-                    )
-                });
+                .partition(|e| !is_ebook_file(&e.path));
         self.library_view.library.entries = kept;
         for entry in removed {
             if let Some(cover) = &entry.cover_path {
@@ -5095,8 +4174,8 @@ impl ReaderApp {
     fn open_ebook(&mut self, path: std::path::PathBuf) {
         timing::log(&format!("open_ebook {:?}", path));
         self.cancel_pending_open();
-        self.ebook_opener = Some(AsyncOpener::open(path.clone(), |p| {
-            openitgo_parser::parse_ebook(p).map_err(|e| e.to_string())
+        self.ebook_opener = Some(AsyncOpener::open_cancellable(path.clone(), |p, cancel| {
+            openitgo_parser::parse_ebook_with_cancel(p, cancel).map_err(|e| e.to_string())
         }));
         self.current_view = View::Loading(path);
         self.error_message = None;
@@ -5127,8 +4206,6 @@ impl ReaderApp {
         let path = normalize_rar_volume_path(&path);
         if is_ebook_file(&path) {
             self.open_ebook(path);
-        } else if is_media_file(&path) {
-            self.open_media(path);
         } else if is_image_file(&path) {
             self.open_image_as_comic(path);
         } else if archive_kind(&path).is_some() && is_supported_comic_file(&path) {
@@ -5232,55 +4309,6 @@ impl ReaderApp {
         });
     }
 
-    fn open_media(&mut self, path: std::path::PathBuf) {
-        self.open_media_with(path, false);
-    }
-
-    fn open_media_with(&mut self, path: std::path::PathBuf, force_start: bool) {
-        timing::log(&format!("open_media {:?} force_start={force_start}", path));
-        self.pending_media_open = Some(PendingMediaOpen { path, force_start });
-    }
-
-    fn poll_media_open(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        let Some(PendingMediaOpen { path, force_start }) = self.pending_media_open.take() else {
-            return;
-        };
-        let current_path = self.media_view.open.as_ref().map(|o| o.path.as_path());
-        if should_record_media_before_open(current_path, &path) {
-            self.record_media_history();
-            self.persist_history_bookmarks();
-        }
-        let screen = ctx.content_rect();
-        let bounds = wry::Rect {
-            position: wry::dpi::LogicalPosition::new(screen.min.x, screen.min.y).into(),
-            size: wry::dpi::LogicalSize::new(screen.width(), screen.height()).into(),
-        };
-        let media_id = openitgo_parser::stable_comic_id(&path);
-        let history_ms = self
-            .history
-            .entries
-            .iter()
-            .find(|h| history_matches(h, &media_id, &path))
-            .and_then(|h| h.char_offset.map(|ms| ms as u64));
-        let resume_ms = media_resume_ms(force_start, history_ms);
-        match self.media_view.open(ctx, frame, bounds, path, resume_ms) {
-            Ok(()) => {
-                self.media_view.refresh_audio_devices();
-                self.media_view.apply_startup_settings(
-                    self.settings.media_volume,
-                    self.settings.media_speed,
-                    &self.settings.media_audio_device,
-                );
-                self.current_view = View::Media;
-                self.error_message = None;
-            }
-            Err(e) => {
-                self.error_message = Some(format!("无法打开媒体文件: {}", e));
-                self.current_view = View::Library;
-            }
-        }
-    }
-
     fn poll_ebook_opener(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let Some(mut opener) = self.ebook_opener.take() else {
             return;
@@ -5294,27 +4322,33 @@ impl ReaderApp {
                         position: wry::dpi::LogicalPosition::new(screen.min.x, screen.min.y).into(),
                         size: wry::dpi::LogicalSize::new(screen.width(), screen.height()).into(),
                     };
-                    match self.ebook_view.open(
+                    let (initial_chapter, initial_offset) = self
+                        .history
+                        .entries
+                        .iter()
+                        .find(|h| history_matches(h, &ebook.id, &ebook.path))
+                        .map(|h| {
+                            if let Some(global) = h.ebook_char_offset {
+                                ebook.text_position(global)
+                            } else if ebook.text.is_some() {
+                                ebook.legacy_text_position(h.page_index, h.char_offset.unwrap_or(0))
+                            } else {
+                                (
+                                    h.page_index.min(ebook.total_chapters().saturating_sub(1)),
+                                    h.char_offset.unwrap_or(0),
+                                )
+                            }
+                        })
+                        .unwrap_or((0, 0));
+                    match self.ebook_view.open_with_position(
                         ctx,
                         frame,
                         bounds,
                         ebook.clone(),
                         &self.settings.ebook,
+                        (initial_chapter, initial_offset),
                     ) {
                         Ok(()) => {
-                            if let Some(h) = self
-                                .history
-                                .entries
-                                .iter()
-                                .find(|h| history_matches(h, &ebook.id, &ebook.path))
-                            {
-                                let chapter = h.page_index;
-                                let offset = h.char_offset.unwrap_or(0);
-                                self.ebook_view.goto_chapter(chapter);
-                                if let Some(o) = self.ebook_view.open.as_mut() {
-                                    o.renderer.goto_chapter(chapter, offset);
-                                }
-                            }
                             self.current_view = View::Ebook;
                             self.error_message = None;
                             self.update_library_page_count(&ebook.id, ebook.total_chapters());
@@ -5367,7 +4401,7 @@ impl ReaderApp {
                     probe,
                     Err(openitgo_parser::traits::ParseError::PasswordRequired)
                 );
-            if is_ebook_file(path) || is_media_file(path) || openable {
+            if is_ebook_file(path) || openable {
                 self.open_path(path.clone());
             }
         }
@@ -5583,14 +4617,14 @@ fn password_dialog_on_confirm(input: &str) -> PasswordConfirmOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImportAttempt {
     AddedComic,
-    AddedEbookOrMedia,
+    AddedEbook,
     NeedsPassword,
     OtherError,
 }
 
 fn classify_import_result(path: &Path, passwords: &HashMap<PathBuf, String>) -> ImportAttempt {
-    if is_ebook_file(path) || is_media_file(path) {
-        return ImportAttempt::AddedEbookOrMedia;
+    if is_ebook_file(path) {
+        return ImportAttempt::AddedEbook;
     }
     let password = passwords
         .get(&password_key(path))
@@ -5663,7 +4697,7 @@ fn history_matches(entry: &HistoryEntry, comic_id: &str, path: &std::path::Path)
 }
 
 /// Recursively walk `root` and return paths that look like supported comic
-/// files, ebook files, media files, or folders containing images.
+/// files, ebook files, or folders containing images.
 fn walk_supported_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut result = Vec::new();
     let mut dirs = vec![root.to_path_buf()];
@@ -5675,8 +4709,7 @@ fn walk_supported_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 dirs.push(path);
-            } else if is_supported_comic_file(&path) || is_ebook_file(&path) || is_media_file(&path)
-            {
+            } else if is_supported_comic_file(&path) || is_ebook_file(&path) {
                 result.push(path);
             }
         }
@@ -5707,18 +4740,14 @@ fn open_file_dialog() -> rfd::FileDialog {
         .iter()
         .chain(EBOOK_EXTS)
         .chain(openitgo_parser::traits::IMAGE_EXTENSIONS)
-        .chain(VIDEO_EXTS)
-        .chain(AUDIO_EXTS)
         .chain(ARCHIVE_EXTS)
         .copied()
         .collect();
-    let media: Vec<&str> = VIDEO_EXTS.iter().chain(AUDIO_EXTS).copied().collect();
     rfd::FileDialog::new()
         .add_filter("所有支持的文件", &all)
         .add_filter("漫画", COMIC_EXTS)
         .add_filter("电子书", EBOOK_EXTS)
         .add_filter("图片", openitgo_parser::traits::IMAGE_EXTENSIONS)
-        .add_filter("媒体", &media)
         .add_filter("压缩包", ARCHIVE_EXTS)
 }
 
@@ -5870,22 +4899,6 @@ fn save_bookmark_thumb(
     Some(path)
 }
 
-/// Scales a full-size media cover grab down to the comic-cover thumbnail
-/// size and writes it as JPEG, so media covers cost the same disk space and
-/// GPU texture memory as comic covers.
-fn shrink_media_cover(input: &Path, output: &Path) -> Result<PathBuf, String> {
-    let img = image::open(input).map_err(|e| e.to_string())?;
-    let thumb = img.thumbnail(
-        crate::loader::THUMBNAIL_MAX_DIMENSION,
-        crate::loader::THUMBNAIL_MAX_DIMENSION,
-    );
-    thumb
-        .to_rgb8()
-        .save_with_format(output, image::ImageFormat::Jpeg)
-        .map_err(|e| e.to_string())?;
-    Ok(output.to_path_buf())
-}
-
 fn migrate_library_ids(
     library: &mut Library,
     history: &mut History,
@@ -5977,11 +4990,9 @@ fn rename_bookmark_thumbs_for_id(covers_dir: &Path, old_id: &str, new_id: &str) 
 }
 
 /// True while any egui overlay (menu, dropdown popup, floating window) is
-/// visible. The video layer sits below the transparent egui surface, so
-/// overlays composite above the video on their own — this is only used to
-/// keep the media toolbar from auto-hiding in fullscreen while a menu is
-/// open. Tooltips are ignored: they are small, follow the pointer, and must
-/// not affect the toolbar.
+/// visible. Used to keep fullscreen toolbars open and park the native ebook
+/// webview while a menu is above it. Tooltips are ignored: they are small,
+/// follow the pointer, and must not affect the toolbar.
 fn menu_overlay_open(ctx: &egui::Context) -> bool {
     ctx.memory(|m| {
         m.areas()
@@ -6042,7 +5053,6 @@ mod tests {
                 settings.decode_threads as usize,
             );
             let cover_loader = PageLoader::new_with_compress(false, 1);
-            let (media_cover_tx, media_cover_rx) = crossbeam_channel::unbounded();
             let password_book = store.load_password_book().unwrap_or_else(|_| PasswordBook {
                 entries: PasswordBook::builtin_defaults(),
             });
@@ -6066,7 +5076,6 @@ mod tests {
                 library_view,
                 reader_view: ReaderView::default(),
                 ebook_view: EbookView::default(),
-                media_view: MediaView::default(),
                 settings_view: SettingsView::default(),
                 archive_view: ArchiveView::default(),
                 file_manager_view,
@@ -6088,12 +5097,9 @@ mod tests {
                 prewarm_attempted: None,
                 archive_router: None,
                 pending_external_open: None,
-                pending_media_open: None,
                 pending_open_options: None,
                 pending_covers: HashMap::new(),
                 requested_cover_ids: HashSet::new(),
-                media_cover_tx,
-                media_cover_rx,
                 current_theme: Theme::System,
                 comic_settings,
                 last_saved_comic_settings: None,
@@ -6393,7 +5399,7 @@ mod tests {
                 path: book.clone(),
                 cover_path: None,
                 added_at: 0,
-                media_type: MediaType::Comic,
+
                 tags: vec![],
                 page_count: None,
             }],
@@ -6405,6 +5411,7 @@ mod tests {
                 volume_index: 0,
                 page_index: 3,
                 char_offset: None,
+                ebook_char_offset: None,
                 last_read_at: 1,
             }],
         };
@@ -6462,7 +5469,7 @@ mod tests {
                 path: book,
                 cover_path: Some(old_cover.clone()),
                 added_at: 0,
-                media_type: MediaType::Comic,
+
                 tags: vec![],
                 page_count: None,
             }],
@@ -6603,6 +5610,7 @@ mod tests {
             volume_index: 0,
             page_index: 1,
             char_offset: None,
+            ebook_char_offset: None,
             last_read_at: 0,
         });
         app.history_dirty = true;
@@ -6657,50 +5665,6 @@ mod tests {
     }
 
     #[test]
-    fn record_media_history_before_switching_file() {
-        let old = PathBuf::from("/tmp/ep1.mp4");
-        let new = PathBuf::from("/tmp/ep2.mp4");
-        assert!(
-            should_record_media_before_open(Some(old.as_path()), &new),
-            "different path must record"
-        );
-        assert!(
-            !should_record_media_before_open(Some(old.as_path()), &old),
-            "same path must not record"
-        );
-        assert!(
-            !should_record_media_before_open(None, &new),
-            "no current media must not record"
-        );
-
-        // 模拟 poll_media_open 换片前：记录旧片进度后 history 含切换前 position_ms。
-        let position_ms = 12_345u64;
-        let mut history = History::default();
-        if should_record_media_before_open(Some(old.as_path()), &new) {
-            upsert_media_history_entry(&mut history, old.clone(), position_ms, 100);
-        }
-        let entry = history
-            .entries
-            .iter()
-            .find(|h| h.path == old)
-            .expect("old path history entry");
-        assert_eq!(entry.char_offset, Some(position_ms as usize));
-        assert_eq!(entry.page_index, 0);
-    }
-
-    #[test]
-    fn auto_next_forces_resume_from_start() {
-        assert_eq!(media_resume_ms(true, Some(5000)), None);
-        assert_eq!(media_resume_ms(true, None), None);
-    }
-
-    #[test]
-    fn manual_open_still_resumes_from_history() {
-        assert_eq!(media_resume_ms(false, Some(5000)), Some(5000));
-        assert_eq!(media_resume_ms(false, None), None);
-    }
-
-    #[test]
     fn test_poll_opener_restores_page_from_history() {
         let (mut app, _tmp) = app_with_temp_store();
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -6714,6 +5678,7 @@ mod tests {
             volume_index: 0,
             page_index: 1,
             char_offset: None,
+            ebook_char_offset: None,
             last_read_at: 0,
         });
 
@@ -6755,7 +5720,7 @@ mod tests {
                 path: tmp_dir.path().to_path_buf(),
                 cover_path: None,
                 added_at: 0,
-                media_type: MediaType::Comic,
+
                 tags: Vec::new(),
                 page_count: None,
             });
@@ -6814,7 +5779,6 @@ mod tests {
             .iter()
             .find(|e| e.path == tmp_dir.path())
             .expect("comic should be auto-added to library");
-        assert_eq!(entry.media_type, MediaType::Comic);
         assert_eq!(entry.page_count, Some(2));
     }
 
@@ -6843,13 +5807,9 @@ mod tests {
     }
 
     #[test]
-    fn clear_library_entries_removes_comics_keeps_ebooks() {
+    fn delete_library_entry_removes_and_saves_immediately() {
         let (mut app, _tmp) = app_with_temp_store();
-        for (id, media_type) in [
-            ("comic-1", MediaType::Comic),
-            ("video-1", MediaType::Video),
-            ("ebook-1", MediaType::Ebook),
-        ] {
+        for id in ["comic-1", "comic-2"] {
             app.library_view
                 .library
                 .entries
@@ -6857,11 +5817,57 @@ mod tests {
                     comic_id: id.to_string(),
                     title: id.to_string(),
                     path: PathBuf::from(format!("/nonexistent/{id}")),
-                    cover_path: None,
-                    added_at: 0,
-                    media_type,
-                    tags: Vec::new(),
-                    page_count: None,
+                    ..Default::default()
+                });
+        }
+
+        app.delete_library_entry(0);
+
+        assert_eq!(app.library_view.library.entries.len(), 1);
+        assert_eq!(app.library_view.library.entries[0].comic_id, "comic-2");
+        let saved = app.store.load_library().unwrap();
+        assert_eq!(saved.entries.len(), 1);
+        assert_eq!(saved.entries[0].comic_id, "comic-2");
+    }
+
+    #[test]
+    fn delete_library_entry_save_failure_sets_error_message() {
+        let (mut app, tmp) = app_with_temp_store();
+        app.library_view
+            .library
+            .entries
+            .push(openitgo_storage::models::LibraryEntry {
+                comic_id: "comic-1".to_string(),
+                title: "comic-1".to_string(),
+                path: PathBuf::from("/nonexistent/comic-1"),
+                ..Default::default()
+            });
+        let bad = tmp.path().join("not-a-directory");
+        std::fs::write(&bad, b"x").unwrap();
+        app.store = JsonStore::new(&bad);
+
+        app.delete_library_entry(0);
+
+        let message = app.error_message.expect("保存失败应显示错误");
+        assert!(message.contains("书架"), "错误信息应指向书架: {message}");
+    }
+
+    #[test]
+    fn clear_library_entries_removes_comics_keeps_ebooks() {
+        let (mut app, _tmp) = app_with_temp_store();
+        for (id, path) in [
+            ("comic-1", "/nonexistent/comic-1"),
+            ("comic-2", "/nonexistent/comic-2"),
+            ("ebook-1", "/nonexistent/ebook-1.epub"),
+        ] {
+            app.library_view
+                .library
+                .entries
+                .push(openitgo_storage::models::LibraryEntry {
+                    comic_id: id.to_string(),
+                    title: id.to_string(),
+                    path: PathBuf::from(path),
+                    ..Default::default()
                 });
         }
 
@@ -7080,6 +6086,21 @@ mod tests {
             &View::Archive(PathBuf::from("/tmp/a.zip")),
             &Some(View::FileManager)
         ));
+    }
+
+    #[test]
+    fn test_menu_bar_hidden_only_during_fullscreen_reading() {
+        assert!(!ReaderApp::should_show_menu_bar(&View::Reader, true));
+        assert!(!ReaderApp::should_show_menu_bar(&View::Ebook, true));
+        assert!(ReaderApp::should_show_menu_bar(&View::Reader, false));
+        assert!(ReaderApp::should_show_menu_bar(&View::Ebook, false));
+        assert!(ReaderApp::should_show_menu_bar(&View::Library, true));
+        assert!(ReaderApp::should_show_menu_bar(&View::Settings, true));
+        assert!(ReaderApp::should_show_menu_bar(
+            &View::Archive(PathBuf::from("/tmp/a.zip")),
+            true
+        ));
+        assert!(ReaderApp::should_show_menu_bar(&View::FileManager, true));
     }
 
     #[test]
@@ -7381,41 +6402,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_media_file_recognizes_video_and_audio() {
-        assert!(is_media_file(Path::new("a.mp4")));
-        assert!(is_media_file(Path::new("a.MKV")));
-        assert!(is_media_file(Path::new("a.webm")));
-        assert!(is_media_file(Path::new("a.mp3")));
-        assert!(is_media_file(Path::new("a.flac")));
-        assert!(!is_media_file(Path::new("a.epub")));
-        assert!(!is_media_file(Path::new("a.cbz")));
-        assert!(!is_media_file(Path::new("a")));
-    }
-
-    #[test]
-    fn test_media_type_for_path_classifies_media() {
-        assert_eq!(media_type_for_path(Path::new("a.mp4")), MediaType::Video);
-        assert_eq!(media_type_for_path(Path::new("a.mkv")), MediaType::Video);
-        assert_eq!(media_type_for_path(Path::new("a.mp3")), MediaType::Audio);
-        assert_eq!(media_type_for_path(Path::new("a.flac")), MediaType::Audio);
-        assert_eq!(media_type_for_path(Path::new("a.epub")), MediaType::Ebook);
-        assert_eq!(media_type_for_path(Path::new("a.cbz")), MediaType::Comic);
-    }
-
-    #[test]
-    fn test_add_media_to_library_uses_stable_id_and_media_type() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let video = tmp_dir.path().join("clip.mp4");
-        std::fs::write(&video, b"fake").unwrap();
-        let (mut app, _tmp) = app_with_temp_store();
-        app.add_media_to_library(video.clone());
-        let entry = &app.library_view.library.entries[0];
-        assert_eq!(entry.media_type, MediaType::Video);
-        assert_eq!(entry.title, "clip");
-        assert_eq!(entry.comic_id, openitgo_parser::stable_comic_id(&video));
-    }
-
-    #[test]
     fn test_open_path_dispatches_to_ebook_opener() {
         let (mut app, _tmp) = app_with_temp_store();
         app.open_path(PathBuf::from("/tmp/fake.epub"));
@@ -7521,9 +6507,6 @@ mod tests {
         }
         for ext in openitgo_parser::traits::IMAGE_EXTENSIONS {
             assert!(is_image_file(&with_ext(ext)), "{ext}");
-        }
-        for ext in VIDEO_EXTS.iter().chain(AUDIO_EXTS) {
-            assert!(is_media_file(&with_ext(ext)), "{ext}");
         }
         for ext in ARCHIVE_EXTS {
             let p = with_ext(ext);
@@ -7807,6 +6790,7 @@ mod tests {
             volume_index: 0,
             page_index: 0,
             char_offset: None,
+            ebook_char_offset: None,
             last_read_at: 0,
         });
 
@@ -7898,6 +6882,16 @@ mod tests {
     }
 
     #[test]
+    fn test_memory_size_text_uses_binary_units() {
+        assert_eq!(ReaderApp::memory_size_text(512 * 1024), "512 KiB");
+        assert_eq!(ReaderApp::memory_size_text(16 * 1024 * 1024), "16.0 MiB");
+        assert_eq!(
+            ReaderApp::memory_size_text(3 * 1024 * 1024 * 1024),
+            "3.00 GiB"
+        );
+    }
+
+    #[test]
     fn test_history_matches_by_comic_id() {
         let h = HistoryEntry {
             comic_id: "abc".to_string(),
@@ -7926,126 +6920,6 @@ mod tests {
             ..Default::default()
         };
         assert!(!history_matches(&h, "def", Path::new("/book.epub")));
-    }
-
-    #[test]
-    fn test_media_history_entry_contract() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let video = tmp_dir.path().join("clip.mp4");
-        std::fs::write(&video, b"fake").unwrap();
-        let (mut app, _tmp) = app_with_temp_store();
-        let media_id = openitgo_parser::stable_comic_id(&video);
-        app.history.entries.push(HistoryEntry {
-            comic_id: media_id.clone(),
-            path: video.clone(),
-            volume_index: 0,
-            page_index: 0,
-            char_offset: Some(42_000),
-            last_read_at: 1,
-        });
-        let entry = app
-            .history
-            .entries
-            .iter()
-            .find(|h| history_matches(h, &media_id, &video))
-            .unwrap();
-        assert_eq!(entry.char_offset, Some(42_000));
-        assert_eq!(entry.page_index, 0);
-    }
-
-    #[test]
-    fn test_poll_media_covers_sets_cover_path() {
-        let (mut app, _tmp) = app_with_temp_store();
-        let video = PathBuf::from("/tmp/clip.mp4");
-        let id = openitgo_parser::stable_comic_id(&video);
-        app.library_view
-            .library
-            .entries
-            .push(openitgo_storage::models::LibraryEntry {
-                comic_id: id.clone(),
-                title: "clip".to_string(),
-                path: video,
-                cover_path: None,
-                added_at: 0,
-                media_type: MediaType::Video,
-                tags: Vec::new(),
-                page_count: None,
-            });
-        let cover = PathBuf::from("/tmp/covers/clip.jpg");
-        app.media_cover_tx.send((id, cover.clone())).unwrap();
-        app.poll_media_covers();
-        assert_eq!(
-            app.library_view.library.entries[0].cover_path.as_deref(),
-            Some(cover.as_path())
-        );
-        let saved = app.store.load_library().unwrap();
-        assert_eq!(
-            saved.entries[0].cover_path.as_deref(),
-            Some(cover.as_path()),
-            "cover_path should be persisted to library.json"
-        );
-    }
-
-    #[test]
-    fn test_request_media_cover_backfills_existing_cover() {
-        let (mut app, tmp) = app_with_temp_store();
-        let video = tmp.path().join("clip.mp4");
-        std::fs::write(&video, b"fake").unwrap();
-        let id = openitgo_parser::stable_comic_id(&video);
-        app.library_view
-            .library
-            .entries
-            .push(openitgo_storage::models::LibraryEntry {
-                comic_id: id.clone(),
-                title: "clip".to_string(),
-                path: video,
-                cover_path: None,
-                added_at: 0,
-                media_type: MediaType::Video,
-                tags: Vec::new(),
-                page_count: None,
-            });
-        let covers_dir = tmp.path().join("covers");
-        std::fs::create_dir_all(&covers_dir).unwrap();
-        let cover = openitgo_media::cover::cover_output_path(&covers_dir, &id);
-        std::fs::write(&cover, b"jpeg").unwrap();
-        app.request_media_cover(0);
-        assert_eq!(
-            app.library_view.library.entries[0].cover_path.as_deref(),
-            Some(cover.as_path())
-        );
-        assert!(app.requested_cover_ids.contains(&id));
-        let saved = app.store.load_library().unwrap();
-        assert_eq!(
-            saved.entries[0].cover_path.as_deref(),
-            Some(cover.as_path()),
-            "backfilled cover_path should be persisted to library.json"
-        );
-    }
-
-    #[test]
-    fn test_shrink_media_cover_writes_jpeg_thumbnail() {
-        let tmp = tempfile::tempdir().unwrap();
-        let png = tmp.path().join("grab.png");
-        let img = image::RgbaImage::from_pixel(1024, 512, image::Rgba([10, 20, 30, 255]));
-        img.save(&png).unwrap();
-        let out = tmp.path().join("cover.jpg");
-        shrink_media_cover(&png, &out).unwrap();
-        let thumb = image::open(&out).unwrap();
-        assert!(
-            thumb.width() <= crate::loader::THUMBNAIL_MAX_DIMENSION
-                && thumb.height() <= crate::loader::THUMBNAIL_MAX_DIMENSION,
-            "thumbnail should fit within THUMBNAIL_MAX_DIMENSION"
-        );
-        assert_eq!(
-            (thumb.width(), thumb.height()),
-            (256, 128),
-            "aspect ratio should be preserved"
-        );
-        assert!(
-            matches!(thumb, image::DynamicImage::ImageRgb8(_)),
-            "cover should be stored as JPEG"
-        );
     }
 
     fn should_show_bar(
@@ -8176,54 +7050,8 @@ mod tests {
         run_frame_with_area(&ctx, egui::Order::Tooltip);
         assert!(
             !menu_overlay_open(&ctx),
-            "hover tooltips must not hide the video"
+            "hover tooltips must not count as menu overlays"
         );
-    }
-
-    #[test]
-    fn next_media_in_dir_follows_natural_order_and_skips_non_media() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        for name in ["EP1.mkv", "EP2.mkv", "EP10.mkv", "notes.txt"] {
-            std::fs::write(dir.join(name), b"x").unwrap();
-        }
-        // 扩展名像媒体的目录不算媒体文件
-        std::fs::create_dir(dir.join("EP3.mkv")).unwrap();
-
-        assert_eq!(
-            next_media_in_dir(&dir.join("EP1.mkv")),
-            Some(dir.join("EP2.mkv"))
-        );
-        assert_eq!(
-            next_media_in_dir(&dir.join("EP2.mkv")),
-            Some(dir.join("EP10.mkv"))
-        );
-        // 已是最后一集
-        assert_eq!(next_media_in_dir(&dir.join("EP10.mkv")), None);
-        // current 不存在于目录中
-        assert_eq!(next_media_in_dir(&dir.join("EP9.mkv")), None);
-        // current 本身不是媒体文件
-        assert_eq!(next_media_in_dir(&dir.join("notes.txt")), None);
-    }
-
-    #[test]
-    fn next_media_in_dir_filters_audio_and_video() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        for name in ["a.mp3", "b.flac", "c.mkv", "d.cbz", "e.pdf"] {
-            std::fs::write(dir.join(name), b"x").unwrap();
-        }
-        assert_eq!(
-            next_media_in_dir(&dir.join("a.mp3")),
-            Some(dir.join("b.flac"))
-        );
-        assert_eq!(
-            next_media_in_dir(&dir.join("b.flac")),
-            Some(dir.join("c.mkv"))
-        );
-        assert_eq!(next_media_in_dir(&dir.join("c.mkv")), None);
-        // 漫画文件不算媒体
-        assert_eq!(next_media_in_dir(&dir.join("d.cbz")), None);
     }
 
     #[test]

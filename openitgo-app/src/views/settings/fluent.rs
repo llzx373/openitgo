@@ -1,6 +1,6 @@
 use super::{
-    comic_end_action_label, ebook_mode_label, ebook_theme_label, fit_label, media_end_action_label,
-    mode_label, theme_label, toolbar_mode_label, SettingsTab, SettingsView,
+    comic_end_action_label, ebook_mode_label, ebook_theme_label, fit_label, mode_label,
+    theme_label, toolbar_mode_label, SettingsTab, SettingsView,
 };
 use crate::theme::tokens::{size, spacing, text};
 use crate::widgets::fluent::{self as fw, ButtonKind};
@@ -9,8 +9,7 @@ use egui_phosphor_icons::icons;
 use openitgo_core::ebook::EbookReadingMode;
 use openitgo_core::models::{FitMode, ReadingMode};
 use openitgo_storage::models::{
-    ComicEndAction, EbookTheme, FmButton, MediaEndAction, PasswordBook, Settings, Theme,
-    ToolbarDisplayMode,
+    ComicEndAction, EbookTheme, FmButton, PasswordBook, Settings, Theme, ToolbarDisplayMode,
 };
 
 pub(super) fn ui(
@@ -71,7 +70,6 @@ fn content(
                 SettingsTab::Appearance => appearance(view, ui, settings),
                 SettingsTab::Comic => comic(ui, settings),
                 SettingsTab::Ebook => ebook(ui, settings),
-                SettingsTab::Media => media(ui, settings),
                 SettingsTab::Archive => {
                     return archive(view, ui, settings, password_book);
                 }
@@ -402,66 +400,6 @@ fn ebook(ui: &mut Ui, settings: &mut Settings) {
             Some("适用于 macOS 自然滚动"),
             |ui| {
                 fw::toggle(ui, &mut settings.ebook.invert_scroll, "电子书反转滚轮方向");
-            },
-        );
-    });
-}
-
-fn media(ui: &mut Ui, settings: &mut Settings) {
-    group(ui, "播放", |ui| {
-        row(
-            ui,
-            "播放到结尾",
-            Some("自动下一集按同目录自然排序续播"),
-            |ui| {
-                egui::ComboBox::from_id_salt("media_end_action")
-                    .selected_text(media_end_action_label(settings.media_end_action))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut settings.media_end_action,
-                            MediaEndAction::Stop,
-                            "停止",
-                        );
-                        ui.selectable_value(
-                            &mut settings.media_end_action,
-                            MediaEndAction::NextInDir,
-                            "自动播放下一集",
-                        );
-                    });
-            },
-        );
-        separator(ui);
-        row(ui, "默认音量", None, |ui| {
-            let mut volume = settings.media_volume as f32;
-            if fw::slider(ui, egui::Slider::new(&mut volume, 0.0..=100.0)).changed() {
-                settings.media_volume = volume as f64;
-            }
-        });
-        separator(ui);
-        row(ui, "默认倍速", None, |ui| {
-            let mut speed = settings.media_speed as f32;
-            if fw::slider(
-                ui,
-                egui::Slider::new(&mut speed, 0.25..=4.0)
-                    .step_by(0.05)
-                    .suffix("×"),
-            )
-            .changed()
-            {
-                settings.media_speed = speed as f64;
-            }
-        });
-        separator(ui);
-        row(
-            ui,
-            "默认音频输出",
-            Some("填写 mpv 设备名；留空为系统默认"),
-            |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut settings.media_audio_device)
-                        .hint_text("自动")
-                        .desired_width(220.0),
-                );
             },
         );
     });

@@ -47,9 +47,6 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Install mpv
-        run: brew install mpv
-
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 

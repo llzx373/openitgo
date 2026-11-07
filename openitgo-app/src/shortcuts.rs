@@ -96,22 +96,6 @@ pub fn hardcoded_reader_rows() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// 快捷键一览面板的"内置"分区（媒体），键位硬编码在 app.rs 的
-/// `handle_global_input` View::Media 分支。
-pub fn hardcoded_media_rows() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("Space", "播放 / 暂停"),
-        ("← / →", "快退 / 快进 5 秒"),
-        ("↑ / ↓", "音量 + / -"),
-        ("1 - 4", "倍速直选（0.5x / 1.0x / 1.5x / 2.0x）"),
-        ("Z / X", "字幕延迟 -0.1s / +0.1s"),
-        ("M", "静音 / 取消静音"),
-        ("F", "全屏"),
-        ("[ / ]", "倍速微调 -0.25 / +0.25"),
-        ("A", "AB 循环（设 A 点 / 设 B 点 / 取消）"),
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hardcoded_rows_cover_reader_and_media() {
+    fn test_hardcoded_rows_cover_reader() {
         let reader = hardcoded_reader_rows();
         assert_eq!(
             reader,
@@ -175,21 +159,6 @@ mod tests {
                 ("双击画面", "切换 原始大小 / 自动适应"),
                 ("Ctrl + 滚轮", "缩放"),
                 ("鼠标侧键", "上一页 / 下一页"),
-            ]
-        );
-        let media = hardcoded_media_rows();
-        assert_eq!(
-            media,
-            vec![
-                ("Space", "播放 / 暂停"),
-                ("← / →", "快退 / 快进 5 秒"),
-                ("↑ / ↓", "音量 + / -"),
-                ("1 - 4", "倍速直选（0.5x / 1.0x / 1.5x / 2.0x）"),
-                ("Z / X", "字幕延迟 -0.1s / +0.1s"),
-                ("M", "静音 / 取消静音"),
-                ("F", "全屏"),
-                ("[ / ]", "倍速微调 -0.25 / +0.25"),
-                ("A", "AB 循环（设 A 点 / 设 B 点 / 取消）"),
             ]
         );
     }

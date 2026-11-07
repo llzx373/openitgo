@@ -4,7 +4,7 @@
 
 `OpenItGo` is a desktop comic/manga reader built with Rust, `eframe`, `egui`, and `wgpu`.
 Supports ZIP/CBZ, RAR/CBR, PDF, and image folders; EPUB/TXT/MOBI/AZW3/Markdown ebooks via
-an embedded `wry` webview; audio/video via embedded `libmpv`.
+an embedded `wry` webview.
 
 ## Repository Layout
 
@@ -14,8 +14,6 @@ an embedded `wry` webview; audio/video via embedded `libmpv`.
   (skips `._*` AppleDouble sidecars and `__MACOSX/`).
 - `openitgo-storage/` — JSON persistence: settings, library, history, bookmarks,
   `comic_settings.json`, `reading_stats.json`, `password_book.json`.
-- `openitgo-media/` — libmpv wrapper: commands, event pump, property observation, OpenGL
-  render context, headless covers. `args.rs`/`apply.rs` 为 FFI-free 纯函数模块，CI 可测。
 - `openitgo-app/` — egui application, cache, loader, UI views.
 - `docs/` — audit reports, bug notes, implementation plans；`state-machines.md` 是显式/隐式
   状态、不变式、转换与已确认状态 bug 的单一记录，改状态语义时同步更新。
@@ -31,9 +29,6 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-- libmpv: macOS via Homebrew (`brew install mpv`); Windows from `vendor/mpv/`
-  (`scripts/setup-windows.ps1` 下载 shinchiro build 并生成 `mpv.lib`，`openitgo-media/build.rs`
-  链接并复制 `libmpv-2.dll`)。Packaged `.app` bundles embed libmpv.
 - egui 0.35 requires rustc ≥ 1.92; local dev on 1.97.1, CI on unpinned stable.
 - Windows 需 MSVC 环境（VS Build Tools + C++ workload）。`scripts/cargo-win.bat` 用
   `vcvars64.bat` 包裹 cargo。`unrar_sys` 需 `#[cfg(windows)] #[link(name = "advapi32")]`
@@ -69,11 +64,13 @@ cargo clippy --workspace --all-targets -- -D warnings
   （false=同名自动改名）、`extract_wrap`（"smart"/"always"/"never"）、
   `extract_delete_archive`/`extract_open_folder`。
   书架相关：`auto_add_to_library`（默认 true，打开漫画成功即自动入库，同路径去重）；
-  漫画 tab「管理 → 清空书架」经模态确认后移除漫画/视频/音频条目并清理封面与书签缩略图
+  漫画 tab「管理 → 清空书架」经模态确认后移除漫画条目并清理封面与书签缩略图
   （不删源文件、不动历史）。
 - **Motion**：`settings.reduce_motion` 与 Windows 动画偏好在 `App::update` 写入
   `theme::motion`；`animate_visibility` 用于工具栏/共享对话框的 120ms 淡化，开启减少
   动态时直接到最终状态。漫画/电子书翻页也必须叠加该状态，而非只看各自动画开关。
+  给 `Panel` 加淡化时直接暂设并恢复 `ui.opacity()`，**不要在外层加 `ui.scope`**：
+  scope 会把底部面板外框再次推进根游标，导致中央阅读区高度归零。
 - **Per-comic reading settings**（`comic_settings.json`，keyed by comic_id）：打开时经
   `poll_opener` 覆盖全局默认（mode → double_page → fit → rotation，rotation 只收 90°
   步进，脏值回 0）；改动由 `ReaderApp::maybe_save_comic_settings`（`App::update` 末尾）
@@ -81,7 +78,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 - **Library covers**：异步生成存 `covers/`；源文件消失标记 deleted。书签缩略图在
   `covers/bookmarks/<comic_id>-p<page>.jpg`，随书签/书删除。
 - **Window title**：`ReaderApp::sync_window_title` 每帧变化时设 `ViewportCommand::Title`——
-  Reader: `{page} — {comic} - OpenItGo`；Ebook/Media/Loading: `{file} - OpenItGo`；
+  Reader: `{page} — {comic} - OpenItGo`；Ebook/Loading: `{file} - OpenItGo`；
   Library/Settings: `OpenItGo`。
 - **滚轮翻页（漫画）**：egui 0.35 移除了 `raw_scroll_delta`，`smooth_scroll_delta` 会把一次
   滚轮刻度摊到多帧。`render_reader` 用 `raw_wheel_delta_y(&i.events)` 汇总本帧增量，经
@@ -95,7 +92,7 @@ cargo clippy --workspace --all-targets -- -D warnings
   `DoNothing`（默认）/`WrapToFirst`/`NextSibling`（经 `next_comic_sibling` 自然序；
   最后一个时 `error_message` = `已是最后一个漫画`）。
 - **Startup open (non-macOS)**：`initial_open_path` 从 `OPENITGO_OPEN` 环境变量（优先）或
-  `argv[1]` 取路径经 `open_path` 打开。`open_path` 分发顺序：ebook → media → 图片
+  `argv[1]` 取路径经 `open_path` 打开。`open_path` 分发顺序：ebook → 图片
   （`is_image_file`）→ zip/cbz/rar/cbr（`open_archive_auto` 启发式分流）→ 纯压缩包
   （`open_archive_browser`）→ comic。图片分支 `open_image_as_comic` 把父目录作为漫画打开
   并置一次性 `pending_open_options`：`poll_opener` 在每书设置与历史恢复之后消费——定位该图
@@ -351,7 +348,7 @@ dirs_first 逐栏下发，RowsKey 自动失效。
   仅 FM 打开动作真正离开 FM 时记录；进 Library/Settings 即清空；消费后即 None。
   FileManagerView 常驻内存，返回时原样恢复。
 
-### PageLoader / 缓存 / 电子书 / 媒体
+### PageLoader / 缓存 / 电子书
 
 - **PageLoader**：后台 IO + decode worker threads + channels；独立 `cover_loader` 负责库封面。
   RAR 请求路由到单独 IO worker，按 archive+password 保留顺序游标；回退、换包或读错误时重开，
@@ -383,30 +380,15 @@ dirs_first 逐栏下发，RowsKey 自动失效。
   syntect 高亮；相对图片改写 `/file/` 根相对 URL（canonicalize 必须在书目录子树内）。**菜单
   停放（#52）**：菜单打开时 `menu_overlay_open(ctx)` 驱动 `set_webview_hidden`。**位置保持**：
   字号/边距/主题按字符偏移，resize 防抖后按滚动比例（scroll）或 spread（分页）。
-- **Media (macOS)**：mpv 渲染进 CAOpenGLLayer 插到 wgpu CAMetalLayer 之下；app 以透明
-  backbuffer 运行；裸 layer 几何变化必须走禁用 actions 的 `CATransaction`；
-  `drawInCGLContext` 里必须查询 `GL_FRAMEBUFFER_BINDING` 传给 `RenderContext::render`，
-  `FLIP_Y=1`，否则合成全透明。播放进度存 `HistoryEntry.char_offset`（毫秒）。
-- **Media (Windows)**：mpv 经 `wid` 渲染进 `WS_CHILD` HWND 子窗口；`wid` 必须在
-  `mpv_initialize` 前设置，故两段式 open：`PendingVideoView::create(parent)` →
-  `MpvPlayer::new_with_wid` → `finish(bounds, &player)`。HWND 恒在 wgpu 表面之上，
-  `render_media` 在 `menu_overlay_open(ctx)` 时零尺寸 bounds 停放视频窗口（同 #52）。
-- **MpvPlayer command rule**：UI 线程的 mpv 命令/属性调用必须用异步 API——阻塞调用会把 UI
-  线程停在 mpv dispatch 队列上，与首帧 DR 分配形成循环等待，冻结窗口。
-- **MpvPlayer observe/userdata 分配**：观察 id 1-9（9 = `chapter`），userdata 100
-  （`audio-device-list`）/ 101（`chapter-list`），常量在 `apply.rs`；下一可用：观察 id 10、
-  userdata 102。
-- **MpvPlayer teardown**：`Drop` 先设 quit flag 并 join `mpv-events` 线程，再
-  `mpv_terminate_destroy`——颠倒顺序会因 `mpv_wait_event` 与 handle free 竞争而 segfault。
-- **Media OSD**：macOS 走 CATextLayer；原生视图停放时由 egui painter 画同文。`show_osd` 存
-  文本 + 1s 过期；`tick_osd` 未过期时重挂 `request_repaint_after`（egui 定时帧只触发一次，
-  不重挂则空闲时 OSD 永远不清）；`close()` 清 OSD 防泄漏。
-- **Media preferences**：volume/speed/audio-device 全局持久化；音频设备延迟到异步
-  `audio-device-list` 回复后校验，失效回退 "auto" 并经 `take_startup_device_invalid` 上报。
-- **Media auto-next**：`maybe_auto_next_media`（`media_end_action` = `NextInDir`）；`ended`
-  且无 `error` 时打开同目录下一个媒体（`next_media_in_dir` 自然序），每个媒体只触发一次；
-  OSD 存 `pending_open_osd` 由下一次 `open` 显示；播放错误不触发；最后一集弹 `已是最后一集`。
-- **Media menus**：媒体 seek bar 需 scoped `ui.spacing_mut().slider_width` 覆盖。
+  `set_animation_enabled` 必须按值去重；每帧重复 `applySettings` 会重建 DOM 并把翻页重置回旧位置。
+  **超大 TXT**：>256KiB 走 `parser/text_index.rs` 流式索引（64KiB 读取单元、章节目标 256KiB/
+  硬上限 512KiB、HTML 上限 4MiB），`Ebook.text`/`EbookChapter.text` 只存编码与字节/字符范围，
+  渲染只 seek 当前章；文件指纹变化必须报错重开，后台索引经 `AsyncOpener` 协作取消，**不得回退
+  为全书 `fs::read` 后逐行/逐词复制**。TXT/Markdown 不预加载相邻章；`chapterFetches` 共享
+  单章请求，`chapterLoadGeneration` 丢弃过期响应。历史/书签以可选 `ebook_char_offset`
+  保存全书偏移，旧数据按 `logical_chapter` 映射；初始位置在 WebView 创建前传入，禁止先加载
+  第 0 章再恢复。大 TXT 状态栏显示主进程 Windows 工作集（不含 WebView2 子进程）。
+  `parser/tests/text_memory.rs` 用独立计数分配器验证 16MiB 输入峰值，勿改成原始超大文件。
 - **文件关联（Windows only）**：`platform/windows/file_assoc.rs` 注册到
   `HKCU\Software\Classes`（winreg）；覆盖前备份，取消时仅在本程序 ProgID 才删除并恢复备份；
   完成后 `SHChangeNotify`。UserChoice 优先——UI 提供 `open_default_apps_settings()` 引导。
@@ -415,8 +397,6 @@ dirs_first 逐栏下发，RowsKey 自动失效。
   非 UTF-8 文本经 `decode_text_guess` 识别）。标题经 `theme::semibold_font` 使用该族。
   **字体未注册时 epaint 0.35 直接 panic**——任何构造 `ReaderApp` 的 example 必须先调
   `openitgo_app::fonts::setup_fonts`；带 UI 的 example 还需每帧 `request_repaint_after`。
-- **Packaging**：`scripts/package-macos.sh` 签名前跑 `bundle_mpv`，把 libmpv 及 Homebrew 依赖
-  复制进 `Contents/Frameworks` 并改写 install names 为 `@rpath`。
 - **Dock open (macOS)**：`platform::macos::dock_open` swizzle NSApplication delegate 入
   `OPEN_QUEUE`，每帧排空；回调必须 `set_wake_context` + `request_repaint()` 唤醒——删掉会
   复现 "dock 打开的文件卡住" bug。macOS 平台层基于 **objc2 0.6**——**不要重新引入 `objc`
@@ -429,11 +409,8 @@ dirs_first 逐栏下发，RowsKey 自动失效。
 - 漫画：`flip_through`（全页遍历冒烟）、`rapid_flip`（80ms 连续翻页压力）、`profile_open`
   （打开 10 秒后快照退出）、`profile_view`（持续运行每 10 秒快照）、`ui_smoke`（当前页入缓存
   即退出，30 秒超时）。
-- 媒体：`media_smoke`（播放推进即退出）、`probe_visible`/`probe_mpv_view`/`probe_video_overlay`；
-  `openitgo-media/examples/{probe,probe_render,probe_cover}.rs`（无头，`probe_cover` 跨平台）。
 - 电子书：`probe_ebook_menu`（菜单停放 #52 验证）。文件管理器：`fm_smoke`、
   `fm_bookmark_probe`（真实设置复现书签跳转 + 菜单截图，产物在 `target/fm_probe_*.png`）。
-- `OPENITGO_MPV_LOG=1` 开启 mpv debug 日志（stderr）。
 
 ## Commits
 

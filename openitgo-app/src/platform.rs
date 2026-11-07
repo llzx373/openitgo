@@ -3,7 +3,6 @@
 #[cfg(target_os = "macos")]
 pub mod macos {
     pub mod clipboard_files;
-    pub mod mpv_view;
 
     use crate::loader::{dynamic_to_loaded_image, LoadedImage, MAX_IMAGE_DIMENSION};
     use crate::timing;
@@ -760,39 +759,6 @@ pub mod macos {
     pub fn decode_thumbnail_bytes(_bytes: &[u8]) -> Result<Option<ColorImage>, String> {
         Ok(None)
     }
-
-    pub mod mpv_view {
-        pub struct PendingVideoView;
-        impl PendingVideoView {
-            pub fn create<
-                W: wry::raw_window_handle::HasWindowHandle + wry::raw_window_handle::HasDisplayHandle,
-            >(
-                _parent: &W,
-            ) -> Result<Self, String> {
-                Err("媒体播放暂仅支持 macOS/Windows".to_string())
-            }
-            pub fn wid(&self) -> Option<i64> {
-                None
-            }
-            pub fn finish<
-                W: wry::raw_window_handle::HasWindowHandle + wry::raw_window_handle::HasDisplayHandle,
-            >(
-                self,
-                _parent: &W,
-                _bounds: wry::Rect,
-                _player: &openitgo_media::MpvPlayer,
-            ) -> Result<MpvNativeView, String> {
-                Err("媒体播放暂仅支持 macOS/Windows".to_string())
-            }
-        }
-
-        pub struct MpvNativeView;
-        impl MpvNativeView {
-            pub fn set_bounds(&self, _bounds: wry::Rect) {}
-            pub fn set_osd(&self, _text: &str) {}
-            pub fn clear_osd(&self) {}
-        }
-    }
 }
 
 #[cfg(target_os = "windows")]
@@ -804,7 +770,6 @@ pub mod windows {
     pub mod file_attr;
     pub mod file_icons;
     pub mod motion;
-    pub mod mpv_view;
     pub mod recycle_bin;
     pub mod restore_rect;
     pub mod shell_verbs;
@@ -1011,8 +976,7 @@ pub mod shell_verbs {
 #[cfg(target_os = "windows")]
 pub use windows::shell_verbs;
 
-/// 驱动器剩余空间（非 Windows）：`statvfs` 实现（libc 已是 openitgo-media
-/// 直接依赖，openitgo-app 以 target-gated 依赖复用）。
+/// 驱动器剩余空间（非 Windows）：`statvfs` 实现。
 #[cfg(not(target_os = "windows"))]
 pub mod drive_info {
     use std::path::Path;
@@ -1121,11 +1085,56 @@ pub mod recycle_bin {
 #[cfg(target_os = "windows")]
 pub use windows::recycle_bin;
 
-/// Unified video-view API used by views/media.rs (`PendingVideoView`
-/// two-phase construction + `MpvNativeView`).
-#[cfg(target_os = "macos")]
-pub use macos::mpv_view as video;
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub use macos::mpv_view as video;
 #[cfg(target_os = "windows")]
-pub use windows::mpv_view as video;
+pub fn process_memory_bytes() -> Option<u64> {
+    #[repr(C)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+    }
+    #[link(name = "psapi")]
+    unsafe extern "system" {
+        fn GetProcessMemoryInfo(
+            process: *mut std::ffi::c_void,
+            counters: *mut ProcessMemoryCounters,
+            size: u32,
+        ) -> i32;
+    }
+
+    unsafe {
+        let mut counters: ProcessMemoryCounters = std::mem::zeroed();
+        counters.cb = std::mem::size_of::<ProcessMemoryCounters>() as u32;
+        let result = GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut counters,
+            std::mem::size_of::<ProcessMemoryCounters>() as u32,
+        );
+        (result != 0).then_some(counters.working_set_size as u64)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn process_memory_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod process_memory_tests {
+    #[test]
+    fn current_process_working_set_is_available() {
+        assert!(super::process_memory_bytes().is_some_and(|bytes| bytes > 0));
+    }
+}

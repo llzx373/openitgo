@@ -82,15 +82,6 @@ fn main() -> eframe::Result<()> {
     } else {
         viewport = viewport.with_inner_size([w, h]);
     }
-    // Transparent backbuffer (macOS only): egui-wgpu then picks
-    // CompositeAlphaMode::PreMultiplied and the CAMetalLayer becomes
-    // non-opaque, so the video layer below the egui surface (Task 4)
-    // shows through unpainted regions. Windows hosts video in an HWND
-    // child window and keeps an opaque surface.
-    #[cfg(target_os = "macos")]
-    {
-        viewport = viewport.with_transparent(true);
-    }
     if let Some((x, y)) = restored.pos {
         viewport = viewport.with_position([x, y]);
     }

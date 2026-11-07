@@ -17,7 +17,6 @@ texpresso = "2.0"
 pdf-render = "1.0.0-beta.9"
 rfd = "0.15"
 openitgo-core = { path = "../openitgo-core" }
-openitgo-media = { path = "../openitgo-media" }
 openitgo-parser = { path = "../openitgo-parser" }
 openitgo-storage = { path = "../openitgo-storage" }
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
@@ -48,21 +47,18 @@ filetime = "0.2"
 core-foundation = "0.10"
 core-graphics = "0.24"
 foreign-types = "0.5"
-# NSApplication delegate swizzle for Dock open-file events + mpv CAOpenGLLayer.
+# NSApplication delegate swizzle for Dock open-file events.
 # objc2-core-foundation provides CGRect/CGPoint/CGSize with objc2::Encode impls.
 objc2 = "0.6"
 objc2-core-foundation = { version = "0.3", features = ["objc2"] }
-cgl = "0.3"
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 # 嵌入 exe 图标资源（build.rs + assets/icon/openitgo.rc）
 embed-resource = "3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# mpv `wid` HWND 子窗口（platform/windows/mpv_view.rs）+ show-text OSD。
 # Win32_UI_Shell：文件关联（file_assoc.rs）的 SHChangeNotify / ShellExecuteW。
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm"] }
-libmpv-sys = "3.1"
 # HKCU\Software\Classes 文件关联注册（platform/windows/file_assoc.rs）。
 winreg = "0.55"
 # OLE 拖出解压（platform/windows/drag_out.rs）：IDataObject(CF_HDROP)/IDropSource/DoDragDrop。
@@ -73,7 +69,6 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com"
 windows-core = "0.61"
 
 # 驱动器剩余空间（platform.rs drive_info 非 Windows 实现）：statvfs。
-# libc 已是 openitgo-media 直接依赖（版本对齐），此处 target-gated 复用。
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
